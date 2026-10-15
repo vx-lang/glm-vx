@@ -11,7 +11,8 @@ from .model import RequestCache
 MAX_PREFILL_CHUNK = 64
 
 
-def _linear(model, prefix, x, bias=False):
+def _linear(model, prefix, x, bias=False, backend=None):
+    backend = backend or model.backend
     if model.packed_weights and len(x) == 1:
         # Retain packed matvec for singleton chunks and final vocabulary logits.
         return model._linear(prefix, x[0], bias)[None, :]
@@ -21,8 +22,8 @@ def _linear(model, prefix, x, bias=False):
             y = packed_batch(prefix + '.weight', x, model.backend)
             return y + model._weight(prefix + '.bias') if bias else y
     w = model._weight(prefix + '.weight')
-    batch = getattr(model.backend, 'linear_batch', None)
-    y = batch(w, x) if callable(batch) else np.stack([model.backend.matvec(w, row) for row in x])
+    batch = getattr(backend, 'linear_batch', None)
+    y = batch(w, x) if callable(batch) else np.stack([backend.matvec(w, row) for row in x])
     if bias:
         y = y + model._weight(prefix + '.bias')
     return y
@@ -34,11 +35,12 @@ def _norm(model, prefix, x, eps):
     return np.stack([model.backend.rmsnorm(row, w, eps) for row in x])
 
 
-def _mlp(model, prefix, x):
-    gate = _linear(model, prefix + '.gate_proj', x)
-    up = _linear(model, prefix + '.up_proj', x)
-    activated = np.stack([model.backend.swiglu(g, u) for g, u in zip(gate, up)])
-    return _linear(model, prefix + '.down_proj', activated)
+def _mlp(model, prefix, x, backend=None):
+    backend = backend or model.backend
+    gate = _linear(model, prefix + '.gate_proj', x, backend=backend)
+    up = _linear(model, prefix + '.up_proj', x, backend=backend)
+    activated = np.stack([backend.swiglu(g, u) for g, u in zip(gate, up)])
+    return _linear(model, prefix + '.down_proj', activated, backend=backend)
 
 
 def _feed_forward(model, layer, x):
@@ -46,6 +48,8 @@ def _feed_forward(model, layer, x):
     if model.mlp_types[layer] == 'dense':
         return _mlp(model, prefix, x)
     c, b = model.config, model.backend
+    eb = model._expert_backend(layer)
+    b0 = model.backend
     router_logits = _linear(model, prefix + '.gate', x)
     bias = model._weight(prefix + '.gate.e_score_correction_bias')
     count = int(c['num_experts_per_tok'])
@@ -68,9 +72,10 @@ def _feed_forward(model, layer, x):
                 model._weight(expert_prefix + '.gate_proj.weight')
             except KeyError:
                 # Preserve the alternate in-memory stacked expert representation.
-                values = np.stack([model._expert(prefix, int(expert), x[row]) for row in rows])
+                values = np.stack([model._expert(prefix, int(expert), x[row]) if eb is b0 else model._expert(prefix, int(expert), x[row], 0, eb)
+                                   for row in rows])
             else:
-                values = _mlp(model, expert_prefix, x[rows])
+                values = _mlp(model, expert_prefix, x[rows], eb)
         outputs[rows, slots] = values
     result = np.zeros_like(x)
     for row in range(len(x)):

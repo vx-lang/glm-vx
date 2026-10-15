@@ -52,8 +52,11 @@ class GlmMoeDsaModel:
     correction bias for selection only, and normalized selected probabilities.
     """
 
-    def __init__(self, config, weights, backend, *, trace=None, packed_weights=False):
+    def __init__(self, config, weights, backend, *, trace=None, packed_weights=False, expert_placement=None):
         self.trace = trace
+        if expert_placement is not None and packed_weights:
+            raise ValueError('expert placement is not supported with packed weights')
+        self.expert_placement = expert_placement
         if type(packed_weights) is not bool:
             raise ValueError('packed_weights must be boolean')
         if packed_weights and (not callable(getattr(weights, 'linear', None)) or
@@ -255,19 +258,25 @@ class GlmMoeDsaModel:
         self._trace(position, stage + '.output', result)
         return result, selected
 
-    def _mlp_values(self, gate, up, down, x, position, stage):
-        resident_mlp = getattr(self.backend, 'mlp', None)
+    def _expert_backend(self, layer):
+        if self.expert_placement is None:
+            return self.backend
+        return self.expert_placement.backend_for(layer, self.backend)
+
+    def _mlp_values(self, gate, up, down, x, position, stage, backend=None):
+        backend = backend or self.backend
+        resident_mlp = getattr(backend, 'mlp', None)
         if callable(resident_mlp):
             # Do not substitute an unfused diagnostic computation: report only
             # observable fused output. Missing internal stages remain explicit.
             return resident_mlp(gate, up, down, x)
-        projected_gate = self.backend.matvec(gate, x)
-        projected_up = self.backend.matvec(up, x)
+        projected_gate = backend.matvec(gate, x)
+        projected_up = backend.matvec(up, x)
         self._trace(position, stage + '.gate', projected_gate)
         self._trace(position, stage + '.up', projected_up)
-        activation = self.backend.swiglu(projected_gate, projected_up)
+        activation = backend.swiglu(projected_gate, projected_up)
         self._trace(position, stage + '.activation', activation)
-        return self.backend.matvec(down, activation)
+        return backend.matvec(down, activation)
 
     def _mlp(self, prefix, x, position=0):
         stage = prefix.replace('model.layers.', 'layer.').replace('.shared_experts', '.shared').replace('.experts.', '.expert.')
@@ -286,7 +295,8 @@ class GlmMoeDsaModel:
         self._trace(position, stage + '.activation', activation)
         return self._linear(prefix + '.down_proj', activation)
 
-    def _expert(self, prefix, expert, x, position=0):
+    def _expert(self, prefix, expert, x, position=0, backend=None):
+        backend = backend or self.backend
         stage = prefix.replace('model.layers.', 'layer.') + f'.expert.{expert}'
         if self.packed_weights:
             return self._mlp(prefix + f'.experts.{expert}', x, position)
@@ -294,16 +304,16 @@ class GlmMoeDsaModel:
             gate = self._weight(f'{prefix}.experts.{expert}.gate_proj.weight')
         except KeyError:
             gate_up = self._weight(prefix + '.experts.gate_up_proj')[expert]
-            projected = self.backend.matvec(gate_up, x)
+            projected = backend.matvec(gate_up, x)
             half = projected.shape[0] // 2
             self._trace(position, stage + '.gate', projected[:half])
             self._trace(position, stage + '.up', projected[half:])
-            activation = self.backend.swiglu(projected[:half], projected[half:])
+            activation = backend.swiglu(projected[:half], projected[half:])
             self._trace(position, stage + '.activation', activation)
-            return self.backend.matvec(self._weight(prefix + '.experts.down_proj')[expert], activation)
+            return backend.matvec(self._weight(prefix + '.experts.down_proj')[expert], activation)
         up = self._weight(f'{prefix}.experts.{expert}.up_proj.weight')
         down = self._weight(f'{prefix}.experts.{expert}.down_proj.weight')
-        return self._mlp_values(gate, up, down, x, position, stage)
+        return self._mlp_values(gate, up, down, x, position, stage, backend)
 
     def _feed_forward(self, layer, x, position=0):
         prefix = f'model.layers.{layer}.mlp'
@@ -328,7 +338,9 @@ class GlmMoeDsaModel:
         self._trace(position, stage + '.aggregation_ids', np.asarray(indices, dtype=np.int64)[order])
         for slot in order:
             expert, weight = int(indices[slot]), weights[slot]
-            output = self._expert(prefix, expert, x, position)
+            expert_backend = self._expert_backend(layer)
+            output = (self._expert(prefix, expert, x, position) if expert_backend is self.backend
+                      else self._expert(prefix, expert, x, position, expert_backend))
             self._trace(position, stage + f'.expert.{expert}.output', output)
             weighted = output * float(weight)
             self._trace(position, stage + f'.expert.{expert}.weighted', weighted)
