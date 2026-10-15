@@ -32,13 +32,22 @@ CONFIG = dict(
     norm_topk_prob=True, n_group=1, topk_group=1, max_position_embeddings=256)
 
 
+# Real GLM-5.3 per-head geometry (64 heads, kv rank 512, nope 192, rope 64, value
+# 256, indexer 32x128, theta 8e6) with a small hidden width and few layers/experts,
+# so kernel launch sizes and rank/dim edge cases match the real model.
+REAL_GEOMETRY = dict(CONFIG, hidden_size=1024, num_hidden_layers=6, num_attention_heads=64,
+    num_key_value_heads=64, q_lora_rank=512, kv_lora_rank=512, qk_nope_head_dim=192,
+    qk_rope_head_dim=64, v_head_dim=256, index_n_heads=32, index_head_dim=128, index_topk=16,
+    intermediate_size=1536, moe_intermediate_size=256, n_routed_experts=16, num_experts_per_tok=4,
+    rope_parameters={'rope_type': 'default', 'rope_theta': 8000000}, max_position_embeddings=1024)
+
 # 16 indexer heads: with few heads, ReLU can zero every head for a key, and the
 # resulting exact score ties are broken differently by torch.topk and Vx
 # (lowest index), which is not a numerical bug but flips the selection.
 
 def random_weights(config, seed):
     """Same names/shapes as tiny_weights but with non-degenerate values."""
-    shapes = tiny_weights(config, seed=0)
+    shapes = tiny_weights(config, seed=0, parameter_limit=2_000_000_000)
     rng = np.random.default_rng(seed)
     out = {}
     for name, ref in shapes.items():
