@@ -28,7 +28,7 @@ class LayerCache:
     def __post_init__(self):
         for name in ('latents', 'rope_keys', 'index_keys'):
             value = getattr(self, name)
-            if not isinstance(value, RowBuffer):
+            if not hasattr(value, 'gather'):  # RowBuffer / PagedRows pass through
                 setattr(self, name, RowBuffer(value))
 
 
@@ -139,9 +139,18 @@ class GlmMoeDsaModel:
     def _norm(self, prefix, x, eps):
         return self.backend.rmsnorm(x, self._weight(prefix + '.weight'), eps)
 
-    def new_cache(self):
-        """Allocate independent state; model weights/backend can be shared by requests."""
-        return RequestCache([LayerCache() for _ in range(self.n_layers)])
+    def new_cache(self, pools=None):
+        """Allocate independent state; model weights/backend can be shared by requests.
+
+        With `pools` (a `paged_kv.KVPools`) the cache is paged: rows live in shared
+        fixed-size blocks, and `paged_kv.fork_cache` can share a prefix between
+        requests. Without it, rows live in per-layer contiguous buffers."""
+        if pools is None:
+            return RequestCache([LayerCache() for _ in range(self.n_layers)])
+        from .paged_kv import PagedRows
+        return RequestCache([LayerCache(latents=PagedRows(pools.latents), rope_keys=PagedRows(pools.rope_keys),
+                                        index_keys=PagedRows(pools.index_keys))
+                             for _ in range(self.n_layers)])
 
     def _index(self, prefix, x, q_residual, position, state):
         b = self.backend
