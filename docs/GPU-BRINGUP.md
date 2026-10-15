@@ -54,6 +54,26 @@ bit-for-bit selection parity matters, the tie rule should be specified.
 Do not run the NumPy backend with default BLAS threads on a many-core host
 (`OMP_NUM_THREADS=8`).
 
+## Bug found: chained GPU ops returned wrong results under GPU sharing (fixed)
+
+Found by the per-layer harness. A 2300-token run failed once (position 1428, layer 2
+MLP) and passed on rerun; three identical concurrent runs gave three different,
+wrong answers (`evidence/a100-20261015/concurrency/rep-*`). `gpu/stress_ops.py`
+(16 processes on one A100, every `GPUBackend` op vs. an independent oracle) isolated
+it: single-kernel ops (matvec, rmsnorm, ...) never failed, but `mlp` (4 chained
+launches) and `compressed_attention` (2) were wrong in up to ~20% of calls, with
+errors of order 1e3. Not ECC/hardware (no errors logged). A host sync either before
+an op's first launch or between launches removes all failures (0 in 8000+ calls
+each); the root cause is **not yet understood** (a question is out to the Vx
+runtime peers). `GPUBackend._launch` now syncs before the first launch of an op and
+between launches; with it, 16-process stress shows 0 mismatches and the three
+concurrent 2300-token runs are bit-identical (`fix-*`, all pass).
+Implications: (1) any result obtained while the GPU was shared could be wrong, so
+parity runs should be repeated alone and under load; (2) the resident APIs
+(`GLMKernels`, GEMM, tuning) use the same upload-then-launch pattern and have not
+been stress-tested under sharing; (3) this costs a sync per launch, so performance
+numbers must wait until the cause is known.
+
 ## Open questions answered from the repo
 
 - *Which GLM checkpoints does the prototype support?* Only the GLM-MoE-DSA

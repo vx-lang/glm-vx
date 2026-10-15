@@ -52,7 +52,7 @@ class GPUBackend:
                 if type(plan.get('selected_block')) is not int or plan['selected_block'] not in (32,64,128,256):raise ValueError('invalid tuned block size')
                 self.tuning=plan
             self.module=self.ctx.load_ptx(ptx_path)
-            self.stream=self.ctx.stream()
+            self.stream=self.ctx.stream();self._launched=False
             names=('matvec','index_scores','rmsnorm','softmax','swiglu','rope_glm','router','mla_partial','mla_merge')
             self.functions={name:self.module.kernel('glm_vx_gpu_'+name) for name in names}
         except BaseException:self.ctx.close();raise
@@ -91,8 +91,18 @@ class GPUBackend:
         return np.frombuffer(tensor.download(),dtype=tensor.dtype).reshape(tensor.shape).copy()
     def _launch(self,name,grid,block,args):
         if self._closed:raise RuntimeError('GPU backend is closed')
+        # Serialize on the host: wait for all uploads before an op's first kernel,
+        # and for each kernel before the next one. Without this, chained ops (mlp,
+        # compressed_attention) returned wrong results at a rate of up to ~20% of
+        # calls when several processes shared the GPU (gpu/stress_ops.py, A100,
+        # 16 processes), and identical full-model runs disagreed. The cause is not
+        # yet understood; this costs a sync per launch, not correctness.
+        if self._launched:self.stream.synchronize()
+        else:self.ctx.synchronize()
+        self._launched=True
         self.functions[name].launch((grid,),(block,),args,stream=self.stream)
     def _release(self,temps):
+        self._launched=False
         # Explicit synchronization before releasing temporaries, including on
         # a failed launch. A sync error propagates and prevents unsafe frees.
         self.stream.synchronize()

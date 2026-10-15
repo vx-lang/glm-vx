@@ -1,0 +1,60 @@
+{
+  "status": "pass",
+  "backend": "vx-gpu",
+  "geometry": "real",
+  "prompt_len": 100,
+  "scope": "random weights vs official eager F32; chunked prefill + cached decode",
+  "runs": [
+    {
+      "seed": 1,
+      "results": {
+        "whole(<=64)": {
+          "sizes": [
+            64,
+            36
+          ],
+          "final_logit_rel_err": 2.538097760407254e-06,
+          "greedy_match": true,
+          "ok": true
+        },
+        "singles-then-chunk": {
+          "sizes": [
+            1,
+            1,
+            1,
+            61,
+            36
+          ],
+          "final_logit_rel_err": 2.538097760407254e-06,
+          "greedy_match": true,
+          "ok": true
+        },
+        "uneven": {
+          "sizes": [
+            7,
+            33,
+            1,
+            59
+          ],
+          "final_logit_rel_err": 2.538097760407254e-06,
+          "greedy_match": true,
+          "ok": true
+        },
+        "by-16": {
+          "sizes": [
+            16,
+            16,
+            16,
+            16,
+            16,
+            16,
+            4
+          ],
+          "final_logit_rel_err": 2.538097760407254e-06,
+          "greedy_match": true,
+          "ok": true
+        }
+      }
+    }
+  ]
+}
