@@ -15,6 +15,26 @@ a PTX path (`gpu/`), but **nothing has run on a real device yet** (`gpu/GPU-REPO
 | M2 library | not started; ops live in `gpu/`, `kernels/` | decide location (open question) |
 | M3–M5 | not started | after M1 passes |
 
+## First real-device result (2026-10-15)
+
+A100-SXM4-80GB (sm_80, driver 580.159.04, 128 vCPUs, ~2 TB host RAM), Vx main
+`a7a3aa65` built on the pod, LLVM 22 from apt.llvm.org. `gpu/test_hardware.py`,
+`test_gemm_hardware.py`, `test_index_scores_hardware.py`: **16 passed**. Resident
+kernel benchmark: all match the oracle (max abs error ≤ 8e-7). Raw output in
+`evidence/a100-20261015/`. Timings are for tiny shapes (not model shapes) and are
+not performance claims.
+
+Toolchain notes from the bring-up:
+- Newer `vxc` emits `define hidden`, `@abort` and `@puts` (overflow/div checks);
+  `gpu/toolchain/build_ptx.py` now accepts them (abort -> `llvm.trap`, puts -> no-op).
+- Vx main (#1745) no longer exports program function symbols, so the CPU `.so`
+  paths (`kernels/build.sh`, `gpu/testing/build_simt.sh`) fail to expose
+  `glm_vx_*`; they need `_vx_`-compatible entry points. PTX path is unaffected.
+- Per the Vx maintainers, the mlir-translate/opt/llc PTX pipeline is not the
+  compiler's own path (`spawn on(Topology::X)` + `deviceImageOf()` is). Moving
+  there is a candidate for M2.
+- Prebuilt `vxc` from another host is unusable (glibc 2.43); build on the pod.
+
 ## Open questions answered from the repo
 
 - *Which GLM checkpoints does the prototype support?* Only the GLM-MoE-DSA
