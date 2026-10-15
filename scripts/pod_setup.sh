@@ -19,7 +19,7 @@ cap=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1)
 
 # Host resources: record for every benchmark.
 { echo "vcpus=$(nproc)"; awk '/MemTotal/{printf "host_ram_gib=%.1f\n",$2/1048576}' /proc/meminfo
-  echo "arch=$VX_GPU_ARCH"; echo "git=$(git rev-parse HEAD)"; } | tee "$OUT/host.env"
+  echo "arch=$VX_GPU_ARCH"; echo "git=$(git rev-parse HEAD 2>/dev/null || echo unknown)"; } | tee "$OUT/host.env"
 
 : "${VXC:=$(command -v vxc || true)}"
 [[ -n $VXC ]] || { echo "vxc not found: install Vx v0.0.2 + LLVM 22 (docs/toolchain.md), set VXC" >&2; exit 3; }
@@ -30,6 +30,7 @@ command -v mlir-translate opt llc >/dev/null || [[ -n ${VX_GPU_LLVM_BIN:-} ]] \
 [[ -d .venv ]] || python3 -m venv .venv
 .venv/bin/pip install -q -e '.[test]'
 gpu/build.sh
-.venv/bin/python -m pytest gpu -q -rs | tee "$OUT/gpu-tests.txt"
+# Real-device tests only: the CPU SIMT/.so tests need symbols that Vx main (#1745) now hides.
+.venv/bin/python -m pytest gpu/test_hardware.py gpu/test_gemm_hardware.py gpu/test_index_scores_hardware.py -q -rs | tee "$OUT/gpu-tests.txt"
 .venv/bin/python -m gpu.benchmark --kernel all --repeats 20 --output "$OUT/kernels.json"
 echo "ok: results in $OUT"

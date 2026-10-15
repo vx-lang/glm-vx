@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compile ordinary per-thread Vx functions to NVIDIA PTX; never execute on CPU.
 
-Requires vxc v0.0.2 and LLVM 22 mlir-translate/opt/llc in PATH. Optional
+Requires vxc v0.0.2 or newer and LLVM 22 mlir-translate/opt/llc in PATH. Optional
 VX_GPU_LLVM_BIN points at the directory containing those LLVM executables.
 """
 from __future__ import annotations
@@ -26,11 +26,11 @@ INDEX = {
 SIGNATURES = {**{name: ("i32", "") for name in INDEX},
     "vx_gpu_shuffle_down_f32": ("float", "float, i32"),
     "vx_gpu_shuffle_idx_f32": ("float", "float, i32"),
-    "vx_gpu_barrier": ("void", ""), "vx_gpu_shared_f32": ("ptr", ""),
+    "abort": ("void", ""), "puts": ("void", "ptr"), "vx_gpu_barrier": ("void", ""), "vx_gpu_shared_f32": ("ptr", ""),
     "vx_gpu_mma_tf32_m16n8k8": ("void", "ptr, i32, " + ", ".join(["float"] * 10)),
     "expf": ("float", "float"), "sqrtf": ("float", "float")}
 DECL = re.compile(r"^declare\s+(\w+)\s+@([\w.$]+)\(([^)]*)\)(?:[ \t]+[^\n]*)?$", re.M)
-DEFINE = re.compile(r"^define\s+(\w+)\s+@([\w.$]+)\(([^)]*)\)([^\n]*)\{", re.M)
+DEFINE = re.compile(r"^define\s+(?:(?:hidden|internal|private|dso_local)\s+)*(\w+)\s+@([\w.$]+)\(([^)]*)\)([^\n]*)\{", re.M)
 
 def adapter_ir(ir: str, shared_floats: int) -> tuple[str, list[str]]:
     if re.search(r'^target (triple|datalayout)', ir, re.M):
@@ -88,6 +88,16 @@ define internal float @{name}(float %value, i32 %lane) alwaysinline convergent {
   %v = call float @{intrinsic}(i32 -1, float %value, i32 %lane, i32 31)
   ret float %v
 }}''')
+    if 'puts' in used:
+        wrappers.append('define internal void @puts(ptr %msg) alwaysinline {\n  ret void\n}')
+    if 'abort' in used:
+        # Newer vxc emits overflow/division checks that call abort; on device
+        # that is a trap, which fails the launch rather than continuing.
+        wrappers.append('''declare void @llvm.trap() noreturn
+define internal void @abort() noreturn {
+  call void @llvm.trap()
+  unreachable
+}''')
     if 'vx_gpu_barrier' in used:
         wrappers.append('''declare void @llvm.nvvm.barrier0() convergent
 define internal void @vx_gpu_barrier() alwaysinline convergent {
