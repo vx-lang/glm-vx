@@ -85,17 +85,34 @@ async upload on the kernel stream would also avoid the context sync later.
   architecture (`GlmMoeDsaForCausalLM`): the official GLM-5.3 (FP8 safetensors,
   ~756 GB) and its mixed-bit GGUF, plus tiny random-weight test models. There is
   no smaller trained GLM-MoE-DSA checkpoint known to this repo.
-- *Bring-up model.* GLM-5.3 cannot fit an L4/A10/4090 or one A100-80GB without the
-  M4 hybrid offload. Until a small trained checkpoint exists, M1 correctness uses
-  (a) tiny random-weight models vs. the pinned Transformers class
-  (`validation/official_eager_fixture.py` already does this on CPU) and
-  (b) scaled-down random configs on the pod via `hf_reference.py`. Trained-model
-  parity waits for M4.
+- *Bring-up model (decision, 2026-10-15).* A web search found no official or community
+  trained GLM-MoE-DSA checkpoint below the ~744-754 B-parameter family (GLM-5 / 5.1 / 5.2 /
+  5.3). The only small one is a third-party random-weight fixture
+  ([`aday777/glm_moe_dsa_tiny_fixture`](https://huggingface.co/aday777/glm_moe_dsa_tiny_fixture):
+  274 k parameters, 4 layers, 64 wide, 8 experts, explicitly untrained, unverified under any
+  Transformers version; not used here). Our own random-weight models are larger and sharper
+  tests (real per-head geometry up to the real 6144-wide config). So: **correctness is
+  gated on random-weight parity against the pinned Transformers class
+  (`validation/layer_compare.py`, `gpu_vs_official.py`, `prefill_compare.py`); trained-weight
+  parity is deferred to M4**, when the hybrid CPU+GPU path can run the real checkpoint. If a
+  small trained GLM-MoE-DSA ever appears, point `validation/hf_reference.py` at it.
 
-## M1 pass criteria (proposed; the issue left these blank)
+## M1 pass criteria (proposed, grounded in measured numbers; the issue left these blank)
 
-- Greedy decode equals the HF reference for the first 16 tokens on every prompt in
-  the reference set.
-- Per-position logit max-abs-diff ≤ 1e-2 for BF16 reference vs. TF32/FP8 Vx
-  (tighten once real-device numbers exist).
-- Perplexity on a fixed eval set within 1% of HF.
+Random-weight parity gate, F32/TF32 path (what exists today). Measured on the A100: worst
+per-stage relative error 7e-6 to 2e-5 up to 78 layers; 2.9e-6 at real width.
+- Every stage of every layer at every position: `max|a-b| / max(1, max|a|) <= 1e-4`
+  (`layer_compare --tol 1e-4`; currently 2e-4, 5x-10x above what is observed).
+- DSA top-k selections identical, except exact-score ties, which are reported separately
+  (a tie is not an error; see the harness note).
+- Greedy decode matches Transformers for 16 tokens on every reference prompt.
+- Repeatable under GPU sharing: identical concurrent runs give identical logits hashes.
+
+BF16 path (when BF16 kernels exist): tolerance is not guessed. Measure the noise of the
+official model itself, official-BF16 vs. official-F32 on the same inputs, and require our
+BF16 stages to be within 4x of that, with greedy decode matching on prompts where the
+official top-1 margin exceeds that noise.
+
+Trained weights (M4): perplexity on a fixed eval set within 1% of Transformers, and greedy
+decode matching for the first 16 tokens on a fixed prompt set wherever the official top-1
+margin is above the BF16 noise.
