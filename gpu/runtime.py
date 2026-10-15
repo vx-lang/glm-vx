@@ -358,6 +358,12 @@ class DeviceBuffer(_Resource):
             if raw:
                 host = C.create_string_buffer(raw, len(raw))
                 self.context.driver.call("cuMemcpyHtoD_v2", self._pointer.value + offset, host, len(raw))
+                # A pageable HtoD copy may return before its DMA lands, and it is
+                # ordered on the legacy default stream, not against kernels on our
+                # non-blocking streams. Without this, kernels launched right after
+                # an upload sometimes read stale data when the GPU is shared
+                # (gpu/stress_ops.py, 16 processes). Wait so "blocking" is true.
+                self.context._synchronize_current()
         return self
 
     def download(self, *, offset=0, nbytes=None):
