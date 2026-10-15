@@ -1,19 +1,23 @@
 # GPU bring-up plan (issue #1)
 
 Maps the milestones in [vx-lang/glm-vx#1](https://github.com/vx-lang/glm-vx/issues/1)
-to what this repo already has. The issue calls the prototype CPU-only; it now has
-a PTX path (`gpu/`), but **nothing has run on a real device yet** (`gpu/GPU-REPORT.md`).
+to what this repo has. The prototype started CPU-only; it now has a PTX path (`gpu/`) that has
+run on an A100 and matches the official Transformers implementation on random weights.
+Trained-weight parity, BF16 and performance are not done.
 
 ## Status
 
 | Milestone | Repo state | Next step |
 |---|---|---|
-| M0 pod setup | `scripts/pod_setup.sh` (new): driver check, build PTX, hardware tests, records vCPUs/RAM | run on the pod |
-| M0 HF reference | `validation/hf_reference.py` (new): dump logits + greedy, compare with tolerances | run on pod with chosen checkpoint |
-| M0 bring-up model | **undecided** (see below) | decide |
-| M1 GPU ops (random-weight parity vs. HF passes on A100) | RMSNorm, RoPE, SwiGLU, matvec, FP8 matvec, TF32 GEMM, MLA decode, index scores exist as PTX; hybrid `vx-gpu` adapter round-trips activations through host | run `gpu/test_hardware.py`; fix first real-device failures; then make activations/KV device-resident; BF16 is not yet implemented (F32/TF32/FP8 only) |
-| M2 library | not started; ops live in `gpu/`, `kernels/` | decide location (open question) |
-| M3–M5 | not started | after M1 passes |
+| M0 pod setup | `scripts/pod_setup.sh`: driver check, PTX build, hardware tests, records vCPUs/RAM | done |
+| M0 HF reference | `validation/hf_reference.py` + `layer_compare.py`, `gpu_vs_official.py`, `prefill_compare.py` | done |
+| M0 bring-up model | decided: random-weight parity until M4 (see below) | revisit if a small trained checkpoint appears |
+| M1 GPU ops | PTX for RMSNorm, RoPE, SwiGLU, matvec, FP8 matvec, TF32 GEMM, MLA decode, index scores; parity vs. HF passes on A100 (F32/TF32) | BF16 kernels; device-resident activations/KV |
+| M1 KV cache | contiguous host buffers (`glm_vx/kvcache.py`), 4x faster row gather | device-resident cache |
+| M2 library | layout recommended in `docs/LIBRARY-LAYOUT.md`; paged KV CPU reference (`glm_vx/paged_kv.py`); loader tested on BF16/FP8/sharded checkpoints (`validation/write_checkpoint.py`) | GQA attention, grouped GEMM, sampling, device paged cache; extraction |
+| M3 second family | not started; gap list in `docs/LIBRARY-LAYOUT.md` | after M2 ops |
+| M4 hybrid MoE | admission verdict (`glm_vx/admission.py`, validated within 0.011% of the official checkpoint size); per-layer expert placement on a host backend (`glm_vx/placement.py`), bit-identical logits on CPU backends | GPU attention + device KV with host experts; port the verdict into `vxc` |
+| M5 quantization / benchmarks | INT4 and block-FP8 reference math (`glm_vx/quant.py`); cross-engine harness (`benchmarks/compare.py`, tested on fake servers) | INT4/FP8 kernels in the model path; run against llama.cpp and vLLM on the pod |
 
 ## First real-device result (2026-10-15)
 
