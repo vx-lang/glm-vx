@@ -45,9 +45,17 @@ REAL_GEOMETRY = dict(CONFIG, hidden_size=1024, num_hidden_layers=6, num_attentio
 # resulting exact score ties are broken differently by torch.topk and Vx
 # (lowest index), which is not a numerical bug but flips the selection.
 
+def with_layers(config, n):
+    """Deepen a config using GLM-5.3's real layer pattern (verified against model-config.json):
+    first 3 layers dense, indexer 'full' at layers 0-2 and every 4th from layer 6, else 'shared'."""
+    return dict(config, num_hidden_layers=n,
+                indexer_types=['full' if i < 3 or (i >= 6 and (i - 6) % 4 == 0) else 'shared' for i in range(n)],
+                mlp_layer_types=['dense' if i < 3 else 'sparse' for i in range(n)])
+
+
 def random_weights(config, seed):
     """Same names/shapes as tiny_weights but with non-degenerate values."""
-    shapes = tiny_weights(config, seed=0, parameter_limit=2_000_000_000)
+    shapes = tiny_weights(config, seed=0, parameter_limit=10_000_000_000)
     rng = np.random.default_rng(seed)
     out = {}
     for name, ref in shapes.items():
