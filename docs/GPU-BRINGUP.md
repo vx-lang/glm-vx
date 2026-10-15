@@ -11,7 +11,7 @@ a PTX path (`gpu/`), but **nothing has run on a real device yet** (`gpu/GPU-REPO
 | M0 pod setup | `scripts/pod_setup.sh` (new): driver check, build PTX, hardware tests, records vCPUs/RAM | run on the pod |
 | M0 HF reference | `validation/hf_reference.py` (new): dump logits + greedy, compare with tolerances | run on pod with chosen checkpoint |
 | M0 bring-up model | **undecided** (see below) | decide |
-| M1 GPU ops | RMSNorm, RoPE, SwiGLU, matvec, FP8 matvec, TF32 GEMM, MLA decode, index scores exist as PTX; hybrid `vx-gpu` adapter round-trips activations through host | run `gpu/test_hardware.py`; fix first real-device failures; then make activations/KV device-resident; BF16 is not yet implemented (F32/TF32/FP8 only) |
+| M1 GPU ops (random-weight parity vs. HF passes on A100) | RMSNorm, RoPE, SwiGLU, matvec, FP8 matvec, TF32 GEMM, MLA decode, index scores exist as PTX; hybrid `vx-gpu` adapter round-trips activations through host | run `gpu/test_hardware.py`; fix first real-device failures; then make activations/KV device-resident; BF16 is not yet implemented (F32/TF32/FP8 only) |
 | M2 library | not started; ops live in `gpu/`, `kernels/` | decide location (open question) |
 | M3–M5 | not started | after M1 passes |
 
@@ -34,6 +34,25 @@ Toolchain notes from the bring-up:
   compiler's own path (`spawn on(Topology::X)` + `deviceImageOf()` is). Moving
   there is a candidate for M2.
 - Prebuilt `vxc` from another host is unusable (glibc 2.43); build on the pod.
+
+## M1 correctness vs. the official model (random weights, A100)
+
+`python -m validation.gpu_vs_official --backend vx-gpu` runs a 6-layer, 256-wide
+random-weight GLM-MoE-DSA (dense + MoE + shared expert, full and shared indexers,
+top-k 8 over 24-token prompts, 16 cached greedy decode steps) against unmodified
+Transformers (commit 469230357a, eager F32 CPU). Seeds 1–3 on the A100: **max
+per-position logit abs diff ≤ 8.8e-6, top-1 matches at every prompt position, all
+16 greedy tokens match** (numpy-reference backend: ≤ 9.9e-6). Evidence:
+`evidence/a100-20261015/vs-official/`. This is F32/TF32-class agreement on a
+*random* model; it is not a BF16 result and not a trained-model result.
+
+Harness lesson: with few indexer heads, ReLU can zero all heads for a key, giving
+exact score ties that `torch.topk` and Vx break differently (Vx: lowest index).
+That flips the selection and the logits (a 4.0 jump) without any numerical error,
+so the model uses 16 indexer heads. Real checkpoints can hit such ties too; if
+bit-for-bit selection parity matters, the tie rule should be specified.
+Do not run the NumPy backend with default BLAS threads on a many-core host
+(`OMP_NUM_THREADS=8`).
 
 ## Open questions answered from the repo
 
