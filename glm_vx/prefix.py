@@ -108,9 +108,8 @@ class PrefixCache:
         # Reject obviously oversized snapshots before allocating serialization
         # workspace. Scalar/tuple overhead is included in the final exact check.
         raw_bytes = logits.nbytes + sum(
-            np.asarray(row).nbytes for layer in cache.layers
-            for name in ('latents', 'rope_keys', 'index_keys')
-            for row in getattr(layer, name))
+            getattr(layer, name).nbytes for layer in cache.layers
+            for name in ('latents', 'rope_keys', 'index_keys'))
         if raw_bytes > self.budget:
             with self.lock: self.rejected += 1
             return False

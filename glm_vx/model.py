@@ -13,13 +13,23 @@ from typing import Any
 
 import numpy as np
 
+from .kvcache import RowBuffer
+
 
 @dataclass
 class LayerCache:
-    latents: list = field(default_factory=list)
-    rope_keys: list = field(default_factory=list)
-    index_keys: list = field(default_factory=list)
+    """Per-layer MLA state. The three row stores are contiguous `RowBuffer`s; lists
+    passed in (checkpoint/handoff constructors, tests) are converted on creation."""
+    latents: RowBuffer = field(default_factory=RowBuffer)
+    rope_keys: RowBuffer = field(default_factory=RowBuffer)
+    index_keys: RowBuffer = field(default_factory=RowBuffer)
     selected_indices: Any = None
+
+    def __post_init__(self):
+        for name in ('latents', 'rope_keys', 'index_keys'):
+            value = getattr(self, name)
+            if not isinstance(value, RowBuffer):
+                setattr(self, name, RowBuffer(value))
 
 
 @dataclass
@@ -152,7 +162,7 @@ class GlmMoeDsaModel:
         self._trace(position, stage + '.key_norm', key)
         key = np.concatenate((b.rope(key[:self.rot], position, self.theta), key[self.rot:]))
         state.index_keys.append(np.asarray(key, dtype=np.float32).copy())
-        keys = np.stack(state.index_keys)
+        keys = state.index_keys.array
         queries = np.stack([np.concatenate((b.rope(q[h, :self.rot], position, self.theta), q[h, self.rot:]))
                             for h in range(self.index_heads)])
         head_weights = self._linear(prefix + '.weights_proj', x) * self.index_heads ** -0.5
@@ -202,8 +212,8 @@ class GlmMoeDsaModel:
             selected = previous_selection
         self._trace(position, f'layer.{layer}.selected', selected)
         state.selected_indices = selected.copy()
-        latents = np.stack([state.latents[int(i)] for i in selected])
-        rotary_keys = np.stack([state.rope_keys[int(i)] for i in selected])
+        latents = state.latents.gather(selected)
+        rotary_keys = state.rope_keys.gather(selected)
         kv_weight = self._weight(prefix + '.kv_b_proj.weight').reshape(self.heads, self.nope + self.value_dim, self.rank)
         outputs = []
         fused = getattr(b, 'compressed_attention', None)

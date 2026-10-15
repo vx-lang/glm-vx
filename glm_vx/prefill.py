@@ -101,8 +101,8 @@ def _attention(model, layer, x, start, state, previous):
             selected = previous[offset]
         selections.append(selected.copy())
         state.selected_indices = selected.copy()
-        latents = np.stack([state.latents[int(i)] for i in selected])
-        rotary_keys = np.stack([state.rope_keys[int(i)] for i in selected])
+        latents = state.latents.gather(selected)
+        rotary_keys = state.rope_keys.gather(selected)
         query = queries[offset]
         fused = getattr(b, 'compressed_attention', None)
         if callable(fused):
