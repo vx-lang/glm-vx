@@ -54,25 +54,30 @@ bit-for-bit selection parity matters, the tie rule should be specified.
 Do not run the NumPy backend with default BLAS threads on a many-core host
 (`OMP_NUM_THREADS=8`).
 
-## Bug found: chained GPU ops returned wrong results under GPU sharing (fixed)
+## Bug found: kernels read stale data after uploads when the GPU was shared (fixed)
 
 Found by the per-layer harness. A 2300-token run failed once (position 1428, layer 2
 MLP) and passed on rerun; three identical concurrent runs gave three different,
 wrong answers (`evidence/a100-20261015/concurrency/rep-*`). `gpu/stress_ops.py`
-(16 processes on one A100, every `GPUBackend` op vs. an independent oracle) isolated
-it: single-kernel ops (matvec, rmsnorm, ...) never failed, but `mlp` (4 chained
-launches) and `compressed_attention` (2) were wrong in up to ~20% of calls, with
-errors of order 1e3. Not ECC/hardware (no errors logged). A host sync either before
-an op's first launch or between launches removes all failures (0 in 8000+ calls
-each); the root cause is **not yet understood** (a question is out to the Vx
-runtime peers). `GPUBackend._launch` now syncs before the first launch of an op and
-between launches; with it, 16-process stress shows 0 mismatches and the three
-concurrent 2300-token runs are bit-identical (`fix-*`, all pass).
-Implications: (1) any result obtained while the GPU was shared could be wrong, so
-parity runs should be repeated alone and under load; (2) the resident APIs
-(`GLMKernels`, GEMM, tuning) use the same upload-then-launch pattern and have not
-been stress-tested under sharing; (3) this costs a sync per launch, so performance
-numbers must wait until the cause is known.
+(16 processes on one A100, every `GPUBackend` op vs. an independent oracle) showed
+wrong results of order 1e3 in up to ~20% of `mlp`/`compressed_attention` calls and,
+at lower rates, in single-kernel ops with small uploads (matvec, softmax). Not
+ECC/hardware (no errors logged).
+
+Root cause (confirmed by the fix, not by a driver trace): `DeviceBuffer.upload()`
+synchronized the context *before* `cuMemcpyHtoD_v2` but not after. A pageable HtoD
+copy may return before its DMA lands, and it is ordered on the legacy default
+stream, not against kernels on our non-blocking streams, so a kernel launched right
+after could read stale device memory. It needed GPU contention to show. Fix: sync
+after the copy in `upload()` (so "blocking" is true). Evidence it is the cause and
+not a mask: a first workaround, a host sync per kernel launch, also removed the
+failures but was unnecessary; with only the upload fix, 16-process stress shows 0
+mismatches for all ops (and `mlp`/`compressed_attention` 16x500), the resident
+pytest loop passes 64/64 (it failed 1-2 per 36-64 before), and three concurrent
+2300-token comparisons are bit-identical and pass (`final-*`).
+Implications: results obtained while the GPU was shared could be wrong, so the
+earlier idle-GPU parity numbers stand but anything else should be rerun; a device
+async upload on the kernel stream would also avoid the context sync later.
 
 ## Open questions answered from the repo
 
