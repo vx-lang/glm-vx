@@ -106,7 +106,7 @@ def main():
     p.add_argument('--layers', type=int, default=None,
                    help="depth, using GLM-5.3's real dense/full/shared layer pattern (default: the 6-layer fixture)")
     p.add_argument('--topk', type=int, default=None)
-    p.add_argument('--tol', type=float, default=2e-4,
+    p.add_argument('--tol', type=float, default=1e-4,
                    help='max abs diff / max(1, max abs reference) per stage tensor')
     p.add_argument('--perturb', metavar='WEIGHT:REL',
                    help='harness self-check: scale this Vx-side weight by 1+REL (e.g. '
