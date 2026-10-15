@@ -18,6 +18,7 @@ Random-weight scaled model (see gpu_vs_official.py); never imported by serving.
   python -m validation.layer_compare --backend vx-gpu --output run/layers
 """
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -123,9 +124,10 @@ def main():
         backend = NumpyBackend()
     base = REAL_GEOMETRY if args.geometry == 'real' else CONFIG
     args.topk = args.topk or base['index_topk']
-    config = dict(base, index_topk=args.topk)
+    config = dict(base, index_topk=args.topk,
+                  max_position_embeddings=max(base['max_position_embeddings'], args.prompt_len + 16))
     full_layers = {i for i, t in enumerate(config['indexer_types']) if t == 'full'}
-    runs = []
+    runs, failures = [], {}
     for seed in args.seeds:
         weights = random_weights(config, seed)
         for w in weights.values():
@@ -149,6 +151,7 @@ def main():
             worst[key[1:]] = max(worst.get(key[1:], 0.0), err)
             if err > args.tol and first is None:
                 first = dict(position=key[0], layer=key[1], stage=key[2], error=err)
+                failing = {f'seed{seed}.official': a, f'seed{seed}.vx': b}
         for t in range(len(tokens)):
             for l in range(config['num_hidden_layers']):
                 mine = np.sort(np.asarray(raw[(t, f'layer.{l}.selected')], dtype=np.int64))
@@ -160,7 +163,11 @@ def main():
                     bad_sel.append(dict(position=t, layer=l, official=ref_sel[(t, l)].tolist(), vx=mine.tolist()))
         table = {f'{l}.{s}': e for (l, s), e in sorted(worst.items())}
         # A tie flips later stages legitimately; only trust "first" when no tie came earlier.
-        runs.append(dict(seed=seed, tokens=len(tokens), first_outside_tolerance=first,
+        if first is not None:
+            failures.update(failing)
+        digest = hashlib.sha256(b''.join(got[(t, -1, 'logits')].astype('<f8').tobytes()
+                                         for t in range(len(tokens)))).hexdigest()
+        runs.append(dict(seed=seed, tokens=len(tokens), vx_logits_sha256=digest, first_outside_tolerance=first,
                          selection_ties=ties, selection_mismatches=bad_sel[:10],
                          selection_mismatch_count=len(bad_sel), worst_error_by_layer_stage=table))
         status = 'ok' if first is None and not bad_sel else ('tie-affected' if ties and not bad_sel else 'FAIL')
@@ -171,6 +178,8 @@ def main():
                   stages=list(STAGES), geometry=args.geometry, config=config,
                   scope='random-weight scaled model vs official eager F32 CPU, teacher-forced; not trained-model parity',
                   runs=runs)
+    if failures:
+        np.savez(args.output / 'first_failure_vectors.npz', **failures)
     (args.output / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
     return 0 if ok else 1
 
