@@ -26,7 +26,7 @@ from pathlib import Path
 import numpy as np
 
 from glm_vx.model import GlmMoeDsaModel
-from validation.gpu_vs_official import CONFIG, REAL_GEOMETRY, official_model, random_weights
+from validation.gpu_vs_official import CONFIG, REAL_GEOMETRY, official_model, random_weights, with_layers
 
 STAGES = ('input_norm', 'attention.output', 'post_attention_norm', 'mlp.output', 'output')
 
@@ -103,6 +103,8 @@ def main():
     p.add_argument('--prompt-len', type=int, default=48)
     p.add_argument('--geometry', choices=['small', 'real'], default='small',
                    help="'real' uses GLM-5.3's per-head dimensions (64 heads, rank 512, 192+64 qk, 256 v, 32x128 indexer)")
+    p.add_argument('--layers', type=int, default=None,
+                   help="depth, using GLM-5.3's real dense/full/shared layer pattern (default: the 6-layer fixture)")
     p.add_argument('--topk', type=int, default=None)
     p.add_argument('--tol', type=float, default=2e-4,
                    help='max abs diff / max(1, max abs reference) per stage tensor')
@@ -123,6 +125,8 @@ def main():
         from glm_vx.backend import NumpyBackend
         backend = NumpyBackend()
     base = REAL_GEOMETRY if args.geometry == 'real' else CONFIG
+    if args.layers:
+        base = with_layers(base, args.layers)
     args.topk = args.topk or base['index_topk']
     config = dict(base, index_topk=args.topk,
                   max_position_embeddings=max(base['max_position_embeddings'], args.prompt_len + 16))
