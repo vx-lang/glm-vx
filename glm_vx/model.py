@@ -412,7 +412,7 @@ Model = GlmMoeDsaModel
 GLMModel = GlmMoeDsaModel
 
 
-def tiny_weights(config, seed=0, parameter_limit=10_000_000):
+def tiny_weights(config, seed=0, parameter_limit=10_000_000, shapes_only=False):
     """Generate deterministic float32 test tensors with native checkpoint names.
 
     These are random, untrained weights for architecture/backend smoke tests.
@@ -482,6 +482,8 @@ def tiny_weights(config, seed=0, parameter_limit=10_000_000):
     parameters = sum(int(np.prod(shape)) for shape in shapes.values())
     if parameters > parameter_limit:
         raise ValueError(f'tiny_weights is limited to {parameter_limit:,} parameters; config requests {parameters:,}')
+    if shapes_only:
+        return shapes, norms, biases
     rng = np.random.default_rng(seed)
     std = float(c.get('initializer_range', 0.02))
     return {name: (np.ones(shape, dtype=np.float32) if name in norms else

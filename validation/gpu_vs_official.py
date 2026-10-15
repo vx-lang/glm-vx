@@ -41,6 +41,17 @@ REAL_GEOMETRY = dict(CONFIG, hidden_size=1024, num_hidden_layers=6, num_attentio
     intermediate_size=1536, moe_intermediate_size=256, n_routed_experts=16, num_experts_per_tok=4,
     rope_parameters={'rope_type': 'default', 'rope_theta': 8000000}, max_position_embeddings=1024)
 
+def full_geometry(layers=4, topk=16):
+    """The actual GLM-5.3 config (model-config.json: 6144 hidden, 64 heads, 256 experts,
+    154880 vocab, theta 8e6) cut to `layers` layers, F32. About 11 B parameters at 4 layers."""
+    import json
+    real = json.loads((Path(__file__).resolve().parent.parent / 'model-config.json').read_text())
+    for key in ('architectures', 'quantization_config', 'dtype', 'transformers_version', 'eos_token_id',
+                'pad_token_id', 'use_cache'):
+        real.pop(key, None)
+    return with_layers(dict(real, index_topk=topk, max_position_embeddings=1024), layers)
+
+
 # 16 indexer heads: with few heads, ReLU can zero every head for a key, and the
 # resulting exact score ties are broken differently by torch.topk and Vx
 # (lowest index), which is not a numerical bug but flips the selection.
@@ -55,17 +66,16 @@ def with_layers(config, n):
 
 def random_weights(config, seed):
     """Same names/shapes as tiny_weights but with non-degenerate values."""
-    shapes = tiny_weights(config, seed=0, parameter_limit=10_000_000_000)
+    shapes, _, _ = tiny_weights(config, seed=0, parameter_limit=40_000_000_000, shapes_only=True)
     rng = np.random.default_rng(seed)
     out = {}
-    for name, ref in shapes.items():
+    for name, shape in shapes.items():
         if name.endswith('layernorm.weight') or name.endswith('norm.weight'):
-            out[name] = rng.uniform(.7, 1.3, ref.shape).astype(np.float32)
+            out[name] = rng.uniform(.7, 1.3, shape).astype(np.float32)
         elif name.endswith('.bias') or name.endswith('e_score_correction_bias'):
-            out[name] = rng.normal(0, .1, ref.shape).astype(np.float32)
+            out[name] = rng.normal(0, .1, shape).astype(np.float32)
         else:
-            fan_in = ref.shape[-1]
-            out[name] = rng.normal(0, 1 / np.sqrt(fan_in), ref.shape).astype(np.float32)
+            out[name] = rng.normal(0, 1 / np.sqrt(shape[-1]), shape).astype(np.float32)
     return out
 
 
@@ -73,7 +83,7 @@ def official_model(config, weights):
     import torch
     from transformers.models.glm_moe_dsa import configuration_glm_moe_dsa as configuration
     from transformers.models.glm_moe_dsa import modeling_glm_moe_dsa as official
-    cfg = configuration.GlmMoeDsaConfig(**config, attention_dropout=0.0)
+    cfg = configuration.GlmMoeDsaConfig(**{**config, "attention_dropout": 0.0})
     cfg._attn_implementation = 'eager'
     model = official.GlmMoeDsaForCausalLM(cfg).float().eval()
     state = {}

@@ -26,7 +26,7 @@ from pathlib import Path
 import numpy as np
 
 from glm_vx.model import GlmMoeDsaModel
-from validation.gpu_vs_official import CONFIG, REAL_GEOMETRY, official_model, random_weights, with_layers
+from validation.gpu_vs_official import CONFIG, REAL_GEOMETRY, official_model, random_weights, with_layers, full_geometry
 
 STAGES = ('input_norm', 'attention.output', 'post_attention_norm', 'mlp.output', 'output')
 
@@ -101,7 +101,7 @@ def main():
     p.add_argument('--backend', choices=['vx-gpu', 'vx', 'numpy-reference'], default='vx-gpu')
     p.add_argument('--seeds', type=int, nargs='+', default=[1, 2, 3])
     p.add_argument('--prompt-len', type=int, default=48)
-    p.add_argument('--geometry', choices=['small', 'real'], default='small',
+    p.add_argument('--geometry', choices=['small', 'real', 'full'], default='small',
                    help="'real' uses GLM-5.3's per-head dimensions (64 heads, rank 512, 192+64 qk, 256 v, 32x128 indexer)")
     p.add_argument('--layers', type=int, default=None,
                    help="depth, using GLM-5.3's real dense/full/shared layer pattern (default: the 6-layer fixture)")
@@ -124,8 +124,10 @@ def main():
     else:
         from glm_vx.backend import NumpyBackend
         backend = NumpyBackend()
-    base = REAL_GEOMETRY if args.geometry == 'real' else CONFIG
-    if args.layers:
+    base = {'real': REAL_GEOMETRY, 'small': CONFIG}.get(args.geometry)
+    if args.geometry == 'full':
+        base = full_geometry(args.layers or 4)
+    elif args.layers:
         base = with_layers(base, args.layers)
     args.topk = args.topk or base['index_topk']
     config = dict(base, index_topk=args.topk,
