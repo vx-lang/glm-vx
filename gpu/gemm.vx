@@ -11,7 +11,7 @@ extern "C" {
 
 // One warp/CTA, one 16x8 output tile. Shared: A[128], B[64], D[32,4].
 // Every lane executes every barrier/MMA. Bounds mask loads/stores, not lanes.
-fn glm_vx_gpu_gemm_tf32(out: *mut f32, a: *const f32, b: *const f32, m: i32, n: i32, k: i32) -> void {
+pub fn glm_vx_gpu_gemm_tf32(out: *mut f32, a: *const f32, b: *const f32, m: i32, n: i32, k: i32) -> void {
   if m <= 0 { return; }
   if n <= 0 { return; }
   if k < 0 { return; }
@@ -73,7 +73,7 @@ fn glm_vx_gpu_gemm_tf32(out: *mut f32, a: *const f32, b: *const f32, m: i32, n: 
 }
 
 // Full F32 scalar multiply/add reference. No silent precision downgrade.
-fn glm_vx_gpu_gemm_f32(out: *mut f32, a: *const f32, b: *const f32, m: i32, n: i32, k: i32) -> void {
+pub fn glm_vx_gpu_gemm_f32(out: *mut f32, a: *const f32, b: *const f32, m: i32, n: i32, k: i32) -> void {
   if m <= 0 { return; }
   if n <= 0 { return; }
   if k < 0 { return; }

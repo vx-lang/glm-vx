@@ -20,7 +20,7 @@ def generate(max_tile=64, layout="tile"):
         '// x packs [cols,tile] blocks (64/32/16/8/4/2/1); output is [batch,rows].' if layout == 'tile' else '// x is transposed [cols,batch]; output is [batch,rows].',
         '// No horizontal reduction, reassociation, FMA, or activation quantization.']
     for block, size, suffix in LAYOUTS.values():
-        lines += [f'fn glm_vx_packed_batch_{"v2_" if layout == "tile" else ""}{suffix}(out: *mut f32, w: *const u8, x: *const f32, half: *const f32, table: *const u8, rows: i32, cols: i32, batch: i32) -> i32 {{',
+        lines += [f'pub fn glm_vx_packed_batch_{"v2_" if layout == "tile" else ""}{suffix}(out: *mut f32, w: *const u8, x: *const f32, half: *const f32, table: *const u8, rows: i32, cols: i32, batch: i32) -> i32 {{',
                   f'  if rows < 0 || cols <= 0 || cols % {block} != 0 || batch < 0 || batch > 64 {{ return -1; }}',
                   f'  let blocks: i32 = cols / {block};',
                   '  unsafe {', '    let mut token: i32 = 0;']

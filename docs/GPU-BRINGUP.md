@@ -31,9 +31,13 @@ not performance claims.
 Toolchain notes from the bring-up:
 - Newer `vxc` emits `define hidden`, `@abort` and `@puts` (overflow/div checks);
   `gpu/toolchain/build_ptx.py` now accepts them (abort -> `llvm.trap`, puts -> no-op).
-- Vx main (#1745) no longer exports program function symbols, so the CPU `.so`
-  paths (`kernels/build.sh`, `gpu/testing/build_simt.sh`) fail to expose
-  `glm_vx_*`; they need `_vx_`-compatible entry points. PTX path is unaffected.
+- Vx #1745 stopped exporting program function symbols, which emptied the CPU `.so`
+  files built by `kernels/build.sh` and `gpu/testing/build_simt.sh`. Vx #1839 (issue
+  #1827) added `pub fn`: a top-level `pub fn` keeps its name and is exported. The 58
+  kernels we call from outside are `pub fn`; the helpers (`add`, `axpy`, `attention`,
+  `sparse_attention`, `rope`, `rope_offset`, `sigmoid_scalar`, `topk_*`) stay hidden.
+  Needs a `vxc` at or after 8d28aa86; older ones reject `pub`. `pub` does not change
+  the PTX output (checked byte for byte).
 - Per the Vx maintainers, the mlir-translate/opt/llc PTX pipeline is not the
   compiler's own path (`spawn on(Topology::X)` + `deviceImageOf()` is). Moving
   there is a candidate for M2.

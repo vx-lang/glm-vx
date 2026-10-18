@@ -37,7 +37,7 @@ embedding, lm_head); attention and routing are new code.
    is still in progress (Vx issue #487), so there is no supported way for the library to be consumed
    across repos today; the Vx packages README says packages are imported via `-I` include paths. And
    the kernels co-evolve with the compiler: Vx #1745 (program symbols no longer exported) silently
-   broke our CPU `.so` build, and the GPU pipeline here is a hand-built MLIR→PTX path that the
+   broke our CPU `.so` build until `pub fn` (#1839) arrived, and the GPU pipeline here is a hand-built MLIR→PTX path that the
    maintainers say is not the compiler's own route.
 2. **In the Vx repo, `packages/vx_llm`** (or inside `vx_nn`, which is a documented placeholder for
    "Transformers"). Follows the existing first-party package rules: tests live inside the package,

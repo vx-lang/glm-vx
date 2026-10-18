@@ -1,6 +1,6 @@
 // FP8 e4m3fn block-scaled projection. See FP8.md for the launch contract.
 // Keep this CPU-reference prefix self-contained: test_fp8.py compiles it unchanged.
-fn glm_vx_fp8_decode(byte: u8) -> f32 {
+pub fn glm_vx_fp8_decode(byte: u8) -> f32 {
   let bits: i32 = byte as i32;
   let exponent: i32 = (bits >> 3) & 15;
   let mantissa: i32 = bits & 7;
@@ -17,7 +17,7 @@ fn glm_vx_fp8_decode(byte: u8) -> f32 {
 }
 
 // Sequential oracle for CPU validation; not the GPU execution path.
-fn glm_vx_fp8_matvec_reference(out: *mut f32, weight: *const u8, scales: *const f32, x: *const f32, rows: i32, cols: i32) -> i32 {
+pub fn glm_vx_fp8_matvec_reference(out: *mut f32, weight: *const u8, scales: *const f32, x: *const f32, rows: i32, cols: i32) -> i32 {
   if rows < 0 { return -1; }
   if cols < 0 { return -1; }
   let scale_cols: i64 = ((cols as i64) + 127) / 128;
@@ -47,7 +47,7 @@ extern "C" {
 
 // One complete warp owns each row; block size must be a multiple of 32.
 // Four adjacent-lane byte loads cover each 128-column scale tile.
-fn glm_vx_gpu_fp8_matvec(out: *mut f32, weight: *const u8, scales: *const f32, x: *const f32, rows: i32, cols: i32) -> void {
+pub fn glm_vx_gpu_fp8_matvec(out: *mut f32, weight: *const u8, scales: *const f32, x: *const f32, rows: i32, cols: i32) -> void {
   if rows <= 0 { return; }
   if cols < 0 { return; }
   unsafe {
