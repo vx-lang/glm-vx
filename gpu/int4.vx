@@ -1,0 +1,150 @@
+// INT4 group-128 weight projections (M5). Layout is glm_vx/quant.py's: symmetric codes in
+// [-8,7], two per byte with element 2i in the low nibble (two's complement), an odd trailing
+// element padded with a zero nibble, one fp16 scale per (row, 128-column group) passed as raw
+// uint16 bits. See INT4.md for the launch contract.
+// Keep this CPU-reference prefix self-contained: test_int4.py compiles it unchanged.
+// IEEE binary16 bits (0..65535) to f32, exact for every encoding including subnormals, inf, NaN.
+pub fn glm_vx_i4_half(bits: i32) -> f32 {
+  let exponent: i32 = (bits >> 10) & 31;
+  let mantissa: i32 = bits & 1023;
+  let mut magnitude: f32 = (mantissa as f32) / 16777216.0;
+  if exponent > 0 {
+    let mut power: f32 = 1.0;
+    if exponent >= 15 { power = ((1 << (exponent - 15)) as f32); }
+    if exponent < 15 { power = 1.0 / ((1 << (15 - exponent)) as f32); }
+    magnitude = ((1024 + mantissa) as f32) * power / 1024.0;
+  }
+  if exponent == 31 {
+    if mantissa == 0 { magnitude = 1.0 / 0.0; }
+    if mantissa != 0 { magnitude = 0.0 / 0.0; }
+  }
+  let mut sign: f32 = 1.0;
+  if (bits & 32768) != 0 { sign = -1.0; }
+  return magnitude * sign;
+}
+
+// Signed 4-bit code from a byte: high=0 low nibble, high=1 high nibble.
+pub fn glm_vx_i4_code(byte: i32, high: i32) -> f32 {
+  let mut nibble: i32 = byte & 15;
+  if high != 0 { nibble = (byte >> 4) & 15; }
+  if nibble >= 8 { nibble = nibble - 16; }
+  return nibble as f32;
+}
+
+// GPU ENTRY: CPU tests compile the unchanged prefix above this marker.
+extern "C" {
+  fn vx_gpu_thread_idx_x() -> i32;
+  fn vx_gpu_block_idx_x() -> i32;
+  fn vx_gpu_block_dim_x() -> i32;
+  fn vx_gpu_shuffle_down_f32(value: f32, delta: i32) -> f32;
+}
+
+// Single vector. One warp owns each row; block size is a multiple of 32. Each 128-column group
+// is 64 packed bytes: lane reads bytes lane and lane+32, accumulates the raw-code dot product,
+// then applies the group scale (the order quant.py's int4_matvec uses).
+pub fn glm_vx_gpu_int4_matvec(out: *mut f32, packed: *const u8, scales: *const u16, x: *const f32, rows: i32, cols: i32) -> void {
+  if rows <= 0 { return; }
+  if cols < 0 { return; }
+  unsafe {
+    let tid: i32 = vx_gpu_thread_idx_x();
+    let lane: i32 = tid & 31;
+    let block: i32 = vx_gpu_block_dim_x();
+    if block < 32 { return; }
+    if block > 1024 { return; }
+    if block % 32 != 0 { return; }
+    let warps: i32 = block / 32;
+    let row: i64 = (vx_gpu_block_idx_x() as i64) * (warps as i64) + ((tid / 32) as i64);
+    if row < (rows as i64) {
+      let k: i64 = cols as i64;
+      let groups: i64 = (k + 127) / 128;
+      let row_bytes: i64 = (k + 1) / 2;
+      let mut sum: f32 = 0.0;
+      for group in 0..groups {
+        let scale: f32 = glm_vx_i4_half(scales[row * groups + group] as i32);
+        let mut part: f32 = 0.0;
+        for step in 0..2 {
+          let byte_index: i64 = group * 64 + ((step * 32 + lane) as i64);
+          let col: i64 = byte_index * 2;
+          if col < k {
+            let byte: i32 = packed[row * row_bytes + byte_index] as i32;
+            part = part + glm_vx_i4_code(byte, 0) * x[col];
+            if col + 1 < k { part = part + glm_vx_i4_code(byte, 1) * x[col + 1]; }
+          }
+        }
+        sum = sum + part * scale;
+      }
+      sum = sum + vx_gpu_shuffle_down_f32(sum, 16);
+      sum = sum + vx_gpu_shuffle_down_f32(sum, 8);
+      sum = sum + vx_gpu_shuffle_down_f32(sum, 4);
+      sum = sum + vx_gpu_shuffle_down_f32(sum, 2);
+      sum = sum + vx_gpu_shuffle_down_f32(sum, 1);
+      if lane == 0 { out[row] = sum; }
+    }
+    return;
+  }
+}
+
+// Batched and grouped. out[m, n] = sum_k W_e[n, k] * x[m, k] for M activation rows x[M, K].
+// experts == 0: one dense matrix packed[N, ceil(K/2)], scales[N, ceil(K/128)] shared by all rows.
+// experts  > 0: packed[E, N, ceil(K/2)], scales[E, N, ceil(K/128)] stacked experts of identical
+// shape; expert_ids[M] picks each row's expert. An id outside [0, E) writes zeros to that row
+// (an unrouted slot). One warp per (n, m) task, tasks ordered n-major so the M rows of one weight
+// row are adjacent warps. grid.x = ceil(N*M / (block/32)).
+pub fn glm_vx_gpu_int4_matmul(out: *mut f32, packed: *const u8, scales: *const u16, x: *const f32, expert_ids: *const i32, rows_m: i32, rows_n: i32, cols: i32, experts: i32) -> void {
+  if rows_m <= 0 { return; }
+  if rows_n <= 0 { return; }
+  if cols < 0 { return; }
+  if experts < 0 { return; }
+  unsafe {
+    let tid: i32 = vx_gpu_thread_idx_x();
+    let lane: i32 = tid & 31;
+    let block: i32 = vx_gpu_block_dim_x();
+    if block < 32 { return; }
+    if block > 1024 { return; }
+    if block % 32 != 0 { return; }
+    let warps: i32 = block / 32;
+    let task: i64 = (vx_gpu_block_idx_x() as i64) * (warps as i64) + ((tid / 32) as i64);
+    let m_count: i64 = rows_m as i64;
+    let n_count: i64 = rows_n as i64;
+    if task < m_count * n_count {
+      let n: i64 = task / m_count;
+      let m: i64 = task % m_count;
+      let k: i64 = cols as i64;
+      let groups: i64 = (k + 127) / 128;
+      let row_bytes: i64 = (k + 1) / 2;
+      let mut expert: i64 = 0;
+      let mut valid: i32 = 1;
+      if experts > 0 {
+        let id: i32 = expert_ids[m];
+        if id < 0 { valid = 0; }
+        if id >= experts { valid = 0; }
+        expert = id as i64;
+      }
+      let mut sum: f32 = 0.0;
+      if valid != 0 {
+        let row: i64 = expert * n_count + n;
+        for group in 0..groups {
+          let scale: f32 = glm_vx_i4_half(scales[row * groups + group] as i32);
+          let mut part: f32 = 0.0;
+          for step in 0..2 {
+            let byte_index: i64 = group * 64 + ((step * 32 + lane) as i64);
+            let col: i64 = byte_index * 2;
+            if col < k {
+              let byte: i32 = packed[row * row_bytes + byte_index] as i32;
+              part = part + glm_vx_i4_code(byte, 0) * x[m * k + col];
+              if col + 1 < k { part = part + glm_vx_i4_code(byte, 1) * x[m * k + col + 1]; }
+            }
+          }
+          sum = sum + part * scale;
+        }
+      }
+      sum = sum + vx_gpu_shuffle_down_f32(sum, 16);
+      sum = sum + vx_gpu_shuffle_down_f32(sum, 8);
+      sum = sum + vx_gpu_shuffle_down_f32(sum, 4);
+      sum = sum + vx_gpu_shuffle_down_f32(sum, 2);
+      sum = sum + vx_gpu_shuffle_down_f32(sum, 1);
+      if lane == 0 { out[m * n_count + n] = sum; }
+    }
+    return;
+  }
+}
