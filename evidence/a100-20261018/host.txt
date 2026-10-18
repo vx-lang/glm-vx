@@ -1,0 +1,4 @@
+name, driver_version
+NVIDIA A100-SXM4-80GB, 595.91.07
+256
+Vx 8d28aa86 (vxc 0.0.3), LLVM 22.1.8, repo 928b6cc
