@@ -330,7 +330,18 @@ class SafetensorsCheckpoint:
     def info(self, name: str) -> TensorInfo:
         return self._shard(name).info(name)
 
+    def is_compressed_int4(self, prefix: str) -> bool:
+        return f"{prefix}.weight_packed" in self
+
     def tensor(self, name: str, *, rows: slice | None = None) -> np.ndarray:
+        if name.endswith(".weight") and name not in self and self.is_compressed_int4(name[:-len(".weight")]):
+            # compressed-tensors INT4 Linear: the exact float32 dequantization (code * scale).
+            from .quant import compressed_int4_dequantize
+            packed, bits, scale_format, (n, k) = self.compressed_int4(name[:-len(".weight")])
+            if n * k * 4 > self.max_tensor_bytes:
+                raise CheckpointError(f"decoded tensor {name} exceeds max_tensor_bytes")
+            start, stop = (0, n) if rows is None else _row_bounds(rows, (n, k))
+            return compressed_int4_dequantize(packed[start:stop], bits[start:stop], scale_format, k)
         mapped = self._shard(name)
         info = mapped.info(name)
         out = mapped.tensor(name, rows=rows)

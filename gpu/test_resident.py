@@ -88,3 +88,66 @@ def test_limits_and_unsupported_modes_are_explicit():
         ResidentGLM(model, ctx=Context(), max_tokens=3).forward(10 ** 6)
     with pytest.raises(MemoryError):
         ResidentGLM(model, ctx=Context(), max_tokens=4, max_weight_bytes=1024).forward(1)
+
+
+# Linears the published GLM W4A16 checkpoint quantizes; the indexer, router, norms, embeddings
+# and lm_head stay in the model dtype there. 'all' additionally quantizes the indexer projections.
+GLM_INT4 = ('.q_a_proj.', '.q_b_proj.', '.kv_a_proj_with_mqa.', '.kv_b_proj.', '.o_proj.',
+            '.gate_proj.', '.up_proj.', '.down_proj.')
+INDEXER_INT4 = ('.indexer.wq_b.', '.indexer.wk.')
+
+
+def int4_model(seed, patterns, **overrides):
+    from glm_vx.quant import CompressedInt4Weights, compressed_int4_encode
+    base = build(seed=seed, **overrides)
+    linears = {}
+    for name, w in base.weights.items():
+        if w.ndim == 2 and name.endswith('.weight') and any(p in name for p in patterns):
+            words, bits = compressed_int4_encode(w)
+            linears[name[:-len('.weight')]] = (words, bits, w.shape)
+    rest = {n: w for n, w in base.weights.items() if n[:-len('.weight')] not in linears}
+    return GlmMoeDsaModel(base.config, CompressedInt4Weights(rest, linears), NumpyBackend()), linears
+
+
+@pytest.mark.parametrize('patterns,overrides', [
+    (GLM_INT4, {}),
+    (GLM_INT4 + INDEXER_INT4, {}),
+    (GLM_INT4, {'hidden_size': 136}),  # K > 128: two groups, the second partial
+])
+def test_int4_linears_match_the_dequantized_reference(patterns, overrides):
+    model, linears = int4_model(11, patterns, **overrides)
+    expected = reference(model, TOKENS)  # NumPy on the exact float32 dequantization
+    resident = ResidentGLM(model, ctx=Context(), max_tokens=32)
+    try:
+        got = resident.prefill(TOKENS)
+        launches = dict(resident.launches)
+        uploaded = set(resident._weights)
+    finally:
+        resident.close()
+    # Only the summation order differs from the reference (per-group code sums, then the scale).
+    np.testing.assert_allclose(got, expected, rtol=1e-4, atol=1e-4)
+    assert (got.argmax(-1) == expected.argmax(-1)).all()
+    assert launches.get('int4_matvec', 0) > 0
+    # Every quantized Linear except kv_b_proj stayed packed: no float32 copy was uploaded.
+    for prefix in linears:
+        if prefix.endswith('.kv_b_proj'):
+            assert prefix + '.weight' in uploaded and prefix + ':int4' not in uploaded
+        elif prefix + ':int4' in uploaded:
+            assert prefix + '.weight' not in uploaded
+
+
+def test_int4_resident_matches_float32_resident_on_the_same_weights():
+    # The same exact dequantized weights through the float32 kernels: isolates the INT4 kernel.
+    model, _ = int4_model(13, GLM_INT4)
+    dense = GlmMoeDsaModel(model.config, model._weight, NumpyBackend())
+    a = ResidentGLM(model, ctx=Context(), max_tokens=32)
+    b = ResidentGLM(dense, ctx=Context(), max_tokens=32)
+    np.testing.assert_allclose(a.prefill(TOKENS[:6]), b.prefill(TOKENS[:6]), rtol=1e-4, atol=1e-4)
+    assert 'int4_matvec' in a.launches and 'int4_matvec' not in b.launches
+
+
+def test_int4_rejects_a_quantization_config_the_kernels_do_not_implement():
+    model, _ = int4_model(3, GLM_INT4)
+    config = dict(model.config, quantization_config={'quant_method': 'awq'})
+    with pytest.raises(ValueError, match='compressed-tensors'):
+        ResidentGLM(GlmMoeDsaModel(config, model.weights, NumpyBackend()), ctx=Context(), max_tokens=4)

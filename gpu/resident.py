@@ -13,8 +13,16 @@ only host traffic per token is:
 
 Numerics follow `GlmMoeDsaModel` operation for operation (same kernels, same reduction orders,
 same expert aggregation order), so results should agree with the hybrid path to float32 rounding;
-`validation/resident_compare.py` checks that on a GPU. Weights are float32, uploaded once and kept.
-Expanded weights only: packed (GGUF) weights, expert placement and tracing are not supported.
+`validation/resident_compare.py` checks that on a GPU. Weights are uploaded once and kept.
+
+INT4: a Linear the weight source reports as compressed-tensors INT4 (``is_compressed_int4(prefix)``,
+as SafetensorsCheckpoint and glm_vx.quant.CompressedInt4Weights do) stays packed on the device and
+runs through ``glm_vx_gpu_int4_matvec`` (gpu/int4.ptx) with its bf16/fp16 group scales; every other
+weight is float32. The exception is ``kv_b_proj``, which absorbed MLA reads transposed per head: it
+is dequantized exactly (code * scale) to float32 once at upload. The NumPy reference sees the same
+exact dequantized weights, so the only differences from it are float32 accumulation order (the INT4
+kernel sums code * x per 128-column group, then scales).
+GGUF packed weights, expert placement and tracing are not supported.
 
 Not a performance claim: no timing is made here, and launches are still one per op.
 """
@@ -40,7 +48,7 @@ def _f32(value, name, positive=False):
 
 
 class ResidentGLM:
-    name = 'vx-gpu-resident-f32'
+    name = 'vx-gpu-resident'
 
     def __init__(self, model, *, max_tokens=4096, ptx_dir=None, device=0, ctx=None, max_weight_bytes=None):
         if getattr(model, 'packed_weights', False):
@@ -59,8 +67,16 @@ class ResidentGLM:
         try:
             ptx = Path(ptx_dir or Path(__file__).parent / 'build') / 'kernels.ptx'
             self.module = self.ctx.load_ptx(ptx)
+            self._int4_module = None
+            self._int4_ptx = ptx.parent / 'int4.ptx'
+            source = model.weights
+            self._is_int4 = getattr(source, 'is_compressed_int4', None) or (lambda prefix: False)
+            if 'quantization_config' in model.config:
+                from glm_vx.quant import compressed_int4_scheme
+                compressed_int4_scheme(model.config['quantization_config'])
             self.stream = self.ctx.stream()
             self._kernels = {}
+            self.launches = {}
             self._weights = {}
             self._allocate()
             self.position = 0
@@ -88,6 +104,7 @@ class ResidentGLM:
         if self._closed:
             raise RuntimeError('ResidentGLM is closed')
         self._kernel(name).launch((grid,), (block,), args, stream=self.stream)
+        self.launches[name] = self.launches.get(name, 0) + 1
 
     def _grid(self, n):
         return max(1, min((n + _ELEMENTWISE_BLOCK - 1) // _ELEMENTWISE_BLOCK, _MAX_GRID))
@@ -99,13 +116,26 @@ class ResidentGLM:
             tensor = self._upload_weight(name, np.ascontiguousarray(self.model._weight(name), dtype=np.float32))
         return tensor
 
-    def _upload_weight(self, key, array):
+    def _upload_weight(self, key, array, dtype='float32'):
         if self.max_weight_bytes is not None and self.weight_bytes + array.nbytes > self.max_weight_bytes:
             raise MemoryError(f'device weights would exceed max_weight_bytes={self.max_weight_bytes} at {key!r}')
-        tensor = self._tensor(array.shape, 'float32', array.tobytes())
+        tensor = self._tensor(array.shape, dtype, array.tobytes())
         self.weight_bytes += array.nbytes
         self._weights[key] = tensor
         return tensor
+
+    def _int4_weight(self, prefix):
+        """(packed uint8, scale bits uint16, scale_kind, (N, K)) on the device, uploaded once."""
+        key = prefix + ':int4'
+        entry = self._weights.get(key)
+        if entry is None:
+            packed, bits, scale_format, shape = self.model.weights.compressed_int4(prefix)
+            kind = {'float16': 0, 'bfloat16': 1}[scale_format]
+            entry = (self._upload_weight(key + ':packed', np.ascontiguousarray(packed, np.uint8), 'uint8'),
+                     self._upload_weight(key + ':scales', np.ascontiguousarray(bits, np.uint16), 'uint16'),
+                     kind, tuple(shape))
+            self._weights[key] = entry
+        return entry
 
     def _allocate(self):
         m, c = self.model, self.config
@@ -169,8 +199,21 @@ class ResidentGLM:
         self._launch('matvec', (rows + 3) // 4, 128, [out, weight, x, I(rows), I(cols)])
         return out
 
+    def _project(self, prefix, x, out):
+        """out = W x for the Linear `prefix`: INT4 kernel on packed weights, else float32 matvec."""
+        if not self._is_int4(prefix):
+            return self._matvec(self._weight(prefix + '.weight'), x, out)
+        packed, scales, kind, (rows, cols) = self._int4_weight(prefix)
+        if out.shape != (rows,) or x.shape != (cols,):
+            raise ValueError(f'{prefix}: INT4 weight is {rows}x{cols}, got x {x.shape} -> out {out.shape}')
+        if self._int4_module is None:
+            self._int4_module = self.ctx.load_ptx(self._int4_ptx)
+            self._kernels['int4_matvec'] = self._int4_module.kernel('glm_vx_gpu_int4_matvec')
+        self._launch('int4_matvec', (rows + 3) // 4, 128, [out, packed, scales, x, I(rows), I(cols), I(kind)])
+        return out
+
     def _linear(self, name, x, out, bias=False):
-        self._matvec(self._weight(name + '.weight'), x, out)
+        self._project(name, x, out)
         if bias:
             self._add(out, out, self._weight(name + '.bias'), out.shape[0])
         return out
@@ -198,18 +241,21 @@ class ResidentGLM:
 
     def _mlp(self, prefix, x, out):
         """down(SwiGLU(gate(x), up(x))) with both projections and the activation resident."""
-        gate_w = self._weight(prefix + '.gate_proj.weight')
-        width = gate_w.shape[0]
+        if self._is_int4(prefix + '.gate_proj'):
+            width = self._int4_weight(prefix + '.gate_proj')[3][0]
+        else:
+            width = self._weight(prefix + '.gate_proj.weight').shape[0]
         gate, up, act = (t.view((width,)) for t in (self.gate, self.up, self.act))
-        self._matvec(gate_w, x, gate)
-        self._matvec(self._weight(prefix + '.up_proj.weight'), x, up)
+        self._project(prefix + '.gate_proj', x, gate)
+        self._project(prefix + '.up_proj', x, up)
         self._swiglu(gate, up, act, width)
-        self._matvec(self._weight(prefix + '.down_proj.weight'), act, out)
+        self._project(prefix + '.down_proj', act, out)
 
     def _expert(self, prefix, expert, x, out):
         base = f'{prefix}.experts.{expert}'
         try:
-            self.model._weight(base + '.gate_proj.weight')
+            if not self._is_int4(base + '.gate_proj'):
+                self.model._weight(base + '.gate_proj.weight')
         except KeyError:
             # Fused checkpoint layout: gate_up_proj[E, 2I, H] and down_proj[E, H, I]. The whole
             # tensors are uploaded once; each expert is a view into them.

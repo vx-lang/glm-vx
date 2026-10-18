@@ -128,6 +128,65 @@ def compressed_int4_to_packed(weight_packed, cols):
     return np.ascontiguousarray(raw)
 
 
+def compressed_int4_dequantize(packed, scale_bits, scale_format, cols, group=128):
+    """Exact float32 weights from the int4.vx layout: code * scale (a 4-bit code times a bf16 or
+    fp16 scale is representable in float32, so nothing rounds)."""
+    bits = np.asarray(scale_bits, dtype=np.uint16)
+    scales = bf16_to_f32(bits) if scale_format == 'bfloat16' else bits.view(np.float16).astype(np.float32)
+    return int4_unpack(packed, cols).astype(np.float32) * np.repeat(scales, group, axis=1)[:, :cols]
+
+
+def compressed_int4_encode(w, group=128):
+    """A test encoder: (weight_packed int32, bf16 scale bits) for float32 w [N, K], scale =
+    bf16(amax / 7) per group (1 for an all-zero group). Not claimed to reproduce llm-compressor's
+    observer; real checkpoints are read, never re-encoded."""
+    w = np.asarray(w, dtype=np.float32)
+    rows, cols = w.shape
+    groups = math.ceil(cols / group)
+    bits = np.zeros((rows, groups), np.uint16)
+    codes = np.zeros((rows, cols), np.int8)
+    for g in range(groups):
+        tile = w[:, g * group:(g + 1) * group]
+        amax = np.abs(tile).max(axis=1)
+        scale = np.where(amax > 0, amax / 7.0, 1.0).astype(np.float32)
+        bits[:, g] = ((scale.view(np.uint32) + 0x7FFF + ((scale.view(np.uint32) >> 16) & 1)) >> 16).astype(np.uint16)
+        s = bf16_to_f32(bits[:, g])[:, None]
+        codes[:, g * group:(g + 1) * group] = np.clip(np.rint(tile / s), INT4_MIN, INT4_MAX).astype(np.int8)
+    return compressed_int4_pack(codes), bits
+
+
+class CompressedInt4Weights:
+    """Weight source with some Linears in compressed-tensors INT4, the in-memory twin of an INT4
+    SafetensorsCheckpoint. ``linears`` maps a Linear prefix to (weight_packed int32 [N, ceil(K/8)],
+    scale bits uint16 [N, ceil(K/128)], (N, K)) with bf16 scales; ``base`` (a dict or a callable)
+    supplies every other tensor. ``prefix.weight`` reads back as the exact float32 dequantization,
+    which is what the NumPy reference model computes with."""
+
+    def __init__(self, base, linears):
+        self.base, self.linears = base, dict(linears)
+        self._dense = {}
+
+    def is_compressed_int4(self, prefix):
+        return prefix in self.linears
+
+    def compressed_int4(self, prefix):
+        words, bits, (n, k) = self.linears[prefix]
+        return compressed_int4_to_packed(words, k), np.asarray(bits, np.uint16), 'bfloat16', (n, k)
+
+    def __call__(self, name):
+        prefix = name[:-len('.weight')] if name.endswith('.weight') else None
+        if prefix in self.linears:
+            if name not in self._dense:
+                packed, bits, fmt, (_, k) = self.compressed_int4(prefix)
+                dense = compressed_int4_dequantize(packed, bits, fmt, k)
+                dense.flags.writeable = False
+                self._dense[name] = dense
+            return self._dense[name]
+        return self.base(name) if callable(self.base) else self.base[name]
+
+    __getitem__ = __call__
+
+
 def compressed_int4_scheme(quantization_config):
     """Validate a config.json ``quantization_config`` as the one INT4 scheme the kernels implement.
 

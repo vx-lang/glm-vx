@@ -70,8 +70,15 @@ Single-run timings, steady state after a warmup pass, not a benchmark: 6-layer m
 resident vs 78.9 ms hybrid; full-width 4-layer slice 10.5 ms/token vs 34.0 s/token (the hybrid
 path re-uploads weights from the host each token). A per-kernel profile at full width (157 launches
 per token, synchronized after each launch, so inflated) puts about 9 of 16 ms in `matvec`.
-Not done: a device top-k, fewer launches (fusion/graphs), BF16/FP8/INT4 weights in this path,
-and a full-depth model (only 4 layers ran at full width).
+INT4 (compressed-tensors W4A16, `gpu/INT4.md`): a Linear the weight source reports as INT4
+(`SafetensorsCheckpoint`, or `glm_vx.quant.CompressedInt4Weights`) stays packed on the device and
+runs through `glm_vx_gpu_int4_matvec` with its bf16 group scales; `kv_b_proj`, which absorbed MLA
+reads transposed per head, is dequantized exactly to float32 once. Checked in the CPU SIMT emulator
+only (`gpu/test_resident.py`: INT4 resident vs the NumPy model on the exact dequantization, and vs
+float32 resident on the same weights). `resident_compare --int4` is the A100 check; it has not run.
+
+Not done: a device top-k, fewer launches (fusion/graphs), BF16/FP8 weights in this path, INT4 on
+hardware, and a full-depth model (only 4 layers ran at full width).
 
 ## M1 correctness vs. the official model (random weights, A100)
 
