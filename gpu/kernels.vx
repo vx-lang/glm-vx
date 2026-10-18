@@ -508,3 +508,163 @@ pub fn glm_vx_gpu_softmax_rows(out: *mut f32, x: *const f32, rows: i32, dim: i32
   vxk_softmax_rows(out, x, rows, dim);
   return;
 }
+
+// ---- Device-resident decode support (gpu/resident.py) -------------------------------------
+// Elementwise kernels use the grid-stride loop of swiglu. In-place use (out == a / out == x
+// exactly) is allowed because each thread touches only its own index.
+
+pub fn glm_vx_gpu_add(out: *mut f32, a: *const f32, b: *const f32, n: i32) -> void {
+  unsafe {
+    let mut i: i32 = vx_gpu_block_idx_x() * vx_gpu_block_dim_x() + vx_gpu_thread_idx_x();
+    let stride: i32 = vx_gpu_grid_dim_x() * vx_gpu_block_dim_x();
+    for iteration in 0..((n + stride - 1) / stride) {
+      if i < n { out[i] = a[i] + b[i]; }
+      i = i + stride;
+    }
+    return;
+  }
+}
+
+pub fn glm_vx_gpu_copy(out: *mut f32, x: *const f32, n: i32) -> void {
+  unsafe {
+    let mut i: i32 = vx_gpu_block_idx_x() * vx_gpu_block_dim_x() + vx_gpu_thread_idx_x();
+    let stride: i32 = vx_gpu_grid_dim_x() * vx_gpu_block_dim_x();
+    for iteration in 0..((n + stride - 1) / stride) {
+      if i < n { out[i] = x[i]; }
+      i = i + stride;
+    }
+    return;
+  }
+}
+
+pub fn glm_vx_gpu_scale(out: *mut f32, x: *const f32, alpha: f32, n: i32) -> void {
+  unsafe {
+    let mut i: i32 = vx_gpu_block_idx_x() * vx_gpu_block_dim_x() + vx_gpu_thread_idx_x();
+    let stride: i32 = vx_gpu_grid_dim_x() * vx_gpu_block_dim_x();
+    for iteration in 0..((n + stride - 1) / stride) {
+      if i < n { out[i] = x[i] * alpha; }
+      i = i + stride;
+    }
+    return;
+  }
+}
+
+// out[i] = out[i] + x[i] * weights[slot]: the weighted expert accumulation, with the router
+// weight read on the device so no host round trip is needed. Two roundings, as the host path.
+pub fn glm_vx_gpu_scaled_add(out: *mut f32, x: *const f32, weights: *const f32, slot: i32, n: i32) -> void {
+  unsafe {
+    let w: f32 = weights[slot];
+    let mut i: i32 = vx_gpu_block_idx_x() * vx_gpu_block_dim_x() + vx_gpu_thread_idx_x();
+    let stride: i32 = vx_gpu_grid_dim_x() * vx_gpu_block_dim_x();
+    for iteration in 0..((n + stride - 1) / stride) {
+      if i < n {
+        let weighted: f32 = x[i] * w;
+        out[i] = out[i] + weighted;
+      }
+      i = i + stride;
+    }
+    return;
+  }
+}
+
+// LayerNorm with bias over the last dimension (the DSA indexer key norm). One CTA per row;
+// mean first, then the variance of the centered values.
+pub fn glm_vx_gpu_layernorm(out: *mut f32, x: *const f32, weight: *const f32, bias: *const f32, rows: i32, dim: i32, eps: f32) -> void {
+  if rows <= 0 { return; }
+  if dim <= 0 { return; }
+  if eps <= 0.0 { return; }
+  unsafe {
+    let tid: i32 = vx_gpu_thread_idx_x();
+    let row: i32 = vx_gpu_block_idx_x();
+    let block: i32 = vx_gpu_block_dim_x();
+    if row >= rows { return; }
+    if block < 32 { return; }
+    if block > 1024 { return; }
+    if block % 32 != 0 { return; }
+    let base: i32 = row * dim;
+    let mut s: f32 = 0.0;
+    let mut d: i32 = tid;
+    for iteration in 0..((dim + block - 1) / block) {
+      d = tid + iteration * block;
+      if d < dim { s = s + x[base + d]; }
+    }
+    let mean: f32 = vxk_block_sum(s) / (dim as f32);
+    let mut ss: f32 = 0.0;
+    for iteration in 0..((dim + block - 1) / block) {
+      d = tid + iteration * block;
+      if d < dim {
+        let c: f32 = x[base + d] - mean;
+        ss = ss + c * c;
+      }
+    }
+    let inv: f32 = 1.0 / sqrtf(vxk_block_sum(ss) / (dim as f32) + eps);
+    for iteration in 0..((dim + block - 1) / block) {
+      d = tid + iteration * block;
+      if d < dim { out[base + d] = (x[base + d] - mean) * inv * weight[d] + bias[d]; }
+    }
+    return;
+  }
+}
+
+// RoPE on a strided slice of rows: head h reads x[h*x_stride ..] and writes out[h*out_stride ..]
+// (packed [rotated even, rotated odd]), arithmetic identical to glm_vx_gpu_rope_glm. Lets the
+// rotary part of [heads, nope+rot] queries be rotated in place of a gather.
+pub fn glm_vx_gpu_rope_strided(out: *mut f32, x: *const f32, cosine: *const f32, sine: *const f32, heads: i32, dim: i32, x_stride: i32, out_stride: i32) -> void {
+  if heads <= 0 { return; }
+  if dim <= 0 { return; }
+  if dim % 2 != 0 { return; }
+  unsafe {
+    let pairs: i32 = dim / 2;
+    let mut i: i32 = vx_gpu_block_idx_x() * vx_gpu_block_dim_x() + vx_gpu_thread_idx_x();
+    let stride: i32 = vx_gpu_grid_dim_x() * vx_gpu_block_dim_x();
+    for iteration in 0..((heads * pairs + stride - 1) / stride) {
+      if i < heads * pairs {
+        let h: i32 = i / pairs;
+        let p: i32 = i % pairs;
+        let xb: i32 = h * x_stride;
+        let ob: i32 = h * out_stride;
+        let a: f32 = x[xb + p * 2];
+        let b: f32 = x[xb + p * 2 + 1];
+        let c: f32 = cosine[p];
+        let s: f32 = sine[p];
+        out[ob + p] = a * c - b * s;
+        out[ob + pairs + p] = b * c + a * s;
+      }
+      i = i + stride;
+    }
+    return;
+  }
+}
+
+// Per-head matvec in one launch: out[h*out_stride + r] = sum_c weight[h*w_stride + r*cols + c]
+// * x[h*x_stride + c]. A warp owns one (head,row); the column loop and warp reduction are those
+// of glm_vx_gpu_matvec, so each head matches a separate matvec bit for bit. Used for the absorbed
+// MLA query (W_k^T q_nope) and the value up-projection.
+pub fn glm_vx_gpu_matvec_heads(out: *mut f32, weight: *const f32, x: *const f32, heads: i32, rows: i32, cols: i32, w_stride: i32, x_stride: i32, out_stride: i32) -> void {
+  if heads <= 0 { return; }
+  if rows <= 0 { return; }
+  if cols < 0 { return; }
+  unsafe {
+    let tid: i32 = vx_gpu_thread_idx_x();
+    let block: i32 = vx_gpu_block_dim_x();
+    if block < 32 { return; }
+    if block > 1024 { return; }
+    if block % 32 != 0 { return; }
+    let lane: i32 = tid % 32;
+    let index: i64 = (vx_gpu_block_idx_x() as i64) * ((block / 32) as i64) + ((tid / 32) as i64);
+    if index >= (heads as i64) * (rows as i64) { return; }
+    let h: i64 = index / (rows as i64);
+    let r: i64 = index % (rows as i64);
+    let wbase: i64 = h * (w_stride as i64) + r * (cols as i64);
+    let xbase: i64 = h * (x_stride as i64);
+    let mut sum: f32 = 0.0;
+    let mut c: i32 = lane;
+    for iteration in 0..((cols + 31) / 32) {
+      if c < cols { sum = sum + weight[wbase + (c as i64)] * x[xbase + (c as i64)]; }
+      c = c + 32;
+    }
+    let total: f32 = vxk_warp_sum(sum);
+    if lane == 0 { out[h * (out_stride as i64) + r] = total; }
+    return;
+  }
+}

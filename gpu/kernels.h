@@ -109,6 +109,27 @@ void glm_vx_gpu_router(int32_t *indices, float *weights,
 void glm_vx_gpu_rmsnorm(float *out, const float *x, const float *weight,
     int32_t n, float eps);
 void glm_vx_gpu_softmax(float *out, const float *x, int32_t n);
+/* Device-resident decode support (gpu/resident.py). Elementwise kernels: grid-stride,
+ * exact in-place use allowed. */
+void glm_vx_gpu_add(float *out, const float *a, const float *b, int32_t n);
+void glm_vx_gpu_copy(float *out, const float *x, int32_t n);
+void glm_vx_gpu_scale(float *out, const float *x, float alpha, int32_t n);
+/* out[i] += x[i] * weights[slot] (two roundings; router weight read on device). */
+void glm_vx_gpu_scaled_add(float *out, const float *x, const float *weights,
+    int32_t slot, int32_t n);
+/* LayerNorm with bias over rows x dim; one 32..1024-thread CTA per row. */
+void glm_vx_gpu_layernorm(float *out, const float *x, const float *weight,
+    const float *bias, int32_t rows, int32_t dim, float eps);
+/* glm_vx_gpu_rope_glm on strided rows: head h reads x[h*x_stride..] and writes
+ * out[h*out_stride..]. */
+void glm_vx_gpu_rope_strided(float *out, const float *x, const float *cosine,
+    const float *sine, int32_t heads, int32_t dim, int32_t x_stride, int32_t out_stride);
+/* Per-head matvec: out[h*out_stride+r] = sum_c weight[h*w_stride+r*cols+c] * x[h*x_stride+c].
+ * One warp per (head,row), same reduction as glm_vx_gpu_matvec. Launch
+ * grid=ceil(heads*rows/(block/32)). */
+void glm_vx_gpu_matvec_heads(float *out, const float *weight, const float *x,
+    int32_t heads, int32_t rows, int32_t cols, int32_t w_stride, int32_t x_stride,
+    int32_t out_stride);
 #ifdef __cplusplus
 }
 #endif

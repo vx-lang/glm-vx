@@ -22,6 +22,12 @@ class Tensor:
     def download(self):
         assert not self.closed
         return self.data.tobytes()
+    def upload(self,data):
+        assert not self.closed
+        raw=np.frombuffer(bytes(memoryview(data)),dtype=self.data.dtype)
+        assert raw.size==self.data.size,'upload size mismatch'
+        self.data[...]=raw.reshape(self.data.shape)
+        return self
     def close(self):self._closed=True
 class Stream:
     def synchronize(self):pass

@@ -7,7 +7,7 @@ multi-warp/multi-block code. Needs torch + the pinned transformers (optional
 validation dependency; never imported by serving). Writes a JSON report and an
 .npz of logits and exits nonzero if any criterion fails.
 
-  python -m validation.gpu_vs_official --output run/ [--backend vx-gpu|vx|numpy-reference]
+  python -m validation.gpu_vs_official --output run/ [--backend vx-gpu|vx-gpu-resident|vx|numpy-reference]
 """
 import argparse
 import json
@@ -113,20 +113,27 @@ def official_run(model, tokens, new):
 
 
 def candidate_run(model, tokens, new):
-    cache = model.new_cache()
-    logits = np.stack([model.forward(t, cache) for t in tokens])
+    if hasattr(model, 'reset'):  # gpu.resident.ResidentGLM keeps its own device cache
+        model.reset()
+        step = model.forward
+        cache_args = ()
+    else:
+        cache = model.new_cache()
+        cache_args = (cache,)
+        step = model.forward
+    logits = np.stack([step(t, *cache_args) for t in tokens])
     out = []
     last = logits[-1]
     for _ in range(new):
         out.append(int(np.argmax(last)))
-        last = model.forward(out[-1], cache)
+        last = step(out[-1], *cache_args)
     return logits, np.array(out)
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--output', type=Path, required=True)
-    p.add_argument('--backend', choices=['vx-gpu', 'vx', 'numpy-reference'], default='vx-gpu')
+    p.add_argument('--backend', choices=['vx-gpu', 'vx-gpu-resident', 'vx', 'numpy-reference'], default='vx-gpu')
     p.add_argument('--seeds', type=int, nargs='+', default=[1, 2])
     p.add_argument('--prompt-len', type=int, default=24)
     p.add_argument('--new', type=int, default=16)
@@ -137,9 +144,13 @@ def main():
         p.error('output exists; preserve evidence')
     import torch
     import transformers
+    resident = args.backend == 'vx-gpu-resident'
     if args.backend == 'vx-gpu':
         from gpu.backend import GPUBackend
         backend = GPUBackend()
+    elif resident:
+        from glm_vx.backend import NumpyBackend  # host weights/embedding only; all math runs in ResidentGLM
+        backend = NumpyBackend()
     elif args.backend == 'vx':
         from kernels.backend import VxBackend
         backend = VxBackend()
@@ -153,7 +164,15 @@ def main():
             w.flags.writeable = False
         tokens = [int(t) for t in np.random.default_rng(100 + seed).integers(0, CONFIG['vocab_size'], args.prompt_len)]
         ref_logits, ref_ids = official_run(official_model(CONFIG, weights), tokens, args.new)
-        got_logits, got_ids = candidate_run(GlmMoeDsaModel(CONFIG, weights, backend), tokens, args.new)
+        candidate = GlmMoeDsaModel(CONFIG, weights, backend)
+        if resident:
+            from gpu.resident import ResidentGLM
+            candidate = ResidentGLM(candidate, max_tokens=args.prompt_len + args.new + 1)
+        try:
+            got_logits, got_ids = candidate_run(candidate, tokens, args.new)
+        finally:
+            if resident:
+                candidate.close()
         diff = np.abs(ref_logits - got_logits)
         # argmax-stability: HF's top-1 margin must exceed the error for a mismatch to matter
         top1_match = bool(np.array_equal(ref_logits.argmax(-1), got_logits.argmax(-1)))
