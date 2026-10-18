@@ -24,7 +24,9 @@ class CheckpointError(ValueError):
     """Malformed, unsupported or inconsistent checkpoint."""
 
 
-DTYPE_BYTES = {"F32": 4, "F16": 2, "BF16": 2, "F8_E4M3": 1, "F8_E4M3FN": 1}
+DTYPE_BYTES = {"F32": 4, "F16": 2, "BF16": 2, "F8_E4M3": 1, "F8_E4M3FN": 1, "I32": 4, "I64": 8}
+# Undecoded storage: BF16 as its uint16 bits, FP8 as uint8 codes, integers as themselves.
+RAW_DTYPES = {"F32": "<f4", "F16": "<f2", "BF16": "<u2", "F8_E4M3": "u1", "F8_E4M3FN": "u1", "I32": "<i4", "I64": "<i8"}
 MAX_HEADER_BYTES = 100 * 1024 * 1024
 
 
@@ -156,6 +158,24 @@ class SafetensorsFile:
 
     def tensor(self, name: str, *, rows: slice | None = None) -> np.ndarray:
         """Decode to owned float32; row slices avoid materializing entire matrices."""
+        info = self.info(name)
+        if info.dtype in ("I32", "I64"):
+            raise CheckpointError(f"{name} is an integer tensor ({info.dtype}); read it with raw()")
+        raw, shape = self._window(name, rows, decoded_itemsize=4)
+        if info.dtype == "BF16":
+            out = (raw.astype(np.uint32) << 16).view(np.float32)
+        elif info.dtype.startswith("F8_"):
+            out = decode_e4m3fn(raw)
+        else:
+            out = raw.astype(np.float32, copy=True)
+        return out.reshape(shape)
+
+    def raw(self, name: str, *, rows: slice | None = None) -> np.ndarray:
+        """Owned copy of the stored values without decoding (see RAW_DTYPES), e.g. packed INT4 words."""
+        raw, shape = self._window(name, rows, decoded_itemsize=None)
+        return raw.copy().reshape(shape)
+
+    def _window(self, name: str, rows: slice | None, decoded_itemsize: int | None):
         if self._map is None:
             raise CheckpointError("safetensors file is closed")
         info = self.info(name)
@@ -167,19 +187,12 @@ class SafetensorsFile:
             begin += row_start * width * DTYPE_BYTES[info.dtype]
             end = begin + (row_end - row_start) * width * DTYPE_BYTES[info.dtype]
             shape = (row_end - row_start,) + shape[1:]
-        if math.prod(shape) * 4 > self.max_tensor_bytes:
+        itemsize = DTYPE_BYTES[info.dtype] if decoded_itemsize is None else decoded_itemsize
+        if math.prod(shape) * itemsize > self.max_tensor_bytes:
             raise CheckpointError(f"decoded tensor {name} exceeds max_tensor_bytes; use row slices")
         offset = self.data_start + begin
         count = math.prod(shape)
-        dtype = {"F32": "<f4", "F16": "<f2", "BF16": "<u2", "F8_E4M3": "u1", "F8_E4M3FN": "u1"}[info.dtype]
-        raw = np.frombuffer(self._map, dtype=dtype, count=count, offset=offset)
-        if info.dtype == "BF16":
-            out = (raw.astype(np.uint32) << 16).view(np.float32)
-        elif info.dtype.startswith("F8_"):
-            out = decode_e4m3fn(raw)
-        else:
-            out = raw.astype(np.float32, copy=True)
-        return out.reshape(shape)
+        return np.frombuffer(self._map, dtype=RAW_DTYPES[info.dtype], count=count, offset=offset), shape
 
     def close(self):
         if self._map is not None:
@@ -335,6 +348,41 @@ class SafetensorsCheckpoint:
         elif name.endswith(".weight") and name[:-len("weight")] + "weight_scale_inv" in self:
             raise CheckpointError(f"scale supplied for non-FP8 weight: {name}")
         return out
+
+    def raw(self, name: str, *, rows: slice | None = None) -> np.ndarray:
+        return self._shard(name).raw(name, rows=rows)
+
+    def compressed_int4(self, prefix: str):
+        """One compressed-tensors pack-quantized INT4 Linear, e.g. ``model.layers.3.self_attn.o_proj``.
+
+        Returns (packed uint8 [N, ceil(K/2)] in the int4.vx layout, scale bits uint16
+        [N, ceil(K/128)], scale_format "bfloat16" or "float16", (N, K)). Only the symmetric
+        group-128 scheme is accepted (see glm_vx.quant.compressed_int4_scheme); a zero point or
+        activation-order index is rejected rather than ignored.
+        """
+        from .quant import compressed_int4_to_packed
+        for suffix in ("weight", "weight_zero_point", "weight_g_idx"):
+            if f"{prefix}.{suffix}" in self:
+                raise CheckpointError(f"{prefix}.{suffix} present: not a symmetric pack-quantized INT4 Linear")
+        packed_info = self.info(f"{prefix}.weight_packed")
+        shape_info = self.info(f"{prefix}.weight_shape")
+        scale_info = self.info(f"{prefix}.weight_scale")
+        if shape_info.dtype != "I64" or shape_info.shape != (2,):
+            raise CheckpointError(f"{prefix}.weight_shape must be I64 [2]")
+        n, k = (int(v) for v in self.raw(f"{prefix}.weight_shape"))
+        if n <= 0 or k <= 0:
+            raise CheckpointError(f"{prefix}.weight_shape must be positive, got {(n, k)}")
+        if packed_info.dtype != "I32" or packed_info.shape != (n, (k + 7) // 8):
+            raise CheckpointError(f"{prefix}.weight_packed must be I32 {(n, (k + 7) // 8)}, got {packed_info.dtype} {packed_info.shape}")
+        formats = {"BF16": "bfloat16", "F16": "float16"}
+        if scale_info.dtype not in formats or scale_info.shape != (n, (k + 127) // 128):
+            raise CheckpointError(f"{prefix}.weight_scale must be BF16/F16 {(n, (k + 127) // 128)}, got {scale_info.dtype} {scale_info.shape}")
+        bits = self.raw(f"{prefix}.weight_scale").view(np.uint16)  # F16 reads back as float16
+        exponent = (bits >> 7) & 0xFF if scale_info.dtype == "BF16" else (bits >> 10) & 0x1F
+        if np.any(exponent == (0xFF if scale_info.dtype == "BF16" else 0x1F)):
+            raise CheckpointError(f"{prefix}.weight_scale has inf or NaN")
+        packed = compressed_int4_to_packed(self.raw(f"{prefix}.weight_packed"), k)
+        return packed, bits, formats[scale_info.dtype], (n, k)
 
     get = tensor
     load = tensor

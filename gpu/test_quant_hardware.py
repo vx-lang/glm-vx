@@ -9,7 +9,7 @@ from glm_vx.checkpoint import FP8_E4M3FN_TABLE
 from glm_vx.quant import fp8_matvec_blocked, int4_dequantize, int4_matvec
 from gpu.quant_ops import QuantKernels
 from gpu.runtime import CUDAContext, CUDAUnavailable
-from gpu.test_quant_simt import fp8_data, fp8_scale, int4_data
+from gpu.test_quant_simt import REAL, compressed_data, compressed_reference, fp8_data, fp8_scale, int4_data
 
 BUILD = Path(__file__).parent / 'build'
 
@@ -54,6 +54,44 @@ def test_int4_matmul_device(device, m, n, k):
     ctx.synchronize()
     expected = np.stack([int4_matvec(packed, scales, r) for r in x])
     close(download(out, (m, n)), expected, np.abs(int4_dequantize(packed, scales, k)).sum() * np.abs(x).max())
+
+
+@pytest.mark.parametrize('extreme', [False, True])
+def test_int4_bf16_compressed_tensors_device(device, extreme):
+    ctx, q = device
+    e, n, k, m = 4, 130, 1024, 9
+    codes, words, bits, packed = compressed_data(n, k, 21, experts=e, extreme=extreme)
+    x = np.random.default_rng(22).normal(size=(m, k)).astype('f4')
+    ids = np.array([3, 0, -1, 1, 2, 4, 2, 0, 1], dtype='i4')
+    out = q.int4_matmul(ctx.tensor(packed.shape, 'uint8', packed), ctx.tensor(bits.shape, 'uint16', bits), ctx.tensor(x.shape, data=x),
+                        expert_ids=ctx.tensor(ids.shape, 'int32', ids), scale_format='bfloat16')
+    vec = q.int4_matvec(ctx.tensor(packed[1].shape, 'uint8', packed[1]), ctx.tensor(bits[1].shape, 'uint16', bits[1]),
+                        ctx.tensor((k,), data=x[0]), scale_format='bfloat16')
+    ctx.synchronize()
+    got = download(out, (m, n))
+    for row, i in enumerate(ids):
+        if 0 <= i < e:
+            close(got[row], *compressed_reference(words[i], bits[i], x[row], k))
+        else:
+            assert (got[row] == 0).all()
+    close(download(vec, n), *compressed_reference(words[1], bits[1], x[0], k))
+
+
+@pytest.mark.skipif(not REAL, reason='set GLM_VX_INT4_CHECKPOINT to a validation.fetch_tensors directory')
+def test_int4_real_checkpoint_linears_device(device):
+    from glm_vx.checkpoint import SafetensorsCheckpoint
+    ctx, q = device
+    with SafetensorsCheckpoint(REAL) as ckpt:
+        for prefix in sorted(n[:-len('.weight_packed')] for n in ckpt.names if n.endswith('.weight_packed')):
+            packed, bits, scale_format, (n, k) = ckpt.compressed_int4(prefix)
+            words = ckpt.raw(prefix + '.weight_packed')
+            x = np.random.default_rng(k).normal(size=(3, k)).astype('f4')
+            out = q.int4_matmul(ctx.tensor(packed.shape, 'uint8', packed), ctx.tensor(bits.shape, 'uint16', bits),
+                                ctx.tensor(x.shape, data=x), scale_format=scale_format)
+            ctx.synchronize()
+            got = download(out, (3, n))
+            for r in range(3):
+                close(got[r], *compressed_reference(words, bits, x[r], k))
 
 
 def test_int4_grouped_device(device):

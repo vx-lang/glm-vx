@@ -17,7 +17,7 @@ Trained-weight parity, BF16 and performance are not done.
 | M2 library | layout recommended in `docs/LIBRARY-LAYOUT.md`; paged KV CPU reference (`glm_vx/paged_kv.py`); loader tested on BF16/FP8/sharded checkpoints (`validation/write_checkpoint.py`) | GQA attention, grouped GEMM, sampling, device paged cache; extraction |
 | M3 second family | not started; gap list in `docs/LIBRARY-LAYOUT.md` | after M2 ops |
 | M4 hybrid MoE | admission verdict (`glm_vx/admission.py`, validated within 0.011% of the official checkpoint size); per-layer expert placement on a host backend (`glm_vx/placement.py`), bit-identical logits on CPU backends | GPU attention + device KV with host experts; port the verdict into `vxc` |
-| M5 quantization / benchmarks | INT4 and block-FP8 reference math (`glm_vx/quant.py`); cross-engine harness (`benchmarks/compare.py`, tested on fake servers) | INT4/FP8 kernels in the model path; run against llama.cpp and vLLM on the pod |
+| M5 quantization / benchmarks | INT4 and block-FP8 reference math (`glm_vx/quant.py`); cross-engine harness (`benchmarks/compare.py`, tested on fake servers) | INT4 (incl. compressed-tensors bf16-scale checkpoints, `gpu/INT4.md`) and batched FP8 kernels exist but are not in the model path; run against llama.cpp and vLLM on the pod |
 
 ## First real-device result (2026-10-15)
 

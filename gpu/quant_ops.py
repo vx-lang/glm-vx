@@ -4,7 +4,9 @@ Kept out of runtime.py so that file stays untouched; it reuses runtime.py's vali
 Construct with ``QuantKernels.from_ptx(ctx, int4_ptx, fp8_batched_ptx)`` (either may be None).
 
 INT4 layout (glm_vx/quant.py): packed uint8 [rows, ceil(cols/2)], two symmetric 4-bit codes per
-byte (element 2i in the low nibble), float16 scales [rows, ceil(cols/128)].
+byte (element 2i in the low nibble), scales [rows, ceil(cols/128)] as float16 or, with
+``scale_format="bfloat16"``, as raw bfloat16 bits in a uint16 tensor (the runtime has no bfloat16
+dtype). glm_vx.quant.compressed_int4_to_packed converts compressed-tensors checkpoints to this layout.
 All activations/outputs are float32. Grouped ops take stacked expert tensors of identical shape and
 an int32 ``expert_ids[M]``; an id outside [0, E) yields a zero output row.
 """
@@ -53,6 +55,14 @@ class QuantKernels:
         _integer(grid * _BLOCK, "launch stride", minimum=1, maximum=(1 << 62))
         kernel.launch(grid, _BLOCK, args, stream=stream)
 
+    def _scales(self, scales, shape, scale_format):
+        kinds = {"float16": ("float16", 0), "bfloat16": ("uint16", 1)}
+        if scale_format not in kinds:
+            raise ValueError(f"scale_format must be one of {tuple(kinds)}")
+        dtype, kind = kinds[scale_format]
+        self._check(scales, "scales", dtype, shape=shape)
+        return kind
+
     def _prepare(self, out, ids, x, n, experts):
         self._check(x, "x", "float32", ndim=2)
         m, k = x.shape
@@ -72,8 +82,8 @@ class QuantKernels:
             self._check(out, "out", "float32", shape=(m, n))
         return m, k, ids_arg, out
 
-    def int4_matvec(self, packed, scales, x, *, out=None, stream=None):
-        """Single vector: packed [N, ceil(K/2)] uint8, scales [N, ceil(K/128)] float16, x [K] float32."""
+    def int4_matvec(self, packed, scales, x, *, out=None, stream=None, scale_format="float16"):
+        """Single vector: packed [N, ceil(K/2)] uint8, scales [N, ceil(K/128)], x [K] float32."""
         if self._int4_vec is None:
             raise RuntimeError("INT4 module not loaded")
         self._check(packed, "packed", "uint8", ndim=2)
@@ -84,13 +94,13 @@ class QuantKernels:
         _i32(k, "K")
         if row_bytes != (k + 1) // 2:
             raise ValueError("packed width must be ceil(K/2)")
-        self._check(scales, "scales", "float16", shape=(n, (k + 127) // 128))
+        kind = self._scales(scales, (n, (k + 127) // 128), scale_format)
         out = self.context.tensor((n,)) if out is None else self._check(out, "out", "float32", shape=(n,))
         _separate(out, [packed, scales, x])
-        self._launch(self._int4_vec, n, [out, packed, scales, x, _I32(n), _I32(k)], stream)
+        self._launch(self._int4_vec, n, [out, packed, scales, x, _I32(n), _I32(k), _I32(kind)], stream)
         return out
 
-    def int4_matmul(self, packed, scales, x, *, expert_ids=None, out=None, stream=None):
+    def int4_matmul(self, packed, scales, x, *, expert_ids=None, out=None, stream=None, scale_format="float16"):
         """out [M, N] = x [M, K] @ W^T. Dense: packed [N, ceil(K/2)], scales [N, G]. Grouped
         (expert_ids int32 [M] given): packed [E, N, ceil(K/2)], scales [E, N, G]."""
         if self._int4 is None:
@@ -104,10 +114,10 @@ class QuantKernels:
         if row_bytes != (k + 1) // 2:
             raise ValueError("packed width must be ceil(K/2)")
         sshape = ((experts,) if grouped else ()) + (n, (k + 127) // 128)
-        self._check(scales, "scales", "float16", shape=sshape)
+        kind = self._scales(scales, sshape, scale_format)
         _separate(out, [packed, scales, x] + ([expert_ids] if grouped else []))
         self._launch(self._int4, m * n,
-                     [out, packed, scales, x, ids_arg, _I32(m), _I32(n), _I32(k), _I32(experts)], stream)
+                     [out, packed, scales, x, ids_arg, _I32(m), _I32(n), _I32(k), _I32(experts), _I32(kind)], stream)
         return out
 
     def fp8_matmul(self, weight, scales, x, *, expert_ids=None, out=None, stream=None):

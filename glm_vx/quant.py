@@ -71,6 +71,93 @@ def int4_matvec(packed, scales, x, group=128):
     return y
 
 
+def bf16_to_f32(bits):
+    """float32 values of raw bfloat16 bits (uint16); exact for every encoding."""
+    bits = np.asarray(bits)
+    if bits.dtype != np.uint16:
+        raise ValueError('bfloat16 bits must be uint16')
+    return (bits.astype(np.uint32) << 16).view(np.float32)
+
+
+# compressed-tensors "pack-quantized" INT4 (llm-compressor W4A16; the format of published GLM INT4
+# checkpoints). Per Linear: weight_packed int32 [N, ceil(K/8)], weight_scale [N, ceil(K/G)] in the
+# model dtype (bfloat16 for GLM), weight_shape int64 [2] = (N, K). Codes are symmetric in [-8, 7],
+# stored as code + 8; element k of a row sits at bits 4*(k % 8) of word k // 8 (dense little-endian
+# packing), rows padded to a multiple of 32 elements with stored value 0 before truncation.
+# Dequantization is code * scale. The reference decompressor rounds that product to the scale dtype;
+# these oracles and the kernels keep the exact float32 product.
+
+def compressed_int4_unpack(weight_packed, cols):
+    """Signed codes int8 [rows, cols] from compressed-tensors int32 words (bit shifts, no byte view)."""
+    words = np.asarray(weight_packed)
+    if words.dtype != np.int32 or words.ndim != 2 or words.shape[1] != math.ceil(cols / 8):
+        raise ValueError('weight_packed must be int32 [rows, ceil(cols/8)]')
+    u = words.astype(np.int64) & 0xFFFFFFFF
+    nibbles = np.stack([(u >> (4 * j)) & 0xF for j in range(8)], axis=2).reshape(words.shape[0], -1)
+    return (nibbles[:, :cols] - 8).astype(np.int8)
+
+
+def compressed_int4_pack(codes):
+    """compressed-tensors int32 words from signed codes int8 [rows, cols] (the encoder, for tests)."""
+    codes = np.asarray(codes)
+    if codes.dtype != np.int8 or codes.ndim != 2 or codes.min(initial=0) < INT4_MIN or codes.max(initial=0) > INT4_MAX:
+        raise ValueError('codes must be int8 [rows, cols] in [-8, 7]')
+    rows, cols = codes.shape
+    padded = math.ceil(cols / 32) * 32
+    stored = np.zeros((rows, padded), np.uint32)
+    stored[:, :cols] = (codes.astype(np.int32) + 8).astype(np.uint32)
+    words = np.zeros((rows, padded // 8), np.uint32)
+    for j in range(8):
+        words |= stored[:, j::8] << np.uint32(4 * j)
+    return words[:, :math.ceil(cols / 8)].view(np.int32)
+
+
+def compressed_int4_to_packed(weight_packed, cols):
+    """Repack compressed-tensors words into the int4.vx layout, uint8 [rows, ceil(cols/2)].
+
+    Same nibble order byte for byte (little-endian words); only the code encoding differs:
+    offset-8 storage is two's complement with the top nibble bit flipped, so XOR 0x88. A pad nibble
+    past `cols` is cleared to the int4.vx convention (zero).
+    """
+    words = np.ascontiguousarray(weight_packed)
+    if words.dtype != np.int32 or words.ndim != 2 or words.shape[1] != math.ceil(cols / 8):
+        raise ValueError('weight_packed must be int32 [rows, ceil(cols/8)]')
+    raw = words.astype('<i4', copy=False).view(np.uint8)[:, :(cols + 1) // 2] ^ np.uint8(0x88)
+    if cols % 2:
+        raw[:, -1] &= np.uint8(0x0F)
+    return np.ascontiguousarray(raw)
+
+
+def compressed_int4_scheme(quantization_config):
+    """Validate a config.json ``quantization_config`` as the one INT4 scheme the kernels implement.
+
+    Accepts compressed-tensors, format pack-quantized, every config group INT4 symmetric
+    group-128 weight-only (no activation quantization). Returns (targets, ignore) so the caller
+    can tell quantized Linears from the ones left in the model dtype. Raises ValueError otherwise.
+    """
+    q = quantization_config
+    if not isinstance(q, dict) or q.get('quant_method') != 'compressed-tensors':
+        raise ValueError('quant_method must be compressed-tensors')
+    if q.get('format') != 'pack-quantized' or q.get('quantization_status', 'compressed') != 'compressed':
+        raise ValueError('only compressed pack-quantized checkpoints are supported')
+    if q.get('kv_cache_scheme') is not None:
+        raise ValueError('quantized KV cache is not supported')
+    groups = q.get('config_groups')
+    if not isinstance(groups, dict) or not groups:
+        raise ValueError('config_groups missing')
+    targets = []
+    for name, group in groups.items():
+        w = group.get('weights') or {}
+        expected = {'num_bits': 4, 'type': 'int', 'symmetric': True, 'strategy': 'group', 'group_size': 128, 'dynamic': False}
+        bad = {key: w.get(key) for key, value in expected.items() if w.get(key) != value}
+        if bad or group.get('format', 'pack-quantized') != 'pack-quantized':
+            raise ValueError(f'config group {name}: unsupported weight scheme {bad or group.get("format")}')
+        if group.get('input_activations') is not None or group.get('output_activations') is not None:
+            raise ValueError(f'config group {name}: activation quantization is not supported')
+        targets += list(group.get('targets') or [])
+    return tuple(targets), tuple(q.get('ignore') or ())
+
+
 def fp8_matvec_blocked(codes, scales, x, block=(128, 128)):
     """float64 reference y = dequant(W) @ x, summing each block's raw-code dot product before its scale."""
     codes = np.asarray(codes, dtype=np.uint8)

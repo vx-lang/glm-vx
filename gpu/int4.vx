@@ -1,7 +1,8 @@
 // INT4 group-128 weight projections (M5). Layout is glm_vx/quant.py's: symmetric codes in
 // [-8,7], two per byte with element 2i in the low nibble (two's complement), an odd trailing
-// element padded with a zero nibble, one fp16 scale per (row, 128-column group) passed as raw
-// uint16 bits. See INT4.md for the launch contract.
+// element padded with a zero nibble, one scale per (row, 128-column group) passed as raw uint16
+// bits: binary16 (scale_kind 0) or bfloat16 (scale_kind 1, as in compressed-tensors GLM INT4
+// checkpoints, which repack to this layout byte for byte). See INT4.md for the launch contract.
 // Keep this CPU-reference prefix self-contained: test_int4.py compiles it unchanged.
 // IEEE binary16 bits (0..65535) to f32, exact for every encoding including subnormals, inf, NaN.
 pub fn glm_vx_i4_half(bits: i32) -> f32 {
@@ -23,6 +24,38 @@ pub fn glm_vx_i4_half(bits: i32) -> f32 {
   return magnitude * sign;
 }
 
+// bfloat16 bits (0..65535) to f32: the top half of a binary32, so exact for every encoding. Built
+// from exact power-of-two products (no bit cast in the hand PTX path); subnormals stay subnormal.
+pub fn glm_vx_i4_bf16(bits: i32) -> f32 {
+  let exponent: i32 = (bits >> 7) & 255;
+  let mantissa: i32 = bits & 127;
+  let mut magnitude: f32 = (mantissa as f32) / 128.0;
+  let mut shift: i32 = -126;
+  if exponent > 0 {
+    magnitude = ((128 + mantissa) as f32) / 128.0;
+    shift = exponent - 127;
+  }
+  let mut power: f32 = 1.0;
+  while shift > 30 { power = power * 1073741824.0; shift = shift - 30; }
+  while shift < -30 { power = power / 1073741824.0; shift = shift + 30; }
+  if shift >= 0 { power = power * ((1 << shift) as f32); }
+  if shift < 0 { power = power / ((1 << (0 - shift)) as f32); }
+  magnitude = magnitude * power;
+  if exponent == 255 {
+    if mantissa == 0 { magnitude = 1.0 / 0.0; }
+    if mantissa != 0 { magnitude = 0.0 / 0.0; }
+  }
+  let mut sign: f32 = 1.0;
+  if (bits & 32768) != 0 { sign = -1.0; }
+  return magnitude * sign;
+}
+
+// One group scale from its raw 16 bits: kind 0 is IEEE binary16, kind 1 is bfloat16.
+pub fn glm_vx_i4_scale(bits: i32, kind: i32) -> f32 {
+  if kind != 0 { return glm_vx_i4_bf16(bits); }
+  return glm_vx_i4_half(bits);
+}
+
 // Signed 4-bit code from a byte: high=0 low nibble, high=1 high nibble.
 pub fn glm_vx_i4_code(byte: i32, high: i32) -> f32 {
   let mut nibble: i32 = byte & 15;
@@ -42,7 +75,7 @@ extern "C" {
 // Single vector. One warp owns each row; block size is a multiple of 32. Each 128-column group
 // is 64 packed bytes: lane reads bytes lane and lane+32, accumulates the raw-code dot product,
 // then applies the group scale (the order quant.py's int4_matvec uses).
-pub fn glm_vx_gpu_int4_matvec(out: *mut f32, packed: *const u8, scales: *const u16, x: *const f32, rows: i32, cols: i32) -> void {
+pub fn glm_vx_gpu_int4_matvec(out: *mut f32, packed: *const u8, scales: *const u16, x: *const f32, rows: i32, cols: i32, scale_kind: i32) -> void {
   if rows <= 0 { return; }
   if cols < 0 { return; }
   unsafe {
@@ -60,7 +93,7 @@ pub fn glm_vx_gpu_int4_matvec(out: *mut f32, packed: *const u8, scales: *const u
       let row_bytes: i64 = (k + 1) / 2;
       let mut sum: f32 = 0.0;
       for group in 0..groups {
-        let scale: f32 = glm_vx_i4_half(scales[row * groups + group] as i32);
+        let scale: f32 = glm_vx_i4_scale(scales[row * groups + group] as i32, scale_kind);
         let mut part: f32 = 0.0;
         for step in 0..2 {
           let byte_index: i64 = group * 64 + ((step * 32 + lane) as i64);
@@ -90,7 +123,7 @@ pub fn glm_vx_gpu_int4_matvec(out: *mut f32, packed: *const u8, scales: *const u
 // shape; expert_ids[M] picks each row's expert. An id outside [0, E) writes zeros to that row
 // (an unrouted slot). One warp per (n, m) task, tasks ordered n-major so the M rows of one weight
 // row are adjacent warps. grid.x = ceil(N*M / (block/32)).
-pub fn glm_vx_gpu_int4_matmul(out: *mut f32, packed: *const u8, scales: *const u16, x: *const f32, expert_ids: *const i32, rows_m: i32, rows_n: i32, cols: i32, experts: i32) -> void {
+pub fn glm_vx_gpu_int4_matmul(out: *mut f32, packed: *const u8, scales: *const u16, x: *const f32, expert_ids: *const i32, rows_m: i32, rows_n: i32, cols: i32, experts: i32, scale_kind: i32) -> void {
   if rows_m <= 0 { return; }
   if rows_n <= 0 { return; }
   if cols < 0 { return; }
@@ -124,7 +157,7 @@ pub fn glm_vx_gpu_int4_matmul(out: *mut f32, packed: *const u8, scales: *const u
       if valid != 0 {
         let row: i64 = expert * n_count + n;
         for group in 0..groups {
-          let scale: f32 = glm_vx_i4_half(scales[row * groups + group] as i32);
+          let scale: f32 = glm_vx_i4_scale(scales[row * groups + group] as i32, scale_kind);
           let mut part: f32 = 0.0;
           for step in 0..2 {
             let byte_index: i64 = group * 64 + ((step * 32 + lane) as i64);

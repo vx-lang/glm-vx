@@ -2,12 +2,14 @@
 (NOT GPU validation) against the glm_vx/quant.py oracles. Rebuild with gpu/testing/build_simt.sh."""
 import ctypes as C
 import math
+import os
 
 import numpy as np
 import pytest
 
 from glm_vx.checkpoint import FP8_E4M3FN_TABLE
-from glm_vx.quant import fp8_matvec_blocked, int4_dequantize, int4_matvec, int4_quantize, int4_unpack
+from glm_vx.quant import (bf16_to_f32, compressed_int4_pack, compressed_int4_to_packed, compressed_int4_unpack,
+                          fp8_matvec_blocked, int4_dequantize, int4_matvec, int4_quantize, int4_unpack)
 from gpu.test_simt import Simt
 
 
@@ -36,13 +38,14 @@ def int4_data(n, k, seed, experts=None):
     return packed.reshape(*lead, n, tail[0][0]), scales.reshape(*lead, n, tail[1][0])
 
 
-def run_int4(simt, packed, scales, x, ids, experts, block=64):
+def run_int4(simt, packed, scales, x, ids, experts, block=64, kind=0):
+    # kind 0: scales are float16; kind 1: scales are raw bfloat16 bits (uint16).
     m, k = x.shape
     n = packed.shape[-2]
     out = np.full((m, n), -7.0, 'f4')
     dummy = np.zeros(1, 'i4') if ids is None else ids
     grid, block = launch_dims(m * n, block)
-    simt.run('glm_vx_gpu_int4_matmul', out, packed, scales.view(np.uint16), x, dummy, m, n, k, experts, grid=grid, block=block)
+    simt.run('glm_vx_gpu_int4_matmul', out, packed, scales.view(np.uint16), x, dummy, m, n, k, experts, kind, grid=grid, block=block)
     return out
 
 
@@ -67,7 +70,7 @@ def test_int4_matvec(simt, n, k, block):
     x = np.random.default_rng(5).normal(size=k).astype('f4')
     out = np.full(n, -7.0, 'f4')
     grid, block = launch_dims(n, block)
-    simt.run('glm_vx_gpu_int4_matvec', out, packed, scales.view(np.uint16), x, n, k, grid=grid, block=block)
+    simt.run('glm_vx_gpu_int4_matvec', out, packed, scales.view(np.uint16), x, n, k, 0, grid=grid, block=block)
     close(out, int4_matvec(packed, scales, x), np.abs(int4_dequantize(packed, scales, k)).astype('f8') @ np.abs(x).astype('f8'))
 
 
@@ -103,6 +106,103 @@ def test_int4_grouped_experts_and_unrouted(simt):
             close(out[row], int4_matvec(packed[i], scales[i], x[row]), np.abs(int4_dequantize(packed[i], scales[i], k)).sum() * np.abs(x[row]).max())
         else:
             assert np.array_equal(out[row], np.zeros(n, 'f4'))
+
+
+def test_bf16_decode_all_65536(simt):
+    f = simt.lib.glm_vx_i4_bf16
+    f.argtypes, f.restype = [C.c_int32], C.c_float
+    bits = np.arange(65536, dtype=np.uint16)
+    expected = bf16_to_f32(bits)
+    actual = np.array([f(int(b)) for b in bits], dtype='f4')
+    assert np.array_equal(np.isnan(actual), np.isnan(expected))
+    finite = ~np.isnan(expected)
+    assert np.array_equal(actual[finite].view(np.uint32), expected[finite].view(np.uint32))  # incl. -0, inf, subnormals
+
+
+def compressed_data(n, k, seed, experts=None, extreme=False):
+    # A compressed-tensors checkpoint as stored (int32 words, bf16 scale bits), and the int4.vx
+    # repack of it. Codes span all 16 values; extreme scales cover bf16 subnormal..2^100.
+    rng = np.random.default_rng(seed + n * 59 + k)
+    lead = () if experts is None else (experts,)
+    codes = rng.integers(-8, 8, (*lead, n, k)).astype(np.int8)
+    groups = (k + 127) // 128
+    if extreme:
+        values = rng.choice([2.0**-133, 2.0**-126, 2.0**-20, 0.0078125, 1.0, 2.0**100], size=(*lead, n, groups))
+        bits = (values.astype('f4').view(np.uint32) >> 16).astype(np.uint16)
+    else:
+        bits = (rng.uniform(1e-3, 0.1, (*lead, n, groups)).astype('f4').view(np.uint32) >> 16).astype(np.uint16)
+    words = np.stack([compressed_int4_pack(c) for c in codes.reshape(-1, n, k)]).reshape(*lead, n, (k + 7) // 8)
+    packed = np.stack([compressed_int4_to_packed(w, k) for w in words.reshape(-1, n, (k + 7) // 8)]).reshape(*lead, n, (k + 1) // 2)
+    return codes, words, bits, packed
+
+
+def compressed_reference(words, bits, x, k):
+    # Independent of int4.vx's layout: codes from the int32 words by shifts, scales from bf16 bits.
+    codes = compressed_int4_unpack(words, k).astype('f8')
+    scale = np.repeat(bf16_to_f32(bits).astype('f8'), 128, axis=1)[:, :k]
+    w = codes * scale
+    return w @ x.astype('f8'), np.abs(w) @ np.abs(x).astype('f8')
+
+
+@pytest.mark.parametrize('n,k', ODD + [(16, 1024)])
+@pytest.mark.parametrize('extreme', [False, True])
+def test_int4_bf16_scales_compressed_tensors(simt, n, k, extreme):
+    codes, words, bits, packed = compressed_data(n, k, 11, extreme=extreme)
+    assert np.array_equal(int4_unpack(packed, k), codes)
+    x = np.random.default_rng(12).normal(size=k).astype('f4')
+    expected, bound = compressed_reference(words, bits, x, k)
+    out = np.full(n, -7.0, 'f4')
+    grid, block = launch_dims(n, 64)
+    simt.run('glm_vx_gpu_int4_matvec', out, packed, bits, x, n, k, 1, grid=grid, block=block)
+    close(out, expected, bound)
+    batched = run_int4(simt, packed, bits, np.stack([x, -x]), None, 0, kind=1)
+    close(batched[0], expected, bound)
+    close(batched[1], -expected, bound)
+
+
+def test_int4_scale_kind_selects_the_decoder(simt):
+    # 0x3F80 is 1.0 as bf16 and 1.875 as fp16; the same bits must give different, exact results.
+    n, k = 2, 128
+    packed = np.full((n, k // 2), 0x11, np.uint8)  # every code 1
+    bits = np.full((n, 1), 0x3F80, np.uint16)
+    x = np.ones((1, k), 'f4')
+    assert np.array_equal(run_int4(simt, packed, bits, x, None, 0, kind=1), np.full((1, n), 128.0, 'f4'))
+    assert np.array_equal(run_int4(simt, packed, bits, x, None, 0, kind=0), np.full((1, n), 240.0, 'f4'))
+
+
+def test_int4_bf16_grouped_experts(simt):
+    e, n, k, m = 3, 5, 384, 6
+    codes, words, bits, packed = compressed_data(n, k, 13, experts=e)
+    x = np.random.default_rng(14).normal(size=(m, k)).astype('f4')
+    ids = np.array([1, 2, -1, 0, 3, 1], dtype='i4')
+    out = run_int4(simt, packed, bits, x, ids, e, kind=1)
+    for row, i in enumerate(ids):
+        if 0 <= i < e:
+            close(out[row], *compressed_reference(words[i], bits[i], x[row], k))
+        else:
+            assert np.array_equal(out[row], np.zeros(n, 'f4'))
+
+
+REAL = os.environ.get('GLM_VX_INT4_CHECKPOINT')
+
+
+@pytest.mark.skipif(not REAL, reason='set GLM_VX_INT4_CHECKPOINT to a validation.fetch_tensors directory')
+def test_int4_real_checkpoint_linears(simt):
+    # Real GLM W4A16 tensors: loader repack + bf16 kernel vs the float64 reference built from the
+    # stored int32 words. Rows are capped to keep the emulator quick; every column is used.
+    from glm_vx.checkpoint import SafetensorsCheckpoint
+    with SafetensorsCheckpoint(REAL) as ckpt:
+        prefixes = sorted(n[:-len('.weight_packed')] for n in ckpt.names if n.endswith('.weight_packed'))
+        assert prefixes
+        for prefix in prefixes:
+            packed, bits, scale_format, (n, k) = ckpt.compressed_int4(prefix)
+            assert scale_format == 'bfloat16'
+            rows = min(n, 512)
+            words = ckpt.raw(prefix + '.weight_packed', rows=slice(0, rows))
+            x = np.random.default_rng(k).normal(size=(2, k)).astype('f4')
+            out = run_int4(simt, np.ascontiguousarray(packed[:rows]), np.ascontiguousarray(bits[:rows]), x, None, 0, kind=1)
+            for r in range(2):
+                close(out[r], *compressed_reference(words, bits[:rows], x[r], k))
 
 
 def fp8_data(n, k, seed, experts=None, finite=True):
@@ -180,7 +280,7 @@ def test_degenerate_dimensions_write_nothing(simt):
     packed, scales = int4_data(2, 1, 1)
     out = np.full((1, 2), -7.0, 'f4')
     # K=0 writes zeros (empty sum); M=0 or N=0 must not write.
-    simt.run('glm_vx_gpu_int4_matmul', out, packed, scales.view(np.uint16), np.zeros(1, 'f4'), np.zeros(1, 'i4'), 0, 2, 1, 0, grid=1, block=32)
+    simt.run('glm_vx_gpu_int4_matmul', out, packed, scales.view(np.uint16), np.zeros(1, 'f4'), np.zeros(1, 'i4'), 0, 2, 1, 0, 0, grid=1, block=32)
     assert (out == -7.0).all()
     w, s = fp8_data(2, 1, 1)
     simt.run('glm_vx_gpu_fp8_matmul', out, w, s, np.zeros(1, 'f4'), np.zeros(1, 'i4'), 1, 0, 1, 0, grid=1, block=32)

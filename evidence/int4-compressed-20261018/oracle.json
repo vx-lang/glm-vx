@@ -1,0 +1,87 @@
+{
+ "checkpoint": "/tmp/claude-1000/-home-ubuntu-go-glm-vx/d134c2f5-ebfa-4ac3-a987-f90b0db413ca/scratchpad/realint4",
+ "linears": {
+  "model.layers.16.mlp.experts.0.down_proj": {
+   "shape": [
+    6144,
+    2048
+   ],
+   "codes_equal": true,
+   "bf16_weights_bitwise_equal": true,
+   "their_bf16_rounding_rel_to_max": 0.002793296007439494,
+   "codes_histogram": [
+    28036,
+    96432,
+    164028,
+    331960,
+    605467,
+    979635,
+    1401282,
+    1744662,
+    1877053,
+    1745699,
+    1402296,
+    981708,
+    603965,
+    331431,
+    164980,
+    124278
+   ]
+  },
+  "model.layers.16.self_attn.kv_a_proj_with_mqa": {
+   "shape": [
+    576,
+    6144
+   ],
+   "codes_equal": true,
+   "bf16_weights_bitwise_equal": true,
+   "their_bf16_rounding_rel_to_max": 0.002747252816334367,
+   "codes_histogram": [
+    8362,
+    25442,
+    44140,
+    89347,
+    163108,
+    267406,
+    389874,
+    500418,
+    562974,
+    501838,
+    388662,
+    267145,
+    162587,
+    89060,
+    44358,
+    34223
+   ]
+  },
+  "model.layers.16.self_attn.kv_b_proj": {
+   "shape": [
+    28672,
+    512
+   ],
+   "codes_equal": true,
+   "bf16_weights_bitwise_equal": true,
+   "their_bf16_rounding_rel_to_max": 0.0021645021624863148,
+   "codes_histogram": [
+    32843,
+    111774,
+    191140,
+    384684,
+    700665,
+    1138306,
+    1630074,
+    2040865,
+    2220152,
+    2042726,
+    1629055,
+    1136888,
+    700621,
+    384294,
+    191524,
+    144453
+   ]
+  }
+ },
+ "ok": true
+}
