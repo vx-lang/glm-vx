@@ -42,6 +42,15 @@ Toolchain notes from the bring-up:
   compiler's own path (`spawn on(Topology::X)` + `deviceImageOf()` is). Moving
   there is a candidate for M2.
 - Prebuilt `vxc` from another host is unusable (glibc 2.43); build on the pod.
+- Saved toolchain, to skip the Vx/LLVM build on a new pod: build once on the pod
+  (`scripts/provision/setup_linux.sh`, `./setup.sh`, `cargo build --release` in the Vx
+  checkout; about 5 minutes on a 256-vCPU host), pack `bin/vxc`, `stdlib/`,
+  `lib/libvx_std_core.so` and `/usr/lib/llvm-22` without `*.a` into
+  `vx-toolchain-<vx-commit>.tar.zst` (115 MB for Vx 8d28aa86), and keep it off the pod.
+  On the next pod: `scripts/pod_restore.sh vx-toolchain-<commit>.tar.zst`, then
+  `source /opt/vx-toolchain/env.sh`. It must be packed on the oldest glibc you will
+  rent (Ubuntu 24.04 / 2.39); the bundle made on the pod does run on this newer box.
+  Rebuilding PTX from the restored toolchain gave byte-identical files to a local build.
 
 ## M1 correctness vs. the official model (random weights, A100)
 
