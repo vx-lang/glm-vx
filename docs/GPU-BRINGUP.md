@@ -52,6 +52,27 @@ Toolchain notes from the bring-up:
   rent (Ubuntu 24.04 / 2.39); the bundle made on the pod does run on this newer box.
   Rebuilding PTX from the restored toolchain gave byte-identical files to a local build.
 
+## Device-resident decode (`gpu/resident.py`)
+
+`ResidentGLM` runs a decode step with weights, activations and the MLA/indexer caches on the
+GPU, through the same Vx kernels as `GPUBackend` (new kernels: add, copy, scale, scaled_add,
+layernorm, rope_strided, matvec_heads). Host traffic per token: the embedding row, RoPE cos/sin,
+indexer scores down and chosen ids up (top-k is still a stable host argsort), the k routed expert
+ids, and the logits. Weights upload lazily on first use and stay resident.
+
+On the A100 (random weights, F32, `validation/resident_compare.py`, evidence in
+`evidence/a100-20261018/`): logits are **bitwise equal** to the hybrid backend's on the 6-layer
+256-wide model (48 tokens, six concurrent runs, seeds 1-6) and on the full-width slice (6144
+hidden, 256 experts, vocab 154880, 4 layers, 12 tokens); `gpu_vs_official --backend vx-gpu-resident`
+keeps the max logit difference to Transformers at <= 8.8e-6 with 16 greedy tokens matching.
+
+Single-run timings, steady state after a warmup pass, not a benchmark: 6-layer model 11.6 ms/token
+resident vs 78.9 ms hybrid; full-width 4-layer slice 10.5 ms/token vs 34.0 s/token (the hybrid
+path re-uploads weights from the host each token). A per-kernel profile at full width (157 launches
+per token, synchronized after each launch, so inflated) puts about 9 of 16 ms in `matvec`.
+Not done: a device top-k, fewer launches (fusion/graphs), BF16/FP8/INT4 weights in this path,
+and a full-depth model (only 4 layers ran at full width).
+
 ## M1 correctness vs. the official model (random weights, A100)
 
 `python -m validation.gpu_vs_official --backend vx-gpu` runs a 6-layer, 256-wide

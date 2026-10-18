@@ -50,9 +50,12 @@ def main():
 
     resident = ResidentGLM(GlmMoeDsaModel(config, weights, NumpyBackend()), max_tokens=len(tokens) + 1)
     try:
+        # Weights upload lazily on first use (only the experts a token routes to), so run the whole
+        # sequence once to make the timed pass steady-state, and report that warmup separately.
         t0 = time.perf_counter()
-        resident.forward(tokens[0])  # uploads every weight the first time
-        upload_s = time.perf_counter() - t0
+        for t in tokens:
+            resident.forward(t)  # logits on: also uploads the final norm and lm_head
+        warmup_s = time.perf_counter() - t0
         resident.reset()
         start = time.perf_counter()
         got = np.stack([resident.forward(t) for t in tokens])
@@ -68,8 +71,8 @@ def main():
         max_rel_diff=float((diff / np.maximum(np.abs(expected), 1e-6)).max()),
         top1_equal=bool(np.array_equal(got.argmax(-1), expected.argmax(-1))),
         hybrid_seconds_per_token=hybrid_s / len(tokens), resident_seconds_per_token=resident_s / len(tokens),
-        resident_first_token_with_weight_upload_s=upload_s, resident_weights_gib=weight_gib,
-        note='single run, F32, random weights; timings include host work and are not a benchmark')
+        resident_warmup_pass_with_lazy_weight_upload_s=warmup_s, resident_weights_gib_uploaded=weight_gib,
+        note='single run, F32, random weights; weights upload lazily so only experts routed in this sequence are resident; timings include host work and are not a benchmark')
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps(report, indent=2))

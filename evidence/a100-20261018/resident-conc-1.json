@@ -1,0 +1,15 @@
+{
+  "geometry": "small",
+  "layers": 6,
+  "hidden": 256,
+  "tokens": 48,
+  "bitwise_equal": true,
+  "max_abs_diff": 0.0,
+  "max_rel_diff": 0.0,
+  "top1_equal": true,
+  "hybrid_seconds_per_token": 0.6175453734952802,
+  "resident_seconds_per_token": 0.02281107218974891,
+  "resident_warmup_pass_with_lazy_weight_upload_s": 1.1548630762845278,
+  "resident_weights_gib_uploaded": 0.018900305032730103,
+  "note": "single run, F32, random weights; weights upload lazily so only experts routed in this sequence are resident; timings include host work and are not a benchmark"
+}
