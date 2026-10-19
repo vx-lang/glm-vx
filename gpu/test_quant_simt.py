@@ -287,3 +287,118 @@ def test_degenerate_dimensions_write_nothing(simt):
     assert (out == -7.0).all()
     simt.run('glm_vx_gpu_fp8_matmul', out, w, s, np.zeros(1, 'f4'), np.zeros(1, 'i4'), 1, 2, 0, 0, grid=1, block=64)
     assert (out == 0).all()
+
+
+# ---- BF16 weights (bf16.vx): raw uint16 bits, float32 activations/accumulation ----
+def bf16_weights(shape, seed, scale=1.0):
+    rng = np.random.default_rng(seed)
+    f = (rng.normal(size=shape) * scale).astype('f4')
+    return (f.view(np.uint32) >> 16).astype(np.uint16)  # truncation is fine: any bf16 bits will do
+
+
+def bf16_close(actual, w, x):
+    """float64 reference over exact bf16->f32 widening; fp32 warp-order error bounded by the
+    sum of |terms|. NaN and inf must match exactly (same positions, same sign)."""
+    with np.errstate(invalid='ignore'):
+        wf = bf16_to_f32(w).astype('f8')
+        expected = x.astype('f8') @ wf.T
+        abssum = np.abs(x).astype('f8') @ np.abs(wf).T
+    assert np.array_equal(np.isnan(actual), np.isnan(expected))
+    assert np.array_equal(np.isinf(actual), np.isinf(expected)) and (np.sign(actual[np.isinf(actual)]) == np.sign(expected[np.isinf(expected)])).all()
+    fin = np.isfinite(expected)
+    np.testing.assert_allclose(actual[fin], expected[fin], rtol=1e-5, atol=4e-6 * float(np.max(abssum[fin], initial=1e-30)))
+
+
+def run_bf16(simt, w, x, ids, experts, block=64):
+    m, k = x.shape
+    n = w.shape[-2]
+    out = np.full((m, n), -7.0, 'f4')
+    dummy = np.zeros(1, 'i4') if ids is None else ids
+    grid, block = launch_dims(m * n, block)
+    simt.run('glm_vx_gpu_bf16_matmul', out, w, x, dummy, m, n, k, experts, grid=grid, block=block)
+    return out
+
+
+def test_bf16_weight_decode_all_65536(simt):
+    f = simt.lib.glm_vx_bf16_decode
+    f.argtypes, f.restype = [C.c_int32], C.c_float
+    bits = np.arange(65536, dtype=np.uint16)
+    expected = bf16_to_f32(bits)
+    actual = np.array([f(int(b)) for b in bits], dtype='f4')
+    assert np.array_equal(np.isnan(actual), np.isnan(expected))
+    ok = ~np.isnan(expected)
+    assert np.array_equal(actual[ok].view(np.uint32), expected[ok].view(np.uint32))  # -0, subnormals, inf exact
+
+
+@pytest.mark.parametrize('n,k', [(1, 1), (3, 31), (5, 33), (4, 128), (7, 129), (9, 257), (130, 300)])
+@pytest.mark.parametrize('block', [32, 128])
+def test_bf16_matvec(simt, n, k, block):
+    w = bf16_weights((n, k), 1)
+    x = np.random.default_rng(5).normal(size=k).astype('f4')
+    out = np.full(n, -7.0, 'f4')
+    grid, block = launch_dims(n, block)
+    simt.run('glm_vx_gpu_bf16_matvec', out, w, x, n, k, grid=grid, block=block)
+    bf16_close(out[None], w, x[None])
+
+
+@pytest.mark.parametrize('m', [1, 3, 5])
+@pytest.mark.parametrize('n,k', [(3, 31), (5, 129), (130, 257)])
+@pytest.mark.parametrize('block', [32, 128])
+def test_bf16_batched(simt, m, n, k, block):
+    w = bf16_weights((n, k), 2)
+    x = np.random.default_rng(6).normal(size=(m, k)).astype('f4')
+    bf16_close(run_bf16(simt, w, x, None, 0, block), w, x)
+
+
+def test_bf16_matmul_matches_matvec_bitwise(simt):
+    # Same lane order and reduction, so the M=1 matmul and the matvec must agree exactly.
+    w = bf16_weights((37, 301), 3)
+    x = np.random.default_rng(7).normal(size=(1, 301)).astype('f4')
+    out = np.empty(37, 'f4')
+    simt.run('glm_vx_gpu_bf16_matvec', out, w, x[0].copy(), 37, 301, grid=10, block=128)
+    assert np.array_equal(run_bf16(simt, w, x, None, 0)[0].view(np.uint32), out.view(np.uint32))
+
+
+def test_bf16_grouped_experts_and_unrouted(simt):
+    e, n, k, m = 4, 6, 200, 7
+    w = bf16_weights((e, n, k), 4)
+    x = np.random.default_rng(8).normal(size=(m, k)).astype('f4')
+    ids = np.array([2, 0, 3, -1, 1, 4, 2], dtype='i4')  # -1 and 4 (== E) are unrouted
+    out = run_bf16(simt, w, x, ids, e)
+    for row, i in enumerate(ids):
+        if 0 <= i < e:
+            bf16_close(out[row:row + 1], w[i], x[row:row + 1])
+        else:
+            assert np.array_equal(out[row], np.zeros(n, 'f4'))
+
+
+def test_bf16_special_weights_extreme_subnormal_inf_nan(simt):
+    k = 40
+    cases = {'min_subnormal': 0x0001, 'neg_min_subnormal': 0x8001, 'max_subnormal': 0x007F, 'min_normal': 0x0080,
+             'max_finite': 0x7F7F, 'neg_max_finite': 0xFF7F, 'pos_zero': 0x0000, 'neg_zero': 0x8000,
+             'pos_inf': 0x7F80, 'neg_inf': 0xFF80, 'nan': 0x7FC0, 'neg_nan': 0xFFC1, 'nan_payload_low': 0x7F81}
+    w = np.zeros((len(cases), k), np.uint16)
+    for row, bits in enumerate(cases.values()):
+        w[row, 5] = bits
+        w[row, 37] = 0x3F80  # 1.0 so the row is not only the special value
+    x = np.ones((2, k), 'f4')
+    x[1, 5] = 0.0  # inf * 0 and nan * 0 are NaN; finite * 0 is 0
+    out = run_bf16(simt, w, x, None, 0)
+    bf16_close(out, w, x)
+    names = list(cases)
+    row = {n: i for i, n in enumerate(names)}
+    assert out[0, row['pos_inf']] == np.inf and out[0, row['neg_inf']] == -np.inf
+    assert np.isnan(out[1, row['pos_inf']]) and np.isnan(out[0, row['nan']]) and np.isnan(out[1, row['nan']])
+    assert out[0, row['max_finite']] == bf16_to_f32(np.array([0x7F7F], np.uint16))[0]  # +1.0 is absorbed
+    assert out[0, row['min_subnormal']] == 1.0 and out[1, row['max_finite']] == 1.0  # tiny/zeroed terms vs 1.0
+    assert out[0, row['neg_zero']] == 1.0
+
+
+def test_bf16_degenerate_dimensions(simt):
+    w = bf16_weights((2, 1), 1)
+    out = np.full((1, 2), -7.0, 'f4')
+    simt.run('glm_vx_gpu_bf16_matmul', out, w, np.zeros(1, 'f4'), np.zeros(1, 'i4'), 0, 2, 1, 0, grid=1, block=32)
+    simt.run('glm_vx_gpu_bf16_matmul', out, w, np.zeros(1, 'f4'), np.zeros(1, 'i4'), 1, 0, 1, 0, grid=1, block=32)
+    assert (out == -7.0).all()  # M=0 and N=0 write nothing
+    simt.run('glm_vx_gpu_bf16_matmul', out, w, np.zeros(1, 'f4'), np.zeros(1, 'i4'), 1, 2, 0, 0, grid=1, block=64)
+    assert (out == 0).all()  # K=0 is an empty sum

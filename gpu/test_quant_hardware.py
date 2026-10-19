@@ -21,7 +21,7 @@ def device():
     except CUDAUnavailable as error:
         pytest.skip('real GPU unavailable: ' + str(error))
     try:
-        yield ctx, QuantKernels.from_ptx(ctx, BUILD / 'int4.ptx', BUILD / 'fp8_batched.ptx')
+        yield ctx, QuantKernels.from_ptx(ctx, BUILD / 'int4.ptx', BUILD / 'fp8_batched.ptx', BUILD / 'bf16.ptx')
     finally:
         ctx.close()
 
@@ -157,3 +157,56 @@ def test_wrapper_rejects_bad_shapes(device):
         q.int4_matmul(pt, st, ctx.tensor((2, 200), data=np.zeros((2, 200), 'f4')))
     with pytest.raises(ValueError):
         q.int4_matmul(pt, st, ctx.tensor((2, 130), data=np.zeros((2, 130), 'f4')), expert_ids=ctx.tensor((2,), 'int32', np.zeros(2, 'i4')))
+
+
+@pytest.mark.parametrize('n,k', [(1, 1), (5, 33), (130, 300), (256, 1024)])
+def test_bf16_matvec_device(device, n, k):
+    ctx, q = device
+    w = bf16_weights((n, k), 1)
+    x = np.random.default_rng(5).normal(size=k).astype('f4')
+    out = q.bf16_matvec(ctx.tensor(w.shape, 'uint16', w), ctx.tensor((k,), data=x))
+    ctx.synchronize()
+    bf16_close(download(out, (1, n)), w, x[None])
+
+
+@pytest.mark.parametrize('m', [1, 5, 33])
+@pytest.mark.parametrize('n,k', [(3, 31), (130, 257)])
+def test_bf16_matmul_device(device, m, n, k):
+    ctx, q = device
+    w = bf16_weights((n, k), 2)
+    x = np.random.default_rng(6).normal(size=(m, k)).astype('f4')
+    out = q.bf16_matmul(ctx.tensor(w.shape, 'uint16', w), ctx.tensor(x.shape, data=x))
+    ctx.synchronize()
+    bf16_close(download(out, (m, n)), w, x)
+
+
+def test_bf16_grouped_and_special_device(device):
+    ctx, q = device
+    e, n, k, m = 5, 9, 70, 8
+    w = bf16_weights((e, n, k), 4)
+    w[1, 2, 3] = 0x7F80  # +inf
+    w[2, 0, 4] = 0x7FC0  # NaN
+    w[3, 1, 5] = 0x0001  # smallest subnormal
+    x = np.random.default_rng(8).uniform(0.5, 1.5, (m, k)).astype('f4')
+    ids = np.array([1, 2, 3, 0, -1, 5, 4, 1], dtype='i4')
+    out = q.bf16_matmul(ctx.tensor(w.shape, 'uint16', w), ctx.tensor(x.shape, data=x), expert_ids=ctx.tensor(ids.shape, 'int32', ids))
+    ctx.synchronize()
+    got = download(out, (m, n))
+    for row, i in enumerate(ids):
+        if 0 <= i < e:
+            bf16_close(got[row:row + 1], w[i], x[row:row + 1])
+        else:
+            assert (got[row] == 0).all()
+    assert got[0, 2] == np.inf and np.isnan(got[1, 0])
+
+
+def test_bf16_wrapper_rejects_bad_shapes(device):
+    ctx, q = device
+    w = bf16_weights((4, 10), 1)
+    wt = ctx.tensor(w.shape, 'uint16', w)
+    with pytest.raises(ValueError):
+        q.bf16_matmul(wt, ctx.tensor((2, 11), data=np.zeros((2, 11), 'f4')))
+    with pytest.raises(ValueError):
+        q.bf16_matvec(wt, ctx.tensor((11,), data=np.zeros(11, 'f4')))
+    with pytest.raises((ValueError, TypeError)):
+        q.bf16_matmul(ctx.tensor(w.shape, 'float32', w.astype('f4')), ctx.tensor((2, 10), data=np.zeros((2, 10), 'f4')))
