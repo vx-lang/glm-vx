@@ -1,0 +1,158 @@
+// Device top-k with the host's exact rule: ids sorted by (descending score, ascending position),
+// the first min(k, tokens) of np.argsort(-scores, kind='stable'). See TOPK.md for the contract.
+// Scores arrive as raw float32 bits (the hand PTX path has no f32->i32 bit cast, so the entry
+// takes the same buffer as *const i32). -0.0 and +0.0 tie; every NaN (any sign/payload) sorts
+// after -inf, tying with other NaNs by position, which is what numpy does with -scores.
+// Keep this CPU-reference prefix self-contained.
+// Order-preserving map from float32 bits to [0, 2^32): bigger key == bigger score.
+pub fn glm_vx_topk_key(bits: i32) -> i64 {
+  let b: i64 = (bits as i64) & 4294967295;
+  let man: i64 = b & 8388607;
+  if ((b >> 23) & 255) == 255 { if man != 0 { return 0; } }
+  if b >= 2147483648 {
+    if b == 2147483648 { return 2147483648; }
+    return 4294967295 - b;
+  }
+  return b + 2147483648;
+}
+
+// GPU ENTRY: CPU tests compile the unchanged prefix above this marker.
+extern "C" {
+  fn vx_gpu_thread_idx_x() -> i32;
+  fn vx_gpu_block_dim_x() -> i32;
+  fn vx_gpu_barrier() -> void;
+}
+
+// Single block of exactly 256 threads (grid.x = 1). scratch is int32 device memory of at least
+// 66824 + 2*min(k, tokens) elements, contents irrelevant. Writes out_ids[0 .. min(k, tokens)).
+// Radix select finds the k-th largest key in four 8-bit passes (per-thread histograms, no
+// atomics, so the result is deterministic); then the selected set is {key > threshold} plus the
+// first R positions equal to it, compacted in position order and ranked by (key, position).
+// Cost: O(4*tokens) for the select and O(min(k,tokens)^2 / 256) per thread for the final rank,
+// intended for k up to a few thousand. Invalid arguments (tokens<=0, k<=0, block != 256) write
+// nothing.
+pub fn glm_vx_gpu_topk_stable(out_ids: *mut i32, scores: *const i32, scratch: *mut i32, tokens: i32, k: i32) -> void {
+  if tokens <= 0 { return; }
+  if k <= 0 { return; }
+  unsafe {
+    if vx_gpu_block_dim_x() != 256 { return; }
+    let tid: i64 = vx_gpu_thread_idx_x() as i64;
+    let t_count: i64 = tokens as i64;
+    let mut kk: i64 = k as i64;
+    if kk > t_count { kk = t_count; }
+    // scratch layout (int32 elements)
+    let total: i64 = 65536;
+    let ctrl: i64 = 65792;
+    let cg: i64 = 65800;
+    let ce: i64 = 66056;
+    let selb: i64 = 66312;
+    let take: i64 = 66568;
+    let cand_pos: i64 = 66824;
+    let cand_key: i64 = cand_pos + kk;
+    let mut prefix: i64 = 0;
+    let mut remaining: i64 = kk;
+    for pass in 0..4 {
+      let shift: i64 = 24 - 8 * (pass as i64);
+      for bin in 0..256 { scratch[tid * 256 + (bin as i64)] = 0; }
+      let mut i: i64 = tid;
+      while i < t_count {
+        let key: i64 = glm_vx_topk_key(scores[i]);
+        if (key >> (shift + 8)) == prefix {
+          let slot: i64 = tid * 256 + ((key >> shift) & 255);
+          scratch[slot] = scratch[slot] + 1;
+        }
+        i = i + 256;
+      }
+      vx_gpu_barrier();
+      let mut sum: i64 = 0;
+      for owner in 0..256 { sum = sum + (scratch[(owner as i64) * 256 + tid] as i64); }
+      scratch[total + tid] = sum as i32;
+      vx_gpu_barrier();
+      if tid == 0 {
+        let mut cumulative: i64 = 0;
+        let mut digit: i64 = 0;
+        let mut below: i64 = 0;
+        let mut found: i32 = 0;
+        let mut bin: i64 = 255;
+        while bin >= 0 {
+          if found == 0 {
+            let c: i64 = scratch[total + bin] as i64;
+            if cumulative + c >= remaining { found = 1; digit = bin; below = cumulative; }
+            if found == 0 { cumulative = cumulative + c; }
+          }
+          bin = bin - 1;
+        }
+        scratch[ctrl] = ((prefix * 256 + digit) - 2147483648) as i32;
+        scratch[ctrl + 1] = (remaining - below) as i32;
+      }
+      vx_gpu_barrier();
+      prefix = (scratch[ctrl] as i64) + 2147483648;
+      remaining = scratch[ctrl + 1] as i64;
+      vx_gpu_barrier();
+    }
+    // prefix is now the k-th largest key; `remaining` of the elements equal to it are selected.
+    let chunk: i64 = (t_count + 255) / 256;
+    let lo: i64 = tid * chunk;
+    let mut hi: i64 = lo + chunk;
+    if hi > t_count { hi = t_count; }
+    let mut greater: i64 = 0;
+    let mut equal: i64 = 0;
+    let mut pos: i64 = lo;
+    while pos < hi {
+      let key: i64 = glm_vx_topk_key(scores[pos]);
+      if key > prefix { greater = greater + 1; }
+      if key == prefix { equal = equal + 1; }
+      pos = pos + 1;
+    }
+    scratch[cg + tid] = greater as i32;
+    scratch[ce + tid] = equal as i32;
+    vx_gpu_barrier();
+    if tid == 0 {
+      let mut equal_before: i64 = 0;
+      let mut selected_before: i64 = 0;
+      for owner in 0..256 {
+        let o: i64 = owner as i64;
+        let mut grant: i64 = remaining - equal_before;
+        if grant < 0 { grant = 0; }
+        let have: i64 = scratch[ce + o] as i64;
+        if grant > have { grant = have; }
+        scratch[selb + o] = selected_before as i32;
+        scratch[take + o] = grant as i32;
+        equal_before = equal_before + have;
+        selected_before = selected_before + (scratch[cg + o] as i64) + grant;
+      }
+    }
+    vx_gpu_barrier();
+    let mut slot: i64 = scratch[selb + tid] as i64;
+    let mut grant_left: i64 = scratch[take + tid] as i64;
+    pos = lo;
+    while pos < hi {
+      let key: i64 = glm_vx_topk_key(scores[pos]);
+      let mut chosen: i32 = 0;
+      if key > prefix { chosen = 1; }
+      if key == prefix { if grant_left > 0 { chosen = 1; grant_left = grant_left - 1; } }
+      if chosen != 0 {
+        scratch[cand_pos + slot] = pos as i32;
+        scratch[cand_key + slot] = (key - 2147483648) as i32;
+        slot = slot + 1;
+      }
+      pos = pos + 1;
+    }
+    vx_gpu_barrier();
+    // Candidates are in position order, so among equal keys the earlier index ranks first.
+    let mut mine: i64 = tid;
+    while mine < kk {
+      let my_key: i32 = scratch[cand_key + mine];
+      let mut rank: i64 = 0;
+      for other in 0..kk {
+        let o: i64 = other as i64;
+        let other_key: i32 = scratch[cand_key + o];
+        if other_key > my_key { rank = rank + 1; }
+        if other_key == my_key { if o < mine { rank = rank + 1; } }
+      }
+      out_ids[rank] = scratch[cand_pos + mine];
+      mine = mine + 256;
+    }
+    return;
+  }
+}

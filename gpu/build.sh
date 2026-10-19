@@ -12,3 +12,4 @@ mkdir -p gpu/build
 "$PYTHON" gpu/toolchain/build_ptx.py --source gpu/int4.vx --output gpu/build/int4.ptx --arch "$VX_GPU_ARCH" "${extra[@]}"
 "$PYTHON" gpu/toolchain/build_ptx.py --source gpu/fp8_batched.vx --output gpu/build/fp8_batched.ptx --arch "$VX_GPU_ARCH" "${extra[@]}"
 "$PYTHON" gpu/toolchain/build_ptx.py --source gpu/bf16.vx --output gpu/build/bf16.ptx --arch "$VX_GPU_ARCH" "${extra[@]}"
+"$PYTHON" gpu/toolchain/build_ptx.py --source gpu/topk.vx --output gpu/build/topk.ptx --arch "$VX_GPU_ARCH" "${extra[@]}"
