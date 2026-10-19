@@ -7,7 +7,7 @@ cd "$(dirname "$0")/../.."
 mkdir -p gpu/build
 # Capture before compilation, then reject concurrent source changes. Tests verify
 # both these exact sources and the resulting binary instead of trusting existence.
-sha256sum gpu/kernels.vx gpu/fp8.vx gpu/gemm.vx gpu/int4.vx gpu/fp8_batched.vx gpu/testing/simt.cpp gpu/testing/build_simt.sh > gpu/build/simt-inputs.sha256
+sha256sum gpu/kernels.vx gpu/fp8.vx gpu/gemm.vx gpu/int4.vx gpu/fp8_batched.vx gpu/bf16.vx gpu/testing/simt.cpp gpu/testing/build_simt.sh > gpu/build/simt-inputs.sha256
 "$VXC" gpu/kernels.vx --action emit-llvm > gpu/build/kernels-host.mlir
 mlir-translate --mlir-to-llvmir gpu/build/kernels-host.mlir > gpu/build/kernels-host.ll
 "$CLANG" -O2 -fPIC -c gpu/build/kernels-host.ll -o gpu/build/kernels-host.o
@@ -17,13 +17,13 @@ mlir-translate --mlir-to-llvmir gpu/build/fp8-host.mlir > gpu/build/fp8-host.ll
 "$VXC" gpu/gemm.vx --action emit-llvm > gpu/build/gemm-host.mlir
 mlir-translate --mlir-to-llvmir gpu/build/gemm-host.mlir > gpu/build/gemm-host.ll
 "$CLANG" -O2 -fPIC -c gpu/build/gemm-host.ll -o gpu/build/gemm-host.o
-for unit in int4 fp8_batched; do
+for unit in int4 fp8_batched bf16; do
   "$VXC" gpu/$unit.vx --action emit-llvm > gpu/build/$unit-host.mlir
   mlir-translate --mlir-to-llvmir gpu/build/$unit-host.mlir > gpu/build/$unit-host.ll
   "$CLANG" -O2 -fPIC -c gpu/build/$unit-host.ll -o gpu/build/$unit-host.o
 done
 "$CXX" -std=c++20 -O2 -fPIC -shared -pthread gpu/testing/simt.cpp \
-    gpu/build/kernels-host.o gpu/build/fp8-host.o gpu/build/gemm-host.o gpu/build/int4-host.o gpu/build/fp8_batched-host.o -lm -o gpu/build/libsimt.so
+    gpu/build/kernels-host.o gpu/build/fp8-host.o gpu/build/gemm-host.o gpu/build/int4-host.o gpu/build/fp8_batched-host.o gpu/build/bf16-host.o -lm -o gpu/build/libsimt.so
 
 sha256sum -c gpu/build/simt-inputs.sha256 > /dev/null
 cat gpu/build/simt-inputs.sha256 > gpu/build/simt-build.sha256.tmp
