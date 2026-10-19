@@ -100,3 +100,34 @@ def test_model_on_loaded_checkpoint_is_bit_identical_to_reference_weights(tmp_pa
         got = from_disk.prefill(TOKENS)
         np.testing.assert_array_equal(got, want.prefill(TOKENS))
     assert np.all(np.isfinite(got))
+
+
+def test_block_fp8_returns_the_undecoded_kernel_operands(tmp_path, model_inputs):
+    from glm_vx.quant import BlockFP8Weights, block_fp8_scheme
+    config, weights = model_inputs
+    expected = export_checkpoint(config, weights, tmp_path, 'fp8', 2)
+    prefix = 'model.layers.0.self_attn.q_b_proj'
+    codes, scales = fp8_quantize(weights[prefix + '.weight'])
+    with Checkpoint(tmp_path) as ck:
+        assert block_fp8_scheme(json.loads((tmp_path / 'config.json').read_text())['quantization_config']) == ()
+        assert ck.is_block_fp8(prefix) and not ck.is_block_fp8('lm_head') and not ck.is_block_fp8('model.missing')
+        got_codes, got_scales, block, shape = ck.block_fp8(prefix)
+        assert got_codes.dtype == np.uint8 and got_scales.dtype == np.float32
+        assert np.array_equal(got_codes, codes) and np.array_equal(got_scales, scales)
+        assert block == (128, 128) and shape == codes.shape
+        with pytest.raises(ValueError, match='not FP8'):
+            ck.block_fp8('lm_head')
+    twin = BlockFP8Weights({}, {prefix: (codes, scales)})
+    np.testing.assert_array_equal(twin(prefix + '.weight'), expected[prefix + '.weight'])
+
+
+@pytest.mark.parametrize('q,match', [
+    ({'quant_method': 'awq'}, 'fp8'),
+    ({'quant_method': 'fp8', 'weight_block_size': [128, 64]}, '128x128'),
+    ({'quant_method': 'fp8', 'activation_scheme': 'static'}, 'dynamic'),
+    ({'quant_method': 'fp8', 'fmt': 'e5m2'}, 'e4m3'),
+])
+def test_block_fp8_scheme_rejects_what_the_kernels_do_not_implement(q, match):
+    from glm_vx.quant import block_fp8_scheme
+    with pytest.raises(ValueError, match=match):
+        block_fp8_scheme(q)

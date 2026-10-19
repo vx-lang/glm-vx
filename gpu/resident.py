@@ -22,6 +22,13 @@ weight is float32. The exception is ``kv_b_proj``, which absorbed MLA reads tran
 is dequantized exactly (code * scale) to float32 once at upload. The NumPy reference sees the same
 exact dequantized weights, so the only differences from it are float32 accumulation order (the INT4
 kernel sums code * x per 128-column group, then scales).
+
+FP8: a Linear the source reports as block-scaled FP8 (``is_block_fp8(prefix)``, as
+SafetensorsCheckpoint and glm_vx.quant.BlockFP8Weights do) stays as E4M3FN bytes on the device with
+its float32 128x128 ``weight_scale_inv`` grid and runs through ``glm_vx_gpu_fp8_matvec``
+(gpu/fp8.ptx). Activations stay float32: this is weight-only FP8, the same arithmetic as the NumPy
+reference on the exact dequantized weights, not the official per-token FP8 activation quantization.
+``kv_b_proj`` is dequantized to float32 as for INT4.
 GGUF packed weights, expert placement and tracing are not supported.
 
 Not a performance claim: no timing is made here, and launches are still one per op.
@@ -67,13 +74,13 @@ class ResidentGLM:
         try:
             ptx = Path(ptx_dir or Path(__file__).parent / 'build') / 'kernels.ptx'
             self.module = self.ctx.load_ptx(ptx)
-            self._int4_module = None
-            self._int4_ptx = ptx.parent / 'int4.ptx'
+            self._ptx_dir = ptx.parent
+            self._modules = {}
             source = model.weights
             self._is_int4 = getattr(source, 'is_compressed_int4', None) or (lambda prefix: False)
-            if 'quantization_config' in model.config:
-                from glm_vx.quant import compressed_int4_scheme
-                compressed_int4_scheme(model.config['quantization_config'])
+            self._is_fp8 = getattr(source, 'is_block_fp8', None) or (lambda prefix: False)
+            self._formats = {}
+            self._check_quantization(model.config.get('quantization_config'))
             self.stream = self.ctx.stream()
             self._kernels = {}
             self.launches = {}
@@ -83,6 +90,19 @@ class ResidentGLM:
         except BaseException:
             self.close()
             raise
+
+    @staticmethod
+    def _check_quantization(q):
+        if q is None:
+            return
+        from glm_vx.quant import block_fp8_scheme, compressed_int4_scheme
+        method = q.get('quant_method') if isinstance(q, dict) else None
+        if method == 'fp8':
+            block_fp8_scheme(q)
+        elif method == 'compressed-tensors':
+            compressed_int4_scheme(q)
+        else:
+            raise ValueError(f'quant_method must be compressed-tensors (INT4) or fp8, got {method!r}')
 
     # ---------------------------------------------------------------- resources
     def close(self):
@@ -136,6 +156,38 @@ class ResidentGLM:
                      kind, tuple(shape))
             self._weights[key] = entry
         return entry
+
+    def _fp8_weight(self, prefix):
+        """(E4M3FN codes uint8, float32 block scales, (N, K)) on the device, uploaded once."""
+        key = prefix + ':fp8'
+        entry = self._weights.get(key)
+        if entry is None:
+            codes, scales, block, shape = self.model.weights.block_fp8(prefix)
+            rows, cols = shape
+            if tuple(block) != (128, 128):
+                raise ValueError(f'{prefix}: fp8 kernels implement 128x128 blocks, got {tuple(block)}')
+            if codes.shape != (rows, cols) or scales.shape != ((rows + 127) // 128, (cols + 127) // 128):
+                raise ValueError(f'{prefix}: FP8 codes {codes.shape} / scales {scales.shape} do not match {shape}')
+            entry = (self._upload_weight(key + ':codes', np.ascontiguousarray(codes, np.uint8), 'uint8'),
+                     self._upload_weight(key + ':scales', np.ascontiguousarray(scales, np.float32)),
+                     (rows, cols))
+            self._weights[key] = entry
+        return entry
+
+    def _format(self, prefix):
+        """'int4', 'fp8' or 'float32' for the Linear `prefix`, decided once."""
+        fmt = self._formats.get(prefix)
+        if fmt is None:
+            fmt = self._formats[prefix] = 'int4' if self._is_int4(prefix) else 'fp8' if self._is_fp8(prefix) else 'float32'
+        return fmt
+
+    def _out_features(self, prefix):
+        fmt = self._format(prefix)
+        if fmt == 'int4':
+            return self._int4_weight(prefix)[3][0]
+        if fmt == 'fp8':
+            return self._fp8_weight(prefix)[2][0]
+        return self._weight(prefix + '.weight').shape[0]
 
     def _allocate(self):
         m, c = self.model, self.config
@@ -200,16 +252,25 @@ class ResidentGLM:
         return out
 
     def _project(self, prefix, x, out):
-        """out = W x for the Linear `prefix`: INT4 kernel on packed weights, else float32 matvec."""
-        if not self._is_int4(prefix):
+        """out = W x for the Linear `prefix`: the INT4 or FP8 kernel on packed weights, else float32 matvec."""
+        fmt = self._format(prefix)
+        if fmt == 'float32':
             return self._matvec(self._weight(prefix + '.weight'), x, out)
-        packed, scales, kind, (rows, cols) = self._int4_weight(prefix)
+        if fmt == 'int4':
+            packed, scales, kind, (rows, cols) = self._int4_weight(prefix)
+            args = [packed, scales, x, I(rows), I(cols), I(kind)]
+        else:
+            codes, scales, (rows, cols) = self._fp8_weight(prefix)
+            args = [codes, scales, x, I(rows), I(cols)]
         if out.shape != (rows,) or x.shape != (cols,):
-            raise ValueError(f'{prefix}: INT4 weight is {rows}x{cols}, got x {x.shape} -> out {out.shape}')
-        if self._int4_module is None:
-            self._int4_module = self.ctx.load_ptx(self._int4_ptx)
-            self._kernels['int4_matvec'] = self._int4_module.kernel('glm_vx_gpu_int4_matvec')
-        self._launch('int4_matvec', (rows + 3) // 4, 128, [out, packed, scales, x, I(rows), I(cols), I(kind)])
+            raise ValueError(f'{prefix}: {fmt.upper()} weight is {rows}x{cols}, got x {x.shape} -> out {out.shape}')
+        name = fmt + '_matvec'
+        if name not in self._kernels:
+            module = self._modules.get(fmt)
+            if module is None:
+                module = self._modules[fmt] = self.ctx.load_ptx(self._ptx_dir / (fmt + '.ptx'))
+            self._kernels[name] = module.kernel('glm_vx_gpu_' + name)
+        self._launch(name, (rows + 3) // 4, 128, [out] + args)
         return out
 
     def _linear(self, name, x, out, bias=False):
@@ -241,10 +302,7 @@ class ResidentGLM:
 
     def _mlp(self, prefix, x, out):
         """down(SwiGLU(gate(x), up(x))) with both projections and the activation resident."""
-        if self._is_int4(prefix + '.gate_proj'):
-            width = self._int4_weight(prefix + '.gate_proj')[3][0]
-        else:
-            width = self._weight(prefix + '.gate_proj.weight').shape[0]
+        width = self._out_features(prefix + '.gate_proj')
         gate, up, act = (t.view((width,)) for t in (self.gate, self.up, self.act))
         self._project(prefix + '.gate_proj', x, gate)
         self._project(prefix + '.up_proj', x, up)
@@ -254,7 +312,7 @@ class ResidentGLM:
     def _expert(self, prefix, expert, x, out):
         base = f'{prefix}.experts.{expert}'
         try:
-            if not self._is_int4(base + '.gate_proj'):
+            if self._format(base + '.gate_proj') == 'float32':
                 self.model._weight(base + '.gate_proj.weight')
         except KeyError:
             # Fused checkpoint layout: gate_up_proj[E, 2I, H] and down_proj[E, H, I]. The whole

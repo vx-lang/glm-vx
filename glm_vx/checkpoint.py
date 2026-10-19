@@ -67,7 +67,7 @@ def _fp8_table() -> np.ndarray:
     mant = (codes & 7).astype(np.float32)
     values = np.where(exp == 0, mant * np.float32(2.0 ** -9),
                       (np.float32(1) + mant / np.float32(8)) * np.exp2(exp - 7)).astype(np.float32)
-    values = np.copysign(values, np.where(codes & 128, -1.0, 1.0))
+    values = np.copysign(values, np.where(codes & 128, np.float32(-1), np.float32(1)))
     values[(exp == 15) & (mant == 7)] = np.nan
     values.flags.writeable = False
     return values
@@ -346,22 +346,45 @@ class SafetensorsCheckpoint:
         info = mapped.info(name)
         out = mapped.tensor(name, rows=rows)
         if info.dtype in ("F8_E4M3", "F8_E4M3FN"):
-            if not name.endswith(".weight") or len(info.shape) != 2:
-                raise CheckpointError(f"FP8 requires a 2D .weight tensor: {name}")
-            scale_name = name[:-len("weight")] + "weight_scale_inv"
-            scale_info = self.info(scale_name)
-            expected = tuple((s + b - 1) // b for s, b in zip(info.shape, self.block_size))
-            if scale_info.dtype != "F32" or scale_info.shape != expected:
-                raise CheckpointError(f"invalid FP8 scale tensor {scale_name}: expected F32 {expected}")
-            scales = self._shard(scale_name).tensor(scale_name)
+            scales = self._fp8_scales(name, info)
             row_start = 0 if rows is None else _row_bounds(rows, info.shape)[0]
             out = dequantize_block_fp8(out, scales, self.block_size, row_offset=row_start)
         elif name.endswith(".weight") and name[:-len("weight")] + "weight_scale_inv" in self:
             raise CheckpointError(f"scale supplied for non-FP8 weight: {name}")
         return out
 
+    def _fp8_scales(self, name: str, info: TensorInfo) -> np.ndarray:
+        if not name.endswith(".weight") or len(info.shape) != 2:
+            raise CheckpointError(f"FP8 requires a 2D .weight tensor: {name}")
+        scale_name = name[:-len("weight")] + "weight_scale_inv"
+        scale_info = self.info(scale_name)
+        expected = tuple((s + b - 1) // b for s, b in zip(info.shape, self.block_size))
+        if scale_info.dtype != "F32" or scale_info.shape != expected:
+            raise CheckpointError(f"invalid FP8 scale tensor {scale_name}: expected F32 {expected}")
+        scales = self._shard(scale_name).tensor(scale_name)
+        if not np.all(np.isfinite(scales)) or np.any(scales <= 0):
+            raise CheckpointError("FP8 scales must be positive and finite")
+        return scales
+
     def raw(self, name: str, *, rows: slice | None = None) -> np.ndarray:
         return self._shard(name).raw(name, rows=rows)
+
+    def is_block_fp8(self, prefix: str) -> bool:
+        name = f"{prefix}.weight"
+        return name in self and self.info(name).dtype in ("F8_E4M3", "F8_E4M3FN")
+
+    def block_fp8(self, prefix: str):
+        """One block-scaled FP8 Linear, e.g. ``model.layers.3.self_attn.o_proj``, undecoded.
+
+        Returns (E4M3FN codes uint8 [N, K], scale multipliers float32 [ceil(N/br), ceil(K/bc)]
+        from ``weight_scale_inv``, (br, bc), (N, K)): the operands of glm_vx_gpu_fp8_matvec.
+        """
+        name = f"{prefix}.weight"
+        info = self.info(name)
+        if info.dtype not in ("F8_E4M3", "F8_E4M3FN"):
+            raise CheckpointError(f"{name} is {info.dtype}, not FP8")
+        scales = self._fp8_scales(name, info)
+        return self.raw(name), scales, self.block_size, info.shape
 
     def compressed_int4(self, prefix: str):
         """One compressed-tensors pack-quantized INT4 Linear, e.g. ``model.layers.3.self_attn.o_proj``.

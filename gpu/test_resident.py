@@ -151,3 +151,89 @@ def test_int4_rejects_a_quantization_config_the_kernels_do_not_implement():
     config = dict(model.config, quantization_config={'quant_method': 'awq'})
     with pytest.raises(ValueError, match='compressed-tensors'):
         ResidentGLM(GlmMoeDsaModel(config, model.weights, NumpyBackend()), ctx=Context(), max_tokens=4)
+
+
+# The official GLM FP8 checkpoint quantizes every Linear except embeddings, lm_head, the router,
+# norms and the indexer weights_proj (validation.write_checkpoint.UNQUANTIZED).
+def fp8_model(seed, **overrides):
+    from glm_vx.quant import BlockFP8Weights
+    from validation.write_checkpoint import UNQUANTIZED, fp8_quantize
+    base = build(seed=seed, **overrides)
+    linears = {}
+    for name, w in base.weights.items():
+        if w.ndim == 2 and name.endswith('.weight') and not any(u in name for u in UNQUANTIZED):
+            linears[name[:-len('.weight')]] = fp8_quantize(w)
+    rest = {n: w for n, w in base.weights.items() if n[:-len('.weight')] not in linears}
+    return GlmMoeDsaModel(base.config, BlockFP8Weights(rest, linears), NumpyBackend()), linears
+
+
+@pytest.mark.parametrize('overrides', [
+    {},
+    {'hidden_size': 136},  # K > 128: two scale columns, the second block partial
+    {'hidden_size': 260, 'moe_intermediate_size': 136},  # partial row and column blocks in the MLPs
+])
+def test_fp8_linears_match_the_dequantized_reference(overrides):
+    model, linears = fp8_model(17, **overrides)
+    expected = reference(model, TOKENS)  # NumPy on the exact float32 dequantization
+    resident = ResidentGLM(model, ctx=Context(), max_tokens=32)
+    try:
+        got = resident.prefill(TOKENS)
+        launches = dict(resident.launches)
+        uploaded = set(resident._weights)
+    finally:
+        resident.close()
+    np.testing.assert_allclose(got, expected, rtol=1e-4, atol=1e-4)
+    assert (got.argmax(-1) == expected.argmax(-1)).all()
+    assert launches.get('fp8_matvec', 0) > 0 and 'int4_matvec' not in launches
+    assert any(p.endswith('.indexer.wq_b') for p in linears) and any(p + ':fp8' in uploaded for p in linears if '.indexer.' in p)
+    for prefix in linears:
+        if prefix.endswith('.kv_b_proj'):
+            assert prefix + '.weight' in uploaded and prefix + ':fp8' not in uploaded
+        elif prefix + ':fp8' in uploaded:
+            assert prefix + '.weight' not in uploaded
+
+
+def test_fp8_resident_matches_float32_resident_on_the_same_weights():
+    # The same exact dequantized weights through the float32 kernels: isolates the FP8 kernel.
+    model, _ = fp8_model(19)
+    dense = GlmMoeDsaModel(model.config, model._weight, NumpyBackend())
+    a = ResidentGLM(model, ctx=Context(), max_tokens=32)
+    b = ResidentGLM(dense, ctx=Context(), max_tokens=32)
+    np.testing.assert_allclose(a.prefill(TOKENS[:6]), b.prefill(TOKENS[:6]), rtol=1e-4, atol=1e-4)
+    assert 'fp8_matvec' in a.launches and 'fp8_matvec' not in b.launches
+    assert a.weight_bytes < b.weight_bytes
+
+
+def test_fp8_checkpoint_on_disk_runs_packed(tmp_path):
+    # The production path: an official-layout FP8 safetensors directory read by SafetensorsCheckpoint.
+    import json
+    from glm_vx.checkpoint import SafetensorsCheckpoint
+    from validation.write_checkpoint import export_checkpoint
+    base = build(seed=23)
+    export_checkpoint(base.config, base.weights, tmp_path, 'fp8', shards=2)
+    config = json.loads((tmp_path / 'config.json').read_text())
+    with SafetensorsCheckpoint(tmp_path) as ckpt:
+        model = GlmMoeDsaModel(config, ckpt, NumpyBackend())
+        expected = reference(model, TOKENS[:8])
+        resident = ResidentGLM(model, ctx=Context(), max_tokens=16)
+        try:
+            got = resident.prefill(TOKENS[:8])
+            launches = dict(resident.launches)
+        finally:
+            resident.close()
+    np.testing.assert_allclose(got, expected, rtol=1e-4, atol=1e-4)
+    assert (got.argmax(-1) == expected.argmax(-1)).all()
+    assert launches.get('fp8_matvec', 0) > 0
+
+
+@pytest.mark.parametrize('change,match', [
+    ({'weight_block_size': [64, 64]}, '128x128'),
+    ({'activation_scheme': 'static'}, 'dynamic'),
+    ({'fmt': 'e5m2'}, 'e4m3'),
+])
+def test_fp8_rejects_a_quantization_config_the_kernels_do_not_implement(change, match):
+    model, _ = fp8_model(3)
+    q = dict({'quant_method': 'fp8', 'fmt': 'e4m3', 'activation_scheme': 'dynamic', 'weight_block_size': [128, 128]}, **change)
+    config = dict(model.config, quantization_config=q)
+    with pytest.raises(ValueError, match=match):
+        ResidentGLM(GlmMoeDsaModel(config, model.weights, NumpyBackend()), ctx=Context(), max_tokens=4)

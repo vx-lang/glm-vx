@@ -217,6 +217,57 @@ def compressed_int4_scheme(quantization_config):
     return tuple(targets), tuple(q.get('ignore') or ())
 
 
+class BlockFP8Weights:
+    """Weight source with some Linears in block-scaled FP8, the in-memory twin of an FP8
+    SafetensorsCheckpoint. ``linears`` maps a Linear prefix to (E4M3FN codes uint8 [N, K], scale
+    multipliers float32 [ceil(N/128), ceil(K/128)]); ``base`` (a dict or a callable) supplies every
+    other tensor. ``prefix.weight`` reads back as the exact float32 dequantization (code * scale),
+    which is what the NumPy reference model computes with."""
+
+    def __init__(self, base, linears, block=(128, 128)):
+        self.base, self.linears, self.block = base, dict(linears), tuple(block)
+        self._dense = {}
+
+    def is_block_fp8(self, prefix):
+        return prefix in self.linears
+
+    def block_fp8(self, prefix):
+        codes, scales = self.linears[prefix]
+        return np.asarray(codes, np.uint8), np.asarray(scales, np.float32), self.block, codes.shape
+
+    def __call__(self, name):
+        prefix = name[:-len('.weight')] if name.endswith('.weight') else None
+        if prefix in self.linears:
+            if name not in self._dense:
+                from .checkpoint import dequantize_block_fp8
+                codes, scales, block, _ = self.block_fp8(prefix)
+                dense = dequantize_block_fp8(codes, scales, block)
+                dense.flags.writeable = False
+                self._dense[name] = dense
+            return self._dense[name]
+        return self.base(name) if callable(self.base) else self.base[name]
+
+    __getitem__ = __call__
+
+
+def block_fp8_scheme(quantization_config):
+    """Validate a config.json ``quantization_config`` as the official GLM block-FP8 scheme.
+
+    Accepts quant_method fp8, fmt e4m3, weight_block_size [128, 128] (what fp8.vx implements).
+    activation_scheme must be dynamic (no stored input scales). The kernels keep activations in
+    float32 (weight-only FP8, like the NumPy reference), not the per-token FP8 activation
+    quantization of the official GPU path. Returns the modules_to_not_convert tuple.
+    """
+    q = quantization_config
+    if not isinstance(q, dict) or q.get('quant_method') != 'fp8':
+        raise ValueError('quant_method must be fp8')
+    if q.get('fmt', 'e4m3') != 'e4m3' or q.get('activation_scheme', 'dynamic') != 'dynamic':
+        raise ValueError(f'only dynamic e4m3 FP8 is supported, got fmt={q.get("fmt")} activation_scheme={q.get("activation_scheme")}')
+    if list(q.get('weight_block_size', [128, 128])) != [128, 128]:
+        raise ValueError(f'fp8 kernels implement 128x128 weight blocks, got {q.get("weight_block_size")}')
+    return tuple(q.get('modules_to_not_convert') or ())
+
+
 def fp8_matvec_blocked(codes, scales, x, block=(128, 128)):
     """float64 reference y = dequant(W) @ x, summing each block's raw-code dot product before its scale."""
     codes = np.asarray(codes, dtype=np.uint8)

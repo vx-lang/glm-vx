@@ -17,7 +17,7 @@ Trained-weight parity, BF16 and performance are not done.
 | M2 library | layout recommended in `docs/LIBRARY-LAYOUT.md`; paged KV CPU reference (`glm_vx/paged_kv.py`); loader tested on BF16/FP8/sharded checkpoints (`validation/write_checkpoint.py`) | GQA attention, grouped GEMM, sampling, device paged cache; extraction |
 | M3 second family | not started; gap list in `docs/LIBRARY-LAYOUT.md` | after M2 ops |
 | M4 hybrid MoE | admission verdict (`glm_vx/admission.py`, validated within 0.011% of the official checkpoint size); per-layer expert placement on a host backend (`glm_vx/placement.py`), bit-identical logits on CPU backends | GPU attention + device KV with host experts; port the verdict into `vxc` |
-| M5 quantization / benchmarks | INT4 and block-FP8 reference math (`glm_vx/quant.py`); cross-engine harness (`benchmarks/compare.py`, tested on fake servers) | INT4 (incl. compressed-tensors bf16-scale checkpoints, `gpu/INT4.md`) and batched FP8 kernels exist but are not in the model path; run against llama.cpp and vLLM on the pod |
+| M5 quantization / benchmarks | INT4 and block-FP8 reference math (`glm_vx/quant.py`); cross-engine harness (`benchmarks/compare.py`, tested on fake servers) | INT4 (incl. compressed-tensors bf16-scale checkpoints, `gpu/INT4.md`) and block-FP8 Linears run packed in resident decode (SIMT-checked, not yet on hardware); batched FP8/INT4 matmul not in the model path; run against llama.cpp and vLLM on the pod |
 
 ## First real-device result (2026-10-15)
 
@@ -76,8 +76,14 @@ runs through `glm_vx_gpu_int4_matvec` with its bf16 group scales; `kv_b_proj`, w
 reads transposed per head, is dequantized exactly to float32 once. Checked in the CPU SIMT emulator
 only (`gpu/test_resident.py`: INT4 resident vs the NumPy model on the exact dequantization, and vs
 float32 resident on the same weights). `resident_compare --int4` is the A100 check; it has not run.
+Block FP8 (the official GLM checkpoint format, `gpu/FP8.md`) works the same way: a Linear whose
+`.weight` is `F8_E4M3` stays as bytes on the device with its 128x128 `weight_scale_inv` grid and
+runs through `glm_vx_gpu_fp8_matvec`; `kv_b_proj` is dequantized to float32. It is weight-only FP8
+(float32 activations, like the NumPy model), not the official per-token FP8 activation
+quantization. Checked in the SIMT emulator only, including an FP8 safetensors directory read by
+`SafetensorsCheckpoint`; `resident_compare --fp8` is the A100 check; it has not run.
 
-Not done: a device top-k, fewer launches (fusion/graphs), BF16/FP8 weights in this path, INT4 on
+Not done: a device top-k, fewer launches (fusion/graphs), BF16 weights in this path, INT4/FP8 on
 hardware, and a full-depth model (only 4 layers ran at full width).
 
 ## M1 correctness vs. the official model (random weights, A100)

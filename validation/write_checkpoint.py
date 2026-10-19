@@ -25,7 +25,7 @@ FP8_MAX = 448.0
 
 _finite = np.isfinite(FP8_E4M3FN_TABLE)
 _codes = np.nonzero(_finite)[0].astype(np.uint8)
-_values = FP8_E4M3FN_TABLE[_codes]
+_values = FP8_E4M3FN_TABLE[_codes].astype(np.float64)  # float64 distances: nearest-value ties as before
 _order = np.argsort(_values, kind='stable')
 _sorted_values, _sorted_codes = _values[_order], _codes[_order]
 
