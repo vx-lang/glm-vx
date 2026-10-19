@@ -6,8 +6,9 @@ the same Vx kernels with activations and the per-layer MLA / indexer caches in d
 only host traffic per token is:
 
   * the embedding row up, and the RoPE cos/sin for the position up;
-  * per full-indexer layer, the indexer scores down and the chosen token ids up (top-k is still
-    a stable host argsort, the same tie rule as the model; a device top-k is a known gap);
+  * nothing per indexer layer: the top-k runs on the device (gpu/topk.vx, the model's exact rule,
+    np.argsort(-scores, kind='stable')). ``device_topk=False`` restores the host argsort (scores
+    down, ids up) for comparison;
   * per MoE layer, the k routed expert ids down (to pick which expert weights to launch);
   * the logits down.
 
@@ -63,7 +64,8 @@ def _f32(value, name, positive=False):
 class ResidentGLM:
     name = 'vx-gpu-resident'
 
-    def __init__(self, model, *, max_tokens=4096, ptx_dir=None, device=0, ctx=None, max_weight_bytes=None):
+    def __init__(self, model, *, max_tokens=4096, ptx_dir=None, device=0, ctx=None, max_weight_bytes=None,
+                 device_topk=True):
         if getattr(model, 'packed_weights', False):
             raise NotImplementedError('ResidentGLM supports expanded float32 weights only')
         if getattr(model, 'expert_placement', None) is not None:
@@ -72,6 +74,7 @@ class ResidentGLM:
             raise ValueError('max_tokens must be a positive integer')
         self.model, self.config = model, model.config
         self.max_tokens = max_tokens
+        self.device_topk = bool(device_topk)
         self.max_weight_bytes = max_weight_bytes
         self.weight_bytes = 0
         self._owns_context = ctx is None
@@ -243,6 +246,9 @@ class ResidentGLM:
         self.head_weights_raw, self.head_weights = t((self.index_heads,)), t((self.index_heads,))
         self.scores = t((cap,))
         self.selected = t((self.index_topk,), 'int32')
+        if self.device_topk:
+            from .topk import scratch_ints
+            self.topk_scratch = t((scratch_ints(cap, self.index_topk),), 'int32')
         self.selected_count = 0
         self.gate, self.up, self.act = t((width,)), t((width,)), t((width,))
         self.fused = t((2 * int(c.get('moe_intermediate_size', 1)),))
@@ -376,11 +382,18 @@ class ResidentGLM:
         self._launch('index_scores', (tokens + 3) // 4, 128,
                      [self.scores, self.iq_rot, self.index_keys[layer], self.head_weights, I(tokens), I(self.index_heads),
                       I(self.index_dim), F(_f32(self.index_dim ** -0.5, 'scale'))])
-        scores = np.frombuffer(self.scores.view((tokens,)).download(), dtype=np.float32)
         count = min(self.index_topk, tokens)
-        # Stable by position, exactly as GlmMoeDsaModel._index without a device top-k.
-        chosen = np.argsort(-scores, kind='stable')[:count].astype(np.int32)
-        self.selected.view((count,)).upload(chosen)
+        if self.device_topk:
+            # Stable by position, exactly as GlmMoeDsaModel._index (TOPK.md); writes ids[:count].
+            if 'topk_stable' not in self._kernels:
+                module = self._modules['topk'] = self.ctx.load_ptx(self._ptx_dir / 'topk.ptx')
+                self._kernels['topk_stable'] = module.kernel('glm_vx_gpu_topk_stable')
+            self._launch('topk_stable', 1, 256, [self.selected, self.scores.view((tokens,)), self.topk_scratch,
+                                                 I(tokens), I(self.index_topk)])
+        else:
+            scores = np.frombuffer(self.scores.view((tokens,)).download(), dtype=np.float32)
+            chosen = np.argsort(-scores, kind='stable')[:count].astype(np.int32)
+            self.selected.view((count,)).upload(chosen)
         self.selected_count = count
 
     def _attention(self, layer, x, position, shared_ok):

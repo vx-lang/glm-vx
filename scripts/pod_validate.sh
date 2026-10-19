@@ -44,7 +44,7 @@ step build-ptx bash gpu/build.sh
 step build-cpu-lib bash kernels/build.sh
 sha256sum gpu/build/*.ptx > "$out/ptx.sha256"
 
-step test-hardware $PYTHON -m pytest -q -rs gpu/test_hardware.py gpu/test_gemm_hardware.py gpu/test_index_scores_hardware.py
+step test-hardware $PYTHON -m pytest -q -rs gpu/test_hardware.py gpu/test_gemm_hardware.py gpu/test_index_scores_hardware.py gpu/test_topk_hardware.py
 step test-quant-hardware $PYTHON -m pytest -q -rs gpu/test_quant_hardware.py
 step test-hardware-stress $PYTHON -m pytest -q -rs gpu/test_hardware_stress.py
 

@@ -281,3 +281,16 @@ def test_bf16_checkpoint_on_disk_runs_as_bf16(tmp_path):
         resident = ResidentGLM(GlmMoeDsaModel(config, ckpt, NumpyBackend()), ctx=Context(), max_tokens=16)
         np.testing.assert_array_equal(resident.prefill(TOKENS[:8]), want.prefill(TOKENS[:8]))
         assert resident.launches.get('bf16_matvec', 0) > 0 and resident.launches.get('matvec', 0) == 0
+
+
+@pytest.mark.parametrize('overrides', [{}, {'index_n_heads': 1}])  # one head: exact score ties
+def test_device_topk_selects_exactly_what_the_host_argsort_selects(overrides):
+    model = build(seed=37, **overrides)
+    device = ResidentGLM(model, ctx=Context(), max_tokens=32)
+    host = ResidentGLM(model, ctx=Context(), max_tokens=32, device_topk=False)
+    for t in TOKENS:
+        a, b = device.forward(t), host.forward(t)
+        np.testing.assert_array_equal(device.selected.data[:device.selected_count],
+                                      host.selected.data[:host.selected_count])
+        np.testing.assert_array_equal(a, b)
+    assert device.launches['topk_stable'] > 0 and 'topk_stable' not in host.launches

@@ -56,9 +56,11 @@ Toolchain notes from the bring-up:
 
 `ResidentGLM` runs a decode step with weights, activations and the MLA/indexer caches on the
 GPU, through the same Vx kernels as `GPUBackend` (new kernels: add, copy, scale, scaled_add,
-layernorm, rope_strided, matvec_heads). Host traffic per token: the embedding row, RoPE cos/sin,
-indexer scores down and chosen ids up (top-k is still a stable host argsort), the k routed expert
-ids, and the logits. Weights upload lazily on first use and stay resident.
+layernorm, rope_strided, matvec_heads; later topk_stable). Host traffic per token: the embedding
+row, RoPE cos/sin, the k routed expert ids, and the logits. The indexer top-k runs on the device
+(`gpu/topk.vx`, `gpu/TOPK.md`: single-block radix select, the model's exact
+`argsort(-scores, kind='stable')` rule, SIMT-tested bit-identical to the host argsort including
+exact ties; not yet on hardware, and the A100 evidence below predates it). Weights upload lazily on first use and stay resident.
 
 On the A100 (random weights, F32, `validation/resident_compare.py`, evidence in
 `evidence/a100-20261018/`): logits are **bitwise equal** to the hybrid backend's on the 6-layer
@@ -88,7 +90,7 @@ through `glm_vx_gpu_bf16_matvec`. Its exact decode and float32 matvec summation 
 logits bit-identical to float32 resident on the same values (SIMT-tested, also from a BF16
 safetensors directory); `resident_compare --bf16` is the A100 check; it has not run.
 
-Not done: a device top-k, fewer launches (fusion/graphs), INT4/FP8/BF16 on hardware, and a full-depth model (only 4 layers ran at full width).
+Not done: fewer launches (fusion/graphs), INT4/FP8/BF16 on hardware, and a full-depth model (only 4 layers ran at full width).
 
 ## M1 correctness vs. the official model (random weights, A100)
 
