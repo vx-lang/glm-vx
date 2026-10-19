@@ -3,7 +3,7 @@ import hashlib
 from pathlib import Path
 
 INPUTS = ('gpu/kernels.vx', 'gpu/fp8.vx', 'gpu/gemm.vx',
-          'gpu/int4.vx', 'gpu/fp8_batched.vx', 'gpu/bf16.vx',
+          'gpu/int4.vx', 'gpu/fp8_batched.vx', 'gpu/bf16.vx', 'gpu/topk.vx',
           'gpu/testing/simt.cpp', 'gpu/testing/build_simt.sh')
 BINARY = 'gpu/build/libsimt.so'
 
