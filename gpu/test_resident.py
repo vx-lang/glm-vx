@@ -224,6 +224,7 @@ def test_fp8_checkpoint_on_disk_runs_packed(tmp_path):
     np.testing.assert_allclose(got, expected, rtol=1e-4, atol=1e-4)
     assert (got.argmax(-1) == expected.argmax(-1)).all()
     assert launches.get('fp8_matvec', 0) > 0
+    assert launches.get('bf16_matvec', 0) > 0  # the unconverted BF16 router, weights_proj and lm_head
 
 
 @pytest.mark.parametrize('change,match', [
@@ -237,3 +238,46 @@ def test_fp8_rejects_a_quantization_config_the_kernels_do_not_implement(change, 
     config = dict(model.config, quantization_config=q)
     with pytest.raises(ValueError, match=match):
         ResidentGLM(GlmMoeDsaModel(config, model.weights, NumpyBackend()), ctx=Context(), max_tokens=4)
+
+
+def bf16_model(seed, **overrides):
+    """Every 2D Linear weight rounded to bfloat16 and stored as bits; norms and embeddings float32."""
+    from glm_vx.quant import BF16Weights
+    from validation.write_checkpoint import to_bf16_bits
+    base = build(seed=seed, **overrides)
+    linears = {name[:-len('.weight')]: to_bf16_bits(w) for name, w in base.weights.items()
+               if w.ndim == 2 and name.endswith('.weight') and 'embed_tokens' not in name}
+    rest = {n: w for n, w in base.weights.items() if n[:-len('.weight')] not in linears}
+    return GlmMoeDsaModel(base.config, BF16Weights(rest, linears), NumpyBackend()), linears
+
+
+@pytest.mark.parametrize('overrides', [{}, {'hidden_size': 136}])
+def test_bf16_resident_equals_float32_resident_on_the_same_values(overrides):
+    # bf16_matvec decodes exactly and sums in matvec's order: bit-identical logits, half the bytes.
+    model, linears = bf16_model(29, **overrides)
+    dense = GlmMoeDsaModel(model.config, model._weight, NumpyBackend())
+    a = ResidentGLM(model, ctx=Context(), max_tokens=32)
+    b = ResidentGLM(dense, ctx=Context(), max_tokens=32)
+    got, want = a.prefill(TOKENS[:6]), b.prefill(TOKENS[:6])
+    np.testing.assert_array_equal(got, want)
+    np.testing.assert_allclose(got, reference(model, TOKENS[:6]), rtol=2e-5, atol=2e-5)
+    assert a.launches.get('bf16_matvec', 0) > 0 and 'bf16_matvec' not in b.launches
+    assert a.launches.get('matvec', 0) == 0  # every projection, router and lm_head included, ran in BF16
+    assert {'lm_head:bf16', 'model.layers.1.mlp.gate:bf16'} <= set(a._weights)
+    kv_b = [p for p in linears if p.endswith('.kv_b_proj')]
+    assert kv_b and all(p + '.weight' in a._weights and p + ':bf16' not in a._weights for p in kv_b)
+    assert a.weight_bytes < b.weight_bytes
+
+
+def test_bf16_checkpoint_on_disk_runs_as_bf16(tmp_path):
+    import json
+    from glm_vx.checkpoint import SafetensorsCheckpoint
+    from validation.write_checkpoint import export_checkpoint
+    base = build(seed=31)
+    expected_weights = export_checkpoint(base.config, base.weights, tmp_path, 'bf16', shards=2)
+    config = json.loads((tmp_path / 'config.json').read_text())
+    want = ResidentGLM(GlmMoeDsaModel(config, expected_weights, NumpyBackend()), ctx=Context(), max_tokens=16)
+    with SafetensorsCheckpoint(tmp_path) as ckpt:
+        resident = ResidentGLM(GlmMoeDsaModel(config, ckpt, NumpyBackend()), ctx=Context(), max_tokens=16)
+        np.testing.assert_array_equal(resident.prefill(TOKENS[:8]), want.prefill(TOKENS[:8]))
+        assert resident.launches.get('bf16_matvec', 0) > 0 and resident.launches.get('matvec', 0) == 0

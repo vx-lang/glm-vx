@@ -29,6 +29,12 @@ its float32 128x128 ``weight_scale_inv`` grid and runs through ``glm_vx_gpu_fp8_
 (gpu/fp8.ptx). Activations stay float32: this is weight-only FP8, the same arithmetic as the NumPy
 reference on the exact dequantized weights, not the official per-token FP8 activation quantization.
 ``kv_b_proj`` is dequantized to float32 as for INT4.
+
+BF16: any other Linear (including the router and lm_head) the source reports as a bfloat16 matrix
+(``is_bf16(prefix)``, as SafetensorsCheckpoint and glm_vx.quant.BF16Weights do) stays as its 16-bit
+patterns on the device and runs through ``glm_vx_gpu_bf16_matvec`` (gpu/bf16.ptx). That kernel
+decodes exactly and sums in the float32 matvec's order, so the logits equal the float32 path on the
+same bf16 values bit for bit. Norms, biases, embeddings and ``kv_b_proj`` stay float32.
 GGUF packed weights, expert placement and tracing are not supported.
 
 Not a performance claim: no timing is made here, and launches are still one per op.
@@ -79,6 +85,7 @@ class ResidentGLM:
             source = model.weights
             self._is_int4 = getattr(source, 'is_compressed_int4', None) or (lambda prefix: False)
             self._is_fp8 = getattr(source, 'is_block_fp8', None) or (lambda prefix: False)
+            self._is_bf16 = getattr(source, 'is_bf16', None) or (lambda prefix: False)
             self._formats = {}
             self._check_quantization(model.config.get('quantization_config'))
             self.stream = self.ctx.stream()
@@ -174,11 +181,25 @@ class ResidentGLM:
             self._weights[key] = entry
         return entry
 
+    def _bf16_weight(self, prefix):
+        """(bfloat16 bits uint16, (N, K)) on the device, uploaded once."""
+        key = prefix + ':bf16'
+        entry = self._weights.get(key)
+        if entry is None:
+            bits, shape = self.model.weights.bf16(prefix)
+            if bits.shape != tuple(shape):
+                raise ValueError(f'{prefix}: BF16 bits {bits.shape} do not match {shape}')
+            entry = (self._upload_weight(key, np.ascontiguousarray(bits, np.uint16), 'uint16'), tuple(shape))
+            self._weights[key] = entry
+        return entry
+
     def _format(self, prefix):
-        """'int4', 'fp8' or 'float32' for the Linear `prefix`, decided once."""
+        """'int4', 'fp8', 'bf16' or 'float32' for the Linear `prefix`, decided once."""
         fmt = self._formats.get(prefix)
         if fmt is None:
-            fmt = self._formats[prefix] = 'int4' if self._is_int4(prefix) else 'fp8' if self._is_fp8(prefix) else 'float32'
+            fmt = ('int4' if self._is_int4(prefix) else 'fp8' if self._is_fp8(prefix)
+                   else 'bf16' if self._is_bf16(prefix) else 'float32')
+            self._formats[prefix] = fmt
         return fmt
 
     def _out_features(self, prefix):
@@ -187,6 +208,8 @@ class ResidentGLM:
             return self._int4_weight(prefix)[3][0]
         if fmt == 'fp8':
             return self._fp8_weight(prefix)[2][0]
+        if fmt == 'bf16':
+            return self._bf16_weight(prefix)[1][0]
         return self._weight(prefix + '.weight').shape[0]
 
     def _allocate(self):
@@ -252,16 +275,19 @@ class ResidentGLM:
         return out
 
     def _project(self, prefix, x, out):
-        """out = W x for the Linear `prefix`: the INT4 or FP8 kernel on packed weights, else float32 matvec."""
+        """out = W x for the Linear `prefix`: the INT4, FP8 or BF16 kernel on stored weights, else float32 matvec."""
         fmt = self._format(prefix)
         if fmt == 'float32':
             return self._matvec(self._weight(prefix + '.weight'), x, out)
         if fmt == 'int4':
             packed, scales, kind, (rows, cols) = self._int4_weight(prefix)
             args = [packed, scales, x, I(rows), I(cols), I(kind)]
-        else:
+        elif fmt == 'fp8':
             codes, scales, (rows, cols) = self._fp8_weight(prefix)
             args = [codes, scales, x, I(rows), I(cols)]
+        else:
+            bits, (rows, cols) = self._bf16_weight(prefix)
+            args = [bits, x, I(rows), I(cols)]
         if out.shape != (rows,) or x.shape != (cols,):
             raise ValueError(f'{prefix}: {fmt.upper()} weight is {rows}x{cols}, got x {x.shape} -> out {out.shape}')
         name = fmt + '_matvec'
@@ -413,7 +439,7 @@ class ResidentGLM:
             return
         experts = int(c['n_routed_experts'])
         k = int(c['num_experts_per_tok'])
-        self._matvec(self._weight(prefix + '.gate.weight'), x, self.router_logits)
+        self._project(prefix + '.gate', x, self.router_logits)
         self._launch('router', 1, 32,
                      [self.route_ids, self.route_weights, self.router_logits,
                       self._weight(prefix + '.gate.e_score_correction_bias'), I(experts), I(k),
@@ -464,7 +490,7 @@ class ResidentGLM:
             return None
         self._rmsnorm(self.x, self._weight('model.norm.weight'), self.norm, m.eps)
         head = 'model.embed_tokens' if c.get('tie_word_embeddings', False) else 'lm_head'
-        self._matvec(self._weight(head + '.weight'), self.norm, self.logits)
+        self._project(head, self.norm, self.logits)
         return np.frombuffer(self.logits.download(), dtype=np.float32).copy()
 
     def prefill(self, token_ids):

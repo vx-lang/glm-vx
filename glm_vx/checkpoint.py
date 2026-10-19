@@ -373,6 +373,22 @@ class SafetensorsCheckpoint:
         name = f"{prefix}.weight"
         return name in self and self.info(name).dtype in ("F8_E4M3", "F8_E4M3FN")
 
+    def is_bf16(self, prefix: str) -> bool:
+        name = f"{prefix}.weight"
+        if name not in self:
+            return False
+        info = self.info(name)
+        return info.dtype == "BF16" and len(info.shape) == 2
+
+    def bf16(self, prefix: str):
+        """One BF16 Linear, undecoded: (bfloat16 bits uint16 [N, K], (N, K)), the operands of
+        glm_vx_gpu_bf16_matvec."""
+        name = f"{prefix}.weight"
+        info = self.info(name)
+        if info.dtype != "BF16" or len(info.shape) != 2:
+            raise CheckpointError(f"{name} is {info.dtype} {info.shape}, not a BF16 matrix")
+        return self.raw(name), info.shape
+
     def block_fp8(self, prefix: str):
         """One block-scaled FP8 Linear, e.g. ``model.layers.3.self_attn.o_proj``, undecoded.
 

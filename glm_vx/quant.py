@@ -250,6 +250,36 @@ class BlockFP8Weights:
     __getitem__ = __call__
 
 
+class BF16Weights:
+    """Weight source with some Linears stored as bfloat16, the in-memory twin of a BF16
+    SafetensorsCheckpoint. ``linears`` maps a Linear prefix to its bfloat16 bits (uint16 [N, K]);
+    ``base`` (a dict or a callable) supplies every other tensor. ``prefix.weight`` reads back as the
+    exact float32 value of those bits."""
+
+    def __init__(self, base, linears):
+        self.base, self.linears = base, dict(linears)
+        self._dense = {}
+
+    def is_bf16(self, prefix):
+        return prefix in self.linears
+
+    def bf16(self, prefix):
+        bits = np.asarray(self.linears[prefix], np.uint16)
+        return bits, bits.shape
+
+    def __call__(self, name):
+        prefix = name[:-len('.weight')] if name.endswith('.weight') else None
+        if prefix in self.linears:
+            if name not in self._dense:
+                dense = bf16_to_f32(self.bf16(prefix)[0])
+                dense.flags.writeable = False
+                self._dense[name] = dense
+            return self._dense[name]
+        return self.base(name) if callable(self.base) else self.base[name]
+
+    __getitem__ = __call__
+
+
 def block_fp8_scheme(quantization_config):
     """Validate a config.json ``quantization_config`` as the official GLM block-FP8 scheme.
 

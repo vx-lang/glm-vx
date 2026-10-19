@@ -131,3 +131,19 @@ def test_block_fp8_scheme_rejects_what_the_kernels_do_not_implement(q, match):
     from glm_vx.quant import block_fp8_scheme
     with pytest.raises(ValueError, match=match):
         block_fp8_scheme(q)
+
+
+def test_bf16_returns_the_undecoded_bits(tmp_path, model_inputs):
+    from glm_vx.quant import BF16Weights
+    config, weights = model_inputs
+    expected = export_checkpoint(config, weights, tmp_path, 'bf16', 2)
+    prefix = 'model.layers.0.self_attn.q_b_proj'
+    with Checkpoint(tmp_path) as ck:
+        assert ck.is_bf16(prefix) and ck.is_bf16('lm_head') and not ck.is_bf16('model.missing')
+        assert not ck.is_bf16('model.layers.0.input_layernorm')  # 1D: not a Linear
+        bits, shape = ck.bf16(prefix)
+        assert bits.dtype == np.uint16 and shape == weights[prefix + '.weight'].shape
+        assert np.array_equal(bits, to_bf16_bits(weights[prefix + '.weight']))
+        with pytest.raises(ValueError, match='not a BF16 matrix'):
+            ck.bf16('model.layers.0.input_layernorm')
+    np.testing.assert_array_equal(BF16Weights({}, {prefix: bits})(prefix + '.weight'), expected[prefix + '.weight'])

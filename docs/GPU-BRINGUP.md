@@ -12,12 +12,12 @@ Trained-weight parity, BF16 and performance are not done.
 | M0 pod setup | `scripts/pod_setup.sh`: driver check, PTX build, hardware tests, records vCPUs/RAM | done |
 | M0 HF reference | `validation/hf_reference.py` + `layer_compare.py`, `gpu_vs_official.py`, `prefill_compare.py` | done |
 | M0 bring-up model | decided: random-weight parity until M4 (see below) | revisit if a small trained checkpoint appears |
-| M1 GPU ops | PTX for RMSNorm, RoPE, SwiGLU, matvec, FP8 matvec, TF32 GEMM, MLA decode, index scores; parity vs. HF passes on A100 (F32/TF32) | BF16 kernels; device-resident activations/KV |
+| M1 GPU ops | PTX for RMSNorm, RoPE, SwiGLU, matvec, FP8 matvec, TF32 GEMM, MLA decode, index scores; parity vs. HF passes on A100 (F32/TF32) | BF16 activations/compute (BF16 weight storage exists: `gpu/BF16.md`); device-resident activations/KV |
 | M1 KV cache | contiguous host buffers (`glm_vx/kvcache.py`), 4x faster row gather | device-resident cache |
 | M2 library | layout recommended in `docs/LIBRARY-LAYOUT.md`; paged KV CPU reference (`glm_vx/paged_kv.py`); loader tested on BF16/FP8/sharded checkpoints (`validation/write_checkpoint.py`) | GQA attention, grouped GEMM, sampling, device paged cache; extraction |
 | M3 second family | not started; gap list in `docs/LIBRARY-LAYOUT.md` | after M2 ops |
 | M4 hybrid MoE | admission verdict (`glm_vx/admission.py`, validated within 0.011% of the official checkpoint size); per-layer expert placement on a host backend (`glm_vx/placement.py`), bit-identical logits on CPU backends | GPU attention + device KV with host experts; port the verdict into `vxc` |
-| M5 quantization / benchmarks | INT4 and block-FP8 reference math (`glm_vx/quant.py`); cross-engine harness (`benchmarks/compare.py`, tested on fake servers) | INT4 (incl. compressed-tensors bf16-scale checkpoints, `gpu/INT4.md`) and block-FP8 Linears run packed in resident decode (SIMT-checked, not yet on hardware); batched FP8/INT4 matmul not in the model path; run against llama.cpp and vLLM on the pod |
+| M5 quantization / benchmarks | INT4 and block-FP8 reference math (`glm_vx/quant.py`); cross-engine harness (`benchmarks/compare.py`, tested on fake servers) | INT4 (incl. compressed-tensors bf16-scale checkpoints, `gpu/INT4.md`) block-FP8 and BF16 (`gpu/BF16.md`) Linears run as stored in resident decode (SIMT-checked, not yet on hardware); batched FP8/INT4 matmul not in the model path; run against llama.cpp and vLLM on the pod |
 
 ## First real-device result (2026-10-15)
 
@@ -82,9 +82,13 @@ runs through `glm_vx_gpu_fp8_matvec`; `kv_b_proj` is dequantized to float32. It 
 (float32 activations, like the NumPy model), not the official per-token FP8 activation
 quantization. Checked in the SIMT emulator only, including an FP8 safetensors directory read by
 `SafetensorsCheckpoint`; `resident_compare --fp8` is the A100 check; it has not run.
+BF16 (`gpu/BF16.md`): every other Linear stored as a bfloat16 matrix, including the router and
+lm_head (the unquantized parts of the FP8 and INT4 checkpoints), stays 16-bit on the device and runs
+through `glm_vx_gpu_bf16_matvec`. Its exact decode and float32 matvec summation order make the
+logits bit-identical to float32 resident on the same values (SIMT-tested, also from a BF16
+safetensors directory); `resident_compare --bf16` is the A100 check; it has not run.
 
-Not done: a device top-k, fewer launches (fusion/graphs), BF16 weights in this path, INT4/FP8 on
-hardware, and a full-depth model (only 4 layers ran at full width).
+Not done: a device top-k, fewer launches (fusion/graphs), INT4/FP8/BF16 on hardware, and a full-depth model (only 4 layers ran at full width).
 
 ## M1 correctness vs. the official model (random weights, A100)
 
@@ -159,7 +163,8 @@ per-stage relative error 7e-6 to 2e-5 up to 78 layers; 2.9e-6 at real width.
 - Greedy decode matches Transformers for 16 tokens on every reference prompt.
 - Repeatable under GPU sharing: identical concurrent runs give identical logits hashes.
 
-BF16 path (when BF16 kernels exist): tolerance is not guessed. Measure the noise of the
+BF16 compute path (BF16 activations; not built yet, BF16 *weights* with float32 compute are bit-identical
+to float32 and need no tolerance): tolerance is not guessed. Measure the noise of the
 official model itself, official-BF16 vs. official-F32 on the same inputs, and require our
 BF16 stages to be within 4x of that, with greedy decode matching on prompts where the
 official top-1 margin exceeds that noise.

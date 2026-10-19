@@ -16,6 +16,10 @@ order differs, so the gate is top-1 equality and max |diff| <= 1e-4 * max |logit
 With --fp8 the Linears the official GLM FP8 checkpoint quantizes are encoded as block-scaled
 E4M3FN (128x128 float32 scales) and compared the same way (FP8 kernel vs float32 on the exact
 dequantization, same gate). Weight-only: activations stay float32 in both.
+
+With --bf16 every Linear except the embedding is rounded to bfloat16 and stored as bits; the BF16
+kernel decodes exactly and sums in the float32 matvec's order, so bitwise_equal is the expectation
+(the gate is the same as above; a non-bitwise result is reported, not hidden).
 """
 import argparse
 import json
@@ -51,6 +55,15 @@ def fp8_source(weights):
     return BlockFP8Weights(rest, linears)
 
 
+def bf16_source(weights):
+    from glm_vx.quant import BF16Weights
+    from validation.write_checkpoint import to_bf16_bits
+    linears = {name[:-len('.weight')]: to_bf16_bits(w) for name, w in weights.items()
+               if w.ndim == 2 and name.endswith('.weight') and 'embed_tokens' not in name}
+    rest = {n: w for n, w in weights.items() if n[:-len('.weight')] not in linears}
+    return BF16Weights(rest, linears)
+
+
 def timed_resident(model, tokens):
     from gpu.resident import ResidentGLM
     resident = ResidentGLM(model, max_tokens=len(tokens) + 1)
@@ -71,7 +84,7 @@ def timed_resident(model, tokens):
 
 def quantized_main(args, config, weights, tokens, fmt):
     from glm_vx.backend import NumpyBackend
-    source = int4_source(weights) if fmt == 'int4' else fp8_source(weights)
+    source = {'int4': int4_source, 'fp8': fp8_source, 'bf16': bf16_source}[fmt](weights)
     candidate = GlmMoeDsaModel(config, source, NumpyBackend())
     baseline = GlmMoeDsaModel(config, source, NumpyBackend())
     baseline_source = baseline.weights
@@ -102,6 +115,7 @@ def main():
     quant = p.add_mutually_exclusive_group()
     quant.add_argument('--int4', action='store_true', help='INT4 resident vs float32 resident on the dequantized weights')
     quant.add_argument('--fp8', action='store_true', help='block-FP8 resident vs float32 resident on the dequantized weights')
+    quant.add_argument('--bf16', action='store_true', help='BF16 resident vs float32 resident on the same bf16 values')
     args = p.parse_args()
     if args.output.exists():
         p.error('output exists; preserve evidence')
@@ -113,8 +127,9 @@ def main():
     for w in weights.values():
         w.flags.writeable = False
     tokens = [int(t) for t in np.random.default_rng(100 + args.seed).integers(0, config['vocab_size'], args.tokens)]
-    if args.int4 or args.fp8:
-        report, ok = quantized_main(args, config, weights, tokens, 'int4' if args.int4 else 'fp8')
+    if args.int4 or args.fp8 or args.bf16:
+        fmt = 'int4' if args.int4 else 'fp8' if args.fp8 else 'bf16'
+        report, ok = quantized_main(args, config, weights, tokens, fmt)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(report, indent=2) + '\n')
         print(json.dumps(report, indent=2))
