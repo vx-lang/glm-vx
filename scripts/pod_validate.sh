@@ -40,13 +40,17 @@ step() {  # step NAME CMD...: run, log to $out/NAME.txt, record the result
   $PYTHON --version
 } > "$out/host.txt" 2>&1
 
+# PTXAS (optional, e.g. /usr/local/cuda/bin/ptxas) also assembles each PTX to an sm_80 cubin; this
+# needs no GPU, so it is worth running before renting one too: PTXAS=... gpu/build.sh
 step build-ptx bash gpu/build.sh
 step build-cpu-lib bash kernels/build.sh
 sha256sum gpu/build/*.ptx > "$out/ptx.sha256"
 
-step test-hardware $PYTHON -m pytest -q -rs gpu/test_hardware.py gpu/test_gemm_hardware.py gpu/test_index_scores_hardware.py gpu/test_topk_hardware.py
-step test-quant-hardware $PYTHON -m pytest -q -rs gpu/test_quant_hardware.py
-step test-hardware-stress $PYTHON -m pytest -q -rs gpu/test_hardware_stress.py
+# Hardware tests skip without a usable device; a run where nothing passed is a failure, not "ok".
+hw() { $PYTHON -m pytest -q -rs "$@" | tee /dev/stderr | grep -qE '[0-9]+ passed'; }
+step test-hardware hw gpu/test_hardware.py gpu/test_gemm_hardware.py gpu/test_index_scores_hardware.py gpu/test_topk_hardware.py
+step test-quant-hardware hw gpu/test_quant_hardware.py
+step test-hardware-stress hw gpu/test_hardware_stress.py
 
 for mode in f32 int4 fp8 bf16; do
   flag=$([[ $mode == f32 ]] && echo "" || echo "--$mode")
