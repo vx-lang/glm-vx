@@ -139,3 +139,51 @@ def test_refuses_two_kernels_in_one_file(tmp_path):
     shutil.copy(HERE / 'device.vx', tmp_path)
     result = run_build(tmp_path / 'copy.vx', tmp_path / 'k.ptx')
     assert result.returncode == 1 and 'one GPU kernel per file' in result.stderr, result.stderr
+
+
+@needs_vxc
+def test_every_kernel_has_a_launch_shape_that_launch_reads(tmp_path):
+    from gpu.spawn.launch import launch_size
+    for source in sorted(HERE.glob('*.vx')):
+        if source.stem in ('machine', 'device'):
+            continue
+        out = tmp_path / f'{source.stem}.ptx'
+        result = run_build(source, out)
+        assert result.returncode == 0, result.stderr
+        manifest = json.loads(out.with_suffix('.json').read_text())
+        launch = manifest['launch']
+        assert launch, source.stem
+        values = {p['name']: 3 for p in manifest['params'] if p['kind'] == 'scalar'}
+        for size in launch['grid'] + [launch['block']]:
+            assert launch_size(size, values) >= 1, (source.stem, size)
+
+
+DISPATCH = os.environ.get('VX_DISPATCH_LIB')
+needs_dispatch = pytest.mark.skipif(not (VXC and DISPATCH and shutil.which('llvm-config')),
+                                    reason='set VXC, VX_DISPATCH_LIB and put llvm-config on PATH')
+
+
+def run_library(source, output):
+    return subprocess.run([sys.executable, str(HERE / 'build.py'), '--source', str(source), '--machine', str(HERE / 'machine.vx'),
+                           '--output', str(output), '--library', str(output.with_name('lib' + output.stem + '.so'))],
+                          text=True, capture_output=True)
+
+
+@needs_dispatch
+def test_library_carries_the_checked_kernel(tmp_path):
+    result = run_library(HERE / 'add.vx', tmp_path / 'add.ptx')
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads((tmp_path / 'add.json').read_text())
+    assert manifest['library'] == 'libadd.so' and (tmp_path / 'libadd.so').exists()
+    assert manifest['launch'] == {'block': 256, 'grid': [{'computed': '((n - 1) / 256) + 1'}]}
+
+
+@needs_dispatch
+def test_library_refuses_a_parameter_the_kernel_does_not_use(tmp_path):
+    # The pub fn would take `unused`, the kernel would not: the C call would not line up.
+    source = (HERE / 'copy.vx').read_text().replace(', n: i32)', ', n: i32, unused: i32)')
+    assert 'unused: i32' in source
+    (tmp_path / 'copy.vx').write_text(source)
+    shutil.copy(HERE / 'device.vx', tmp_path)
+    result = run_library(tmp_path / 'copy.vx', tmp_path / 'copy.ptx')
+    assert result.returncode == 1 and 'but the kernel uses' in result.stderr, result.stderr

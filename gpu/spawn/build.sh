@@ -6,8 +6,13 @@ cd "$(dirname "$0")/../.."
 : "${PYTHON:=python3}"
 extra=()
 if [[ -n "${PTXAS:-}" ]]; then extra+=(--ptxas "$PTXAS"); fi
+# VX_DISPATCH_LIB (libvx_cuda_dispatch.so from the vxc build) also builds lib<kernel>.so, which
+# Vx's own runtime launches; vxc then needs llvm-config on PATH.
+library=${VX_DISPATCH_LIB:+yes}
 for source in gpu/spawn/*.vx; do
   name=$(basename "$source" .vx)
   [[ $name == machine || $name == device ]] && continue
-  "$PYTHON" gpu/spawn/build.py --source "$source" --output "gpu/build/spawn/$name.ptx" "${extra[@]}"
+  lib=()
+  if [[ -n $library ]]; then lib=(--library "gpu/build/spawn/lib$name.so"); fi
+  "$PYTHON" gpu/spawn/build.py --source "$source" --output "gpu/build/spawn/$name.ptx" "${extra[@]}" "${lib[@]}"
 done

@@ -45,7 +45,8 @@ Toolchain notes from the bring-up:
 - Saved toolchain, to skip the Vx/LLVM build on a new pod: build once on the pod
   (`scripts/provision/setup_linux.sh`, `./setup.sh`, `cargo build --release` in the Vx
   checkout; about 5 minutes on a 256-vCPU host), pack `bin/vxc`, `stdlib/`,
-  `lib/libvx_std_core.so` and `/usr/lib/llvm-22` without `*.a` into
+  `lib/libvx_std_core.so`, `libvx_cuda_dispatch.so` (from `target/release/build/vxc-*/out/`, for the
+  spawn kernels Vx launches itself) and `/usr/lib/llvm-22` without `*.a` into
   `vx-toolchain-<vx-commit>.tar.zst` (115 MB for Vx 8d28aa86), and keep it off the pod.
   On the next pod: `scripts/pod_restore.sh vx-toolchain-<commit>.tar.zst`, then
   `source /opt/vx-toolchain/env.sh`. It must be packed on the oldest glibc you will

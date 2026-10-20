@@ -10,6 +10,10 @@ pointer, offset, sizes, strides).
 This script checks vxc's manifest against the PTX it wrote: the parameter widths and
 descriptor layout, that exactly the mutable tensors are stored to, and that each tensor is
 loaded at its element width. It writes the PTX and our manifest (.json) beside it.
+
+With --library, it also compiles the same source to a host object (vxc --action emit-obj;
+needs llvm-config on PATH) and links it with Vx's dispatch library into a shared library
+whose `pub fn` Vx's own runtime launches (gpu/spawn/vx_launch.py).
 """
 import argparse, hashlib, json, os, re, subprocess, sys, tempfile
 from pathlib import Path
@@ -17,6 +21,60 @@ from pathlib import Path
 SCALARS = {'i32': '.u32', 'i64': '.u64', 'f32': '.f32'}
 ELEMENT_BITS = {'f32': 32, 'i32': 32, 'u16': 16, 'u8': 8}
 INCLUDE = re.compile(r'^//\s*spawn-include:\s*(\S+)\s*$', re.M)
+
+
+def split_top(text: str):
+    """Split on commas outside <> and [] (Tensor<f32, [?], Memory::HBM> has commas inside)."""
+    parts, depth, start = [], 0, 0
+    for i, ch in enumerate(text):
+        depth += ch in '<[' and 1 or ch in '>]' and -1 or 0
+        if ch == ',' and depth == 0:
+            parts.append(text[start:i]); start = i + 1
+    parts.append(text[start:])
+    return [p.strip() for p in parts if p.strip()]
+
+
+def same_kernel(a: str, b: str) -> bool:
+    """Two PTX files hold the same kernel apart from its entry name and label numbering."""
+    def body(ptx):
+        ptx = ptx[ptx.index('.entry'):]
+        entry = re.match(r'\.entry (\w+)', ptx)[1]
+        return re.sub(r'\$L__BB\d+_', '$L__BB_', re.sub(rf'\b{entry}(?=\b|_param)', 'K', ptx))
+    return body(a) == body(b)
+
+
+def build_library(args, combined_text, name, params, env, ptx):
+    """The shared library Vx launches from. Its `pub fn` takes every parameter of the function,
+    so they must be exactly the kernel's, in the manifest's order, for the call to line up."""
+    declared = re.search(rf'^pub fn {name}\((.*?)\)\s*->', combined_text, re.M | re.S)
+    names = [item.split(':', 1)[0].strip() for item in split_top(declared[1])] if declared else None
+    if names != [p['name'] for p in params]:
+        raise ValueError(f'pub fn {name} takes {names}, but the kernel uses {[p["name"] for p in params]}')
+    if not args.dispatch_lib or not Path(args.dispatch_lib).is_file():
+        raise ValueError('--library needs --dispatch-lib (or VX_DISPATCH_LIB): the libvx_cuda_dispatch.so vxc was built with')
+    dispatch = Path(args.dispatch_lib).resolve()
+    with tempfile.TemporaryDirectory(prefix='vx-spawn-lib-') as temp:
+        combined, obj = Path(temp, args.source.name), Path(temp, 'k.o')
+        combined.write_text(combined_text)
+        # The optimization level as for --emit-ptx: the device image follows it, and the PTX checked
+        # above must be the PTX this library launches.
+        result = subprocess.run([args.vxc, '--machine', str(args.machine.resolve()), str(combined),
+                                 '--action', 'emit-obj', '-o', str(obj)], text=True, capture_output=True, env=env)
+        if result.returncode or not obj.exists():
+            raise ValueError(f'vxc emit-obj failed ({result.returncode}):\n{result.stderr}')
+        args.library.parent.mkdir(parents=True, exist_ok=True)
+        linked = subprocess.run([args.cc, '-shared', str(obj), str(dispatch), f'-Wl,-rpath,{dispatch.parent}',
+                                 '-o', str(args.library)], text=True, capture_output=True)
+        if linked.returncode:
+            raise ValueError(f'linking {args.library} failed:\n{linked.stderr}')
+    # The library carries its kernel in the dispatch payload (`image=`); it must be the PTX that
+    # was checked, or a test of Vx's launch would test other code.
+    images = re.findall(rb'image=(.*?)\x00', args.library.read_bytes(), re.S)
+    if len(images) != 1 or not same_kernel(images[0].decode(), ptx):
+        args.library.unlink()
+        raise ValueError(f'{args.library.name} does not carry the kernel that --emit-ptx wrote')
+    return {'library': args.library.name, 'library_sha256': hashlib.sha256(args.library.read_bytes()).hexdigest(),
+            'dispatch_lib': str(dispatch)}
 
 
 def kernel_params(manifest_params):
@@ -105,6 +163,9 @@ def main() -> int:
     parser.add_argument('--vxc', default=os.environ.get('VXC', 'vxc'))
     parser.add_argument('--ptxas', help='assemble with this NVIDIA ptxas; failure is fatal')
     parser.add_argument('--arch', default='sm_80')
+    parser.add_argument('--library', type=Path, help='also build this shared library for Vx to launch from')
+    parser.add_argument('--dispatch-lib', default=os.environ.get('VX_DISPATCH_LIB'))
+    parser.add_argument('--cc', default=os.environ.get('CC', 'cc'))
     args = parser.parse_args()
     try:
         source = args.source.read_text()
@@ -133,6 +194,7 @@ def main() -> int:
         check_params(ptx, name, params)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         evidence = {'schema': 'glm-vx-spawn-v2', 'entry': name, 'params': params, 'vx_params': kernels[0]['params'],
+                    'launch': kernels[0].get('launch'),
                     'arch': args.arch, 'source_sha256': hashlib.sha256((''.join(included) + source).encode()).hexdigest(),
                     'ptx_sha256': hashlib.sha256(ptx.encode()).hexdigest(),
                     'vxc': subprocess.run([args.vxc, '--version'], text=True, stdout=subprocess.PIPE).stdout.strip(),
@@ -145,6 +207,8 @@ def main() -> int:
                 if assembled.returncode:
                     raise ValueError(f'ptxas failed:\n{assembled.stderr}')
                 evidence.update({'assembly_validated': True, 'ptxas_log': assembled.stderr.strip().splitlines()})
+        if args.library:
+            evidence.update(build_library(args, ''.join(included) + source, name, params, env, ptx))
         args.output.write_text(ptx)
         args.output.with_suffix('.json').write_text(json.dumps(evidence, indent=2) + '\n')
         print(f'{args.output}: {name} ({len(params)} params)')

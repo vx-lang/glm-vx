@@ -29,7 +29,7 @@ fn warp_argmax(score: f32, index: i32) on Topology::Device -> i32 {
 pub fn glm_vx_spawn_router(indices: &mut Tensor<i32, [?], Memory::HBM>, weights: &mut Tensor<f32, [?], Memory::HBM>,
                            logits: &Tensor<f32, [?], Memory::HBM>, bias: &Tensor<f32, [?], Memory::HBM>,
                            experts: i32, k: i32, scale: f32) -> void {
-  spawn on(Topology::Device) {
+  spawn on(Topology::Device) grid([1]) block(32) {
     if experts > 0 && experts <= 256 && k > 0 && k <= 8 && k <= experts && block_id() == 0 && block_dim() == 32 {
       let lane: i32 = thread_id();
       let mut slot: i32 = 0;

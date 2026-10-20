@@ -7,7 +7,7 @@
 pub fn glm_vx_spawn_index_scores(out: &mut Tensor<f32, [?], Memory::HBM>, q: &Tensor<f32, [?], Memory::HBM>,
                                  keys: &Tensor<f32, [?], Memory::HBM>, weights: &Tensor<f32, [?], Memory::HBM>,
                                  tokens: i32, heads: i32, dim: i32, scale: f32) -> void {
-  spawn on(Topology::Device) {
+  spawn on(Topology::Device) grid([(tokens - 1) / 4 + 1]) block(128) {
     let tid: i32 = thread_id();
     let block: i32 = block_dim();
     let lane: i32 = tid % 32;

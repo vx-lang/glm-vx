@@ -4,7 +4,7 @@
 
 pub fn glm_vx_spawn_mla_merge(out: &mut Tensor<f32, [?], Memory::HBM>, numerator: &Tensor<f32, [?], Memory::HBM>,
                               stats: &Tensor<f32, [?], Memory::HBM>, heads: i32, rank: i32, splits: i32) -> void {
-  spawn on(Topology::Device) {
+  spawn on(Topology::Device) grid([heads]) block(256) {
     let h: i32 = block_id();
     let tid: i32 = thread_id();
     let block: i32 = block_dim();

@@ -5,7 +5,7 @@
 pub fn glm_vx_spawn_rope_glm(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
                              cosine: &Tensor<f32, [?], Memory::HBM>, sine: &Tensor<f32, [?], Memory::HBM>,
                              heads: i32, dim: i32) -> void {
-  spawn on(Topology::Device) {
+  spawn on(Topology::Device) grid([(heads * (dim / 2) - 1) / 256 + 1]) block(256) {
     if heads > 0 && dim > 0 && dim % 2 == 0 {
       let pairs: i32 = dim / 2;
       let stride: i32 = grid_dim() * block_dim();

@@ -9,7 +9,7 @@ pub fn glm_vx_spawn_int4_matmul(out: &mut Tensor<f32, [?], Memory::HBM>, packed:
                                 scales: &Tensor<u16, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
                                 expert_ids: &Tensor<i32, [?], Memory::HBM>, rows_m: i32, rows_n: i32, cols: i32,
                                 experts: i32, scale_kind: i32) -> void {
-  spawn on(Topology::Device) {
+  spawn on(Topology::Device) grid([(rows_m * rows_n - 1) / 4 + 1]) block(128) {
     let tid: i32 = thread_id();
     let lane: i32 = tid & 31;
     let block: i32 = block_dim();

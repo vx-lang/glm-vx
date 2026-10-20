@@ -3,8 +3,12 @@
 The manifest (.json beside the .ptx) gives the entry name and the parameters, which vxc takes
 in the order the function declares them. Arguments are passed by name. A rank-1 tensor
 argument expands to its memref descriptor: base and aligned pointer (both the tensor's device
-pointer), offset 0, size, stride 1. Launch dimensions are ours; Vx cannot set them yet (#252).
+pointer), offset 0, size, stride 1. Without grid and block, a launch takes the shape the
+kernel's `spawn on(..) grid([..]) block(..)` gives in the manifest (Vx #252), which is the
+shape Vx's own launch uses; each computed size is evaluated as Vx does, in i32 with
+division and remainder truncating toward zero.
 """
+import ast
 import ctypes as C
 import json
 from pathlib import Path
@@ -13,6 +17,35 @@ from gpu.runtime import DeviceTensor
 
 _SCALAR = {'i32': C.c_int32, 'i64': C.c_int64, 'f32': C.c_float}
 _ELEMENT = {'f32': 'float32', 'u16': 'uint16', 'u8': 'uint8', 'i32': 'int32'}
+
+
+_OPS = {ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b, ast.Mult: lambda a, b: a * b,
+        ast.Div: lambda a, b: abs(a) // abs(b) * (1 if (a < 0) == (b < 0) else -1),
+        ast.Mod: lambda a, b: a - abs(a) // abs(b) * (1 if (a < 0) == (b < 0) else -1) * b}
+
+
+def launch_size(size, values):
+    """A manifest launch size: a number, {"param": name} or {"computed": "(rows + 3) / 4"}."""
+    if isinstance(size, int):
+        return size
+    if 'param' in size:
+        return int(values[size['param']])
+    def evaluate(node):
+        if isinstance(node, ast.Constant) and type(node.value) is int:
+            result = node.value
+        elif isinstance(node, ast.Name):
+            result = int(values[node.id])
+        elif isinstance(node, ast.BinOp) and type(node.op) in _OPS:
+            right = evaluate(node.right)
+            if isinstance(node.op, (ast.Div, ast.Mod)) and right == 0:
+                raise ValueError(f'launch size {size["computed"]!r} divides by zero')
+            result = _OPS[type(node.op)](evaluate(node.left), right)
+        else:
+            raise ValueError(f'unsupported launch size {size["computed"]!r}')
+        if not -(1 << 31) <= result < (1 << 31):
+            raise ValueError(f'launch size {size["computed"]!r} overflows i32')
+        return result
+    return evaluate(ast.parse(size['computed'], mode='eval').body)
 
 
 class SpawnKernel:
@@ -40,6 +73,17 @@ class SpawnKernel:
             args += [value, value, C.c_uint64(0), C.c_uint64(value.size), C.c_uint64(1)]
         return args
 
-    def launch(self, grid, block, *, stream=None, **values):
+    def shape(self, values):
+        """(grid, block) from the manifest's launch shape for these arguments."""
+        launch = self.manifest.get('launch')
+        if not launch:
+            raise TypeError(f'{self.manifest["entry"]} has no launch shape; pass grid and block')
+        return (tuple(launch_size(s, values) for s in launch['grid']), launch_size(launch['block'], values))
+
+    def launch(self, grid=None, block=None, *, stream=None, **values):
+        if (grid is None) != (block is None):
+            raise TypeError('pass both grid and block, or neither')
+        if grid is None:
+            grid, block = self.shape(values)
         self.kernel.launch(grid, block, self.arguments(values), stream=stream)
         return self

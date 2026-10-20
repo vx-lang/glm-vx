@@ -5,7 +5,7 @@
 
 pub fn glm_vx_spawn_softmax_rows(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
                                  rows: i32, dim: i32) -> void {
-  spawn on(Topology::Device) {
+  spawn on(Topology::Device) grid([rows]) block(256) {
     let mut shared = unsafe { Tensor<f32, [33], Memory::SMEM>::uninit() };
     let tid: i32 = thread_id();
     let block: i32 = block_dim();

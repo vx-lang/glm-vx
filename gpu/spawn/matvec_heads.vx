@@ -7,7 +7,7 @@
 pub fn glm_vx_spawn_matvec_heads(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<f32, [?], Memory::HBM>,
                                  x: &Tensor<f32, [?], Memory::HBM>, heads: i32, rows: i32, cols: i32,
                                  w_stride: i32, x_stride: i32, out_stride: i32) -> void {
-  spawn on(Topology::Device) {
+  spawn on(Topology::Device) grid([(heads * rows - 1) / 4 + 1]) block(128) {
     let tid: i32 = thread_id();
     let block: i32 = block_dim();
     let lane: i32 = tid % 32;

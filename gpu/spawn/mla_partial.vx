@@ -9,7 +9,7 @@ pub fn glm_vx_spawn_mla_partial(numerator: &mut Tensor<f32, [?], Memory::HBM>, s
                                 cache_latent: &Tensor<f32, [?], Memory::HBM>, cache_rope: &Tensor<f32, [?], Memory::HBM>,
                                 selected: &Tensor<i32, [?], Memory::HBM>, heads: i32, rank: i32, rope_dim: i32,
                                 tokens: i32, count: i32, selection_stride: i32, splits: i32, scale: f32) -> void {
-  spawn on(Topology::Device) {
+  spawn on(Topology::Device) grid([heads * splits]) block((rank + 31) / 32 * 32) {
     let mut shared = unsafe { Tensor<f32, [33], Memory::SMEM>::uninit() };
     let tid: i32 = thread_id();
     let block: i32 = block_dim();

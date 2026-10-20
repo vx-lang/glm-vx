@@ -4,7 +4,7 @@
 
 pub fn glm_vx_spawn_bf16_matvec(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<u16, [?], Memory::HBM>,
                                 x: &Tensor<f32, [?], Memory::HBM>, rows: i32, cols: i32) -> void {
-  spawn on(Topology::Device) {
+  spawn on(Topology::Device) grid([(rows - 1) / 4 + 1]) block(128) {
     let tid: i32 = thread_id();
     let lane: i32 = tid & 31;
     let block: i32 = block_dim();

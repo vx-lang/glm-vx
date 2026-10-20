@@ -2,7 +2,7 @@
 // spawn-include: device.vx
 
 pub fn glm_vx_spawn_scale(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>, alpha: f32, n: i32) -> void {
-  spawn on(Topology::Device) {
+  spawn on(Topology::Device) grid([(n - 1) / 256 + 1]) block(256) {
     let stride: i32 = grid_dim() * block_dim();
     let mut i: i32 = block_id() * block_dim() + thread_id();
     while i < n {
