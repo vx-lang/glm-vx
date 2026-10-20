@@ -1,0 +1,59 @@
+// glm_vx_gpu_layernorm through Vx's own GPU path (the DSA indexer key norm). One block per row;
+// the mean first, then the variance of the centered values, correctly rounded sqrt (Vx #1944).
+// spawn-include: device.vx
+// spawn-kernel: glm_vx_spawn_layernorm(rows: i32, dim: i32, eps: f32, x: f32[?], weight: f32[?], bias: f32[?], out: mut f32[?])
+
+pub fn layernorm(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                 weight: &Tensor<f32, [?], Memory::HBM>, bias: &Tensor<f32, [?], Memory::HBM>,
+                 rows: i32, dim: i32, eps: f32) -> void {
+  spawn on(Topology::Device) {
+    let mut shared = unsafe { Tensor<f32, [33], Memory::SMEM>::uninit() };
+    let tid: i32 = thread_id();
+    let row: i32 = block_id();
+    let block: i32 = block_dim();
+    if rows > 0 && dim > 0 && eps > 0.0 && row < rows && block >= 32 && block <= 1024 && block % 32 == 0 {
+      let base: i32 = row * dim;
+      let mut s: f32 = 0.0;
+      let mut d: i32 = tid;
+      while d < dim { s = s + x[base + d]; d = d + block; }
+      // block_sum(s) inlined: a shared tensor cannot be passed to a function and barrier()
+      // is not found inside one (both reported to Vx).
+      let partial_sum: f32 = warp_sum(s);
+      if tid % 32 == 0 { shared[tid / 32] = partial_sum; }
+      barrier();
+      if tid < 32 {
+        let mut v_sum: f32 = 0.0;
+        if tid < block / 32 { v_sum = shared[tid]; }
+        let total_sum: f32 = warp_sum(v_sum);
+        if tid == 0 { shared[32] = total_sum; }
+      }
+      barrier();
+      let sum: f32 = shared[32];
+      let mean: f32 = sum / (dim as f32);
+      let mut ss: f32 = 0.0;
+      d = tid;
+      while d < dim {
+        let c: f32 = x[base + d] - mean;
+        ss = ss + c * c;
+        d = d + block;
+      }
+      // block_sum(ss) inlined: a shared tensor cannot be passed to a function and barrier()
+      // is not found inside one (both reported to Vx).
+      let partial_sq: f32 = warp_sum(ss);
+      if tid % 32 == 0 { shared[tid / 32] = partial_sq; }
+      barrier();
+      if tid < 32 {
+        let mut v_sq: f32 = 0.0;
+        if tid < block / 32 { v_sq = shared[tid]; }
+        let total_sq: f32 = warp_sum(v_sq);
+        if tid == 0 { shared[32] = total_sq; }
+      }
+      barrier();
+      let sq: f32 = shared[32];
+      let inv: f32 = 1.0 / (sq / (dim as f32) + eps).sqrt();
+      d = tid;
+      while d < dim { out[base + d] = (x[base + d] - mean) * inv * weight[d] + bias[d]; d = d + block; }
+    }
+  }
+  return;
+}

@@ -1,3 +1,4 @@
+import core::num;
 // Device helpers shared by the gpu/spawn kernels; build.py pastes this file in front of a
 // kernel that declares `// spawn-include: device.vx`. Thread ids and warp shuffles are
 // gpu-dialect mlir! blocks until Vx has builtins for them (#260).
@@ -123,3 +124,4 @@ fn fp8_decode(bits: i32) on Topology::Device -> f32 {
   if (bits & 128) != 0 { sign = -1.0; }
   return magnitude * sign;
 }
+

@@ -342,3 +342,50 @@ def test_spawn_fp8_matmul_matches_hand_kernel(context, m, n, k, experts):
     compare(context, 'fp8_matmul', hand_kernel(context, 'fp8_batched.ptx', 'glm_vx_gpu_fp8_matmul'), -(-(m * n) // 8), 256,
             dict(rows_m=m, rows_n=n, cols=k, experts=experts, expert_ids=spawn_ids, weight=dw, x=dx, scales=ds, out=s),
             [h, dw, ds, dx, hand_ids, C.c_int32(m), C.c_int32(n), C.c_int32(k), C.c_int32(experts)], {'out': (s, h)})
+
+
+# Norms need a correctly rounded sqrt in the device image: Vx #1944 (PR #1955) or later.
+@pytest.mark.parametrize('rows,dim,block', [(1, 6144, 256), (5, 131, 64), (3, 1, 32), (4, 2048, 1024)])
+def test_spawn_rmsnorm_rows_matches_hand_kernel(context, rows, dim, block):
+    rng = np.random.default_rng(rows * dim)
+    x, w = rng.normal(size=rows * dim).astype('f4'), rng.normal(size=dim).astype('f4')
+    dx, dw = upload(context, x), upload(context, w)
+    spawn_out, hand_out, single_out = (context.tensor((rows * dim,)) for _ in range(3))
+    SpawnKernel(context, BUILD / 'spawn/rmsnorm_rows.ptx').launch(rows, block, rows=rows, dim=dim, eps=1e-5, x=dx, weight=dw, out=spawn_out)
+    hand = context.load_ptx(BUILD / 'kernels.ptx')
+    hand.kernel('glm_vx_gpu_rmsnorm_rows').launch(rows, block, [hand_out, dx, dw, C.c_int32(rows), C.c_int32(dim), C.c_float(1e-5)])
+    if rows == 1:
+        hand.kernel('glm_vx_gpu_rmsnorm').launch(1, block, [single_out, dx, dw, C.c_int32(dim), C.c_float(1e-5)])
+    context.synchronize()
+    np.testing.assert_array_equal(download(spawn_out), download(hand_out))
+    if rows == 1:
+        np.testing.assert_array_equal(download(spawn_out), download(single_out))
+
+
+@pytest.mark.parametrize('rows,dim,block', [(1, 6144, 256), (7, 333, 96)])
+def test_spawn_residual_rmsnorm_matches_hand_kernel(context, rows, dim, block):
+    rng = np.random.default_rng(rows + dim)
+    x, r, w = (rng.normal(size=n).astype('f4') for n in (rows * dim, rows * dim, dim))
+    dx, dr, dw = upload(context, x), upload(context, r), upload(context, w)
+    outs = [context.tensor((rows * dim,)) for _ in range(4)]
+    SpawnKernel(context, BUILD / 'spawn/residual_rmsnorm.ptx').launch(
+        rows, block, rows=rows, dim=dim, eps=1e-5, x=dx, residual=dr, residual_out=outs[1], weight=dw, out=outs[0])
+    context.load_ptx(BUILD / 'kernels.ptx').kernel('glm_vx_gpu_residual_rmsnorm').launch(
+        rows, block, [outs[2], outs[3], dx, dr, dw, C.c_int32(rows), C.c_int32(dim), C.c_float(1e-5)])
+    context.synchronize()
+    np.testing.assert_array_equal(download(outs[1]), x + r)
+    np.testing.assert_array_equal(download(outs[1]), download(outs[3]))
+    np.testing.assert_array_equal(download(outs[0]), download(outs[2]))
+
+
+@pytest.mark.parametrize('rows,dim,block', [(1, 128, 128), (9, 333, 64)])
+def test_spawn_layernorm_matches_hand_kernel(context, rows, dim, block):
+    rng = np.random.default_rng(rows * 3 + dim)
+    x, w, b = (rng.normal(size=n).astype('f4') for n in (rows * dim, dim, dim))
+    dx, dw, db = upload(context, x + 3.0), upload(context, w), upload(context, b)
+    spawn_out, hand_out = context.tensor((rows * dim,)), context.tensor((rows * dim,))
+    SpawnKernel(context, BUILD / 'spawn/layernorm.ptx').launch(rows, block, rows=rows, dim=dim, eps=1e-6, x=dx, weight=dw, bias=db, out=spawn_out)
+    context.load_ptx(BUILD / 'kernels.ptx').kernel('glm_vx_gpu_layernorm').launch(
+        rows, block, [hand_out, dx, dw, db, C.c_int32(rows), C.c_int32(dim), C.c_float(1e-6)])
+    context.synchronize()
+    np.testing.assert_array_equal(download(spawn_out), download(hand_out))

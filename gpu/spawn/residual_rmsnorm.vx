@@ -1,0 +1,43 @@
+// glm_vx_gpu_residual_rmsnorm through Vx's own GPU path. One block per row: residual_out =
+// x + residual, then out = rmsnorm(residual_out) * weight (correctly rounded sqrt, Vx #1944).
+// spawn-include: device.vx
+// spawn-kernel: glm_vx_spawn_residual_rmsnorm(rows: i32, dim: i32, eps: f32, x: f32[?], residual: f32[?], residual_out: mut f32[?], weight: f32[?], out: mut f32[?])
+
+pub fn residual_rmsnorm(out: &mut Tensor<f32, [?], Memory::HBM>, residual_out: &mut Tensor<f32, [?], Memory::HBM>,
+                        x: &Tensor<f32, [?], Memory::HBM>, residual: &Tensor<f32, [?], Memory::HBM>,
+                        weight: &Tensor<f32, [?], Memory::HBM>, rows: i32, dim: i32, eps: f32) -> void {
+  spawn on(Topology::Device) {
+    let mut shared = unsafe { Tensor<f32, [33], Memory::SMEM>::uninit() };
+    let tid: i32 = thread_id();
+    let row: i32 = block_id();
+    let block: i32 = block_dim();
+    if rows > 0 && dim > 0 && eps > 0.0 && row < rows && block >= 32 && block <= 1024 && block % 32 == 0 {
+      let base: i32 = row * dim;
+      let mut ss: f32 = 0.0;
+      let mut d: i32 = tid;
+      while d < dim {
+        let v: f32 = x[base + d] + residual[base + d];
+        residual_out[base + d] = v;
+        ss = ss + v * v;
+        d = d + block;
+      }
+      // block_sum(ss) inlined: a shared tensor cannot be passed to a function and barrier()
+      // is not found inside one (both reported to Vx).
+      let partial_total: f32 = warp_sum(ss);
+      if tid % 32 == 0 { shared[tid / 32] = partial_total; }
+      barrier();
+      if tid < 32 {
+        let mut v_total: f32 = 0.0;
+        if tid < block / 32 { v_total = shared[tid]; }
+        let total_total: f32 = warp_sum(v_total);
+        if tid == 0 { shared[32] = total_total; }
+      }
+      barrier();
+      let total: f32 = shared[32];
+      let inv: f32 = 1.0 / (total / (dim as f32) + eps).sqrt();
+      d = tid;
+      while d < dim { out[base + d] = residual_out[base + d] * inv * weight[d]; d = d + block; }
+    }
+  }
+  return;
+}
