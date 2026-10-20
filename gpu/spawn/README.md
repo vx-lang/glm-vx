@@ -32,12 +32,19 @@ block, because Vx's runtime cannot do that yet (see below).
 | `rmsnorm_rows.vx` | `glm_vx_gpu_rmsnorm_rows`, and `glm_vx_gpu_rmsnorm` as rows = 1 | 16 |
 | `residual_rmsnorm.vx` | `glm_vx_gpu_residual_rmsnorm` | 18 |
 | `layernorm.vx` | `glm_vx_gpu_layernorm` | 21 |
+| `softmax_rows.vx` | `glm_vx_gpu_softmax_rows`, and `glm_vx_gpu_softmax` as rows = 1 | 18 |
+| `swiglu.vx` | `glm_vx_gpu_swiglu` | 17 |
+| `router.vx` | `glm_vx_gpu_router` | 22 |
+| `mla_partial.vx` | `glm_vx_gpu_mla_partial` | 25 |
+| `mla_merge.vx` | `glm_vx_gpu_mla_merge` | 31 |
 
 All assemble with ptxas for sm_80 with no spills; none has run on a GPU yet. The three norms
 need a correctly rounded sqrt, so they build only with a vxc that has #1944 (PR #1955, branch
-device-sqrt-rounded); the others build with vxc 390c2534 too. Not ported: the ones that use exp (softmax, softmax_rows, swiglu,
-router, mla_partial, mla_merge: vxc gives `ex2.approx.f32` where the hand kernels use
-`ex2.approx.ftz.f32`), and gemm_tf32 (`mma.sync m16n8k8`: #350).
+device-sqrt-rounded); the others build with vxc 390c2534 too. The five kernels with exp use
+`fast_exp` (device.vx), the hand path's `x * log2 e` followed by `ex2.approx.f32` where the
+hand kernels have `ex2.approx.ftz.f32`; the two agree except when exp(x) is subnormal, and the
+tests keep every argument above -80. Barrier counts match the hand kernels (softmax 4, router
+1, mla_partial 2). Not ported: gemm_tf32 (`mma.sync m16n8k8`: #350).
 
 `gpu/test_spawn_hardware.py` checks each against the hand kernel, bit for bit, on a GPU.
 
@@ -60,9 +67,12 @@ side first and an index before the tensor it indexes, so `out[i] = a[i] + b[i]` 
 five u64 (base, aligned pointer, offset, size, stride). `build.py` refuses a declaration whose
 scalar widths or descriptor layout differ from the PTX, or whose `mut` tensors are not the
 ones the kernel stores to, or whose element types differ from the width of the loads made
-through each tensor (address arithmetic is traced from the descriptor's pointer). Two inputs
-of the same type in each other's place still pass; the hardware tests catch those.
-`device.vx` holds thread-id and shuffle helpers and the bf16, binary16, INT4 and FP8 decodes.
+through each tensor (address arithmetic is traced from the descriptor's pointer). Last, it
+reads the order by name from the host side of the same vxc output, where the kernel arguments
+are packed from the `pub fn`'s own parameters, so two inputs of the same type, or two i32
+scalars, declared in each other's place are refused too.
+`device.vx` holds thread-id and shuffle helpers, warp sum and max, `fast_exp` and `sigmoid`, and
+the bf16, binary16, INT4 and FP8 decodes.
 
 ## What Vx is missing
 
@@ -71,8 +81,8 @@ of the same type in each other's place still pass; the hardware tests catch thos
 | Thread ids, warp shuffles | `mlir!` gpu-dialect helpers in `device.vx` | #260 |
 | A stable entry name and documented parameter order | `build.py` renames `vx_npu_kernel_N` and checks the order | #251 |
 | Correctly rounded sqrt / div (the norms) | `sqrt.approx` / `rsqrt.approx` in 390c2534; `sqrt.rn` + `rcp.rn` with PR #1955 | #1944 |
-| A shared tensor passed to a device function, `barrier()` inside one | `memref.cast` error, then "Function barrier not found"; the block sum is written out in each norm | none yet |
-| exp as the hand kernels compute it, `ex2.approx.ftz.f32(x * log2 e)` | `math.exp2` gives `ex2.approx.f32` (no ftz), so a subnormal exp(x) differs | #1945 (nvvm ops kept in the device image) |
+| A shared tensor passed to a device function, `barrier()` inside one | `memref.cast` error, then "Function barrier not found"; block reductions are written out in each kernel | none yet |
+| exp as the hand kernels compute it, `ex2.approx.ftz.f32(x * log2 e)` | `fast_exp` gives `ex2.approx.f32` (no ftz), so a subnormal exp(x) differs | #1945 (nvvm ops kept in the device image) |
 | Bit casts (`f32::from_bits`) | crash; bf16 decode uses exact arithmetic instead | #1943 |
 | Scalars passed by value | E6003 unless `machine.vx` lists CPU_DRAM as visible | #1947 |
 | Raw pointers in a region | silent host fallback; kernels take `[?]` tensors | #1945 |
@@ -82,5 +92,5 @@ of the same type in each other's place still pass; the hardware tests catch thos
 | Launch without a device sync each time | `cudaDeviceSynchronize` after every launch | #25 |
 | TF32 `mma.sync m16n8k8` | WMMA m16n16k8 only | #350 |
 
-Once nvvm ops stay in the device image (#1945), softmax, swiglu, the router and MLA follow; once #252 and #25 land, Vx can launch these
+Once nvvm ops stay in the device image (#1945), `fast_exp` can use the ftz form; once #252 and #25 land, Vx can launch these
 itself instead of Python.

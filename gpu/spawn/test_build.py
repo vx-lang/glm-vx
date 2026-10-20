@@ -95,6 +95,9 @@ def test_builds_add_from_vx(tmp_path):
     ('add', 'a: f32[?], b: f32[?], out: mut f32[?]', 'out: mut f32[?], a: f32[?], b: f32[?]', 'mut'),
     ('int4_matvec', 'scales: u16[?], scale_kind: i32, packed: u8[?]', 'packed: u8[?], scale_kind: i32, scales: u16[?]', 'bits wide'),
     ('fp8_matvec', 'scales: f32[?], weight: u8[?]', 'weight: u8[?], scales: f32[?]', 'bits wide'),
+    # Same type and both read-only: only the host-side order by name tells these apart.
+    ('mla_partial', 'q_latent: f32[?], q_rope: f32[?]', 'q_rope: f32[?], q_latent: f32[?]', 'vxc passes the kernel'),
+    ('mla_partial', 'heads: i32, rank: i32,', 'rank: i32, heads: i32,', 'vxc passes the kernel'),
 ])
 def test_refuses_a_signature_in_the_wrong_order(tmp_path, kernel, right, wrong, message):
     source = (HERE / f'{kernel}.vx').read_text()

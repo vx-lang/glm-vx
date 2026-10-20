@@ -389,3 +389,97 @@ def test_spawn_layernorm_matches_hand_kernel(context, rows, dim, block):
         rows, block, [hand_out, dx, dw, db, C.c_int32(rows), C.c_int32(dim), C.c_float(1e-6)])
     context.synchronize()
     np.testing.assert_array_equal(download(spawn_out), download(hand_out))
+
+
+# Kernels with exp: the hand kernels use ex2.approx.ftz.f32 and the spawn ones ex2.approx.f32
+# (device.vx fast_exp), equal except for a subnormal exp(x). Inputs keep every exp argument
+# above -80, so the two must agree bit for bit.
+@pytest.mark.parametrize('rows,dim,block', [(1, 154880, 256), (5, 131, 64), (3, 1, 32), (4, 2048, 1024)])
+def test_spawn_softmax_rows_matches_hand_kernel(context, rows, dim, block):
+    rng = np.random.default_rng(rows * dim + 5)
+    x = (rng.normal(size=rows * dim) * 3).astype('f4')
+    dx = upload(context, x)
+    spawn_out, hand_out, single_out = (context.tensor((rows * dim,)) for _ in range(3))
+    SpawnKernel(context, BUILD / 'spawn/softmax_rows.ptx').launch(rows, block, rows=rows, dim=dim, x=dx, out=spawn_out)
+    hand = context.load_ptx(BUILD / 'kernels.ptx')
+    hand.kernel('glm_vx_gpu_softmax_rows').launch(rows, block, [hand_out, dx, C.c_int32(rows), C.c_int32(dim)])
+    if rows == 1:
+        hand.kernel('glm_vx_gpu_softmax').launch(1, block, [single_out, dx, C.c_int32(dim)])
+    context.synchronize()
+    np.testing.assert_array_equal(download(spawn_out), download(hand_out))
+    if rows == 1:
+        np.testing.assert_array_equal(download(spawn_out), download(single_out))
+
+
+@pytest.mark.parametrize('n,grid,block', [(1, 1, 32), (1000, 4, 128), (12288, 48, 256), (100003, 7, 96)])
+def test_spawn_swiglu_matches_hand_kernel(context, n, grid, block):
+    rng = np.random.default_rng(n + 9)
+    gate, up = (rng.normal(size=n) * 6).astype('f4'), rng.normal(size=n).astype('f4')
+    gate[:min(n, 4)] = [0.0, -0.0, 20.0, -20.0][:min(n, 4)]
+    dg, du = upload(context, gate), upload(context, up)
+    spawn_out, hand_out = context.tensor((n,)), context.tensor((n,))
+    SpawnKernel(context, BUILD / 'spawn/swiglu.ptx').launch(grid, block, n=n, gate=dg, up=du, out=spawn_out)
+    context.load_ptx(BUILD / 'kernels.ptx').kernel('glm_vx_gpu_swiglu').launch(grid, block, [hand_out, dg, du, C.c_int32(n)])
+    context.synchronize()
+    np.testing.assert_array_equal(download(spawn_out), download(hand_out))
+
+
+# Ties: integer logits plus a bias that repeats, so equal scores must go to the lower id.
+@pytest.mark.parametrize('experts,k,ties', [(256, 8, False), (256, 8, True), (7, 3, True), (1, 1, False), (33, 8, True)])
+def test_spawn_router_matches_hand_kernel(context, experts, k, ties):
+    rng = np.random.default_rng(experts * 10 + k)
+    if ties:
+        logits = rng.integers(-3, 3, size=experts).astype('f4')
+        bias = np.tile(np.array([0.0, 0.5], 'f4'), experts)[:experts].copy()
+    else:
+        logits, bias = rng.normal(size=experts).astype('f4'), (rng.normal(size=experts) * 0.1).astype('f4')
+    dl, db = upload(context, logits), upload(context, bias)
+    ids = [context.tensor((k,), 'int32') for _ in range(2)]
+    weights = [context.tensor((k,)) for _ in range(2)]
+    SpawnKernel(context, BUILD / 'spawn/router.ptx').launch(
+        1, 32, experts=experts, k=k, indices=ids[0], logits=dl, bias=db, weights=weights[0], scale=2.5)
+    context.load_ptx(BUILD / 'kernels.ptx').kernel('glm_vx_gpu_router').launch(
+        1, 32, [ids[1], weights[1], dl, db, C.c_int32(experts), C.c_int32(k), C.c_float(2.5)])
+    context.synchronize()
+    np.testing.assert_array_equal(download(ids[0]), download(ids[1]))
+    np.testing.assert_array_equal(download(weights[0]), download(weights[1]))
+    if ties:  # integer logits keep distinct scores far apart, so a float64 oracle orders them the same
+        score = 1.0 / (1.0 + np.exp(-logits.astype('f8'))) + bias
+        np.testing.assert_array_equal(download(ids[0]), np.lexsort((np.arange(experts), -score))[:k])
+
+
+# selected mixes padding (-1) and out-of-range ids; selection_stride 0 shares one list across
+# heads, > 0 gives each head its own. splits > count leaves some partitions empty (l = 0).
+@pytest.mark.parametrize('heads,rank,rope,tokens,count,splits,stride,block', [
+    (2, 48, 4, 7, 5, 3, 0, 64), (2, 48, 4, 7, 5, 8, 0, 64), (2, 48, 4, 7, 0, 3, 0, 64),
+    (64, 512, 64, 4096, 2048, 16, 0, 512), (4, 64, 64, 300, 37, 4, 37, 64)])
+def test_spawn_mla_matches_hand_kernels(context, heads, rank, rope, tokens, count, splits, stride, block):
+    rng = np.random.default_rng(heads + rank + count + splits)
+    q, qr = rng.normal(size=heads * rank).astype('f4'), rng.normal(size=heads * rope).astype('f4')
+    kv, kr = rng.normal(size=tokens * rank).astype('f4'), rng.normal(size=tokens * rope).astype('f4')
+    lists = heads if stride else 1
+    selected = rng.integers(0, tokens, size=max(1, lists * max(count, 1))).astype('i4')
+    if count:
+        selected[1 % selected.size] = -1
+        selected[-1] = tokens + 5
+    dq, dqr, dkv, dkr, dsel = (upload(context, a) for a in (q, qr, kv, kr, selected))
+    scale = rank ** -0.5
+    num = [context.tensor((heads * splits * rank,)) for _ in range(2)]
+    stats = [context.tensor((heads * splits * 2,)) for _ in range(2)]
+    out = [context.tensor((heads * rank,)) for _ in range(2)]
+    SpawnKernel(context, BUILD / 'spawn/mla_partial.ptx').launch(
+        heads * splits, block, heads=heads, rank=rank, rope_dim=rope, tokens=tokens, count=count,
+        selection_stride=stride, splits=splits, selected=dsel, cache_latent=dkv, q_latent=dq, q_rope=dqr,
+        cache_rope=dkr, scale=scale, numerator=num[0], stats=stats[0])
+    SpawnKernel(context, BUILD / 'spawn/mla_merge.ptx').launch(
+        heads, 256, heads=heads, rank=rank, splits=splits, stats=stats[0], numerator=num[0], out=out[0])
+    hand = context.load_ptx(BUILD / 'kernels.ptx')
+    I = C.c_int32
+    hand.kernel('glm_vx_gpu_mla_partial').launch(heads * splits, block, [
+        num[1], stats[1], dq, dqr, dkv, dkr, dsel, I(heads), I(rank), I(rope), I(tokens), I(count), I(stride),
+        I(splits), C.c_float(scale)])
+    hand.kernel('glm_vx_gpu_mla_merge').launch(heads, 256, [out[1], num[1], stats[1], I(heads), I(rank), I(splits)])
+    context.synchronize()
+    np.testing.assert_array_equal(download(stats[0]), download(stats[1]))
+    np.testing.assert_array_equal(download(num[0]), download(num[1]))
+    np.testing.assert_array_equal(download(out[0]), download(out[1]))

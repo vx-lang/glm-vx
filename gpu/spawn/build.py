@@ -12,8 +12,10 @@ checks the parameter list against the declared signature, since vxc does not doc
 Parameters are the region's captures in first-use order (an assignment reads its right side
 first). A scalar is passed by value; a rank-1 tensor is a memref descriptor of five u64 (base
 pointer, aligned pointer, offset, size, stride). The check matches scalar widths and descriptor
-layout, and requires that exactly the `mut` tensors are stored to, which catches two tensors
-declared in the wrong order when only one is written.
+layout, requires that exactly the `mut` tensors are stored to and that each tensor is loaded
+at its element width. It also reads the order by name from the host side of the dispatch in
+the same vxc output: the kernel arguments are packed from the `pub fn`'s own parameters, so
+each kernel slot names the Vx parameter that fills it.
 """
 import argparse, hashlib, json, os, re, subprocess, sys, tempfile
 from pathlib import Path
@@ -41,6 +43,55 @@ def signature(source: str):
         else:
             raise ValueError(f'unsupported parameter {item!r}')
     return name, params
+
+
+def split_top(text: str):
+    """Split on commas outside <> and [] (Tensor<f32, [?], Memory::HBM> has commas inside)."""
+    parts, depth, start = [], 0, 0
+    for i, ch in enumerate(text):
+        depth += ch in '<[' and 1 or ch in '>]' and -1 or 0
+        if ch == ',' and depth == 0:
+            parts.append(text[start:i]); start = i + 1
+    parts.append(text[start:])
+    return [p.strip() for p in parts if p.strip()]
+
+
+def host_order(source: str, ir: str):
+    """Names of the pub fn parameters in the order the host packs them for the kernel."""
+    fns = re.findall(r'^pub fn (\w+)\((.*?)\)\s*->', source, re.M | re.S)
+    if len(fns) != 1:
+        raise ValueError('the kernel file needs exactly one pub fn (the one holding the spawn region)')
+    fn, text = fns[0]
+    args = []  # host argument index -> parameter name; a rank-1 tensor is five arguments
+    for item in split_top(text):
+        pname, kind = (x.strip() for x in item.split(':', 1))
+        args += [pname] * (5 if 'Tensor<' in kind else 1)
+    body = re.search(rf'llvm\.func @{fn}\((.*?)\n  \}}', ir, re.S)
+    if not body:
+        raise ValueError(f'no host function {fn} in the vxc output')
+    body = body[1]
+    root = {}  # SSA value -> host argument index it was built from or holds
+    for m in re.finditer(r'(%\w+) = llvm\.insertvalue (%\w+), (%\w+)\[0\]', body):
+        if m[2].startswith('%arg'):
+            root[m[1]] = int(m[2][4:])
+    for m in re.finditer(r'(%\w+) = llvm\.insertvalue %\w+, (%\w+)\[[1-9]', body):
+        if m[2] in root:
+            root[m[1]] = root[m[2]]
+    stored = {ptr: val for val, ptr in reversed(re.findall(r'llvm\.store (%\w+), (%\w+) :', body))}  # pointer -> first value
+    def resolve(value, depth=0):
+        if value.startswith('%arg'):
+            return int(value[4:])
+        if value in root:
+            return root[value]
+        if depth > 4 or value not in stored:
+            raise ValueError(f'cannot follow kernel argument {value} in {fn}')
+        return resolve(stored[value], depth + 1)
+    call = re.search(r'llvm\.call @vx_plugin_dispatch_async\(%\w+, %\w+, (%\w+),', body)
+    if not call:
+        raise ValueError(f'no dispatch in {fn}')
+    array = call[1]
+    slots = {0: array} | {int(m[2]): m[1] for m in re.finditer(rf'(%\w+) = llvm\.getelementptr {array}\[(\d+)\]', body)}
+    return [args[resolve(stored[slots[i]])] for i in sorted(slots)]
 
 
 def payload_images(ir: str):
@@ -140,6 +191,9 @@ def main() -> int:
         if not re.search(rf'^\.target {args.arch}\b', ptx, re.M):
             raise ValueError(f'PTX is not for {args.arch}')
         check_params(ptx, vx_name, params)
+        order = host_order(source, result.stdout)
+        if order != [p['name'] for p in params]:
+            raise ValueError(f'vxc passes the kernel {order} but the declaration says {[p["name"] for p in params]}')
         ptx = re.sub(rf'\b{vx_name}(?!\d)', name, ptx)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         evidence = {'schema': 'glm-vx-spawn-v1', 'entry': name, 'vx_entry': vx_name, 'params': params,

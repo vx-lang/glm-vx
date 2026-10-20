@@ -49,6 +49,45 @@ fn warp_sum(value: f32) on Topology::Device -> f32 {
   return sum;
 }
 
+// Full-warp shfl.sync.idx with clamp 31: every lane gets lane `source`'s value.
+fn shuffle_idx(value: f32, source: i32) on Topology::Device -> f32 {
+  return mlir!( inputs : (%v = value : f32, %s = source : i32), returns : f32, dialects : ["gpu", "arith"]) {
+    %w = "arith.constant"() {value = 32 : i32} : () -> i32
+    %r, %ok = gpu.shuffle idx %v, %s, %w : f32
+    macro.yield %r : f32
+  };
+}
+// The hand kernels' vxk_warp_max: lane 0 gets the warp's maximum (`other > result`, as there).
+fn warp_max(value: f32) on Topology::Device -> f32 {
+  let mut result: f32 = value;
+  let mut delta: i32 = 16;
+  while delta > 0 {
+    let other: f32 = shuffle_down(result, delta);
+    if other > result { result = other; }
+    delta = delta / 2;
+  }
+  return result;
+}
+// exp(x) as the hand kernels compute it, ex2(x * log2 e) with log2 e = 0f3FB8AA3B. The hand
+// kernels use ex2.approx.ftz.f32; math.exp2 gives ex2.approx.f32 (no ftz), so the two differ
+// only when exp(x) is subnormal (x below about -87). It becomes the ftz form once nvvm ops stay
+// in the device image (Vx #1945).
+fn fast_exp(x: f32) on Topology::Device -> f32 {
+  return mlir!( inputs : (%x = x : f32), returns : f32, dialects : ["math", "arith"]) {
+    %c = "arith.constant"() {value = 1.44269502 : f32} : () -> f32
+    %y = "arith.mulf"(%x, %c) : (f32, f32) -> f32
+    %r = math.exp2 %y : f32
+    macro.yield %r : f32
+  };
+}
+// The hand kernels' vxk_sigmoid: the exp argument is never positive, so it cannot overflow.
+fn sigmoid(x: f32) on Topology::Device -> f32 {
+  let mut result: f32 = 0.0;
+  if x >= 0.0 { result = 1.0 / (1.0 + fast_exp(0.0 - x)); }
+  else { let z: f32 = fast_exp(x); result = z / (1.0 + z); }
+  return result;
+}
+
 // bfloat16 bits to f32, exact for all 65,536 encodings: gpu/bf16.vx's glm_vx_bf16_decode
 // unchanged. A bit cast would be shorter, but f32::from_bits crashes vxc in device code (#1943).
 fn bf16_decode(bits: i32) on Topology::Device -> f32 {

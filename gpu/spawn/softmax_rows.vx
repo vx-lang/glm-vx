@@ -1,0 +1,57 @@
+// glm_vx_gpu_softmax_rows (and glm_vx_gpu_softmax, which is rows = 1) through Vx's own GPU
+// path. One block per row: the block maximum, exp(x - max) stored and summed, then a divide,
+// in the hand kernel's order. exp is fast_exp (device.vx).
+// spawn-include: device.vx
+// spawn-kernel: glm_vx_spawn_softmax_rows(rows: i32, dim: i32, x: f32[?], out: mut f32[?])
+
+pub fn softmax_rows(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                    rows: i32, dim: i32) -> void {
+  spawn on(Topology::Device) {
+    let mut shared = unsafe { Tensor<f32, [33], Memory::SMEM>::uninit() };
+    let tid: i32 = thread_id();
+    let block: i32 = block_dim();
+    let row: i32 = block_id();
+    // Uniform per block, so every thread of a running block reaches the barriers.
+    if rows > 0 && dim > 0 && row < rows && block >= 32 && block <= 1024 && block % 32 == 0 {
+      let base: i32 = row * dim;
+      let mut maximum: f32 = x[base];
+      let mut d: i32 = tid;
+      while d < dim { if x[base + d] > maximum { maximum = x[base + d]; } d = d + block; }
+      // block_max(maximum) inlined, as the block sums in rmsnorm_rows.vx are.
+      let partial_max: f32 = warp_max(maximum);
+      if tid % 32 == 0 { shared[tid / 32] = partial_max; }
+      barrier();
+      if tid < 32 {
+        let mut v_max: f32 = shared[0];
+        if tid < block / 32 { v_max = shared[tid]; }
+        let total_max: f32 = warp_max(v_max);
+        if tid == 0 { shared[32] = total_max; }
+      }
+      barrier();
+      let row_max: f32 = shared[32];
+      let mut sum: f32 = 0.0;
+      d = tid;
+      while d < dim {
+        let v: f32 = fast_exp(x[base + d] - row_max);
+        out[base + d] = v;
+        sum = sum + v;
+        d = d + block;
+      }
+      // block_sum(sum) inlined.
+      let partial_sum: f32 = warp_sum(sum);
+      if tid % 32 == 0 { shared[tid / 32] = partial_sum; }
+      barrier();
+      if tid < 32 {
+        let mut v_sum: f32 = 0.0;
+        if tid < block / 32 { v_sum = shared[tid]; }
+        let total_sum: f32 = warp_sum(v_sum);
+        if tid == 0 { shared[32] = total_sum; }
+      }
+      barrier();
+      let denominator: f32 = shared[32];
+      d = tid;
+      while d < dim { out[base + d] = out[base + d] / denominator; d = d + block; }
+    }
+  }
+  return;
+}

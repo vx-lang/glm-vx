@@ -1,0 +1,72 @@
+// glm_vx_gpu_mla_partial through Vx's own GPU path. Absorbed MLA: score = dot(q_latent,
+// cache_latent) + dot(q_rope, cache_rope); the cache latent is also the value. One block per
+// (head, split), one value per thread, online softmax over this split's selected tokens. exp is
+// fast_exp (device.vx); the block sum is written out (see rmsnorm_rows.vx).
+// spawn-include: device.vx
+// spawn-kernel: glm_vx_spawn_mla_partial(heads: i32, rank: i32, rope_dim: i32, tokens: i32, count: i32, selection_stride: i32, splits: i32, selected: i32[?], cache_latent: f32[?], q_latent: f32[?], q_rope: f32[?], cache_rope: f32[?], scale: f32, numerator: mut f32[?], stats: mut f32[?])
+
+pub fn mla_partial(numerator: &mut Tensor<f32, [?], Memory::HBM>, stats: &mut Tensor<f32, [?], Memory::HBM>,
+                   q_latent: &Tensor<f32, [?], Memory::HBM>, q_rope: &Tensor<f32, [?], Memory::HBM>,
+                   cache_latent: &Tensor<f32, [?], Memory::HBM>, cache_rope: &Tensor<f32, [?], Memory::HBM>,
+                   selected: &Tensor<i32, [?], Memory::HBM>, heads: i32, rank: i32, rope_dim: i32,
+                   tokens: i32, count: i32, selection_stride: i32, splits: i32, scale: f32) -> void {
+  spawn on(Topology::Device) {
+    let mut shared = unsafe { Tensor<f32, [33], Memory::SMEM>::uninit() };
+    let tid: i32 = thread_id();
+    let block: i32 = block_dim();
+    let task: i32 = block_id();
+    // Uniform per block; the token tests below are too (every thread reads the same id).
+    if heads > 0 && rank > 0 && rope_dim >= 0 && tokens >= 0 && count >= 0 && selection_stride >= 0 && splits > 0
+       && block >= 32 && block <= 1024 && block % 32 == 0 && block >= rank && task < heads * splits {
+      let h: i32 = task / splits;
+      let split: i32 = task % splits;
+      let mut m: f32 = 0.0;
+      let mut l: f32 = 0.0;
+      let mut acc: f32 = 0.0;
+      let mut j: i32 = split;
+      while j < count {
+        let token: i32 = selected[h * selection_stride + j];
+        if token >= 0 && token < tokens {
+          let mut dot: f32 = 0.0;
+          let mut value: f32 = 0.0;
+          if tid < rank {
+            value = cache_latent[token * rank + tid];
+            dot = q_latent[h * rank + tid] * value;
+          }
+          let mut d: i32 = tid;
+          while d < rope_dim {
+            dot = dot + q_rope[h * rope_dim + d] * cache_rope[token * rope_dim + d];
+            d = d + block;
+          }
+          // block_sum(dot) inlined.
+          let partial_dot: f32 = warp_sum(dot);
+          if tid % 32 == 0 { shared[tid / 32] = partial_dot; }
+          barrier();
+          if tid < 32 {
+            let mut v_dot: f32 = 0.0;
+            if tid < block / 32 { v_dot = shared[tid]; }
+            let total_dot: f32 = warp_sum(v_dot);
+            if tid == 0 { shared[32] = total_dot; }
+          }
+          barrier();
+          let score: f32 = shared[32] * scale;
+          let mut next_m: f32 = score;
+          let mut alpha: f32 = 0.0;
+          let mut beta: f32 = 1.0;
+          if l > 0.0 {
+            if m > score { next_m = m; }
+            alpha = fast_exp(m - next_m);
+            beta = fast_exp(score - next_m);
+          }
+          acc = acc * alpha + beta * value;
+          l = l * alpha + beta;
+          m = next_m;
+        }
+        j = j + splits;
+      }
+      if tid < rank { numerator[task * rank + tid] = acc; }
+      if tid == 0 { stats[task * 2] = m; stats[task * 2 + 1] = l; }
+    }
+  }
+  return;
+}

@@ -1,0 +1,48 @@
+// glm_vx_gpu_mla_merge through Vx's own GPU path: the stable merge of the online-softmax
+// partitions mla_partial writes, one block per head. exp is fast_exp (device.vx).
+// spawn-include: device.vx
+// spawn-kernel: glm_vx_spawn_mla_merge(heads: i32, rank: i32, splits: i32, stats: f32[?], numerator: f32[?], out: mut f32[?])
+
+pub fn mla_merge(out: &mut Tensor<f32, [?], Memory::HBM>, numerator: &Tensor<f32, [?], Memory::HBM>,
+                 stats: &Tensor<f32, [?], Memory::HBM>, heads: i32, rank: i32, splits: i32) -> void {
+  spawn on(Topology::Device) {
+    let h: i32 = block_id();
+    let tid: i32 = thread_id();
+    let block: i32 = block_dim();
+    if heads > 0 && rank > 0 && splits > 0 && h < heads {
+      let mut m: f32 = 0.0;
+      let mut seen: i32 = 0;
+      let mut s: i32 = 0;
+      while s < splits {
+        let task: i32 = h * splits + s;
+        if stats[task * 2 + 1] > 0.0 {
+          let v: f32 = stats[task * 2];
+          if seen == 0 { m = v; seen = 1; }
+          else { if v > m { m = v; } }
+        }
+        s = s + 1;
+      }
+      let mut d: i32 = tid;
+      while d < rank {
+        let mut sum: f32 = 0.0;
+        let mut denominator: f32 = 0.0;
+        let mut t: i32 = 0;
+        while t < splits {
+          let task: i32 = h * splits + t;
+          let l: f32 = stats[task * 2 + 1];
+          if l > 0.0 {
+            let factor: f32 = fast_exp(stats[task * 2] - m);
+            sum = sum + numerator[task * rank + d] * factor;
+            denominator = denominator + l * factor;
+          }
+          t = t + 1;
+        }
+        let mut result: f32 = 0.0;
+        if denominator > 0.0 { result = sum / denominator; }
+        out[h * rank + d] = result;
+        d = d + block;
+      }
+    }
+  }
+  return;
+}

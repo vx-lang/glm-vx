@@ -1,0 +1,66 @@
+// glm_vx_gpu_router through Vx's own GPU path: one full warp picks k <= 8 of experts <= 256 by
+// sigmoid(logit) + bias (the bias changes ids only), with the hand kernel's stable warp argmax
+// (ties go to the lower id), then normalizes the chosen sigmoid weights and scales them.
+// spawn-include: device.vx
+// spawn-kernel: glm_vx_spawn_router(experts: i32, k: i32, indices: mut i32[?], logits: f32[?], bias: f32[?], weights: mut f32[?], scale: f32)
+
+// The hand kernels' vxk_warp_argmax: a negative index marks an empty lane; ids <= 256 are exact
+// as f32, so the pair travels through f32 shuffles. Every lane gets lane 0's result.
+fn warp_argmax(score: f32, index: i32) on Topology::Device -> i32 {
+  let mut result: i32 = index;
+  let mut best: f32 = score;
+  let mut delta: i32 = 16;
+  while delta > 0 {
+    let other_score: f32 = shuffle_down(best, delta);
+    let other_index: i32 = shuffle_down(result as f32, delta) as i32;
+    let mut replace: i32 = 0;
+    if other_index >= 0 {
+      if result < 0 { replace = 1; }
+      else {
+        if other_score > best { replace = 1; }
+        if other_score == best { if other_index < result { replace = 1; } }
+      }
+    }
+    if replace != 0 { best = other_score; result = other_index; }
+    delta = delta / 2;
+  }
+  return shuffle_idx(result as f32, 0) as i32;
+}
+
+pub fn router(indices: &mut Tensor<i32, [?], Memory::HBM>, weights: &mut Tensor<f32, [?], Memory::HBM>,
+              logits: &Tensor<f32, [?], Memory::HBM>, bias: &Tensor<f32, [?], Memory::HBM>,
+              experts: i32, k: i32, scale: f32) -> void {
+  spawn on(Topology::Device) {
+    if experts > 0 && experts <= 256 && k > 0 && k <= 8 && k <= experts && block_id() == 0 && block_dim() == 32 {
+      let lane: i32 = thread_id();
+      let mut slot: i32 = 0;
+      while slot < k {
+        let mut best_index: i32 = -1;
+        let mut best_score: f32 = 0.0;
+        let mut e: i32 = lane;
+        while e < experts {
+          let mut used: i32 = 0;
+          let mut previous: i32 = 0;
+          while previous < slot { if indices[previous] == e { used = 1; } previous = previous + 1; }
+          if used == 0 {
+            let score: f32 = sigmoid(logits[e]) + bias[e];
+            if best_index < 0 { best_index = e; best_score = score; }
+            else { if score > best_score { best_index = e; best_score = score; } }
+          }
+          e = e + 32;
+        }
+        let chosen: i32 = warp_argmax(best_score, best_index);
+        if lane == 0 { indices[slot] = chosen; weights[slot] = sigmoid(logits[chosen]); }
+        // Makes the chosen ids and weights visible before the next selection.
+        barrier();
+        slot = slot + 1;
+      }
+      let mut value: f32 = 0.0;
+      if lane < k { value = weights[lane]; }
+      let partial: f32 = warp_sum(value);
+      let total: f32 = shuffle_idx(partial, 0) + 0.00000000000000000001;
+      if lane < k { weights[lane] = value / total * scale; }
+    }
+  }
+  return;
+}
