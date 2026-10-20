@@ -91,11 +91,17 @@ def test_builds_add_from_vx(tmp_path):
 
 
 @needs_vxc
-def test_refuses_add_declared_in_the_wrong_order(tmp_path):
-    source = (HERE / 'add.vx').read_text().replace('a: f32[?], b: f32[?], out: mut f32[?]', 'out: mut f32[?], a: f32[?], b: f32[?]')
-    (tmp_path / 'add.vx').write_text(source)
+@pytest.mark.parametrize('kernel,right,wrong,message', [
+    ('add', 'a: f32[?], b: f32[?], out: mut f32[?]', 'out: mut f32[?], a: f32[?], b: f32[?]', 'mut'),
+    ('int4_matvec', 'scales: u16[?], scale_kind: i32, packed: u8[?]', 'packed: u8[?], scale_kind: i32, scales: u16[?]', 'bits wide'),
+    ('fp8_matvec', 'scales: f32[?], weight: u8[?]', 'weight: u8[?], scales: f32[?]', 'bits wide'),
+])
+def test_refuses_a_signature_in_the_wrong_order(tmp_path, kernel, right, wrong, message):
+    source = (HERE / f'{kernel}.vx').read_text()
+    assert right in source
+    (tmp_path / f'{kernel}.vx').write_text(source.replace(right, wrong))
     shutil.copy(HERE / 'device.vx', tmp_path)
-    result = subprocess.run([sys.executable, str(HERE / 'build.py'), '--source', str(tmp_path / 'add.vx'),
-                             '--machine', str(HERE / 'machine.vx'), '--output', str(tmp_path / 'add.ptx')],
+    result = subprocess.run([sys.executable, str(HERE / 'build.py'), '--source', str(tmp_path / f'{kernel}.vx'),
+                             '--machine', str(HERE / 'machine.vx'), '--output', str(tmp_path / 'k.ptx')],
                             text=True, capture_output=True)
-    assert result.returncode == 1 and 'mut' in result.stderr
+    assert result.returncode == 1 and message in result.stderr, result.stderr

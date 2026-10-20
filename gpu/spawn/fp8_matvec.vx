@@ -1,0 +1,57 @@
+// glm_vx_gpu_fp8_matvec through Vx's own GPU path. FP8 e4m3fn weights with one f32 scale per
+// 128x128 block; one warp per row, four adjacent-lane byte loads per 128-column tile, and
+// (value * scale) * x summed in the hand kernel's order.
+// spawn-include: device.vx
+// spawn-kernel: glm_vx_spawn_fp8_matvec(rows: i32, cols: i32, scales: f32[?], weight: u8[?], x: f32[?], out: mut f32[?])
+
+// e4m3fn byte to f32, exact: gpu/fp8.vx's glm_vx_fp8_decode. No infinity; S.1111.111 is NaN.
+fn fp8_decode(bits: i32) on Topology::Device -> f32 {
+  let exponent: i32 = (bits >> 3) & 15;
+  let mantissa: i32 = bits & 7;
+  let mut magnitude: f32 = (mantissa as f32) / 512.0;
+  if exponent > 0 {
+    let power: i32 = 1 << (exponent - 1);
+    magnitude = ((8 + mantissa) as f32) * (power as f32) / 512.0;
+  }
+  if exponent == 15 { if mantissa == 7 { magnitude = 0.0 / 0.0; } }
+  let mut sign: f32 = 1.0;
+  if (bits & 128) != 0 { sign = -1.0; }
+  return magnitude * sign;
+}
+
+pub fn fp8_matvec(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<u8, [?], Memory::HBM>,
+                  scales: &Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                  rows: i32, cols: i32) -> void {
+  spawn on(Topology::Device) {
+    let tid: i32 = thread_id();
+    let lane: i32 = tid & 31;
+    let block: i32 = block_dim();
+    let warps: i32 = block / 32;
+    let row: i64 = (block_id() as i64) * (warps as i64) + ((tid / 32) as i64);
+    if rows > 0 && cols >= 0 && block >= 32 && block <= 1024 && block % 32 == 0 && row < (rows as i64) {
+      let k: i64 = cols as i64;
+      let scale_cols: i64 = (k + 127) / 128;
+      let row_base: i64 = row * k;
+      let scale_base: i64 = (row / 128) * scale_cols;
+      let mut sum: f32 = 0.0;
+      let mut tile: i64 = 0;
+      while tile < scale_cols {
+        let scale: f32 = scales[scale_base + tile];
+        let tile_base: i64 = tile * 128 + (lane as i64);
+        let mut step: i32 = 0;
+        while step < 4 {
+          let col: i64 = tile_base + ((step * 32) as i64);
+          if col < k {
+            let value: f32 = fp8_decode(weight[row_base + col] as i32);
+            sum = sum + (value * scale) * x[col];
+          }
+          step = step + 1;
+        }
+        tile = tile + 1;
+      }
+      let total: f32 = warp_sum(sum);
+      if lane == 0 { out[row] = total; }
+    }
+  }
+  return;
+}

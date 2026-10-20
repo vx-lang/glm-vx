@@ -47,3 +47,29 @@ fn warp_sum(value: f32) on Topology::Device -> f32 {
   sum = sum + shuffle_down(sum, 1);
   return sum;
 }
+
+// bfloat16 bits to f32, exact for all 65,536 encodings: gpu/bf16.vx's glm_vx_bf16_decode
+// unchanged. A bit cast would be shorter, but f32::from_bits crashes vxc in device code (#1943).
+fn bf16_decode(bits: i32) on Topology::Device -> f32 {
+  let exponent: i32 = (bits >> 7) & 255;
+  let mantissa: i32 = bits & 127;
+  let mut magnitude: f32 = (mantissa as f32) / 128.0;
+  let mut shift: i32 = -126;
+  if exponent > 0 {
+    magnitude = ((128 + mantissa) as f32) / 128.0;
+    shift = exponent - 127;
+  }
+  let mut power: f32 = 1.0;
+  while shift > 30 { power = power * 1073741824.0; shift = shift - 30; }
+  while shift < -30 { power = power / 1073741824.0; shift = shift + 30; }
+  if shift >= 0 { power = power * ((1 << shift) as f32); }
+  if shift < 0 { power = power / ((1 << (0 - shift)) as f32); }
+  magnitude = magnitude * power;
+  if exponent == 255 {
+    if mantissa == 0 { magnitude = 1.0 / 0.0; }
+    if mantissa != 0 { magnitude = 0.0 / 0.0; }
+  }
+  let mut sign: f32 = 1.0;
+  if (bits & 32768) != 0 { sign = -1.0; }
+  return magnitude * sign;
+}

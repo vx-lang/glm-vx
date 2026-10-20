@@ -15,6 +15,8 @@ block, because Vx's runtime cannot do that yet (see below).
 | `add.vx` | `glm_vx_gpu_add` | builds, ptxas sm_80 OK; A100 not run |
 | `matvec.vx` | `glm_vx_gpu_matvec` | builds, ptxas sm_80 OK; A100 not run |
 | `bf16_matvec.vx` | `glm_vx_gpu_bf16_matvec` | builds, ptxas sm_80 OK; A100 not run |
+| `int4_matvec.vx` | `glm_vx_gpu_int4_matvec` | builds, ptxas sm_80 OK; A100 not run |
+| `fp8_matvec.vx` | `glm_vx_gpu_fp8_matvec` | builds, ptxas sm_80 OK; A100 not run |
 
 `gpu/test_spawn_hardware.py` checks each against the hand kernel, bit for bit, on a GPU.
 
@@ -35,7 +37,10 @@ The parameters are the region's captures in first-use order; an assignment reads
 side first, so `out[i] = a[i] + b[i]` captures `a`, `b`, then `out`. A rank-1 tensor becomes
 five u64 (base, aligned pointer, offset, size, stride). `build.py` refuses a declaration whose
 scalar widths or descriptor layout differ from the PTX, or whose `mut` tensors are not the
-ones the kernel stores to. `device.vx` holds thread-id and shuffle helpers.
+ones the kernel stores to, or whose element types differ from the width of the loads made
+through each tensor (address arithmetic is traced from the descriptor's pointer). Two inputs
+of the same type in each other's place still pass; the hardware tests catch those.
+`device.vx` holds thread-id, shuffle and bf16 helpers.
 
 ## What Vx is missing
 

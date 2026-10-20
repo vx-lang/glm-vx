@@ -105,3 +105,45 @@ def test_spawn_bf16_matvec_matches_hand_kernel(context, rows, cols):
     hand.launch(grid, 256, [hand_out, dw, dx, C.c_int32(rows), C.c_int32(cols)])
     context.synchronize()
     np.testing.assert_array_equal(download(spawn_out), download(hand_out))
+
+
+@pytest.mark.parametrize('rows,cols,scale_kind', [(5, 131, 0), (64, 6144, 1), (3, 257, 1)])
+def test_spawn_int4_matvec_matches_hand_kernel(context, rows, cols, scale_kind):
+    rng = np.random.default_rng(rows * 7 + cols)
+    groups, row_bytes = -(-cols // 128), -(-cols // 2)
+    packed = rng.integers(0, 256, size=rows * row_bytes, dtype=np.uint8)
+    if cols % 2:  # odd tail: the padding nibble is zero
+        packed.reshape(rows, row_bytes)[:, -1] &= 0x0F
+    magnitudes = rng.uniform(0.001, 0.1, size=rows * groups).astype(np.float32)
+    if scale_kind:
+        scales = (magnitudes.view(np.uint32) >> 16).astype(np.uint16)
+    else:
+        scales = magnitudes.astype(np.float16).view(np.uint16)
+    x = rng.normal(size=cols).astype('f4')
+    dp, ds, dx = upload(context, packed), upload(context, scales), upload(context, x)
+    spawn_out, hand_out = context.tensor((rows,)), context.tensor((rows,))
+    grid = -(-rows // 8)
+    SpawnKernel(context, BUILD / 'spawn/int4_matvec.ptx').launch(
+        grid, 256, rows=rows, cols=cols, scales=ds, scale_kind=scale_kind, packed=dp, x=dx, out=spawn_out)
+    hand = context.load_ptx(BUILD / 'int4.ptx').kernel('glm_vx_gpu_int4_matvec')
+    hand.launch(grid, 256, [hand_out, dp, ds, dx, C.c_int32(rows), C.c_int32(cols), C.c_int32(scale_kind)])
+    context.synchronize()
+    np.testing.assert_array_equal(download(spawn_out), download(hand_out))
+
+
+@pytest.mark.parametrize('rows,cols', [(5, 131), (300, 6144)])
+def test_spawn_fp8_matvec_matches_hand_kernel(context, rows, cols):
+    rng = np.random.default_rng(rows * 11 + cols)
+    weight = rng.integers(0, 256, size=rows * cols, dtype=np.uint8)
+    weight[(weight & 0x7F) == 0x7F] = 0  # no NaN codes
+    scales = rng.uniform(0.001, 0.1, size=-(-rows // 128) * -(-cols // 128)).astype('f4')
+    x = rng.normal(size=cols).astype('f4')
+    dw, ds, dx = upload(context, weight), upload(context, scales), upload(context, x)
+    spawn_out, hand_out = context.tensor((rows,)), context.tensor((rows,))
+    grid = -(-rows // 8)
+    SpawnKernel(context, BUILD / 'spawn/fp8_matvec.ptx').launch(
+        grid, 256, rows=rows, cols=cols, scales=ds, weight=dw, x=dx, out=spawn_out)
+    hand = context.load_ptx(BUILD / 'fp8.ptx').kernel('glm_vx_gpu_fp8_matvec')
+    hand.launch(grid, 256, [hand_out, dw, ds, dx, C.c_int32(rows), C.c_int32(cols)])
+    context.synchronize()
+    np.testing.assert_array_equal(download(spawn_out), download(hand_out))

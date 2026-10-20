@@ -19,6 +19,7 @@ import argparse, hashlib, json, os, re, subprocess, sys, tempfile
 from pathlib import Path
 
 SCALARS = {'i32': '.u32', 'i64': '.u64', 'f32': '.f32'}
+ELEMENT_BITS = {'f32': 32, 'i32': 32, 'u16': 16, 'u8': 8}
 DECL = re.compile(r'^//\s*spawn-kernel:\s*(\w+)\((.*)\)\s*$', re.M)
 INCLUDE = re.compile(r'^//\s*spawn-include:\s*(\S+)\s*$', re.M)
 
@@ -52,6 +53,20 @@ def payload_images(ir: str):
     return images
 
 
+def derived(body: str, base: str):
+    """Registers computed from BASE by 64-bit address arithmetic (add/sub/mov/cvta), followed
+    to a fixed point, so a load through base + row offset + column offset is still traced."""
+    steps = [(m[1], set(re.findall(r'%rd\d+', m[2]))) for m in
+             re.finditer(r'^\s*(?:add|sub|mov|cvta)[.\w]*\s+(%rd\d+),([^;]*);', body, re.M)]
+    found, grew = {base}, True
+    while grew:
+        grew = False
+        for dst, srcs in steps:
+            if dst not in found and srcs & found:
+                found.add(dst); grew = True
+    return found
+
+
 def check_params(ptx: str, entry: str, params):
     head = re.search(rf'\.entry {entry}\((.*?)\)', ptx, re.S)
     if not head:
@@ -81,10 +96,15 @@ def check_params(ptx: str, entry: str, params):
             continue
         global_reg = re.search(rf'cvta\.to\.global\.u64\s+(%rd\d+), {re.escape(reg[1])};', body)
         base = global_reg[1] if global_reg else reg[1]
-        # Follow address arithmetic one step: add.s64 %rdX, %base, ...
-        addresses = {base} | set(re.findall(rf'add\.s64\s+(%rd\d+), {re.escape(base)},', body))
+        addresses = derived(body, base)
         if any(re.search(rf'st\.global\.\w+\s+\[{re.escape(a)}(\+\d+)?\]', body) for a in addresses):
             stored.add(p['name'])
+        # Element width: loads through this tensor must be as wide as its declared element, which
+        # catches two read-only tensors of different types declared in each other's place.
+        widths = {int(w) for a in addresses
+                  for w in re.findall(rf'ld\.global(?:\.nc)?\.[bsuf](\d+)\s+%\w+, \[{re.escape(a)}(?:\+\d+)?\]', body)}
+        if widths - {ELEMENT_BITS[p['element']]}:
+            raise ValueError(f'{p["name"]} is declared {p["element"]} but loaded {sorted(widths)} bits wide')
     declared = {p['name'] for p in params if p['kind'] == 'memref' and p['mut']}
     if stored != declared:
         raise ValueError(f'kernel stores to {sorted(stored)} but the signature marks {sorted(declared)} mut')
