@@ -39,11 +39,10 @@ block, because Vx's runtime cannot do that yet (see below).
 | `mla_merge.vx` | `glm_vx_gpu_mla_merge` | 31 |
 
 All assemble with ptxas for sm_80 with no spills; none has run on a GPU yet. The three norms
-need a correctly rounded sqrt, so they build only with a vxc that has #1944 (PR #1955, branch
-device-sqrt-rounded); the others build with vxc 390c2534 too. The five kernels with exp use
-`fast_exp` (device.vx), the hand path's `x * log2 e` followed by `ex2.approx.f32` where the
-hand kernels have `ex2.approx.ftz.f32`; the two agree except when exp(x) is subnormal, and the
-tests keep every argument above -80. Barrier counts match the hand kernels (softmax 4, router
+need a correctly rounded sqrt, which needs #1944 (PR #1955), and the five kernels with exp use
+`fast_exp` (device.vx), `ex2.approx.ftz.f32(x * log2 e)` exactly as the hand kernels do, which
+needs nvvm intrinsics in the device image, #1945 (PR #1959). Built and checked with Vx main
+plus PRs #1952, #1954, #1955, #1958 and #1959. Barrier counts match the hand kernels (softmax 4, router
 1, mla_partial 2). Not ported: gemm_tf32 (`mma.sync m16n8k8`: #350).
 
 `gpu/test_spawn_hardware.py` checks each against the hand kernel, bit for bit, on a GPU.
@@ -83,15 +82,15 @@ the bf16, binary16, INT4 and FP8 decodes.
 | Correctly rounded sqrt / div (the norms) | `sqrt.approx` / `rsqrt.approx` in 390c2534; `sqrt.rn` + `rcp.rn` with PR #1955 | #1944 |
 | A shared tensor passed to a device function | `memref.cast` drops address space 3, then the fallback panics ("Function barrier not found"); block reductions are written out in each kernel | #1956 |
 | `barrier()` inside a device function | no device image, no warning | #1957 |
-| exp as the hand kernels compute it, `ex2.approx.ftz.f32(x * log2 e)` | `fast_exp` gives `ex2.approx.f32` (no ftz), so a subnormal exp(x) differs | #1945 (nvvm ops kept in the device image) |
+| exp as the hand kernels compute it, `ex2.approx.ftz.f32(x * log2 e)` | `llvm.call_intrinsic "llvm.nvvm.ex2.approx.ftz.f"` in an mlir! block, with PR #1959 | #1945 |
 | Bit casts (`f32::from_bits`) | crash; bf16 decode uses exact arithmetic instead | #1943 |
 | Scalars passed by value | E6003 unless `machine.vx` lists CPU_DRAM as visible | #1947 |
-| Raw pointers in a region | silent host fallback; kernels take `[?]` tensors | #1945 |
+| Raw pointers in a region | silent host fallback before PR #1959, which takes them and warns on any other fallback; kernels take `[?]` tensors | #1945 |
 | Shared memory `::new()` | zero-fill races with other warps; use `unsafe { ::uninit() }` | #1946 |
 | A Vx build of the same file (exe or .so) | fails on `gpu.shuffle` / `gpu.thread_id` in the host copy (fix in review: a CPU stub that aborts) | #1942 |
 | Grid and block chosen by the program | runtime picks from literal trip counts, else 1x1x1 | #252 |
 | Launch without a device sync each time | `cudaDeviceSynchronize` after every launch | #25 |
 | TF32 `mma.sync m16n8k8` | WMMA m16n16k8 only | #350 |
 
-Once nvvm ops stay in the device image (#1945), `fast_exp` can use the ftz form; once #252 and #25 land, Vx can launch these
+Once #252 and #25 land, Vx can launch these
 itself instead of Python.

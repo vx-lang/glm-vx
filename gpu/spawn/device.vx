@@ -68,15 +68,14 @@ fn warp_max(value: f32) on Topology::Device -> f32 {
   }
   return result;
 }
-// exp(x) as the hand kernels compute it, ex2(x * log2 e) with log2 e = 0f3FB8AA3B. The hand
-// kernels use ex2.approx.ftz.f32; math.exp2 gives ex2.approx.f32 (no ftz), so the two differ
-// only when exp(x) is subnormal (x below about -87). It becomes the ftz form once nvvm ops stay
-// in the device image (Vx #1945).
+// exp(x) exactly as the hand kernels compute it: ex2.approx.ftz.f32(x * log2 e), log2 e =
+// 0f3FB8AA3B. The NVVM intrinsic stays in the device image from Vx #1945 (PR #1959) on;
+// math.exp2 would give ex2.approx.f32, which differs when exp(x) is subnormal.
 fn fast_exp(x: f32) on Topology::Device -> f32 {
-  return mlir!( inputs : (%x = x : f32), returns : f32, dialects : ["math", "arith"]) {
+  return mlir!( inputs : (%x = x : f32), returns : f32, dialects : ["llvm", "arith"]) {
     %c = "arith.constant"() {value = 1.44269502 : f32} : () -> f32
     %y = "arith.mulf"(%x, %c) : (f32, f32) -> f32
-    %r = math.exp2 %y : f32
+    %r = llvm.call_intrinsic "llvm.nvvm.ex2.approx.ftz.f"(%y) : (f32) -> f32
     macro.yield %r : f32
   };
 }

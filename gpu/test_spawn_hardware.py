@@ -391,9 +391,9 @@ def test_spawn_layernorm_matches_hand_kernel(context, rows, dim, block):
     np.testing.assert_array_equal(download(spawn_out), download(hand_out))
 
 
-# Kernels with exp: the hand kernels use ex2.approx.ftz.f32 and the spawn ones ex2.approx.f32
-# (device.vx fast_exp), equal except for a subnormal exp(x). Inputs keep every exp argument
-# above -80, so the two must agree bit for bit.
+# Kernels with exp: device.vx fast_exp is ex2.approx.ftz.f32(x * log2 e), as in the hand
+# kernels, which needs Vx #1945 (PR #1959). The deep-tail case below makes exp(x) subnormal,
+# where a non-ftz exp2 would differ.
 @pytest.mark.parametrize('rows,dim,block', [(1, 154880, 256), (5, 131, 64), (3, 1, 32), (4, 2048, 1024)])
 def test_spawn_softmax_rows_matches_hand_kernel(context, rows, dim, block):
     rng = np.random.default_rng(rows * dim + 5)
@@ -409,6 +409,18 @@ def test_spawn_softmax_rows_matches_hand_kernel(context, rows, dim, block):
     np.testing.assert_array_equal(download(spawn_out), download(hand_out))
     if rows == 1:
         np.testing.assert_array_equal(download(spawn_out), download(single_out))
+
+
+def test_spawn_softmax_flushes_subnormal_exp_like_hand_kernel(context):
+    # x - max reaches -100: exp of anything below about -87.3 is subnormal, which ftz flushes.
+    x = np.linspace(-100.0, 0.0, 4096).astype('f4')
+    dx = upload(context, x)
+    spawn_out, hand_out = context.tensor((4096,)), context.tensor((4096,))
+    SpawnKernel(context, BUILD / 'spawn/softmax_rows.ptx').launch(1, 256, rows=1, dim=4096, x=dx, out=spawn_out)
+    context.load_ptx(BUILD / 'kernels.ptx').kernel('glm_vx_gpu_softmax_rows').launch(1, 256, [hand_out, dx, C.c_int32(1), C.c_int32(4096)])
+    context.synchronize()
+    np.testing.assert_array_equal(download(spawn_out), download(hand_out))
+    assert (download(spawn_out)[x < -88] == 0).all()
 
 
 @pytest.mark.parametrize('n,grid,block', [(1, 1, 32), (1000, 4, 128), (12288, 48, 256), (100003, 7, 96)])
