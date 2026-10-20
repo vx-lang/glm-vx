@@ -1,0 +1,38 @@
+// glm_vx_gpu_index_scores through Vx's own GPU path: DSA index scores, one warp per token and
+// all heads in one launch. score = sum_h weights[h] * relu(dot(q_h, key) * scale); the caller
+// supplies causal keys and weights already scaled by heads**-0.5. Whole warps skip together
+// (the condition is uniform per warp), so the full-mask shuffles stay legal.
+// spawn-include: device.vx
+// spawn-kernel: glm_vx_spawn_index_scores(tokens: i32, heads: i32, dim: i32, q: f32[?], keys: f32[?], scale: f32, weights: f32[?], out: mut f32[?])
+
+pub fn index_scores(out: &mut Tensor<f32, [?], Memory::HBM>, q: &Tensor<f32, [?], Memory::HBM>,
+                    keys: &Tensor<f32, [?], Memory::HBM>, weights: &Tensor<f32, [?], Memory::HBM>,
+                    tokens: i32, heads: i32, dim: i32, scale: f32) -> void {
+  spawn on(Topology::Device) {
+    let tid: i32 = thread_id();
+    let block: i32 = block_dim();
+    let lane: i32 = tid % 32;
+    let token: i32 = block_id() * (block / 32) + tid / 32;
+    if tokens > 0 && heads > 0 && dim > 0 && block >= 32 && block <= 1024 && block % 32 == 0 && token < tokens {
+      let mut score: f32 = 0.0;
+      let mut head: i32 = 0;
+      while head < heads {
+        let mut dot: f32 = 0.0;
+        let mut d: i32 = lane;
+        while d < dim {
+          dot = dot + q[head * dim + d] * keys[token * dim + d];
+          d = d + 32;
+        }
+        let scaled: f32 = warp_sum(dot) * scale;
+        if lane == 0 {
+          let mut activated: f32 = scaled;
+          if activated < 0.0 { activated = 0.0; }
+          score = score + weights[head] * activated;
+        }
+        head = head + 1;
+      }
+      if lane == 0 { out[token] = score; }
+    }
+  }
+  return;
+}

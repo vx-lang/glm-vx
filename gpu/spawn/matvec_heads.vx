@@ -1,0 +1,33 @@
+// glm_vx_gpu_matvec_heads through Vx's own GPU path: per-head matvec in one launch,
+// out[h*out_stride + r] = sum_c weight[h*w_stride + r*cols + c] * x[h*x_stride + c]. A warp
+// owns one (head, row); the column loop and warp sum are matvec's, so each head matches a
+// separate matvec bit for bit.
+// spawn-include: device.vx
+// spawn-kernel: glm_vx_spawn_matvec_heads(heads: i32, rows: i32, cols: i32, w_stride: i32, x_stride: i32, weight: f32[?], x: f32[?], out_stride: i32, out: mut f32[?])
+
+pub fn matvec_heads(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<f32, [?], Memory::HBM>,
+                    x: &Tensor<f32, [?], Memory::HBM>, heads: i32, rows: i32, cols: i32,
+                    w_stride: i32, x_stride: i32, out_stride: i32) -> void {
+  spawn on(Topology::Device) {
+    let tid: i32 = thread_id();
+    let block: i32 = block_dim();
+    let lane: i32 = tid % 32;
+    let index: i64 = (block_id() as i64) * ((block / 32) as i64) + ((tid / 32) as i64);
+    if heads > 0 && rows > 0 && cols >= 0 && block >= 32 && block <= 1024 && block % 32 == 0
+       && index < (heads as i64) * (rows as i64) {
+      let h: i64 = index / (rows as i64);
+      let r: i64 = index % (rows as i64);
+      let wbase: i64 = h * (w_stride as i64) + r * (cols as i64);
+      let xbase: i64 = h * (x_stride as i64);
+      let mut sum: f32 = 0.0;
+      let mut c: i32 = lane;
+      while c < cols {
+        sum = sum + weight[wbase + (c as i64)] * x[xbase + (c as i64)];
+        c = c + 32;
+      }
+      let total: f32 = warp_sum(sum);
+      if lane == 0 { out[h * (out_stride as i64) + r] = total; }
+    }
+  }
+  return;
+}

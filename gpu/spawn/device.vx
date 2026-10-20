@@ -73,3 +73,53 @@ fn bf16_decode(bits: i32) on Topology::Device -> f32 {
   if (bits & 32768) != 0 { sign = -1.0; }
   return magnitude * sign;
 }
+
+// IEEE binary16 bits to f32, exact for every encoding: gpu/int4.vx's glm_vx_i4_half.
+fn half_decode(bits: i32) on Topology::Device -> f32 {
+  let exponent: i32 = (bits >> 10) & 31;
+  let mantissa: i32 = bits & 1023;
+  let mut magnitude: f32 = (mantissa as f32) / 16777216.0;
+  if exponent > 0 {
+    let mut power: f32 = 1.0;
+    if exponent >= 15 { power = ((1 << (exponent - 15)) as f32); }
+    if exponent < 15 { power = 1.0 / ((1 << (15 - exponent)) as f32); }
+    magnitude = ((1024 + mantissa) as f32) * power / 1024.0;
+  }
+  if exponent == 31 {
+    if mantissa == 0 { magnitude = 1.0 / 0.0; }
+    if mantissa != 0 { magnitude = 0.0 / 0.0; }
+  }
+  let mut sign: f32 = 1.0;
+  if (bits & 32768) != 0 { sign = -1.0; }
+  return magnitude * sign;
+}
+
+fn group_scale(bits: i32, kind: i32) on Topology::Device -> f32 {
+  let mut scale: f32 = 0.0;
+  if kind != 0 { scale = bf16_decode(bits); } else { scale = half_decode(bits); }
+  return scale;
+}
+
+// Signed 4-bit code: high 0 is the low nibble, 1 the high nibble.
+fn int4_code(byte: i32, high: i32) on Topology::Device -> f32 {
+  let mut nibble: i32 = byte & 15;
+  if high != 0 { nibble = (byte >> 4) & 15; }
+  if nibble >= 8 { nibble = nibble - 16; }
+  return nibble as f32;
+}
+
+// e4m3fn byte to f32, exact: gpu/fp8.vx's glm_vx_fp8_decode (= fp8_batched.vx's
+// glm_vx_fp8m_decode). No infinity; S.1111.111 is NaN.
+fn fp8_decode(bits: i32) on Topology::Device -> f32 {
+  let exponent: i32 = (bits >> 3) & 15;
+  let mantissa: i32 = bits & 7;
+  let mut magnitude: f32 = (mantissa as f32) / 512.0;
+  if exponent > 0 {
+    let power: i32 = 1 << (exponent - 1);
+    magnitude = ((8 + mantissa) as f32) * (power as f32) / 512.0;
+  }
+  if exponent == 15 { if mantissa == 7 { magnitude = 0.0 / 0.0; } }
+  let mut sign: f32 = 1.0;
+  if (bits & 128) != 0 { sign = -1.0; }
+  return magnitude * sign;
+}

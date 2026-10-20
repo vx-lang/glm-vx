@@ -1,0 +1,20 @@
+// glm_vx_gpu_scaled_add through Vx's own GPU path: out[i] = out[i] + x[i] * weights[slot], the
+// weighted expert accumulation with the router weight read on the device. Two roundings, as
+// the hand kernel and the host path.
+// spawn-include: device.vx
+// spawn-kernel: glm_vx_spawn_scaled_add(slot: i32, weights: f32[?], n: i32, x: f32[?], out: mut f32[?])
+
+pub fn scaled_add(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                  weights: &Tensor<f32, [?], Memory::HBM>, slot: i32, n: i32) -> void {
+  spawn on(Topology::Device) {
+    let w: f32 = weights[slot];
+    let stride: i32 = grid_dim() * block_dim();
+    let mut i: i32 = block_id() * block_dim() + thread_id();
+    while i < n {
+      let weighted: f32 = x[i] * w;
+      out[i] = out[i] + weighted;
+      i = i + stride;
+    }
+  }
+  return;
+}

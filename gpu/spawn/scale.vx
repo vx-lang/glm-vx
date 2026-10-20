@@ -1,0 +1,15 @@
+// glm_vx_gpu_scale through Vx's own GPU path: out[i] = x[i] * alpha for i < n, grid-stride.
+// spawn-include: device.vx
+// spawn-kernel: glm_vx_spawn_scale(n: i32, x: f32[?], alpha: f32, out: mut f32[?])
+
+pub fn scale(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>, alpha: f32, n: i32) -> void {
+  spawn on(Topology::Device) {
+    let stride: i32 = grid_dim() * block_dim();
+    let mut i: i32 = block_id() * block_dim() + thread_id();
+    while i < n {
+      out[i] = x[i] * alpha;
+      i = i + stride;
+    }
+  }
+  return;
+}
