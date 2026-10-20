@@ -29,6 +29,7 @@ export VX_TOOLCHAIN=$prefix
 export PATH=$prefix/llvm-22/bin:$prefix/bin:\$PATH
 export VXC=$prefix/bin/vxc
 export VX_GPU_LLVM_BIN=$prefix/llvm-22/bin
+export LD_LIBRARY_PATH=$prefix/llvm-22/lib:$prefix/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}
 E
 . "$prefix/env.sh"
 missing=$(for f in "$prefix/bin/vxc" "$prefix"/llvm-22/bin/{mlir-translate,opt,llc,clang}; do ldd "$f" | grep 'not found' || true; done)

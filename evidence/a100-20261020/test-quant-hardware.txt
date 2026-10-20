@@ -1,0 +1,162 @@
+...........................FFFFFFFFFFFF                                  [100%]
+=================================== FAILURES ===================================
+_________________________ test_bf16_matvec_device[1-1] _________________________
+
+device = (<gpu.runtime.CUDAContext object at 0x702d31e47320>, <gpu.quant_ops.QuantKernels object at 0x702d31e47290>)
+n = 1, k = 1
+
+    @pytest.mark.parametrize('n,k', [(1, 1), (5, 33), (130, 300), (256, 1024)])
+    def test_bf16_matvec_device(device, n, k):
+        ctx, q = device
+>       w = bf16_weights((n, k), 1)
+            ^^^^^^^^^^^^
+E       NameError: name 'bf16_weights' is not defined
+
+gpu/test_quant_hardware.py:165: NameError
+________________________ test_bf16_matvec_device[5-33] _________________________
+
+device = (<gpu.runtime.CUDAContext object at 0x702d31e03980>, <gpu.quant_ops.QuantKernels object at 0x702d59b69760>)
+n = 5, k = 33
+
+    @pytest.mark.parametrize('n,k', [(1, 1), (5, 33), (130, 300), (256, 1024)])
+    def test_bf16_matvec_device(device, n, k):
+        ctx, q = device
+>       w = bf16_weights((n, k), 1)
+            ^^^^^^^^^^^^
+E       NameError: name 'bf16_weights' is not defined
+
+gpu/test_quant_hardware.py:165: NameError
+_______________________ test_bf16_matvec_device[130-300] _______________________
+
+device = (<gpu.runtime.CUDAContext object at 0x702d31c63590>, <gpu.quant_ops.QuantKernels object at 0x702d31c61a30>)
+n = 130, k = 300
+
+    @pytest.mark.parametrize('n,k', [(1, 1), (5, 33), (130, 300), (256, 1024)])
+    def test_bf16_matvec_device(device, n, k):
+        ctx, q = device
+>       w = bf16_weights((n, k), 1)
+            ^^^^^^^^^^^^
+E       NameError: name 'bf16_weights' is not defined
+
+gpu/test_quant_hardware.py:165: NameError
+______________________ test_bf16_matvec_device[256-1024] _______________________
+
+device = (<gpu.runtime.CUDAContext object at 0x702d31c62000>, <gpu.quant_ops.QuantKernels object at 0x702d31c62750>)
+n = 256, k = 1024
+
+    @pytest.mark.parametrize('n,k', [(1, 1), (5, 33), (130, 300), (256, 1024)])
+    def test_bf16_matvec_device(device, n, k):
+        ctx, q = device
+>       w = bf16_weights((n, k), 1)
+            ^^^^^^^^^^^^
+E       NameError: name 'bf16_weights' is not defined
+
+gpu/test_quant_hardware.py:165: NameError
+_______________________ test_bf16_matmul_device[3-31-1] ________________________
+
+device = (<gpu.runtime.CUDAContext object at 0x702d31c60f50>, <gpu.quant_ops.QuantKernels object at 0x702d31e03fe0>)
+m = 1, n = 3, k = 31
+
+    @pytest.mark.parametrize('m', [1, 5, 33])
+    @pytest.mark.parametrize('n,k', [(3, 31), (130, 257)])
+    def test_bf16_matmul_device(device, m, n, k):
+        ctx, q = device
+>       w = bf16_weights((n, k), 2)
+            ^^^^^^^^^^^^
+E       NameError: name 'bf16_weights' is not defined
+
+gpu/test_quant_hardware.py:176: NameError
+_______________________ test_bf16_matmul_device[3-31-5] ________________________
+
+device = (<gpu.runtime.CUDAContext object at 0x702d31c63320>, <gpu.quant_ops.QuantKernels object at 0x702d31c63f80>)
+m = 5, n = 3, k = 31
+
+    @pytest.mark.parametrize('m', [1, 5, 33])
+    @pytest.mark.parametrize('n,k', [(3, 31), (130, 257)])
+    def test_bf16_matmul_device(device, m, n, k):
+        ctx, q = device
+>       w = bf16_weights((n, k), 2)
+            ^^^^^^^^^^^^
+E       NameError: name 'bf16_weights' is not defined
+
+gpu/test_quant_hardware.py:176: NameError
+_______________________ test_bf16_matmul_device[3-31-33] _______________________
+
+device = (<gpu.runtime.CUDAContext object at 0x702d31e474d0>, <gpu.quant_ops.QuantKernels object at 0x702d31e44e60>)
+m = 33, n = 3, k = 31
+
+    @pytest.mark.parametrize('m', [1, 5, 33])
+    @pytest.mark.parametrize('n,k', [(3, 31), (130, 257)])
+    def test_bf16_matmul_device(device, m, n, k):
+        ctx, q = device
+>       w = bf16_weights((n, k), 2)
+            ^^^^^^^^^^^^
+E       NameError: name 'bf16_weights' is not defined
+
+gpu/test_quant_hardware.py:176: NameError
+______________________ test_bf16_matmul_device[130-257-1] ______________________
+
+device = (<gpu.runtime.CUDAContext object at 0x702d31dd1e20>, <gpu.quant_ops.QuantKernels object at 0x702d31dd05f0>)
+m = 1, n = 130, k = 257
+
+    @pytest.mark.parametrize('m', [1, 5, 33])
+    @pytest.mark.parametrize('n,k', [(3, 31), (130, 257)])
+    def test_bf16_matmul_device(device, m, n, k):
+        ctx, q = device
+>       w = bf16_weights((n, k), 2)
+            ^^^^^^^^^^^^
+E       NameError: name 'bf16_weights' is not defined
+
+gpu/test_quant_hardware.py:176: NameError
+______________________ test_bf16_matmul_device[130-257-5] ______________________
+
+device = (<gpu.runtime.CUDAContext object at 0x702d31dd07d0>, <gpu.quant_ops.QuantKernels object at 0x702d31dd1130>)
+m = 5, n = 130, k = 257
+
+    @pytest.mark.parametrize('m', [1, 5, 33])
+    @pytest.mark.parametrize('n,k', [(3, 31), (130, 257)])
+    def test_bf16_matmul_device(device, m, n, k):
+        ctx, q = device
+>       w = bf16_weights((n, k), 2)
+            ^^^^^^^^^^^^
+E       NameError: name 'bf16_weights' is not defined
+
+gpu/test_quant_hardware.py:176: NameError
+_____________________ test_bf16_matmul_device[130-257-33] ______________________
+
+device = (<gpu.runtime.CUDAContext object at 0x702d31dd13a0>, <gpu.quant_ops.QuantKernels object at 0x702d31dd2330>)
+m = 33, n = 130, k = 257
+
+    @pytest.mark.parametrize('m', [1, 5, 33])
+    @pytest.mark.parametrize('n,k', [(3, 31), (130, 257)])
+    def test_bf16_matmul_device(device, m, n, k):
+        ctx, q = device
+>       w = bf16_weights((n, k), 2)
+            ^^^^^^^^^^^^
+E       NameError: name 'bf16_weights' is not defined
+
+gpu/test_quant_hardware.py:176: NameError
+_____________________ test_bf16_grouped_and_special_device _____________________
+
+device = (<gpu.runtime.CUDAContext object at 0x702d31fb6b40>, <gpu.quant_ops.QuantKernels object at 0x702d31e03d10>)
+
+    def test_bf16_grouped_and_special_device(device):
+        ctx, q = device
+        e, n, k, m = 5, 9, 70, 8
+>       w = bf16_weights((e, n, k), 4)
+            ^^^^^^^^^^^^
+E       NameError: name 'bf16_weights' is not defined
+
+gpu/test_quant_hardware.py:186: NameError
+_____________________ test_bf16_wrapper_rejects_bad_shapes _____________________
+
+device = (<gpu.runtime.CUDAContext object at 0x702d31e446b0>, <gpu.quant_ops.QuantKernels object at 0x702d31e45460>)
+
+    def test_bf16_wrapper_rejects_bad_shapes(device):
+        ctx, q = device
+>       w = bf16_weights((4, 10), 1)
+            ^^^^^^^^^^^^
+E       NameError: name 'bf16_weights' is not defined
+
+gpu/test_quant_hardware.py:205: NameError
+12 failed, 27 passed in 12.87s

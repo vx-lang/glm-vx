@@ -34,7 +34,11 @@ step() {  # step NAME CMD...: run, log to $out/NAME.txt, record the result
 
 {
   nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv
-  echo "repo $(git rev-parse --short HEAD)$(git diff --quiet || echo ' (dirty)')"
+  if git rev-parse -q HEAD >/dev/null 2>&1; then
+    echo "repo $(git rev-parse --short HEAD)$(git diff --quiet || echo ' (dirty)')"
+  else
+    echo "repo ${REPO_REV:-unknown} (no .git; set REPO_REV)"
+  fi
   echo "vxc $("${VXC:-vxc}" --version 2>&1 | head -1)"
   echo "llvm $(llc --version 2>&1 | grep -m1 -o 'LLVM version [0-9.]*')"
   $PYTHON --version

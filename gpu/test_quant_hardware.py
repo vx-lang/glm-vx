@@ -9,7 +9,8 @@ from glm_vx.checkpoint import FP8_E4M3FN_TABLE
 from glm_vx.quant import fp8_matvec_blocked, int4_dequantize, int4_matvec
 from gpu.quant_ops import QuantKernels
 from gpu.runtime import CUDAContext, CUDAUnavailable
-from gpu.test_quant_simt import REAL, compressed_data, compressed_reference, fp8_data, fp8_scale, int4_data
+from gpu.test_quant_simt import (REAL, bf16_close, bf16_weights, compressed_data, compressed_reference, fp8_data,
+                                 fp8_scale, int4_data)
 
 BUILD = Path(__file__).parent / 'build'
 

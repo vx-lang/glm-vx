@@ -1,0 +1,49 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.7.0 -- /workspace/glm-vx/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /workspace/glm-vx
+configfile: pyproject.toml
+plugins: anyio-4.15.1
+collecting ... collected 39 items
+
+gpu/test_quant_hardware.py::test_int4_matvec_device[1-1] PASSED          [  2%]
+gpu/test_quant_hardware.py::test_int4_matvec_device[3-31] PASSED         [  5%]
+gpu/test_quant_hardware.py::test_int4_matvec_device[5-129] PASSED        [  7%]
+gpu/test_quant_hardware.py::test_int4_matvec_device[130-257] PASSED      [ 10%]
+gpu/test_quant_hardware.py::test_int4_matvec_device[256-1024] PASSED     [ 12%]
+gpu/test_quant_hardware.py::test_int4_matmul_device[3-31-1] PASSED       [ 15%]
+gpu/test_quant_hardware.py::test_int4_matmul_device[3-31-5] PASSED       [ 17%]
+gpu/test_quant_hardware.py::test_int4_matmul_device[3-31-33] PASSED      [ 20%]
+gpu/test_quant_hardware.py::test_int4_matmul_device[130-257-1] PASSED    [ 23%]
+gpu/test_quant_hardware.py::test_int4_matmul_device[130-257-5] PASSED    [ 25%]
+gpu/test_quant_hardware.py::test_int4_matmul_device[130-257-33] PASSED   [ 28%]
+gpu/test_quant_hardware.py::test_int4_bf16_compressed_tensors_device[False] PASSED [ 30%]
+gpu/test_quant_hardware.py::test_int4_bf16_compressed_tensors_device[True] PASSED [ 33%]
+gpu/test_quant_hardware.py::test_int4_real_checkpoint_linears_device PASSED [ 35%]
+gpu/test_quant_hardware.py::test_int4_grouped_device PASSED              [ 38%]
+gpu/test_quant_hardware.py::test_fp8_matmul_device[3-31-1] PASSED        [ 41%]
+gpu/test_quant_hardware.py::test_fp8_matmul_device[3-31-5] PASSED        [ 43%]
+gpu/test_quant_hardware.py::test_fp8_matmul_device[3-31-33] PASSED       [ 46%]
+gpu/test_quant_hardware.py::test_fp8_matmul_device[129-129-1] PASSED     [ 48%]
+gpu/test_quant_hardware.py::test_fp8_matmul_device[129-129-5] PASSED     [ 51%]
+gpu/test_quant_hardware.py::test_fp8_matmul_device[129-129-33] PASSED    [ 53%]
+gpu/test_quant_hardware.py::test_fp8_matmul_device[130-257-1] PASSED     [ 56%]
+gpu/test_quant_hardware.py::test_fp8_matmul_device[130-257-5] PASSED     [ 58%]
+gpu/test_quant_hardware.py::test_fp8_matmul_device[130-257-33] PASSED    [ 61%]
+gpu/test_quant_hardware.py::test_fp8_all_codes_device PASSED             [ 64%]
+gpu/test_quant_hardware.py::test_fp8_grouped_device PASSED               [ 66%]
+gpu/test_quant_hardware.py::test_wrapper_rejects_bad_shapes PASSED       [ 69%]
+gpu/test_quant_hardware.py::test_bf16_matvec_device[1-1] PASSED          [ 71%]
+gpu/test_quant_hardware.py::test_bf16_matvec_device[5-33] PASSED         [ 74%]
+gpu/test_quant_hardware.py::test_bf16_matvec_device[130-300] PASSED      [ 76%]
+gpu/test_quant_hardware.py::test_bf16_matvec_device[256-1024] PASSED     [ 79%]
+gpu/test_quant_hardware.py::test_bf16_matmul_device[3-31-1] PASSED       [ 82%]
+gpu/test_quant_hardware.py::test_bf16_matmul_device[3-31-5] PASSED       [ 84%]
+gpu/test_quant_hardware.py::test_bf16_matmul_device[3-31-33] PASSED      [ 87%]
+gpu/test_quant_hardware.py::test_bf16_matmul_device[130-257-1] PASSED    [ 89%]
+gpu/test_quant_hardware.py::test_bf16_matmul_device[130-257-5] PASSED    [ 92%]
+gpu/test_quant_hardware.py::test_bf16_matmul_device[130-257-33] PASSED   [ 94%]
+gpu/test_quant_hardware.py::test_bf16_grouped_and_special_device PASSED  [ 97%]
+gpu/test_quant_hardware.py::test_bf16_wrapper_rejects_bad_shapes PASSED  [100%]
+
+============================= 39 passed in 13.35s ==============================
