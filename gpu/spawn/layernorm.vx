@@ -1,11 +1,10 @@
 // glm_vx_gpu_layernorm through Vx's own GPU path (the DSA indexer key norm). One block per row;
 // the mean first, then the variance of the centered values, correctly rounded sqrt (Vx #1944).
 // spawn-include: device.vx
-// spawn-kernel: glm_vx_spawn_layernorm(rows: i32, dim: i32, eps: f32, x: f32[?], weight: f32[?], bias: f32[?], out: mut f32[?])
 
-pub fn layernorm(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
-                 weight: &Tensor<f32, [?], Memory::HBM>, bias: &Tensor<f32, [?], Memory::HBM>,
-                 rows: i32, dim: i32, eps: f32) -> void {
+pub fn glm_vx_spawn_layernorm(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                              weight: &Tensor<f32, [?], Memory::HBM>, bias: &Tensor<f32, [?], Memory::HBM>,
+                              rows: i32, dim: i32, eps: f32) -> void {
   spawn on(Topology::Device) {
     let mut shared = unsafe { Tensor<f32, [33], Memory::SMEM>::uninit() };
     let tid: i32 = thread_id();

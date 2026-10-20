@@ -2,11 +2,10 @@
 // 128x128 block; one warp per row, four adjacent-lane byte loads per 128-column tile, and
 // (value * scale) * x summed in the hand kernel's order.
 // spawn-include: device.vx
-// spawn-kernel: glm_vx_spawn_fp8_matvec(rows: i32, cols: i32, scales: f32[?], weight: u8[?], x: f32[?], out: mut f32[?])
 
-pub fn fp8_matvec(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<u8, [?], Memory::HBM>,
-                  scales: &Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
-                  rows: i32, cols: i32) -> void {
+pub fn glm_vx_spawn_fp8_matvec(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<u8, [?], Memory::HBM>,
+                               scales: &Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                               rows: i32, cols: i32) -> void {
   spawn on(Topology::Device) {
     let tid: i32 = thread_id();
     let lane: i32 = tid & 31;

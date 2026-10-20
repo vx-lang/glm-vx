@@ -1,10 +1,9 @@
 // glm_vx_gpu_mla_merge through Vx's own GPU path: the stable merge of the online-softmax
 // partitions mla_partial writes, one block per head. exp is fast_exp (device.vx).
 // spawn-include: device.vx
-// spawn-kernel: glm_vx_spawn_mla_merge(heads: i32, rank: i32, splits: i32, stats: f32[?], numerator: f32[?], out: mut f32[?])
 
-pub fn mla_merge(out: &mut Tensor<f32, [?], Memory::HBM>, numerator: &Tensor<f32, [?], Memory::HBM>,
-                 stats: &Tensor<f32, [?], Memory::HBM>, heads: i32, rank: i32, splits: i32) -> void {
+pub fn glm_vx_spawn_mla_merge(out: &mut Tensor<f32, [?], Memory::HBM>, numerator: &Tensor<f32, [?], Memory::HBM>,
+                              stats: &Tensor<f32, [?], Memory::HBM>, heads: i32, rank: i32, splits: i32) -> void {
   spawn on(Topology::Device) {
     let h: i32 = block_id();
     let tid: i32 = thread_id();

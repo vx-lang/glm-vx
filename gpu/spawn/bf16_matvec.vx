@@ -1,10 +1,9 @@
 // glm_vx_gpu_bf16_matvec through Vx's own GPU path: out[rows] = W[rows, cols] x[cols] with W
 // raw bfloat16 bits, one warp per row, i64 indexing, float32 accumulation.
 // spawn-include: device.vx
-// spawn-kernel: glm_vx_spawn_bf16_matvec(rows: i32, cols: i32, weight: u16[?], x: f32[?], out: mut f32[?])
 
-pub fn bf16_matvec(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<u16, [?], Memory::HBM>,
-                   x: &Tensor<f32, [?], Memory::HBM>, rows: i32, cols: i32) -> void {
+pub fn glm_vx_spawn_bf16_matvec(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<u16, [?], Memory::HBM>,
+                                x: &Tensor<f32, [?], Memory::HBM>, rows: i32, cols: i32) -> void {
   spawn on(Topology::Device) {
     let tid: i32 = thread_id();
     let lane: i32 = tid & 31;

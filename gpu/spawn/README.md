@@ -3,9 +3,9 @@
 The kernels in `gpu/*.vx` reach the GPU through a hand pipeline: `vxc --emit-llvm`, then
 `gpu/toolchain/build_ptx.py` swaps `vx_gpu_*` externs for NVVM, then `llc`. The kernels here
 are the same kernels written as a `spawn on(Topology::Device)` region. vxc itself outlines
-the region, lowers it through the gpu dialect and NVVM, and puts the PTX in the dispatch
-payload. `build.py` only takes that PTX out, gives the entry a stable name and checks its
-parameters. There is no extern adapter and no `llc` step of ours.
+the region, lowers it through the gpu dialect and NVVM, and `vxc --emit-ptx` writes the PTX
+with a manifest of its parameters. `build.py` runs that and checks the manifest against the
+PTX. There is no extern adapter and no `llc` step of ours.
 
 Python still launches the kernels (`launch.py`, on `gpu/runtime.py`), with our grid and
 block, because Vx's runtime cannot do that yet (see below).
@@ -36,13 +36,13 @@ block, because Vx's runtime cannot do that yet (see below).
 | `swiglu.vx` | `glm_vx_gpu_swiglu` | 17 |
 | `router.vx` | `glm_vx_gpu_router` | 22 |
 | `mla_partial.vx` | `glm_vx_gpu_mla_partial` | 25 |
-| `mla_merge.vx` | `glm_vx_gpu_mla_merge` | 31 |
+| `mla_merge.vx` | `glm_vx_gpu_mla_merge` | 32 |
 
 All assemble with ptxas for sm_80 with no spills; none has run on a GPU yet. The three norms
 need a correctly rounded sqrt, which needs #1944 (PR #1955), and the five kernels with exp use
 `fast_exp` (device.vx), `ex2.approx.ftz.f32(x * log2 e)` exactly as the hand kernels do, which
 needs nvvm intrinsics in the device image, #1945 (PR #1959). Built and checked with Vx main
-plus PRs #1952, #1954, #1955, #1958, #1959, #1961 and #1962. Barrier counts match the hand kernels (softmax 4, router
+plus PRs #1952, #1954, #1955, #1958, #1959, #1960, #1961, #1962 and #1964 (`--emit-ptx`). Barrier counts match the hand kernels (softmax 4, router
 1, mla_partial 2). Not ported: gemm_tf32 (`mma.sync m16n8k8`: #350).
 
 `gpu/test_spawn_hardware.py` checks each against the hand kernel, bit for bit, on a GPU.
@@ -53,23 +53,16 @@ plus PRs #1952, #1954, #1955, #1958, #1959, #1961 and #1962. Barrier counts matc
 VXC=/path/to/vxc PTXAS=/usr/local/cuda/bin/ptxas gpu/spawn/build.sh   # -> gpu/build/spawn/
 ```
 
-Each file holds one `spawn on` region and one declaration line:
+Each file holds one `pub fn glm_vx_spawn_NAME` with one `spawn on` region, and may start with
+`// spawn-include: device.vx` to paste the helpers in front. The PTX entry has the function's
+name, and its parameters are the function's parameters, in declared order (Vx
+`docs/lang/abi.md` section 3.5); a rank-1 tensor is five u64 (base, aligned pointer, offset,
+size, stride). `launch.py` takes the arguments by name.
 
-```
-// spawn-include: device.vx
-// spawn-kernel: glm_vx_spawn_add(n: i32, a: f32[?], b: f32[?], out: mut f32[?])
-```
-
-The parameters are the region's captures in first-use order. An assignment reads its right
-side first and an index before the tensor it indexes, so `out[i] = a[i] + b[i]` captures `a`,
-`b`, then `out`, and `out[h * out_stride + r] = total` captures `out_stride` before `out`. A rank-1 tensor becomes
-five u64 (base, aligned pointer, offset, size, stride). `build.py` refuses a declaration whose
-scalar widths or descriptor layout differ from the PTX, or whose `mut` tensors are not the
-ones the kernel stores to, or whose element types differ from the width of the loads made
-through each tensor (address arithmetic is traced from the descriptor's pointer). Last, it
-reads the order by name from the host side of the same vxc output, where the kernel arguments
-are packed from the `pub fn`'s own parameters, so two inputs of the same type, or two i32
-scalars, declared in each other's place are refused too.
+`build.py` does not take vxc's manifest on trust. It refuses one whose scalar widths or
+descriptor layout differ from the PTX, whose mutable tensors are not the ones the kernel
+stores to, or whose element types differ from the width of the loads made through each tensor
+(address arithmetic is traced from the descriptor's pointer).
 `device.vx` holds thread-id and shuffle helpers, warp sum and max, `fast_exp` and `sigmoid`, and
 the bf16, binary16, INT4 and FP8 decodes.
 
@@ -78,7 +71,7 @@ the bf16, binary16, INT4 and FP8 decodes.
 | Need | Today | Vx issue |
 | --- | --- | --- |
 | Thread ids, warp shuffles | `mlir!` gpu-dialect helpers in `device.vx` | #260 |
-| A stable entry name and documented parameter order | `build.py` renames `vx_npu_kernel_N` and checks the order | #251 |
+| A stable entry name and documented parameter order | `vxc --emit-ptx` (PR #1964): the entry is the function's name, the parameters its own in declared order | #251 |
 | Correctly rounded sqrt / div (the norms) | `sqrt.approx` / `rsqrt.approx` in 390c2534; `sqrt.rn` + `rcp.rn` with PR #1955 | #1944 |
 | A shared tensor passed to a device function | `memref.cast` dropped address space 3 and the fallback panicked; PR #1961 fixes it, and `block_sum` / `block_max` live in device.vx | #1956 |
 | `barrier()` inside a device function | gave no device image, no warning; PR #1962 fixes it | #1957 |

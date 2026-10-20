@@ -2,7 +2,6 @@
 // sigmoid(logit) + bias (the bias changes ids only), with the hand kernel's stable warp argmax
 // (ties go to the lower id), then normalizes the chosen sigmoid weights and scales them.
 // spawn-include: device.vx
-// spawn-kernel: glm_vx_spawn_router(experts: i32, k: i32, indices: mut i32[?], logits: f32[?], bias: f32[?], weights: mut f32[?], scale: f32)
 
 // The hand kernels' vxk_warp_argmax: a negative index marks an empty lane; ids <= 256 are exact
 // as f32, so the pair travels through f32 shuffles. Every lane gets lane 0's result.
@@ -27,9 +26,9 @@ fn warp_argmax(score: f32, index: i32) on Topology::Device -> i32 {
   return shuffle_idx(result as f32, 0) as i32;
 }
 
-pub fn router(indices: &mut Tensor<i32, [?], Memory::HBM>, weights: &mut Tensor<f32, [?], Memory::HBM>,
-              logits: &Tensor<f32, [?], Memory::HBM>, bias: &Tensor<f32, [?], Memory::HBM>,
-              experts: i32, k: i32, scale: f32) -> void {
+pub fn glm_vx_spawn_router(indices: &mut Tensor<i32, [?], Memory::HBM>, weights: &mut Tensor<f32, [?], Memory::HBM>,
+                           logits: &Tensor<f32, [?], Memory::HBM>, bias: &Tensor<f32, [?], Memory::HBM>,
+                           experts: i32, k: i32, scale: f32) -> void {
   spawn on(Topology::Device) {
     if experts > 0 && experts <= 256 && k > 0 && k <= 8 && k <= experts && block_id() == 0 && block_dim() == 32 {
       let lane: i32 = thread_id();

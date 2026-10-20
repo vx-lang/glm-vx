@@ -1,107 +1,43 @@
 #!/usr/bin/env python3
 """Build a glm-vx kernel through Vx's own GPU path (spawn on), with no extern adapter.
 
-vxc lowers the one `spawn on(Topology::Device)` region in SOURCE to a gpu.func and stores its
-PTX in the dispatch payload (`image=`). This script compiles with --emit-llvm, takes that PTX,
-renames the entry from vxc's counter name (vx_npu_kernel_N) to the name declared in SOURCE, and
-checks the parameter list against the declared signature, since vxc does not document it yet
-(Vx #251). The declaration is one comment line:
+`vxc --emit-ptx` writes the PTX of the one `spawn on(Topology::Device)` region in SOURCE, with
+the entry named after the `pub fn` that holds it, and a manifest of its parameters: the
+function's parameters, in declared order (Vx docs/lang/abi.md section 3.5). A scalar is passed
+by value; a tensor of rank r is a memref descriptor of 3 + 2r u64 (base pointer, aligned
+pointer, offset, sizes, strides).
 
-    // spawn-kernel: NAME(p: i32, x: f32[?], out: mut f32[?])
-
-Parameters are the region's captures in first-use order (an assignment reads its right side
-first). A scalar is passed by value; a rank-1 tensor is a memref descriptor of five u64 (base
-pointer, aligned pointer, offset, size, stride). The check matches scalar widths and descriptor
-layout, requires that exactly the `mut` tensors are stored to and that each tensor is loaded
-at its element width. It also reads the order by name from the host side of the dispatch in
-the same vxc output: the kernel arguments are packed from the `pub fn`'s own parameters, so
-each kernel slot names the Vx parameter that fills it.
+This script checks vxc's manifest against the PTX it wrote: the parameter widths and
+descriptor layout, that exactly the mutable tensors are stored to, and that each tensor is
+loaded at its element width. It writes the PTX and our manifest (.json) beside it.
 """
 import argparse, hashlib, json, os, re, subprocess, sys, tempfile
 from pathlib import Path
 
 SCALARS = {'i32': '.u32', 'i64': '.u64', 'f32': '.f32'}
 ELEMENT_BITS = {'f32': 32, 'i32': 32, 'u16': 16, 'u8': 8}
-DECL = re.compile(r'^//\s*spawn-kernel:\s*(\w+)\((.*)\)\s*$', re.M)
 INCLUDE = re.compile(r'^//\s*spawn-include:\s*(\S+)\s*$', re.M)
 
 
-def signature(source: str):
-    found = DECL.findall(source)
-    if len(found) != 1:
-        raise ValueError('source needs exactly one "// spawn-kernel: NAME(...)" line')
-    name, text = found[0]
+def kernel_params(manifest_params):
+    """vxc's parameter list in our form. vxc's `element` is the MLIR type (u16 is i16), so the
+    element comes from the Vx type, `&Tensor<u16, [?], Memory::HBM>`."""
     params = []
-    for item in filter(None, (p.strip() for p in text.split(','))):
-        pname, kind = (s.strip() for s in item.split(':'))
-        mutable = kind.startswith('mut ')
-        kind = kind.removeprefix('mut ').strip()
-        if kind in SCALARS and not mutable:
-            params.append({'name': pname, 'kind': 'scalar', 'type': kind})
-        elif re.fullmatch(r'(f32|u16|u8|i32)\[\?\]', kind):
-            params.append({'name': pname, 'kind': 'memref', 'element': kind[:-3], 'rank': 1, 'mut': mutable})
+    for p in manifest_params:
+        if p['kind'] == 'scalar':
+            if p['type'] not in SCALARS or p['words'] != 1:
+                raise ValueError(f'unsupported scalar parameter {p}')
+            params.append({'name': p['name'], 'kind': 'scalar', 'type': p['type']})
+        elif p['kind'] == 'tensor':
+            element = re.match(r'&(?:mut )?Tensor<(\w+),', p['type'])
+            if not element or element[1] not in ELEMENT_BITS or p['rank'] != 1 or p['words'] != 5:
+                raise ValueError(f'unsupported tensor parameter {p}')
+            if p['mutable'] != p['type'].startswith('&mut '):
+                raise ValueError(f'manifest mutable flag disagrees with the type: {p}')
+            params.append({'name': p['name'], 'kind': 'memref', 'element': element[1], 'rank': 1, 'mut': p['mutable']})
         else:
-            raise ValueError(f'unsupported parameter {item!r}')
-    return name, params
-
-
-def split_top(text: str):
-    """Split on commas outside <> and [] (Tensor<f32, [?], Memory::HBM> has commas inside)."""
-    parts, depth, start = [], 0, 0
-    for i, ch in enumerate(text):
-        depth += ch in '<[' and 1 or ch in '>]' and -1 or 0
-        if ch == ',' and depth == 0:
-            parts.append(text[start:i]); start = i + 1
-    parts.append(text[start:])
-    return [p.strip() for p in parts if p.strip()]
-
-
-def host_order(source: str, ir: str):
-    """Names of the pub fn parameters in the order the host packs them for the kernel."""
-    fns = re.findall(r'^pub fn (\w+)\((.*?)\)\s*->', source, re.M | re.S)
-    if len(fns) != 1:
-        raise ValueError('the kernel file needs exactly one pub fn (the one holding the spawn region)')
-    fn, text = fns[0]
-    args = []  # host argument index -> parameter name; a rank-1 tensor is five arguments
-    for item in split_top(text):
-        pname, kind = (x.strip() for x in item.split(':', 1))
-        args += [pname] * (5 if 'Tensor<' in kind else 1)
-    body = re.search(rf'llvm\.func @{fn}\((.*?)\n  \}}', ir, re.S)
-    if not body:
-        raise ValueError(f'no host function {fn} in the vxc output')
-    body = body[1]
-    root = {}  # SSA value -> host argument index it was built from or holds
-    for m in re.finditer(r'(%\w+) = llvm\.insertvalue (%\w+), (%\w+)\[0\]', body):
-        if m[2].startswith('%arg'):
-            root[m[1]] = int(m[2][4:])
-    for m in re.finditer(r'(%\w+) = llvm\.insertvalue %\w+, (%\w+)\[[1-9]', body):
-        if m[2] in root:
-            root[m[1]] = root[m[2]]
-    stored = {ptr: val for val, ptr in reversed(re.findall(r'llvm\.store (%\w+), (%\w+) :', body))}  # pointer -> first value
-    def resolve(value, depth=0):
-        if value.startswith('%arg'):
-            return int(value[4:])
-        if value in root:
-            return root[value]
-        if depth > 4 or value not in stored:
-            raise ValueError(f'cannot follow kernel argument {value} in {fn}')
-        return resolve(stored[value], depth + 1)
-    call = re.search(r'llvm\.call @vx_plugin_dispatch_async\(%\w+, %\w+, (%\w+),', body)
-    if not call:
-        raise ValueError(f'no dispatch in {fn}')
-    array = call[1]
-    slots = {0: array} | {int(m[2]): m[1] for m in re.finditer(rf'(%\w+) = llvm\.getelementptr {array}\[(\d+)\]', body)}
-    return [args[resolve(stored[slots[i]])] for i in sorted(slots)]
-
-
-def payload_images(ir: str):
-    images = {}
-    for match in re.finditer(r'@(\w+)_str\("(.*?)"\)', ir, re.S):
-        raw = re.sub(r'\\([0-9A-Fa-f]{2})', lambda x: chr(int(x.group(1), 16)), match.group(2))
-        for field in raw.split('\0'):
-            if field.startswith('image='):
-                images[match.group(1)] = field[len('image='):]
-    return images
+            raise ValueError(f'unknown parameter kind {p}')
+    return params
 
 
 def derived(body: str, base: str):
@@ -132,7 +68,7 @@ def check_params(ptx: str, entry: str, params):
             owner += [index] * 5
     got = [(m[1].replace('.b', '.u'), bool(m[2])) for m in actual]
     if got != expected:
-        raise ValueError(f'PTX parameters {got} do not match the declared signature {expected}')
+        raise ValueError(f'PTX parameters {got} do not match the vxc manifest {expected}')
     # The aligned pointer (second descriptor field) is the one the kernel dereferences.
     body = ptx[head.end():]
     stored = set()
@@ -150,15 +86,15 @@ def check_params(ptx: str, entry: str, params):
         addresses = derived(body, base)
         if any(re.search(rf'st\.global\.\w+\s+\[{re.escape(a)}(\+\d+)?\]', body) for a in addresses):
             stored.add(p['name'])
-        # Element width: loads through this tensor must be as wide as its declared element, which
-        # catches two read-only tensors of different types declared in each other's place.
+        # Element width: loads through this tensor must be as wide as its element in the manifest,
+        # which catches a manifest whose read-only tensors of different types are out of place.
         widths = {int(w) for a in addresses
                   for w in re.findall(rf'ld\.global(?:\.nc)?\.[bsuf](\d+)\s+%\w+, \[{re.escape(a)}(?:\+\d+)?\]', body)}
         if widths - {ELEMENT_BITS[p['element']]}:
-            raise ValueError(f'{p["name"]} is declared {p["element"]} but loaded {sorted(widths)} bits wide')
+            raise ValueError(f'{p["name"]} is {p["element"]} in the manifest but loaded {sorted(widths)} bits wide')
     declared = {p['name'] for p in params if p['kind'] == 'memref' and p['mut']}
     if stored != declared:
-        raise ValueError(f'kernel stores to {sorted(stored)} but the signature marks {sorted(declared)} mut')
+        raise ValueError(f'kernel stores to {sorted(stored)} but the manifest marks {sorted(declared)} mut')
 
 
 def main() -> int:
@@ -172,31 +108,31 @@ def main() -> int:
     args = parser.parse_args()
     try:
         source = args.source.read_text()
-        name, params = signature(source)
         # `// spawn-include: FILE` pastes FILE (beside SOURCE) in front: shared device helpers.
         included = [args.source.with_name(f).read_text() for f in INCLUDE.findall(source)]
         env = dict(os.environ, VX_GPU_CHIP=args.arch)
         with tempfile.TemporaryDirectory(prefix='vx-spawn-src-') as temp:
             combined = Path(temp, args.source.name)
             combined.write_text(''.join(included) + source)
-            result = subprocess.run([args.vxc, '--machine', str(args.machine.resolve()), str(combined), '--emit-llvm'],
-                                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
-        if result.returncode:
-            raise ValueError(f'vxc failed ({result.returncode}):\n{result.stderr}')
-        images = payload_images(result.stdout)
-        if len(images) != 1:
-            raise ValueError(f'expected one device image, got {sorted(images)}; a region outside the device '
-                             'allow-list falls back to the host silently (Vx #1945)')
-        (vx_name, ptx), = images.items()
-        if not re.search(rf'^\.target {args.arch}\b', ptx, re.M):
+            emitted = Path(temp, 'kernels.ptx')
+            result = subprocess.run([args.vxc, '--machine', str(args.machine.resolve()), '--emit-ptx', str(combined),
+                                     '-o', str(emitted)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+            if result.returncode:
+                raise ValueError(f'vxc failed ({result.returncode}):\n{result.stderr}')
+            ptx = emitted.read_text()
+            vx_manifest = json.loads(emitted.with_suffix('.json').read_text())
+        kernels = vx_manifest['kernels']
+        if not kernels:
+            raise ValueError('vxc wrote no GPU kernel; a region outside the device allow-list runs on the host (Vx #1945)')
+        if len(kernels) > 1:
+            raise ValueError(f'expected one GPU kernel per file, got {[k["name"] for k in kernels]}')
+        name = kernels[0]['name']
+        if vx_manifest['target'] != args.arch or not re.search(rf'^\.target {args.arch}\b', ptx, re.M):
             raise ValueError(f'PTX is not for {args.arch}')
-        check_params(ptx, vx_name, params)
-        order = host_order(source, result.stdout)
-        if order != [p['name'] for p in params]:
-            raise ValueError(f'vxc passes the kernel {order} but the declaration says {[p["name"] for p in params]}')
-        ptx = re.sub(rf'\b{vx_name}(?!\d)', name, ptx)
+        params = kernel_params(kernels[0]['params'])
+        check_params(ptx, name, params)
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        evidence = {'schema': 'glm-vx-spawn-v1', 'entry': name, 'vx_entry': vx_name, 'params': params,
+        evidence = {'schema': 'glm-vx-spawn-v2', 'entry': name, 'params': params, 'vx_params': kernels[0]['params'],
                     'arch': args.arch, 'source_sha256': hashlib.sha256((''.join(included) + source).encode()).hexdigest(),
                     'ptx_sha256': hashlib.sha256(ptx.encode()).hexdigest(),
                     'vxc': subprocess.run([args.vxc, '--version'], text=True, stdout=subprocess.PIPE).stdout.strip(),
@@ -211,9 +147,9 @@ def main() -> int:
                 evidence.update({'assembly_validated': True, 'ptxas_log': assembled.stderr.strip().splitlines()})
         args.output.write_text(ptx)
         args.output.with_suffix('.json').write_text(json.dumps(evidence, indent=2) + '\n')
-        print(f'{args.output}: {name} ({len(params)} params) from {vx_name}')
+        print(f'{args.output}: {name} ({len(params)} params)')
         return 0
-    except (ValueError, OSError) as error:
+    except (ValueError, OSError, KeyError) as error:
         print(f'error: {error}', file=sys.stderr)
         return 1
 

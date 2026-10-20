@@ -1,11 +1,10 @@
 // glm_vx_gpu_rope_glm through Vx's own GPU path: GLM interleaved RoPE over [heads, dim], with
 // each head's output packed as [rotated even, rotated odd]. Grid-stride over heads * dim/2.
 // spawn-include: device.vx
-// spawn-kernel: glm_vx_spawn_rope_glm(heads: i32, dim: i32, x: f32[?], cosine: f32[?], sine: f32[?], out: mut f32[?])
 
-pub fn rope_glm(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
-                cosine: &Tensor<f32, [?], Memory::HBM>, sine: &Tensor<f32, [?], Memory::HBM>,
-                heads: i32, dim: i32) -> void {
+pub fn glm_vx_spawn_rope_glm(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                             cosine: &Tensor<f32, [?], Memory::HBM>, sine: &Tensor<f32, [?], Memory::HBM>,
+                             heads: i32, dim: i32) -> void {
   spawn on(Topology::Device) {
     if heads > 0 && dim > 0 && dim % 2 == 0 {
       let pairs: i32 = dim / 2;

@@ -3,13 +3,12 @@
 // (head, split), one value per thread, online softmax over this split's selected tokens. exp is
 // fast_exp (device.vx); the block sum is written out (see rmsnorm_rows.vx).
 // spawn-include: device.vx
-// spawn-kernel: glm_vx_spawn_mla_partial(heads: i32, rank: i32, rope_dim: i32, tokens: i32, count: i32, selection_stride: i32, splits: i32, selected: i32[?], cache_latent: f32[?], q_latent: f32[?], q_rope: f32[?], cache_rope: f32[?], scale: f32, numerator: mut f32[?], stats: mut f32[?])
 
-pub fn mla_partial(numerator: &mut Tensor<f32, [?], Memory::HBM>, stats: &mut Tensor<f32, [?], Memory::HBM>,
-                   q_latent: &Tensor<f32, [?], Memory::HBM>, q_rope: &Tensor<f32, [?], Memory::HBM>,
-                   cache_latent: &Tensor<f32, [?], Memory::HBM>, cache_rope: &Tensor<f32, [?], Memory::HBM>,
-                   selected: &Tensor<i32, [?], Memory::HBM>, heads: i32, rank: i32, rope_dim: i32,
-                   tokens: i32, count: i32, selection_stride: i32, splits: i32, scale: f32) -> void {
+pub fn glm_vx_spawn_mla_partial(numerator: &mut Tensor<f32, [?], Memory::HBM>, stats: &mut Tensor<f32, [?], Memory::HBM>,
+                                q_latent: &Tensor<f32, [?], Memory::HBM>, q_rope: &Tensor<f32, [?], Memory::HBM>,
+                                cache_latent: &Tensor<f32, [?], Memory::HBM>, cache_rope: &Tensor<f32, [?], Memory::HBM>,
+                                selected: &Tensor<i32, [?], Memory::HBM>, heads: i32, rank: i32, rope_dim: i32,
+                                tokens: i32, count: i32, selection_stride: i32, splits: i32, scale: f32) -> void {
   spawn on(Topology::Device) {
     let mut shared = unsafe { Tensor<f32, [33], Memory::SMEM>::uninit() };
     let tid: i32 = thread_id();

@@ -1,11 +1,10 @@
 // glm_vx_gpu_residual_rmsnorm through Vx's own GPU path. One block per row: residual_out =
 // x + residual, then out = rmsnorm(residual_out) * weight (correctly rounded sqrt, Vx #1944).
 // spawn-include: device.vx
-// spawn-kernel: glm_vx_spawn_residual_rmsnorm(rows: i32, dim: i32, eps: f32, x: f32[?], residual: f32[?], residual_out: mut f32[?], weight: f32[?], out: mut f32[?])
 
-pub fn residual_rmsnorm(out: &mut Tensor<f32, [?], Memory::HBM>, residual_out: &mut Tensor<f32, [?], Memory::HBM>,
-                        x: &Tensor<f32, [?], Memory::HBM>, residual: &Tensor<f32, [?], Memory::HBM>,
-                        weight: &Tensor<f32, [?], Memory::HBM>, rows: i32, dim: i32, eps: f32) -> void {
+pub fn glm_vx_spawn_residual_rmsnorm(out: &mut Tensor<f32, [?], Memory::HBM>, residual_out: &mut Tensor<f32, [?], Memory::HBM>,
+                                     x: &Tensor<f32, [?], Memory::HBM>, residual: &Tensor<f32, [?], Memory::HBM>,
+                                     weight: &Tensor<f32, [?], Memory::HBM>, rows: i32, dim: i32, eps: f32) -> void {
   spawn on(Topology::Device) {
     let mut shared = unsafe { Tensor<f32, [33], Memory::SMEM>::uninit() };
     let tid: i32 = thread_id();

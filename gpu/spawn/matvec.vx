@@ -2,10 +2,9 @@
 // warp per row, adjacent lanes on adjacent columns, then a full-warp shuffle sum. Same
 // arithmetic order as the hand kernel, so results should be bitwise equal.
 // spawn-include: device.vx
-// spawn-kernel: glm_vx_spawn_matvec(rows: i32, cols: i32, weight: f32[?], x: f32[?], out: mut f32[?])
 
-pub fn matvec(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<f32, [?], Memory::HBM>,
-              x: &Tensor<f32, [?], Memory::HBM>, rows: i32, cols: i32) -> void {
+pub fn glm_vx_spawn_matvec(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<f32, [?], Memory::HBM>,
+                           x: &Tensor<f32, [?], Memory::HBM>, rows: i32, cols: i32) -> void {
   spawn on(Topology::Device) {
     let tid: i32 = thread_id();
     let block: i32 = block_dim();

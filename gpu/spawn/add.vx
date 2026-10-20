@@ -1,13 +1,12 @@
 // glm_vx_gpu_add through Vx's own GPU path: the spawn region becomes the device kernel, with
-// no extern adapter. The kernel's parameters are the region's captures in first-use order;
-// build.py checks the order declared here against the PTX.
+// no extern adapter. vxc names the PTX entry after the function and passes the function's
+// parameters in declared order (Vx docs/lang/abi.md 3.5).
 // spawn-include: device.vx
-// spawn-kernel: glm_vx_spawn_add(n: i32, a: f32[?], b: f32[?], out: mut f32[?])
 
 // out[i] = a[i] + b[i] for i < n, grid-stride. out may be a or b: each thread touches only
 // its own index.
-pub fn add(out: &mut Tensor<f32, [?], Memory::HBM>, a: &Tensor<f32, [?], Memory::HBM>,
-           b: &Tensor<f32, [?], Memory::HBM>, n: i32) -> void {
+pub fn glm_vx_spawn_add(out: &mut Tensor<f32, [?], Memory::HBM>, a: &Tensor<f32, [?], Memory::HBM>,
+                        b: &Tensor<f32, [?], Memory::HBM>, n: i32) -> void {
   spawn on(Topology::Device) {
     let stride: i32 = grid_dim() * block_dim();
     let mut i: i32 = block_id() * block_dim() + thread_id();

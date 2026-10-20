@@ -2,10 +2,9 @@
 // weighted expert accumulation with the router weight read on the device. Two roundings, as
 // the hand kernel and the host path.
 // spawn-include: device.vx
-// spawn-kernel: glm_vx_spawn_scaled_add(slot: i32, weights: f32[?], n: i32, x: f32[?], out: mut f32[?])
 
-pub fn scaled_add(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
-                  weights: &Tensor<f32, [?], Memory::HBM>, slot: i32, n: i32) -> void {
+pub fn glm_vx_spawn_scaled_add(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                               weights: &Tensor<f32, [?], Memory::HBM>, slot: i32, n: i32) -> void {
   spawn on(Topology::Device) {
     let w: f32 = weights[slot];
     let stride: i32 = grid_dim() * block_dim();

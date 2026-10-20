@@ -2,10 +2,9 @@
 // path. One block per row: out = x / sqrt(mean(x^2) + eps) * weight, with a correctly rounded
 // sqrt (needs Vx #1944) and the hand kernel's summation order.
 // spawn-include: device.vx
-// spawn-kernel: glm_vx_spawn_rmsnorm_rows(rows: i32, dim: i32, eps: f32, x: f32[?], weight: f32[?], out: mut f32[?])
 
-pub fn rmsnorm_rows(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
-                    weight: &Tensor<f32, [?], Memory::HBM>, rows: i32, dim: i32, eps: f32) -> void {
+pub fn glm_vx_spawn_rmsnorm_rows(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                                 weight: &Tensor<f32, [?], Memory::HBM>, rows: i32, dim: i32, eps: f32) -> void {
   spawn on(Topology::Device) {
     let mut shared = unsafe { Tensor<f32, [33], Memory::SMEM>::uninit() };
     let tid: i32 = thread_id();

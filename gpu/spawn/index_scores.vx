@@ -3,11 +3,10 @@
 // supplies causal keys and weights already scaled by heads**-0.5. Whole warps skip together
 // (the condition is uniform per warp), so the full-mask shuffles stay legal.
 // spawn-include: device.vx
-// spawn-kernel: glm_vx_spawn_index_scores(tokens: i32, heads: i32, dim: i32, q: f32[?], keys: f32[?], scale: f32, weights: f32[?], out: mut f32[?])
 
-pub fn index_scores(out: &mut Tensor<f32, [?], Memory::HBM>, q: &Tensor<f32, [?], Memory::HBM>,
-                    keys: &Tensor<f32, [?], Memory::HBM>, weights: &Tensor<f32, [?], Memory::HBM>,
-                    tokens: i32, heads: i32, dim: i32, scale: f32) -> void {
+pub fn glm_vx_spawn_index_scores(out: &mut Tensor<f32, [?], Memory::HBM>, q: &Tensor<f32, [?], Memory::HBM>,
+                                 keys: &Tensor<f32, [?], Memory::HBM>, weights: &Tensor<f32, [?], Memory::HBM>,
+                                 tokens: i32, heads: i32, dim: i32, scale: f32) -> void {
   spawn on(Topology::Device) {
     let tid: i32 = thread_id();
     let block: i32 = block_dim();

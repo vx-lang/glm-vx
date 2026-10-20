@@ -4,12 +4,11 @@
 // expert_ids[M] picks each row's expert, an id outside [0, E) writing zeros. Each 128-column
 // tile's raw-value dot product is summed before its scale, as gpu/fp8_batched.vx.
 // spawn-include: device.vx
-// spawn-kernel: glm_vx_spawn_fp8_matmul(rows_m: i32, rows_n: i32, cols: i32, experts: i32, expert_ids: i32[?], weight: u8[?], x: f32[?], scales: f32[?], out: mut f32[?])
 
-pub fn fp8_matmul(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<u8, [?], Memory::HBM>,
-                  scales: &Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
-                  expert_ids: &Tensor<i32, [?], Memory::HBM>, rows_m: i32, rows_n: i32, cols: i32,
-                  experts: i32) -> void {
+pub fn glm_vx_spawn_fp8_matmul(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<u8, [?], Memory::HBM>,
+                               scales: &Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                               expert_ids: &Tensor<i32, [?], Memory::HBM>, rows_m: i32, rows_n: i32, cols: i32,
+                               experts: i32) -> void {
   spawn on(Topology::Device) {
     let tid: i32 = thread_id();
     let lane: i32 = tid & 31;

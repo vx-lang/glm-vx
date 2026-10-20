@@ -1,6 +1,7 @@
 """Launch kernels built by gpu/spawn/build.py with the existing CUDA runtime (gpu/runtime.py).
 
-The manifest (.json beside the .ptx) gives the parameter order vxc chose. A rank-1 tensor
+The manifest (.json beside the .ptx) gives the entry name and the parameters, which vxc takes
+in the order the function declares them. Arguments are passed by name. A rank-1 tensor
 argument expands to its memref descriptor: base and aligned pointer (both the tensor's device
 pointer), offset 0, size, stride 1. Launch dimensions are ours; Vx cannot set them yet (#252).
 """

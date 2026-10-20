@@ -3,11 +3,10 @@
 // experts > 0: weight[E, N, K] and expert_ids[M] picks each row's expert, an id outside [0, E)
 // writing zeros (an unrouted slot). One warp per (n, m) task, n-major.
 // spawn-include: device.vx
-// spawn-kernel: glm_vx_spawn_bf16_matmul(rows_m: i32, rows_n: i32, cols: i32, experts: i32, expert_ids: i32[?], weight: u16[?], x: f32[?], out: mut f32[?])
 
-pub fn bf16_matmul(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<u16, [?], Memory::HBM>,
-                   x: &Tensor<f32, [?], Memory::HBM>, expert_ids: &Tensor<i32, [?], Memory::HBM>,
-                   rows_m: i32, rows_n: i32, cols: i32, experts: i32) -> void {
+pub fn glm_vx_spawn_bf16_matmul(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<u16, [?], Memory::HBM>,
+                                x: &Tensor<f32, [?], Memory::HBM>, expert_ids: &Tensor<i32, [?], Memory::HBM>,
+                                rows_m: i32, rows_n: i32, cols: i32, experts: i32) -> void {
   spawn on(Topology::Device) {
     let tid: i32 = thread_id();
     let lane: i32 = tid & 31;

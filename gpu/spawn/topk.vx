@@ -5,7 +5,6 @@
 // Scores arrive as raw float32 bits in an i32 tensor. Loops are while loops so that no loop is
 // taken for the region's parallel loop.
 // spawn-include: device.vx
-// spawn-kernel: glm_vx_spawn_topk_stable(tokens: i32, k: i32, scratch: mut i32[?], scores: i32[?], out_ids: mut i32[?])
 
 // Order-preserving map from float32 bits to [0, 2^32): bigger key == bigger score; NaN is 0.
 fn topk_key(bits: i32) on Topology::Device -> i64 {
@@ -18,8 +17,8 @@ fn topk_key(bits: i32) on Topology::Device -> i64 {
   return key;
 }
 
-pub fn topk_stable(out_ids: &mut Tensor<i32, [?], Memory::HBM>, scores: &Tensor<i32, [?], Memory::HBM>,
-                   scratch: &mut Tensor<i32, [?], Memory::HBM>, tokens: i32, k: i32) -> void {
+pub fn glm_vx_spawn_topk_stable(out_ids: &mut Tensor<i32, [?], Memory::HBM>, scores: &Tensor<i32, [?], Memory::HBM>,
+                                scratch: &mut Tensor<i32, [?], Memory::HBM>, tokens: i32, k: i32) -> void {
   spawn on(Topology::Device) {
     // The condition is uniform across the block, so every thread reaches the same barriers.
     if tokens > 0 && k > 0 && block_dim() == 256 {

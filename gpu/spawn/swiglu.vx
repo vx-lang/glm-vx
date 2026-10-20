@@ -1,10 +1,9 @@
 // glm_vx_gpu_swiglu through Vx's own GPU path: out = silu(gate) * up, grid-stride, with the
 // hand kernel's two-branch sigmoid (exp argument never positive).
 // spawn-include: device.vx
-// spawn-kernel: glm_vx_spawn_swiglu(n: i32, gate: f32[?], up: f32[?], out: mut f32[?])
 
-pub fn swiglu(out: &mut Tensor<f32, [?], Memory::HBM>, gate: &Tensor<f32, [?], Memory::HBM>,
-              up: &Tensor<f32, [?], Memory::HBM>, n: i32) -> void {
+pub fn glm_vx_spawn_swiglu(out: &mut Tensor<f32, [?], Memory::HBM>, gate: &Tensor<f32, [?], Memory::HBM>,
+                           up: &Tensor<f32, [?], Memory::HBM>, n: i32) -> void {
   spawn on(Topology::Device) {
     let stride: i32 = grid_dim() * block_dim();
     let mut i: i32 = block_id() * block_dim() + thread_id();

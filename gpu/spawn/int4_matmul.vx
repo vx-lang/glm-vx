@@ -4,12 +4,11 @@
 // each row's expert, an id outside [0, E) writing zeros. One warp per (n, m) task, n-major;
 // each group's raw-code dot product is summed before its scale, as int4_matvec.
 // spawn-include: device.vx
-// spawn-kernel: glm_vx_spawn_int4_matmul(rows_m: i32, rows_n: i32, cols: i32, experts: i32, expert_ids: i32[?], scales: u16[?], scale_kind: i32, packed: u8[?], x: f32[?], out: mut f32[?])
 
-pub fn int4_matmul(out: &mut Tensor<f32, [?], Memory::HBM>, packed: &Tensor<u8, [?], Memory::HBM>,
-                   scales: &Tensor<u16, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
-                   expert_ids: &Tensor<i32, [?], Memory::HBM>, rows_m: i32, rows_n: i32, cols: i32,
-                   experts: i32, scale_kind: i32) -> void {
+pub fn glm_vx_spawn_int4_matmul(out: &mut Tensor<f32, [?], Memory::HBM>, packed: &Tensor<u8, [?], Memory::HBM>,
+                                scales: &Tensor<u16, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                                expert_ids: &Tensor<i32, [?], Memory::HBM>, rows_m: i32, rows_n: i32, cols: i32,
+                                experts: i32, scale_kind: i32) -> void {
   spawn on(Topology::Device) {
     let tid: i32 = thread_id();
     let lane: i32 = tid & 31;

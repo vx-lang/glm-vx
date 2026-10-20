@@ -1,11 +1,10 @@
 // glm_vx_gpu_rope_strided through Vx's own GPU path: RoPE on a strided slice of rows; head h
 // reads x[h*x_stride ..] and writes out[h*out_stride ..], arithmetic identical to rope_glm.
 // spawn-include: device.vx
-// spawn-kernel: glm_vx_spawn_rope_strided(heads: i32, dim: i32, x_stride: i32, out_stride: i32, x: f32[?], cosine: f32[?], sine: f32[?], out: mut f32[?])
 
-pub fn rope_strided(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
-                    cosine: &Tensor<f32, [?], Memory::HBM>, sine: &Tensor<f32, [?], Memory::HBM>,
-                    heads: i32, dim: i32, x_stride: i32, out_stride: i32) -> void {
+pub fn glm_vx_spawn_rope_strided(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                                 cosine: &Tensor<f32, [?], Memory::HBM>, sine: &Tensor<f32, [?], Memory::HBM>,
+                                 heads: i32, dim: i32, x_stride: i32, out_stride: i32) -> void {
   spawn on(Topology::Device) {
     if heads > 0 && dim > 0 && dim % 2 == 0 {
       let pairs: i32 = dim / 2;

@@ -1,11 +1,11 @@
-"""build.py contract: signature parsing and the PTX parameter check. The integration tests
-compile real Vx and run only when VXC points at a vxc with --machine support."""
+"""build.py contract: vxc's manifest in our form and the check of it against the PTX. The
+integration tests compile real Vx and run only when VXC points at a vxc with --emit-ptx."""
 import importlib.util
+import json
 import os
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -15,96 +15,127 @@ spec = importlib.util.spec_from_file_location('spawn_build', HERE / 'build.py')
 build = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(build)
 
-# vxc 390c2534 output for add.vx: n, then a, b, out as rank-1 memref descriptors.
-ADD_PTX = '''.visible .entry K(
-\t.param .u32 K_param_0,
-''' + ''.join(f'''\t.param .u64 .ptr .align 1 K_param_{1 + 5 * m},
-\t.param .u64 .ptr .align 1 K_param_{2 + 5 * m},
+# vxc --emit-ptx output for add.vx: out, a, b as rank-1 memref descriptors, then n.
+ADD_PTX = '.visible .entry K(\n' + ''.join(f'''\t.param .u64 .ptr .align 1 K_param_{5 * m},
+\t.param .u64 .ptr .align 1 K_param_{1 + 5 * m},
+\t.param .u64 K_param_{2 + 5 * m},
 \t.param .u64 K_param_{3 + 5 * m},
 \t.param .u64 K_param_{4 + 5 * m},
-\t.param .u64 K_param_{5 + 5 * m}{"," if m < 2 else ""}
-''' for m in range(3)) + ''')
+''' for m in range(3)) + '''\t.param .u32 K_param_15
+)
 {
-\tld.param.b32 \t%r2, [K_param_0];
-\tld.param.b64 \t%rd4, [K_param_2];
+\tld.param.b64 \t%rd4, [K_param_1];
 \tcvta.to.global.u64 \t%rd1, %rd4;
-\tld.param.b64 \t%rd5, [K_param_7];
+\tld.param.b64 \t%rd5, [K_param_6];
 \tcvta.to.global.u64 \t%rd2, %rd5;
-\tld.param.b64 \t%rd6, [K_param_12];
+\tld.param.b64 \t%rd6, [K_param_11];
 \tcvta.to.global.u64 \t%rd3, %rd6;
-\tadd.s64 \t%rd8, %rd1, %rd7;
+\tld.param.b32 \t%r2, [K_param_15];
+\tadd.s64 \t%rd8, %rd2, %rd7;
 \tld.global.b32 \t%r7, [%rd8];
-\tadd.s64 \t%rd9, %rd2, %rd7;
+\tadd.s64 \t%rd9, %rd3, %rd7;
 \tld.global.b32 \t%r8, [%rd9];
 \tadd.rn.f32 \t%r9, %r7, %r8;
-\tadd.s64 \t%rd10, %rd3, %rd7;
+\tadd.s64 \t%rd10, %rd1, %rd7;
 \tst.global.b32 \t[%rd10], %r9;
 \tret;
 }
 '''
 
 
+def vx_param(name, vx_type):
+    """One parameter as vxc's manifest writes it."""
+    if 'Tensor<' in vx_type:
+        element = vx_type.split('<')[1].split(',')[0]
+        return {'name': name, 'type': vx_type, 'mutable': vx_type.startswith('&mut '), 'kind': 'tensor',
+                'element': {'u16': 'i16', 'u8': 'i8'}.get(element, element), 'rank': 1, 'words': 5}
+    return {'name': name, 'type': vx_type, 'mutable': False, 'kind': 'scalar', 'element': vx_type, 'words': 1}
+
+
 def params(text):
-    return build.signature(f'// spawn-kernel: k({text})\n')[1]
+    """'out: mut f32[?], a: f32[?], n: i32' -> our parameter list, through kernel_params."""
+    result = []
+    for item in text.split(','):
+        name, kind = (s.strip() for s in item.split(':'))
+        if kind.endswith('[?]'):
+            ref = '&mut ' if kind.startswith('mut ') else '&'
+            kind = f'{ref}Tensor<{kind.removeprefix("mut ")[:-3]}, [?], Memory::HBM>'
+        result.append(vx_param(name, kind))
+    return build.kernel_params(result)
 
 
-def test_signature_parses_scalars_and_tensors():
-    name, ps = build.signature('// spawn-kernel: glm_vx_spawn_add(n: i32, a: f32[?], out: mut f32[?])\n')
-    assert name == 'glm_vx_spawn_add'
-    assert [p['kind'] for p in ps] == ['scalar', 'memref', 'memref']
-    assert [p.get('mut') for p in ps] == [None, False, True]
+def test_kernel_params_takes_the_element_from_the_vx_type():
+    ps = build.kernel_params([vx_param('w', '&Tensor<u16, [?], Memory::HBM>'), vx_param('out', '&mut Tensor<f32, [?], Memory::HBM>'),
+                              vx_param('n', 'i32')])
+    assert [(p['kind'], p.get('element'), p.get('mut')) for p in ps] == [('memref', 'u16', False), ('memref', 'f32', True),
+                                                                         ('scalar', None, None)]
 
 
-@pytest.mark.parametrize('source', ['', '// spawn-kernel: a()\n// spawn-kernel: b()\n'])
-def test_signature_requires_one_declaration(source):
+@pytest.mark.parametrize('change', [{'mutable': True}, {'rank': 2, 'words': 7}, {'type': '&Tensor<f16, [?], Memory::HBM>'}])
+def test_kernel_params_refuses_what_launch_cannot_pass(change):
     with pytest.raises(ValueError):
-        build.signature(source)
+        build.kernel_params([vx_param('x', '&Tensor<f32, [?], Memory::HBM>') | change])
 
 
-def test_add_ptx_matches_declared_order():
-    build.check_params(ADD_PTX, 'K', params('n: i32, a: f32[?], b: f32[?], out: mut f32[?]'))
+def test_add_ptx_matches_manifest():
+    build.check_params(ADD_PTX, 'K', params('out: mut f32[?], a: f32[?], b: f32[?], n: i32'))
 
 
 @pytest.mark.parametrize('text', [
-    'out: mut f32[?], a: f32[?], b: f32[?], n: i32',   # scalar in the wrong slot
-    'n: i64, a: f32[?], b: f32[?], out: mut f32[?]',   # scalar width
-    'n: i32, out: mut f32[?], a: f32[?], b: f32[?]',   # tensors swapped: stores land on b
-    'n: i32, a: f32[?], b: f32[?]',                    # missing parameter
+    'n: i32, out: mut f32[?], a: f32[?], b: f32[?]',   # scalar in the wrong slot
+    'out: mut f32[?], a: f32[?], b: f32[?], n: i64',   # scalar width
+    'a: f32[?], out: mut f32[?], b: f32[?], n: i32',   # tensors swapped: stores land on a
+    'out: mut f32[?], a: f32[?], b: f32[?]',          # missing parameter
+    'out: mut f32[?], a: u16[?], b: f32[?], n: i32',   # element width
 ])
-def test_add_ptx_rejects_wrong_signature(text):
+def test_add_ptx_rejects_wrong_manifest(text):
     with pytest.raises(ValueError):
         build.check_params(ADD_PTX, 'K', params(text))
 
 
 VXC = os.environ.get('VXC')
-needs_vxc = pytest.mark.skipif(not VXC or not shutil.which(VXC), reason='set VXC to a vxc with --machine')
+needs_vxc = pytest.mark.skipif(not VXC or not shutil.which(VXC), reason='set VXC to a vxc with --emit-ptx')
+
+
+def run_build(source, output):
+    return subprocess.run([sys.executable, str(HERE / 'build.py'), '--source', str(source),
+                           '--machine', str(HERE / 'machine.vx'), '--output', str(output)], text=True, capture_output=True)
 
 
 @needs_vxc
 def test_builds_add_from_vx(tmp_path):
     out = tmp_path / 'add.ptx'
-    result = subprocess.run([sys.executable, str(HERE / 'build.py'), '--source', str(HERE / 'add.vx'), '--output', str(out)],
-                            text=True, capture_output=True)
+    result = run_build(HERE / 'add.vx', out)
     assert result.returncode == 0, result.stderr
-    ptx = out.read_text()
-    assert '.entry glm_vx_spawn_add(' in ptx and 'vx_npu_kernel' not in ptx
+    assert '.entry glm_vx_spawn_add(' in out.read_text()
+    assert [p['name'] for p in json.loads(out.with_suffix('.json').read_text())['params']] == ['out', 'a', 'b', 'n']
 
 
 @needs_vxc
-@pytest.mark.parametrize('kernel,right,wrong,message', [
-    ('add', 'a: f32[?], b: f32[?], out: mut f32[?]', 'out: mut f32[?], a: f32[?], b: f32[?]', 'mut'),
-    ('int4_matvec', 'scales: u16[?], scale_kind: i32, packed: u8[?]', 'packed: u8[?], scale_kind: i32, scales: u16[?]', 'bits wide'),
-    ('fp8_matvec', 'scales: f32[?], weight: u8[?]', 'weight: u8[?], scales: f32[?]', 'bits wide'),
-    # Same type and both read-only: only the host-side order by name tells these apart.
-    ('mla_partial', 'q_latent: f32[?], q_rope: f32[?]', 'q_rope: f32[?], q_latent: f32[?]', 'vxc passes the kernel'),
-    ('mla_partial', 'heads: i32, rank: i32,', 'rank: i32, heads: i32,', 'vxc passes the kernel'),
+@pytest.mark.parametrize('kernel,first,second,message', [
+    ('add', 'out', 'a', 'mut'),
+    ('int4_matvec', 'packed', 'scales', 'bits wide'),
+    ('fp8_matvec', 'weight', 'scales', 'bits wide'),
 ])
-def test_refuses_a_signature_in_the_wrong_order(tmp_path, kernel, right, wrong, message):
-    source = (HERE / f'{kernel}.vx').read_text()
-    assert right in source
-    (tmp_path / f'{kernel}.vx').write_text(source.replace(right, wrong))
+def test_check_catches_a_manifest_out_of_place(tmp_path, kernel, first, second, message):
+    """The PTX check is independent of vxc's manifest: swap two of its entries and it refuses."""
+    out = tmp_path / f'{kernel}.ptx'
+    result = run_build(HERE / f'{kernel}.vx', out)
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads(out.with_suffix('.json').read_text())
+    ps = manifest['params']
+    i, j = [p['name'] for p in ps].index(first), [p['name'] for p in ps].index(second)
+    swapped = list(ps)
+    swapped[i], swapped[j] = ps[j], ps[i]
+    with pytest.raises(ValueError, match=message):
+        build.check_params(out.read_text(), manifest['entry'], swapped)
+
+
+@needs_vxc
+def test_refuses_two_kernels_in_one_file(tmp_path):
+    source = (HERE / 'copy.vx').read_text()
+    second = source[source.index('pub fn'):].replace('glm_vx_spawn_copy', 'glm_vx_spawn_copy_again')
+    (tmp_path / 'copy.vx').write_text(source + '\n' + second)
     shutil.copy(HERE / 'device.vx', tmp_path)
-    result = subprocess.run([sys.executable, str(HERE / 'build.py'), '--source', str(tmp_path / f'{kernel}.vx'),
-                             '--machine', str(HERE / 'machine.vx'), '--output', str(tmp_path / 'k.ptx')],
-                            text=True, capture_output=True)
-    assert result.returncode == 1 and message in result.stderr, result.stderr
+    result = run_build(tmp_path / 'copy.vx', tmp_path / 'k.ptx')
+    assert result.returncode == 1 and 'one GPU kernel per file' in result.stderr, result.stderr
