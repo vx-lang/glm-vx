@@ -1,0 +1,27 @@
+// glm_vx_gpu_matvec through Vx's own GPU path: out[rows] = weight[rows, cols] x[cols], one
+// warp per row, adjacent lanes on adjacent columns, then a full-warp shuffle sum. Same
+// arithmetic order as the hand kernel, so results should be bitwise equal.
+// spawn-include: device.vx
+// spawn-kernel: glm_vx_spawn_matvec(rows: i32, cols: i32, weight: f32[?], x: f32[?], out: mut f32[?])
+
+pub fn matvec(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<f32, [?], Memory::HBM>,
+              x: &Tensor<f32, [?], Memory::HBM>, rows: i32, cols: i32) -> void {
+  spawn on(Topology::Device) {
+    let tid: i32 = thread_id();
+    let block: i32 = block_dim();
+    let lane: i32 = tid % 32;
+    let row: i32 = block_id() * (block / 32) + tid / 32;
+    // Same launch contract as the hand kernel: block a multiple of 32, at most 1024.
+    if block >= 32 && block <= 1024 && block % 32 == 0 && row < rows && cols >= 0 {
+      let mut sum: f32 = 0.0;
+      let mut c: i32 = lane;
+      while c < cols {
+        sum = sum + weight[row * cols + c] * x[c];
+        c = c + 32;
+      }
+      let total: f32 = warp_sum(sum);
+      if lane == 0 { out[row] = total; }
+    }
+  }
+  return;
+}

@@ -1,0 +1,49 @@
+// Device helpers shared by the gpu/spawn kernels; build.py pastes this file in front of a
+// kernel that declares `// spawn-include: device.vx`. Thread ids and warp shuffles are
+// gpu-dialect mlir! blocks until Vx has builtins for them (#260).
+fn thread_id() on Topology::Device -> i32 {
+  return mlir!( inputs : (), returns : i32, dialects : ["gpu", "arith"]) {
+    %t = gpu.thread_id x
+    %r = "arith.index_cast"(%t) : (index) -> i32
+    macro.yield %r : i32
+  };
+}
+fn block_id() on Topology::Device -> i32 {
+  return mlir!( inputs : (), returns : i32, dialects : ["gpu", "arith"]) {
+    %t = gpu.block_id x
+    %r = "arith.index_cast"(%t) : (index) -> i32
+    macro.yield %r : i32
+  };
+}
+fn block_dim() on Topology::Device -> i32 {
+  return mlir!( inputs : (), returns : i32, dialects : ["gpu", "arith"]) {
+    %t = gpu.block_dim x
+    %r = "arith.index_cast"(%t) : (index) -> i32
+    macro.yield %r : i32
+  };
+}
+fn grid_dim() on Topology::Device -> i32 {
+  return mlir!( inputs : (), returns : i32, dialects : ["gpu", "arith"]) {
+    %t = gpu.grid_dim x
+    %r = "arith.index_cast"(%t) : (index) -> i32
+    macro.yield %r : i32
+  };
+}
+// Full-warp shfl.sync.down with clamp 31; a lane past the warp gets its own value back.
+fn shuffle_down(value: f32, delta: i32) on Topology::Device -> f32 {
+  return mlir!( inputs : (%v = value : f32, %d = delta : i32), returns : f32, dialects : ["gpu", "arith"]) {
+    %w = "arith.constant"() {value = 32 : i32} : () -> i32
+    %r, %ok = gpu.shuffle down %v, %d, %w : f32
+    macro.yield %r : f32
+  };
+}
+// The hand kernels' vxk_warp_sum, in the same order, so lane 0 gets a bitwise-equal total.
+fn warp_sum(value: f32) on Topology::Device -> f32 {
+  let mut sum: f32 = value;
+  sum = sum + shuffle_down(sum, 16);
+  sum = sum + shuffle_down(sum, 8);
+  sum = sum + shuffle_down(sum, 4);
+  sum = sum + shuffle_down(sum, 2);
+  sum = sum + shuffle_down(sum, 1);
+  return sum;
+}
