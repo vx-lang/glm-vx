@@ -5,9 +5,14 @@ library build.py --library made, and Vx's CUDA backend launches it with the shap
 The tensors must live in the device's primary context (CUDAContext(primary=True)), the one
 Vx's runtime uses, and are passed with no copy: a rank-1 tensor is the five words of its
 memref descriptor (pointer, aligned pointer, offset 0, size, stride 1), and a scalar is passed
-by value, in the order of the function's parameters. A launch does not wait for the GPU
-(Vx #25); a read of a result through the same context does, since it is a blocking copy on
-the legacy stream. VX_CUDA_SYNC=1 makes Vx wait after each launch.
+by value, in the order of the function's parameters. The call runs with that context current,
+since Vx stops on any other (Vx abi.md section 3.6).
+
+A launch does not wait for the GPU (Vx #25); a read of a result through the same context does,
+since it is a blocking copy on the legacy stream. Our launches with stream=None are ordered
+with Vx's; a Stream from context.stream() is non-blocking by default and is not, so pass
+nonblocking=False or synchronize at the boundary. VX_CUDA_SYNC=1 makes Vx wait after each
+launch.
 """
 import ctypes as C
 import json
@@ -37,7 +42,7 @@ class VxKernel:
         missing = {p['name'] for p in self.params} ^ set(values)
         if missing:
             raise TypeError(f'{self.manifest["entry"]}: arguments do not match parameters: {sorted(missing)}')
-        args = []
+        args, context = [], None
         for p in self.params:
             value = values[p['name']]
             if p['kind'] == 'scalar':
@@ -49,6 +54,11 @@ class VxKernel:
                 raise TypeError(f'{p["name"]} is {value.dtype}, expected {_ELEMENT[p["element"]]}')
             if not getattr(value.context, 'primary', False):
                 raise ValueError(f'{p["name"]} must live in the primary context: CUDAContext(primary=True)')
+            context = value.context
             args += [value.pointer, value.pointer, 0, value.size, 1]
-        self.function(*args)
+        if context is None:
+            self.function(*args)
+        else:
+            with context._activate():
+                self.function(*args)
         return self
