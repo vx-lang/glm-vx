@@ -38,18 +38,7 @@ pub fn mla_partial(numerator: &mut Tensor<f32, [?], Memory::HBM>, stats: &mut Te
             dot = dot + q_rope[h * rope_dim + d] * cache_rope[token * rope_dim + d];
             d = d + block;
           }
-          // block_sum(dot) inlined.
-          let partial_dot: f32 = warp_sum(dot);
-          if tid % 32 == 0 { shared[tid / 32] = partial_dot; }
-          barrier();
-          if tid < 32 {
-            let mut v_dot: f32 = 0.0;
-            if tid < block / 32 { v_dot = shared[tid]; }
-            let total_dot: f32 = warp_sum(v_dot);
-            if tid == 0 { shared[32] = total_dot; }
-          }
-          barrier();
-          let score: f32 = shared[32] * scale;
+          let score: f32 = block_sum(dot, &mut shared) * scale;
           let mut next_m: f32 = score;
           let mut alpha: f32 = 0.0;
           let mut beta: f32 = 1.0;

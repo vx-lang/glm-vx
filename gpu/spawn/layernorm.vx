@@ -16,19 +16,7 @@ pub fn layernorm(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], M
       let mut s: f32 = 0.0;
       let mut d: i32 = tid;
       while d < dim { s = s + x[base + d]; d = d + block; }
-      // block_sum(s) inlined: a shared tensor cannot be passed to a function and barrier()
-      // is not found inside one (both reported to Vx).
-      let partial_sum: f32 = warp_sum(s);
-      if tid % 32 == 0 { shared[tid / 32] = partial_sum; }
-      barrier();
-      if tid < 32 {
-        let mut v_sum: f32 = 0.0;
-        if tid < block / 32 { v_sum = shared[tid]; }
-        let total_sum: f32 = warp_sum(v_sum);
-        if tid == 0 { shared[32] = total_sum; }
-      }
-      barrier();
-      let sum: f32 = shared[32];
+      let sum: f32 = block_sum(s, &mut shared);
       let mean: f32 = sum / (dim as f32);
       let mut ss: f32 = 0.0;
       d = tid;
@@ -37,19 +25,7 @@ pub fn layernorm(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], M
         ss = ss + c * c;
         d = d + block;
       }
-      // block_sum(ss) inlined: a shared tensor cannot be passed to a function and barrier()
-      // is not found inside one (both reported to Vx).
-      let partial_sq: f32 = warp_sum(ss);
-      if tid % 32 == 0 { shared[tid / 32] = partial_sq; }
-      barrier();
-      if tid < 32 {
-        let mut v_sq: f32 = 0.0;
-        if tid < block / 32 { v_sq = shared[tid]; }
-        let total_sq: f32 = warp_sum(v_sq);
-        if tid == 0 { shared[32] = total_sq; }
-      }
-      barrier();
-      let sq: f32 = shared[32];
+      let sq: f32 = block_sum(ss, &mut shared);
       let inv: f32 = 1.0 / (sq / (dim as f32) + eps).sqrt();
       d = tid;
       while d < dim { out[base + d] = (x[base + d] - mean) * inv * weight[d] + bias[d]; d = d + block; }

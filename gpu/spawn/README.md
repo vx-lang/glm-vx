@@ -42,7 +42,7 @@ All assemble with ptxas for sm_80 with no spills; none has run on a GPU yet. The
 need a correctly rounded sqrt, which needs #1944 (PR #1955), and the five kernels with exp use
 `fast_exp` (device.vx), `ex2.approx.ftz.f32(x * log2 e)` exactly as the hand kernels do, which
 needs nvvm intrinsics in the device image, #1945 (PR #1959). Built and checked with Vx main
-plus PRs #1952, #1954, #1955, #1958 and #1959. Barrier counts match the hand kernels (softmax 4, router
+plus PRs #1952, #1954, #1955, #1958, #1959, #1961 and #1962. Barrier counts match the hand kernels (softmax 4, router
 1, mla_partial 2). Not ported: gemm_tf32 (`mma.sync m16n8k8`: #350).
 
 `gpu/test_spawn_hardware.py` checks each against the hand kernel, bit for bit, on a GPU.
@@ -80,8 +80,8 @@ the bf16, binary16, INT4 and FP8 decodes.
 | Thread ids, warp shuffles | `mlir!` gpu-dialect helpers in `device.vx` | #260 |
 | A stable entry name and documented parameter order | `build.py` renames `vx_npu_kernel_N` and checks the order | #251 |
 | Correctly rounded sqrt / div (the norms) | `sqrt.approx` / `rsqrt.approx` in 390c2534; `sqrt.rn` + `rcp.rn` with PR #1955 | #1944 |
-| A shared tensor passed to a device function | `memref.cast` drops address space 3, then the fallback panics ("Function barrier not found"); block reductions are written out in each kernel | #1956 |
-| `barrier()` inside a device function | no device image, no warning | #1957 |
+| A shared tensor passed to a device function | `memref.cast` dropped address space 3 and the fallback panicked; PR #1961 fixes it, and `block_sum` / `block_max` live in device.vx | #1956 |
+| `barrier()` inside a device function | gave no device image, no warning; PR #1962 fixes it | #1957 |
 | exp as the hand kernels compute it, `ex2.approx.ftz.f32(x * log2 e)` | `llvm.call_intrinsic "llvm.nvvm.ex2.approx.ftz.f"` in an mlir! block, with PR #1959 | #1945 |
 | Bit casts (`f32::from_bits`) | crash; bf16 decode uses exact arithmetic instead | #1943 |
 | Scalars passed by value | E6003 unless `machine.vx` lists CPU_DRAM as visible | #1947 |

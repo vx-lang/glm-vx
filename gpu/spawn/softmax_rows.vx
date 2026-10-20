@@ -17,18 +17,7 @@ pub fn softmax_rows(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?]
       let mut maximum: f32 = x[base];
       let mut d: i32 = tid;
       while d < dim { if x[base + d] > maximum { maximum = x[base + d]; } d = d + block; }
-      // block_max(maximum) inlined, as the block sums in rmsnorm_rows.vx are.
-      let partial_max: f32 = warp_max(maximum);
-      if tid % 32 == 0 { shared[tid / 32] = partial_max; }
-      barrier();
-      if tid < 32 {
-        let mut v_max: f32 = shared[0];
-        if tid < block / 32 { v_max = shared[tid]; }
-        let total_max: f32 = warp_max(v_max);
-        if tid == 0 { shared[32] = total_max; }
-      }
-      barrier();
-      let row_max: f32 = shared[32];
+      let row_max: f32 = block_max(maximum, &mut shared);
       let mut sum: f32 = 0.0;
       d = tid;
       while d < dim {
@@ -37,18 +26,7 @@ pub fn softmax_rows(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?]
         sum = sum + v;
         d = d + block;
       }
-      // block_sum(sum) inlined.
-      let partial_sum: f32 = warp_sum(sum);
-      if tid % 32 == 0 { shared[tid / 32] = partial_sum; }
-      barrier();
-      if tid < 32 {
-        let mut v_sum: f32 = 0.0;
-        if tid < block / 32 { v_sum = shared[tid]; }
-        let total_sum: f32 = warp_sum(v_sum);
-        if tid == 0 { shared[32] = total_sum; }
-      }
-      barrier();
-      let denominator: f32 = shared[32];
+      let denominator: f32 = block_sum(sum, &mut shared);
       d = tid;
       while d < dim { out[base + d] = out[base + d] / denominator; d = d + block; }
     }

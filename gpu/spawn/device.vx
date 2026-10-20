@@ -163,3 +163,36 @@ fn fp8_decode(bits: i32) on Topology::Device -> f32 {
   return magnitude * sign;
 }
 
+
+// The hand kernels' vxk_block_sum and vxk_block_max: a uniform call by every thread, block a
+// multiple of 32 in [32, 1024]. `shared` holds one partial per warp and the broadcast slot
+// [32]; declare it in the region as `unsafe { Tensor<f32, [33], Memory::SMEM>::uninit() }`.
+// A shared tensor argument and barrier() in a helper need Vx #1956 and #1957 (PRs #1961, #1962).
+fn block_sum(value: f32, shared: &mut Tensor<f32, [33], Memory::SMEM>) on Topology::Device -> f32 {
+  let tid: i32 = thread_id();
+  let partial: f32 = warp_sum(value);
+  if tid % 32 == 0 { shared[tid / 32] = partial; }
+  barrier();
+  if tid < 32 {
+    let mut v: f32 = 0.0;
+    if tid < block_dim() / 32 { v = shared[tid]; }
+    let total: f32 = warp_sum(v);
+    if tid == 0 { shared[32] = total; }
+  }
+  barrier();
+  return shared[32];
+}
+fn block_max(value: f32, shared: &mut Tensor<f32, [33], Memory::SMEM>) on Topology::Device -> f32 {
+  let tid: i32 = thread_id();
+  let partial: f32 = warp_max(value);
+  if tid % 32 == 0 { shared[tid / 32] = partial; }
+  barrier();
+  if tid < 32 {
+    let mut v: f32 = shared[0];
+    if tid < block_dim() / 32 { v = shared[tid]; }
+    let total: f32 = warp_max(v);
+    if tid == 0 { shared[32] = total; }
+  }
+  barrier();
+  return shared[32];
+}
