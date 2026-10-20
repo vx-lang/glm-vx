@@ -81,13 +81,14 @@ the bf16, binary16, INT4 and FP8 decodes.
 | Thread ids, warp shuffles | `mlir!` gpu-dialect helpers in `device.vx` | #260 |
 | A stable entry name and documented parameter order | `build.py` renames `vx_npu_kernel_N` and checks the order | #251 |
 | Correctly rounded sqrt / div (the norms) | `sqrt.approx` / `rsqrt.approx` in 390c2534; `sqrt.rn` + `rcp.rn` with PR #1955 | #1944 |
-| A shared tensor passed to a device function, `barrier()` inside one | `memref.cast` error, then "Function barrier not found"; block reductions are written out in each kernel | none yet |
+| A shared tensor passed to a device function | `memref.cast` drops address space 3, then the fallback panics ("Function barrier not found"); block reductions are written out in each kernel | #1956 |
+| `barrier()` inside a device function | no device image, no warning | #1957 |
 | exp as the hand kernels compute it, `ex2.approx.ftz.f32(x * log2 e)` | `fast_exp` gives `ex2.approx.f32` (no ftz), so a subnormal exp(x) differs | #1945 (nvvm ops kept in the device image) |
 | Bit casts (`f32::from_bits`) | crash; bf16 decode uses exact arithmetic instead | #1943 |
 | Scalars passed by value | E6003 unless `machine.vx` lists CPU_DRAM as visible | #1947 |
 | Raw pointers in a region | silent host fallback; kernels take `[?]` tensors | #1945 |
 | Shared memory `::new()` | zero-fill races with other warps; use `unsafe { ::uninit() }` | #1946 |
-| A Vx build of the same file (exe or .so) | fails on `gpu.shuffle` / `gpu.thread_id` in the host copy | #1942 |
+| A Vx build of the same file (exe or .so) | fails on `gpu.shuffle` / `gpu.thread_id` in the host copy (fix in review: a CPU stub that aborts) | #1942 |
 | Grid and block chosen by the program | runtime picks from literal trip counts, else 1x1x1 | #252 |
 | Launch without a device sync each time | `cudaDeviceSynchronize` after every launch | #25 |
 | TF32 `mma.sync m16n8k8` | WMMA m16n16k8 only | #350 |
