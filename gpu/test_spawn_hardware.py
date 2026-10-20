@@ -147,3 +147,22 @@ def test_spawn_fp8_matvec_matches_hand_kernel(context, rows, cols):
     hand.launch(grid, 256, [hand_out, dw, ds, dx, C.c_int32(rows), C.c_int32(cols)])
     context.synchronize()
     np.testing.assert_array_equal(download(spawn_out), download(hand_out))
+
+
+@pytest.mark.parametrize('tokens,k,ties', [(1, 1, False), (300, 64, True), (5000, 2048, True), (70000, 2048, False)])
+def test_spawn_topk_matches_stable_argsort_and_hand_kernel(context, tokens, k, ties):
+    from gpu.topk import TopK, scratch_ints
+    rng = np.random.default_rng(tokens + k)
+    scores = rng.integers(-4, 4, size=tokens).astype('f4') if ties else rng.normal(size=tokens).astype('f4')
+    if tokens > 10:
+        scores[3], scores[7] = np.nan, -0.0  # NaN sorts last; -0.0 ties +0.0
+    kk = min(k, tokens)
+    d_scores = upload(context, scores)
+    spawn_ids = context.tensor((kk,), 'int32')
+    SpawnKernel(context, BUILD / 'spawn/topk.ptx').launch(
+        1, 256, tokens=tokens, k=k, scratch=context.tensor((scratch_ints(tokens, k),), 'int32'),
+        scores=d_scores.view((tokens,), 'int32'), out_ids=spawn_ids)
+    hand_ids = TopK.from_ptx(context, BUILD / 'topk.ptx').topk_stable(d_scores, k)
+    context.synchronize()
+    np.testing.assert_array_equal(download(spawn_ids), np.argsort(-scores, kind='stable')[:kk])
+    np.testing.assert_array_equal(download(spawn_ids), download(hand_ids))

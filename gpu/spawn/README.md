@@ -17,6 +17,7 @@ block, because Vx's runtime cannot do that yet (see below).
 | `bf16_matvec.vx` | `glm_vx_gpu_bf16_matvec` | builds, ptxas sm_80 OK; A100 not run |
 | `int4_matvec.vx` | `glm_vx_gpu_int4_matvec` | builds, ptxas sm_80 OK; A100 not run |
 | `fp8_matvec.vx` | `glm_vx_gpu_fp8_matvec` | builds, ptxas sm_80 OK; A100 not run |
+| `topk.vx` | `glm_vx_gpu_topk_stable` | builds, ptxas sm_80 OK (7 barriers, as the hand kernel); A100 not run |
 
 `gpu/test_spawn_hardware.py` checks each against the hand kernel, bit for bit, on a GPU.
 
