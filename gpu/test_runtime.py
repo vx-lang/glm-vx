@@ -81,6 +81,8 @@ class FakeLibrary:
             write(args[0], C.c_int32, attrs[value(args[1])])
         elif name == "cuCtxCreate_v2":
             self.stack.append(self.handle(args[0]))
+        elif name == "cuDevicePrimaryCtxRetain":
+            self.handle(args[0])
         elif name == "cuCtxPushCurrent_v2":
             self.stack.append(value(args[0]))
         elif name == "cuCtxPopCurrent_v2":
@@ -154,6 +156,20 @@ class RuntimeTests(unittest.TestCase):
         with self.assertRaises(CUDAUnavailable):
             CUDAContext(_driver=CUDADriver(_library=library))
         self.assertNotIn("cuCtxCreate_v2", library.names())
+
+    def test_primary_context_is_retained_and_released_not_created(self):
+        library = FakeLibrary()
+        context = CUDAContext(primary=True, _driver=CUDADriver(_library=library))
+        tensor = context.tensor((4,))
+        self.assertEqual(library.stack, [777])  # nothing left current after allocating
+        context.close()
+        names = library.names()
+        self.assertNotIn("cuCtxCreate_v2", names)
+        self.assertNotIn("cuCtxDestroy_v2", names)
+        self.assertIn("cuDevicePrimaryCtxRetain", names)
+        self.assertEqual(names[-1], "cuDevicePrimaryCtxRelease_v2")
+        self.assertLess(names.index("cuMemFree_v2"), names.index("cuDevicePrimaryCtxRelease_v2"))
+        self.assertTrue(tensor.closed)
 
     def test_invalid_ordinal_and_capability(self):
         with self.assertRaises(ValueError):

@@ -90,6 +90,7 @@ class CUDADriver:
             "cuDeviceGetName": [_P, _I32, _I32],
             "cuDeviceGetAttribute": [C.POINTER(_I32), _I32, _I32],
             "cuCtxCreate_v2": [C.POINTER(_P), _U32, _I32], "cuCtxDestroy_v2": [_P],
+            "cuDevicePrimaryCtxRetain": [C.POINTER(_P), _I32], "cuDevicePrimaryCtxRelease_v2": [_I32],
             "cuCtxPushCurrent_v2": [_P], "cuCtxPopCurrent_v2": [C.POINTER(_P)],
             "cuCtxSynchronize": [],
             "cuMemAlloc_v2": [C.POINTER(_U64), _SIZE], "cuMemFree_v2": [_U64],
@@ -151,10 +152,14 @@ class CUDAContext:
     """Own one CUDA context and its resources; use ``with CUDAContext() as ctx``.
 
     ``device`` is a visible CUDA device ordinal. ``minimum_compute_capability``
-    can require e.g. (8, 0); GLMKernels requires this for its sm80 PTX. ``_driver``
-    is an internal test injection, not an alternate execution backend.
+    can require e.g. (8, 0); GLMKernels requires this for its sm80 PTX. ``primary``
+    retains the device's primary context instead of creating one, which is the context
+    the CUDA runtime API (and so Vx's own launches) uses: memory allocated here can then
+    be passed to a vxc-built function, and launches on the legacy default stream
+    (``stream=None``) are ordered with Vx's. ``_driver`` is an internal test injection,
+    not an alternate execution backend.
     """
-    def __init__(self, device=0, *, minimum_compute_capability=None, _driver=None):
+    def __init__(self, device=0, *, minimum_compute_capability=None, primary=False, _driver=None):
         _integer(device, "device", maximum=(1 << 31) - 1)
         self.driver = _driver if _driver is not None else CUDADriver()
         self._lock = threading.RLock()
@@ -192,6 +197,12 @@ class CUDAContext:
                 raise ValueError("minimum_compute_capability must contain two nonnegative integers")
             if self.compute_capability < minimum:
                 raise CUDAUnavailable(f"Device {self.name} has compute capability {self.compute_capability}; requires {minimum}")
+        self.primary = bool(primary)
+        if self.primary:
+            # Retaining does not make the context current, so there is nothing to pop.
+            d.call("cuDevicePrimaryCtxRetain", C.byref(self.handle), self.device)
+            self._closed = False
+            return
         d.call("cuCtxCreate_v2", C.byref(self.handle), 0, self.device)
         try:
             previous = _P()
@@ -280,7 +291,10 @@ class CUDAContext:
                 self._synchronize_current()
                 for resource in list(reversed(self._resources)):
                     resource._destroy_current()
-            self.driver.call("cuCtxDestroy_v2", self.handle)
+            if self.primary:
+                self.driver.call("cuDevicePrimaryCtxRelease_v2", self.device)
+            else:
+                self.driver.call("cuCtxDestroy_v2", self.handle)
             self._closed = True
             self.handle = _P()
 
