@@ -1,14 +1,12 @@
-// A Vx repro, not a probe (build.sh skips it). From the Vx checkout, with PRs #1959-#1962:
+// A Vx repro, not a probe (build.sh skips it). From the Vx checkout:
 //   vxc repro_smem_mlir.vx --host default --machine fleet/a100-40.vx --action emit-llvm -o /dev/null
 // An mlir! block that takes a Memory::SMEM tensor as memref<2048xi32> (without memory space 3).
-// vxc exits 101:
-//   'memref.cast' op operand type 'memref<2048xi32, 3>' and result type 'memref<2048xi32>' are cast incompatible
-//   [flat-codegen] program outside the flat subset; using the AST path
-//   Vx Compiler Internal Error: panicked at src/codegen/lower/expr.rs:3567:13:
-//   Function barrier not found
-// The first message has no source position and does not name the mlir! block or say that a shared
-// tensor is memref<..., 3> there; the AST fallback then panics on barrier(). With
-// memref<2048xi32, 3> it compiles (the wgmma probes' smem_address).
+// Before Vx PR #1961 a device fn took a SMEM tensor without memory space 3; the call's cast failed
+// with no source position and the AST fallback panicked ("Function barrier not found", exit 101).
+// With #1961 and #2006 (vx-lang/Vx#1985) vxc exits 1 with an error at the block:
+//   The `mlir!` block at line 11, column 17 takes its input `%t` as `memref<2048xi32>`, but the
+//   value is a `memref<2048xi32, 3>`: 'memref.cast' op ... are cast incompatible
+// Written as memref<2048xi32, 3> it compiles (the wgmma probes' smem_address).
 fn smem_address(tile: &mut Tensor<i32, [2048], Memory::SMEM>) on Topology::Device -> i64 {
   return mlir!( inputs : (%t = tile : memref<2048xi32>), returns : i64, dialects : ["memref", "arith"]) {
     %p = memref.extract_aligned_pointer_as_index %t : memref<2048xi32> -> index
