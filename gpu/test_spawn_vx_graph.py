@@ -11,8 +11,8 @@ runtime launches (lib<kernel>.so):
 - mixed: Python launches (SpawnKernel) and Vx launches in one graph;
 - refusals: VX_CUDA_SYNC=1 or VX_TIME_KERNEL during a capture must stop the program with
   Vx's message;
-- first call in a capture (no warm-up): whatever happens is reported; only a silent wrong
-  answer fails.
+- first call in a capture (no warm-up): Vx (PR #1994 from d1de7d0a) stops the program and says to
+  call the function once before the recording.
 
 Every scenario runs in a child process (`python -m gpu.test_spawn_vx_graph SCENARIO`), since
 Vx stops the whole program on what it refuses. Each child's stdout and stderr (Vx's
@@ -295,13 +295,11 @@ def test_vx_stops_on_a_wait_during_capture(env, reason):
     assert 'records a CUDA graph' in proc.stderr and reason in proc.stderr, report
 
 
-def test_first_call_inside_a_capture_is_not_silently_wrong():
+def test_vx_stops_on_a_first_call_inside_a_capture():
     proc, report = run_child('first-call')
-    if proc.returncode == 0:
-        return  # Vx loaded the image during the capture, and the replay was right
-    # A refusal is fine (the rule is: call once before capturing), as long as it says why.
     assert proc.returncode != MISMATCH, 'a wrong answer\n' + report
-    assert 'Vx CUDA' in proc.stderr or 'CUDA' in proc.stderr, 'stopped with no message\n' + report
+    assert proc.returncode != 0, 'Vx loaded its image during the capture instead of stopping\n' + report
+    assert 'Call the function once before the recording' in proc.stderr, report
 
 
 def test_every_library_has_vx_cuda_set_stream():

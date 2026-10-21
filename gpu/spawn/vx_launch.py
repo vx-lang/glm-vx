@@ -15,8 +15,9 @@ context.stream() is non-blocking by default and is not, so pass nonblocking=Fals
 synchronize at the boundary.
 
 With stream=<Stream>, the call sets that stream for this thread with Vx's
-`vx_cuda_set_stream` (Vx #1986, PR #1994), calls the function, and sets null again (the legacy
-default stream) before returning, even on an error. Vx's launch is then ordered on our stream,
+`vx_cuda_set_stream` (Vx #1986, PR #1994), calls the function, and puts back the stream that
+was set before (`vx_cuda_get_stream`; null, the legacy default stream, with a Vx that lacks it)
+before returning, even on an error. Vx's launch is then ordered on our stream,
 not on the legacy one, with our own launches on it; and a stream can capture Vx's launches into
 a CUDA graph (Stream.capture()). Call each kernel once before a capture: its first call loads
 the kernel image. While the stream captures, Vx stops the program with a message at anything a
@@ -55,6 +56,7 @@ class VxKernel:
         self.function.argtypes = [t for p in self.params
                                   for t in (_DESCRIPTOR if p['kind'] == 'memref' else [_SCALAR[p['type']]])]
         self._set_stream = None
+        self._get_stream = False  # not looked up yet; None when Vx lacks vx_cuda_get_stream
 
     @property
     def set_stream(self):
@@ -72,6 +74,16 @@ class VxKernel:
             function.argtypes, function.restype = [C.c_void_p], None
             self._set_stream = function
         return self._set_stream
+
+    @property
+    def get_stream(self):
+        """Vx's `CUstream vx_cuda_get_stream(void)`, or None for a Vx without it."""
+        if self._get_stream is False:
+            function = getattr(self.library, 'vx_cuda_get_stream', None)
+            if function is not None:
+                function.argtypes, function.restype = [], C.c_void_p
+            self._get_stream = function
+        return self._get_stream
 
     def __call__(self, *, stream=None, **values):
         missing = {p['name'] for p in self.params} ^ set(values)
@@ -106,9 +118,11 @@ class VxKernel:
                 self.function(*args)
                 return self
             stream._ensure_open()
+            get_stream = self.get_stream
+            previous = get_stream() if get_stream is not None else None
             set_stream(stream.handle)
             try:
                 self.function(*args)
             finally:
-                set_stream(None)
+                set_stream(previous)
         return self

@@ -29,11 +29,13 @@ class FakeFunction:
 
 class FakeKernelLibrary:
     """lib<kernel>.so: the pub fn and, with PR #1994, vx_cuda_set_stream from its dispatch library."""
-    def __init__(self, *, has_set_stream=True, entry_fails=False):
+    def __init__(self, *, has_set_stream=True, entry_fails=False, current_stream=None):
         self.log = []
         self.glm_vx_spawn_add = FakeFunction(self.log, 'entry', entry_fails)
         if has_set_stream:
             self.vx_cuda_set_stream = FakeFunction(self.log, 'set_stream')
+        if current_stream is not None:  # a Vx with vx_cuda_get_stream
+            self.vx_cuda_get_stream = lambda: current_stream
 
 
 @pytest.fixture
@@ -78,6 +80,14 @@ def test_the_stream_is_given_back_when_the_call_fails(setup):
         kernel(out=x, a=x, n=4, stream=stream)
     assert [name for name, _ in library.log] == ['set_stream', 'entry', 'set_stream']
     assert library.log[-1][1] == (None,)
+
+
+def test_the_previous_stream_is_put_back(setup):
+    kernel, library, context, _ = setup(current_stream=1234)
+    x, stream = context.tensor((4,)), context.stream()
+    kernel(out=x, a=x, n=4, stream=stream)
+    assert [(name, stream_value(args[0])) if name == 'set_stream' else name for name, args in library.log] == \
+        [('set_stream', stream.handle.value), 'entry', ('set_stream', 1234)]
 
 
 def test_an_old_vx_fails_only_when_a_stream_is_asked_for(setup):
