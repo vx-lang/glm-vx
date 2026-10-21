@@ -94,6 +94,7 @@ class CUDADriver:
             "cuCtxPushCurrent_v2": [_P], "cuCtxPopCurrent_v2": [C.POINTER(_P)],
             "cuCtxSynchronize": [],
             "cuMemAlloc_v2": [C.POINTER(_U64), _SIZE], "cuMemFree_v2": [_U64],
+            "cuMemGetInfo_v2": [C.POINTER(_SIZE), C.POINTER(_SIZE)],
             "cuMemcpyHtoD_v2": [_U64, _P, _SIZE], "cuMemcpyDtoH_v2": [_P, _U64, _SIZE],
             "cuModuleLoadDataEx": [C.POINTER(_P), _P, _U32, _P, _P],
             "cuModuleUnload": [_P], "cuModuleGetFunction": [C.POINTER(_P), _P, C.c_char_p],
@@ -241,6 +242,13 @@ class CUDAContext:
         """Block until all context work finishes, surfacing asynchronous CUDA errors."""
         with self._activate():
             self._synchronize_current()
+
+    def memory_info(self):
+        """(free, total) device bytes as cuMemGetInfo reports them for this context."""
+        free, total = _SIZE(), _SIZE()
+        with self._activate():
+            self.driver.call("cuMemGetInfo_v2", C.byref(free), C.byref(total))
+        return free.value, total.value
 
     def allocate(self, nbytes):
         return DeviceBuffer(self, nbytes)

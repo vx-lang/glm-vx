@@ -183,13 +183,14 @@ def parse_args(argv=None):
     p.add_argument('--decode-prefill-tokens',type=int,default=4,help='total prefill tokens per round with active decoders; lower favors decode latency')
     p.add_argument('--gpu-ptx-dir',help='directory containing compiled kernels.ptx')
     p.add_argument('--gpu-device',type=int,default=0)
-    p.add_argument('--gpu-weight-cache-mib',type=int,default=512)
+    p.add_argument('--gpu-weight-cache-mib',type=int,help='vx-gpu device weight LRU; default 512')
+    p.add_argument('--no-preload',dest='preload',action='store_false',help=f'{RESIDENT} only: upload weights on first use instead of at startup')
     p.add_argument('--gpu-tuning',help='verified shape-specific plan produced by python -m gpu.tune')
     args=p.parse_args(argv)
     if args.packed_weights and (not args.gguf or args.backend != 'vx'):p.error('packed weights requires --gguf and --backend vx')
     if args.prefix_cache_mib<0:p.error('prefix cache must be nonnegative')
     if args.max_pending_events<2:p.error('max pending events must be at least two')
-    if args.gpu_weight_cache_mib<0:p.error('GPU weight cache must be nonnegative')
+    if args.gpu_weight_cache_mib is not None and args.gpu_weight_cache_mib<0:p.error('GPU weight cache must be nonnegative')
     if args.decoded_cache_mib<0:p.error('decoded cache must be nonnegative')
     if args.max_waiting is not None and args.max_waiting<0:p.error('max waiting must be nonnegative')
     if args.backend==RESIDENT:
@@ -199,12 +200,15 @@ def parse_args(argv=None):
         if args.batched_prefill:p.error(f'{RESIDENT} does not support batched CPU prefill')
         if args.gguf:p.error(f'{RESIDENT} loads --checkpoint or --tiny, not --gguf')
         if args.gpu_tuning:p.error(f'{RESIDENT} does not use --gpu-tuning')
+        if args.gpu_weight_cache_mib is not None:p.error(f'{RESIDENT} keeps every weight resident with no eviction; --gpu-weight-cache-mib applies to vx-gpu')
         if args.max_context is None:args.max_context=8192
         if args.max_context<1:p.error('max context must be positive')
         args.max_sequences=1
         if args.max_waiting is None:args.max_waiting=32
     else:
         if args.max_context is not None:p.error(f'--max-context applies to --backend {RESIDENT} only')
+        if not args.preload:p.error(f'--no-preload applies to --backend {RESIDENT} only')
+        if args.gpu_weight_cache_mib is None:args.gpu_weight_cache_mib=512
         if args.max_sequences is None:args.max_sequences=8
         if args.max_waiting is None:args.max_waiting=0
     return args
@@ -249,6 +253,13 @@ def build_model(args):
         from gpu import resident
         backend=resident.ResidentGLM(model,max_tokens=args.max_context,ptx_dir=args.gpu_ptx_dir,device=args.gpu_device)
         model=resident.ResidentSequenceModel(model,backend)
+        if args.preload:
+            # Every layer and expert up front: lazy first-use uploads would never reach steady state.
+            start=time.perf_counter()
+            try:uploaded=backend.preload()
+            except MemoryError as exc:
+                backend.close(); raise SystemExit(f'error: {exc}') from exc
+            print(json.dumps({'preloaded_weight_bytes':uploaded,'preload_seconds':round(time.perf_counter()-start,3)}),flush=True)
     return model,backend,weights,name
 
 def main(argv=None):

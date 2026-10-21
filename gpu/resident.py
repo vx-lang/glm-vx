@@ -54,6 +54,17 @@ _ELEMENTWISE_BLOCK = 256
 _MAX_GRID = 65535
 
 
+class _Planned:
+    """Size-only stand-in that preload records once device memory would run out; never launched."""
+
+    def __init__(self, shape):
+        self.shape = tuple(shape)
+
+
+def _planned(entry):
+    return isinstance(entry, _Planned) or (isinstance(entry, tuple) and any(isinstance(e, _Planned) for e in entry))
+
+
 def _f32(value, name, positive=False):
     value = C.c_float(float(value)).value
     if not np.isfinite(value) or (value <= 0 if positive else False):
@@ -77,6 +88,7 @@ class ResidentGLM:
         self.device_topk = bool(device_topk)
         self.max_weight_bytes = max_weight_bytes
         self.weight_bytes = 0
+        self._room = self._plan = None  # preload's fit check, see preload()
         self._owns_context = ctx is None
         self.ctx = ctx if ctx is not None else CUDAContext(device, minimum_compute_capability=(8, 0))
         self._closed = False
@@ -149,6 +161,14 @@ class ResidentGLM:
     def _upload_weight(self, key, array, dtype='float32'):
         if self.max_weight_bytes is not None and self.weight_bytes + array.nbytes > self.max_weight_bytes:
             raise MemoryError(f'device weights would exceed max_weight_bytes={self.max_weight_bytes} at {key!r}')
+        if self._plan is None and self._room is not None and array.nbytes > self._room:
+            self._plan = 0  # out of device memory: size the rest without uploading it
+        if self._plan is not None:
+            self._plan += array.nbytes
+            self._weights[key] = tensor = _Planned(array.shape)
+            return tensor
+        if self._room is not None:
+            self._room -= array.nbytes
         tensor = self._tensor(array.shape, dtype, array.tobytes())
         self.weight_bytes += array.nbytes
         self._weights[key] = tensor
@@ -296,14 +316,23 @@ class ResidentGLM:
             args = [bits, x, I(rows), I(cols)]
         if out.shape != (rows,) or x.shape != (cols,):
             raise ValueError(f'{prefix}: {fmt.upper()} weight is {rows}x{cols}, got x {x.shape} -> out {out.shape}')
+        self._launch(self._format_kernel(fmt), (rows + 3) // 4, 128, [out] + args)
+        return out
+
+    def _format_kernel(self, fmt):
         name = fmt + '_matvec'
         if name not in self._kernels:
             module = self._modules.get(fmt)
             if module is None:
                 module = self._modules[fmt] = self.ctx.load_ptx(self._ptx_dir / (fmt + '.ptx'))
             self._kernels[name] = module.kernel('glm_vx_gpu_' + name)
-        self._launch(name, (rows + 3) // 4, 128, [out] + args)
-        return out
+        return name
+
+    def _topk_kernel(self):
+        if 'topk_stable' not in self._kernels:
+            module = self._modules['topk'] = self.ctx.load_ptx(self._ptx_dir / 'topk.ptx')
+            self._kernels['topk_stable'] = module.kernel('glm_vx_gpu_topk_stable')
+        return 'topk_stable'
 
     def _linear(self, name, x, out, bias=False):
         self._project(name, x, out)
@@ -341,12 +370,17 @@ class ResidentGLM:
         self._swiglu(gate, up, act, width)
         self._project(prefix + '.down_proj', act, out)
 
-    def _expert(self, prefix, expert, x, out):
-        base = f'{prefix}.experts.{expert}'
+    def _fused_experts(self, base):
         try:
             if self._format(base + '.gate_proj') == 'float32':
                 self.model._weight(base + '.gate_proj.weight')
+            return False
         except KeyError:
+            return True
+
+    def _expert(self, prefix, expert, x, out):
+        base = f'{prefix}.experts.{expert}'
+        if self._fused_experts(base):
             # Fused checkpoint layout: gate_up_proj[E, 2I, H] and down_proj[E, H, I]. The whole
             # tensors are uploaded once; each expert is a view into them.
             gate_up = self._weight(prefix + '.experts.gate_up_proj')
@@ -385,16 +419,21 @@ class ResidentGLM:
         count = min(self.index_topk, tokens)
         if self.device_topk:
             # Stable by position, exactly as GlmMoeDsaModel._index (TOPK.md); writes ids[:count].
-            if 'topk_stable' not in self._kernels:
-                module = self._modules['topk'] = self.ctx.load_ptx(self._ptx_dir / 'topk.ptx')
-                self._kernels['topk_stable'] = module.kernel('glm_vx_gpu_topk_stable')
-            self._launch('topk_stable', 1, 256, [self.selected, self.scores.view((tokens,)), self.topk_scratch,
+            self._launch(self._topk_kernel(), 1, 256, [self.selected, self.scores.view((tokens,)), self.topk_scratch,
                                                  I(tokens), I(self.index_topk)])
         else:
             scores = np.frombuffer(self.scores.view((tokens,)).download(), dtype=np.float32)
             chosen = np.argsort(-scores, kind='stable')[:count].astype(np.int32)
             self.selected.view((count,)).upload(chosen)
         self.selected_count = count
+
+    def _kv_nope_t(self, prefix):
+        kv_name = prefix + '.kv_b_proj.weight'
+        kv_t = self._weights.get(kv_name + ':nope_t')
+        if kv_t is None:
+            kv = np.asarray(self.model._weight(kv_name), dtype=np.float32).reshape(self.heads, self.nope + self.value_dim, self.rank)
+            kv_t = self._upload_weight(kv_name + ':nope_t', np.ascontiguousarray(kv[:, :self.nope, :].transpose(0, 2, 1)))
+        return kv_t
 
     def _attention(self, layer, x, position, shared_ok):
         m, c = self.model, self.config
@@ -415,13 +454,8 @@ class ResidentGLM:
             raise ValueError('Shared DSA layer has no preceding full indexer selection')
 
         # Absorbed MLA. q_latent[h] = W_k[h]^T q_nope[h]; the transposed nope blocks are built once.
-        kv_name = prefix + '.kv_b_proj.weight'
-        kv_t_key = kv_name + ':nope_t'
-        kv_t = self._weights.get(kv_t_key)
-        if kv_t is None:
-            kv = np.asarray(m._weight(kv_name), dtype=np.float32).reshape(self.heads, self.nope + self.value_dim, self.rank)
-            kv_t = self._upload_weight(kv_t_key, np.ascontiguousarray(kv[:, :self.nope, :].transpose(0, 2, 1)))
-        kv_b = self._weight(kv_name)
+        kv_t = self._kv_nope_t(prefix)
+        kv_b = self._weight(prefix + '.kv_b_proj.weight')
         warps = 4
         self._launch('matvec_heads', (self.heads * self.rank + warps - 1) // warps, 128,
                      [self.latent_q, kv_t, self.query, I(self.heads), I(self.rank), I(self.nope),
@@ -505,6 +539,84 @@ class ResidentGLM:
         head = 'model.embed_tokens' if c.get('tie_word_embeddings', False) else 'lm_head'
         self._project(head, self.norm, self.logits)
         return np.frombuffer(self.logits.download(), dtype=np.float32).copy()
+
+    def preload(self, reserve_bytes=256 * 1024 ** 2):
+        """Upload every weight decode can use (all layers, every routed expert, the final norm and
+        lm_head) and load the kernel modules, so no request pays a first-use upload. Returns the
+        bytes this call uploaded.
+
+        With a context that reports free memory (CUDAContext.memory_info), the upload stops before
+        free memory minus ``reserve_bytes`` runs out: the remaining weights are only sized, and a
+        MemoryError reports the bytes needed against the bytes free. The object then stays usable
+        with the weights that did fit (the rest upload lazily as before)."""
+        if self._closed:
+            raise RuntimeError('ResidentGLM is closed')
+        info = getattr(self.ctx, 'memory_info', None)
+        free = info()[0] if callable(info) else None
+        self._room = None if free is None else max(0, free - int(reserve_bytes))
+        self._plan, before = None, self.weight_bytes
+        try:
+            self._preload()
+            planned = self._plan
+        finally:
+            self._room = self._plan = None
+        if planned is not None:
+            self._weights = {k: v for k, v in self._weights.items() if not _planned(v)}
+            needed = self.weight_bytes - before + planned
+            raise MemoryError(f'ResidentGLM preload needs {needed} bytes ({needed / 1024 ** 3:.2f} GiB) of weights; '
+                              f'the device has {free} bytes ({free / 1024 ** 3:.2f} GiB) free, keeping {reserve_bytes} in reserve')
+        return self.weight_bytes - before
+
+    def _preload(self):
+        m, c = self.model, self.config
+        bias = bool(c.get('attention_bias', False))
+
+        def linear(name, with_bias=False):
+            self._out_features(name)  # uploads in the Linear's own format
+            if self._format(name) != 'float32':
+                self._format_kernel(self._format(name))
+            if with_bias:
+                self._weight(name + '.bias')
+
+        def mlp(prefix):
+            for n in ('gate_proj', 'up_proj', 'down_proj'):
+                linear(f'{prefix}.{n}')
+
+        for layer in range(m.n_layers):
+            p = f'model.layers.{layer}'
+            self._weight(p + '.input_layernorm.weight')
+            self._weight(p + '.post_attention_layernorm.weight')
+            a = p + '.self_attn'
+            for n in ('q_a_proj', 'kv_a_proj_with_mqa', 'o_proj'):
+                linear(f'{a}.{n}', bias)
+            linear(a + '.q_b_proj')
+            self._weight(a + '.q_a_layernorm.weight')
+            self._weight(a + '.kv_a_layernorm.weight')
+            self._kv_nope_t(a)
+            self._weight(a + '.kv_b_proj.weight')
+            if m.indexer_types[layer] == 'full':
+                for n in ('wq_b', 'wk', 'weights_proj'):
+                    linear(f'{a}.indexer.{n}')
+                self._weight(a + '.indexer.k_norm.weight')
+                self._weight(a + '.indexer.k_norm.bias')
+            f = p + '.mlp'
+            if m.mlp_types[layer] == 'dense':
+                mlp(f)
+                continue
+            linear(f + '.gate')
+            self._weight(f + '.gate.e_score_correction_bias')
+            for e in range(int(c['n_routed_experts'])):
+                if self._fused_experts(f'{f}.experts.{e}'):
+                    self._weight(f + '.experts.gate_up_proj')
+                    self._weight(f + '.experts.down_proj')
+                else:
+                    mlp(f'{f}.experts.{e}')
+            if int(c.get('n_shared_experts', 1)) > 0:
+                mlp(f + '.shared_experts')
+        self._weight('model.norm.weight')
+        linear('model.embed_tokens' if c.get('tie_word_embeddings', False) else 'lm_head')
+        if self.device_topk:
+            self._topk_kernel()
 
     def prefill(self, token_ids):
         """Token-by-token prefill; returns the stacked logits of every position."""

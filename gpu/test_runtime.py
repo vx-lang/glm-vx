@@ -111,6 +111,9 @@ class FakeLibrary:
             self.launches.append((self.kernel_names[value(args[0])], args[1:7], value(args[8])))
             if self.on_launch is not None:
                 self.on_launch(args)
+        elif name == "cuMemGetInfo_v2":
+            write(args[0], C.c_size_t, 3 << 30)
+            write(args[1], C.c_size_t, 4 << 30)
         elif name == "cuEventElapsedTime":
             write(args[0], C.c_float, 1.25)
         elif name in ("cuGetErrorName", "cuGetErrorString"):
@@ -138,6 +141,10 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(self.driver.cuMemAlloc_v2.argtypes[1], C.c_size_t)
         self.assertEqual(len(self.driver.cuLaunchKernel.argtypes), 11)
         self.assertEqual(self.driver.cuLaunchKernel.restype, C.c_int32)
+
+    def test_memory_info_reports_free_and_total(self):
+        self.assertEqual(self.context.memory_info(), (3 << 30, 4 << 30))
+        self.assertIn("cuMemGetInfo_v2", self.library.names())
 
     def test_missing_driver_fails_closed(self):
         with mock.patch("gpu.runtime.C.CDLL", side_effect=OSError("missing")):

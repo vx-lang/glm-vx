@@ -49,9 +49,13 @@ activations and the MLA / indexer caches stay on the device, and block-FP8 / INT
 stay packed. It holds one sequence's caches, so it serves one request at a time (`--max-sequences`
 is fixed at 1 until batched decode, #8); further requests wait in a FIFO (`--max-waiting`, default
 32) rather than getting 429. `--max-context` (default 8192) fixes the cache length at startup;
-each request resets the position and reuses the buffers. Weights upload on first use, so the first
-request is slow. The prefix cache and `--batched-prefill` are refused; sampling stays on the host
-(#17).
+each request resets the position and reuses the buffers. At startup `ResidentGLM.preload()` uploads
+every weight decode can use (every layer and routed expert, final norm, lm_head) and logs the bytes
+and seconds; if they would not fit in free device memory (cuMemGetInfo, less a 256 MiB reserve) the
+server exits with the bytes needed against the bytes free. `--no-preload` uploads on first use instead,
+so steady state takes many requests. The prefix cache, `--batched-prefill` and `--gpu-weight-cache-mib`
+(nothing is evicted) are refused; sampling stays on the host (#17). Completion `timings` include
+`queued_seconds`.
 
 ```sh
 .venv/bin/python -m glm_vx.server --backend vx-gpu-resident --checkpoint DIR --tokenizer DIR/tokenizer.json --max-context 4096

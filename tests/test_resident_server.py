@@ -26,8 +26,12 @@ class FakeResident:
 
     def __init__(self, model, *, max_tokens=4096, **kwargs):
         self.model, self.max_tokens = model, max_tokens
-        self.resets, self.headless, self.closed = 0, 0, False
+        self.resets, self.headless, self.closed, self.preloaded = 0, 0, False, False
         self.reset()
+
+    def preload(self):
+        self.preloaded = True
+        return 123
 
     def reset(self):
         self.resets += 1
@@ -67,7 +71,8 @@ PROMPTS = [([3, 17, 5, 5, 9, 200, 1], 5, 0), ([44, 8], 4, 0.7), ([2, 31, 77, 3, 
 
 # --------------------------------------------------------------- arguments
 @pytest.mark.parametrize('extra', [['--max-sequences', '2'], ['--prefix-cache-mib', '64'], ['--batched-prefill'],
-                                   ['--max-context', '0'], ['--gpu-tuning', 'plan.json']])
+                                   ['--max-context', '0'], ['--gpu-tuning', 'plan.json'],
+                                   ['--gpu-weight-cache-mib', '1024']])
 def test_resident_refuses_conflicting_flags(extra):
     with pytest.raises(SystemExit):
         parse_args(['--backend', 'vx-gpu-resident', '--tiny', *extra])
@@ -76,6 +81,7 @@ def test_resident_refuses_conflicting_flags(extra):
 def test_resident_refuses_gguf_and_other_backends_refuse_max_context():
     with pytest.raises(SystemExit): parse_args(['--backend', 'vx-gpu-resident', '--gguf', 'x.gguf'])
     with pytest.raises(SystemExit): parse_args(['--backend', 'numpy-reference', '--tiny', '--max-context', '64'])
+    with pytest.raises(SystemExit): parse_args(['--backend', 'numpy-reference', '--tiny', '--no-preload'])
 
 
 def test_defaults_per_backend():
@@ -84,7 +90,7 @@ def test_defaults_per_backend():
     a = parse_args(['--backend', 'vx-gpu-resident', '--tiny', '--max-sequences', '1', '--max-context', '64', '--max-waiting', '0'])
     assert (a.max_sequences, a.max_waiting, a.max_context) == (1, 0, 64)
     a = parse_args(['--backend', 'numpy-reference', '--tiny'])
-    assert (a.max_sequences, a.max_waiting, a.max_context) == (8, 0, None)
+    assert (a.max_sequences, a.max_waiting, a.max_context, a.gpu_weight_cache_mib) == (8, 0, None, 512)
 
 
 def test_build_model_wraps_one_resident(monkeypatch):
@@ -93,11 +99,27 @@ def test_build_model_wraps_one_resident(monkeypatch):
     model, backend, _, name = srv.build_model(parse_args(['--backend', 'vx-gpu-resident', '--tiny', '--max-context', '64']))
     assert isinstance(model, ResidentSequenceModel) and isinstance(backend, FakeResident)
     assert (backend.max_tokens, model.config['max_position_embeddings'], backend.name) == (64, 64, 'vx-gpu-resident')
+    assert backend.preloaded
     sched = Scheduler(model, max_sequences=1, max_waiting=4)
     try:
         with pytest.raises(ValueError, match='context limit'): sched.submit([1] * 60, 5)
         assert len(served(sched, [1, 2, 3], 3)) == 3
     finally: sched.close()
+
+
+def test_preload_is_optional_and_a_misfit_fails_startup(monkeypatch, capsys):
+    from gpu import resident
+    monkeypatch.setattr(resident, 'ResidentGLM', FakeResident)
+    _, backend, _, _ = srv.build_model(parse_args(['--backend', 'vx-gpu-resident', '--tiny', '--no-preload']))
+    assert not backend.preloaded
+    assert json.loads(capsys.readouterr().out or '{}') == {}
+    srv.build_model(parse_args(['--backend', 'vx-gpu-resident', '--tiny']))
+    assert json.loads(capsys.readouterr().out)['preloaded_weight_bytes'] == 123
+    class TooBig(FakeResident):
+        def preload(self): raise MemoryError('preload needs 9 bytes; the device has 3 bytes free')
+    monkeypatch.setattr(resident, 'ResidentGLM', TooBig)
+    with pytest.raises(SystemExit, match='needs 9 bytes'):
+        srv.build_model(parse_args(['--backend', 'vx-gpu-resident', '--tiny']))
 
 
 # --------------------------------------------------------------- serving
@@ -154,9 +176,12 @@ def test_queued_request_waits_for_the_single_slot():
         assert sched.status()['waiting_requests'] == 1 and sched.status()['active_requests'] == 1
         with pytest.raises(BusyError): sched.submit([5], 2)  # the waiting queue is bounded
         release.set()
+        done = []
         for req, n in ((first, 3), (second, 2)):
             events = [req.events.get(timeout=10) for _ in range(n + 1)]
             assert events[-1]['reason'] == 'length'
+            done.append(events[-1]['timings']['queued_seconds'])
+        assert done[0] < 0.05 and done[1] > 0
         # The second sequence starts only after the first finishes: forwards never interleave.
         caches = [c for i, c in enumerate(order) if i == 0 or c is not order[i - 1]]
         assert len(caches) == 2
@@ -246,3 +271,34 @@ def test_simt_resident_over_http_matches_reference():
     reference = Scheduler(build(seed=9))
     try: assert got == [served(reference, p, n) for p, n in prompts]
     finally: reference.close()
+
+
+def simt_context():
+    try:
+        from gpu.testing.context import Context
+        return Context()
+    except (RuntimeError, OSError, ImportError) as exc:
+        pytest.skip(f'needs the CPU SIMT build (gpu/testing/build_simt.sh): {exc}')
+
+
+def test_simt_preload_uploads_everything_decode_uses_and_reports_a_misfit():
+    from gpu.resident import ResidentGLM, _planned
+    model = build(seed=9)
+    full = ResidentGLM(model, ctx=simt_context(), max_tokens=16)
+    needed = full.preload()
+    keys, c = set(full._weights), model.config
+    sparse = model.mlp_types.count('sparse')
+    assert needed == full.weight_bytes > 0
+    assert sum('.experts.' in k and k.endswith('gate_proj.weight') for k in keys) == sparse * c['n_routed_experts']
+    assert full.preload() == 0  # idempotent
+
+    class Small(type(full.ctx)):
+        def memory_info(self): return (64 * 1024 + needed // 2, 1 << 40)
+    part = ResidentGLM(model, ctx=Small(), max_tokens=16)
+    with pytest.raises(MemoryError, match=f'needs {needed} bytes'):
+        part.preload(reserve_bytes=64 * 1024)
+    assert 0 < part.weight_bytes <= needed // 2 and not any(_planned(v) for v in part._weights.values())
+
+    # Decode after preload uploads nothing more.
+    full.prefill([3, 17, 5, 5, 9, 200])
+    assert full.weight_bytes == needed and set(full._weights) == keys

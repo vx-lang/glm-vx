@@ -33,6 +33,7 @@ class Request:
     generated: int = 0
     next_token: int | None = None
     created: float = field(default_factory=time.monotonic)
+    admitted: float | None = None
     first_token_at: float | None = None
     rng: object = None
     cached_tokens: int = 0
@@ -101,6 +102,7 @@ class Scheduler:
 
     def _admit(self, req):
         # Caller holds the lock.
+        req.admitted = time.monotonic()
         self.reserved += req.reservation
         self.count += 1
         self.pending.append(req)
@@ -129,7 +131,8 @@ class Scheduler:
             "prompt_tokens":len(req.tokens),"completion_tokens":req.generated,
             "cached_prompt_tokens":req.cached_tokens,
             "timings":{"prefill_seconds":req.prefill_seconds,"decode_seconds":req.decode_seconds,
-                       "prefix_seconds":req.prefix_seconds}}
+                       "prefix_seconds":req.prefix_seconds,
+                       "queued_seconds":(req.admitted or time.monotonic())-req.created}}
 
     def _sample(self, logits, req):
         logits = np.asarray(logits,dtype=np.float32)
