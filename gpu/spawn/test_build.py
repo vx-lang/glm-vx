@@ -207,3 +207,16 @@ def test_library_refuses_a_parameter_the_kernel_does_not_use(tmp_path):
     shutil.copy(HERE / 'device.vx', tmp_path)
     result = run_library(tmp_path / 'copy.vx', tmp_path / 'copy.ptx')
     assert result.returncode == 1 and 'but the kernel uses' in result.stderr, result.stderr
+
+
+def test_dynamic_shared_bytes_must_match_the_ptx():
+    """Vx #1984 (PR #1995): an .extern .shared array exactly when the manifest gives a size."""
+    extern = '.version 8.0\n.target sm_90a\n.extern .shared .align 16 .b8 __dynamic_shmem__0[];\n'
+    assert build.check_dynamic_shared(extern, 163840) == 163840
+    assert build.check_dynamic_shared(ADD_PTX, 0) == 0
+    with pytest.raises(ValueError, match='has no .extern .shared'):
+        build.check_dynamic_shared(ADD_PTX, 4096)
+    with pytest.raises(ValueError, match='declares .extern .shared'):
+        build.check_dynamic_shared(extern, 0)
+    with pytest.raises(ValueError, match='nonnegative integer'):
+        build.check_dynamic_shared(ADD_PTX, -1)

@@ -55,6 +55,18 @@ def machine_chip(machine: Path):
     return found[1] if found else None
 
 
+def check_dynamic_shared(ptx, nbytes):
+    """The manifest's dynamic_shared_bytes (Vx #1984, PR #1995) agrees with the PTX: an
+    `.extern .shared` array exactly when it is positive, since a launch passes that size."""
+    if type(nbytes) is not int or nbytes < 0:
+        raise ValueError(f'manifest dynamic_shared_bytes must be a nonnegative integer, got {nbytes!r}')
+    extern = re.search(r'^\s*\.extern \.shared\b', ptx, re.M) is not None
+    if extern != (nbytes > 0):
+        raise ValueError(f'the manifest says {nbytes} dynamic shared bytes, but the PTX '
+                         f'{"declares" if extern else "has no"} .extern .shared memory')
+    return nbytes
+
+
 def same_kernel(a: str, b: str) -> bool:
     """Two PTX files hold the same kernel apart from its entry name and label numbering."""
     def body(ptx):
@@ -221,9 +233,10 @@ def main() -> int:
             raise ValueError(f'PTX is not for {args.arch}')
         params = kernel_params(kernels[0]['params'])
         check_params(ptx, name, params)
+        dynamic_shared = check_dynamic_shared(ptx, kernels[0].get('dynamic_shared_bytes', 0))
         args.output.parent.mkdir(parents=True, exist_ok=True)
         evidence = {'schema': 'glm-vx-spawn-v2', 'entry': name, 'params': params, 'vx_params': kernels[0]['params'],
-                    'launch': kernels[0].get('launch'),
+                    'launch': kernels[0].get('launch'), 'dynamic_shared_bytes': dynamic_shared,
                     'arch': args.arch, 'source_sha256': hashlib.sha256((''.join(included) + source).encode()).hexdigest(),
                     'ptx_sha256': hashlib.sha256(ptx.encode()).hexdigest(),
                     'vxc': subprocess.run([args.vxc, '--version'], text=True, stdout=subprocess.PIPE).stdout.strip(),

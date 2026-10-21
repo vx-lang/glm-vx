@@ -113,6 +113,7 @@ class CUDADriver:
             "cuModuleLoadDataEx": [C.POINTER(_P), _P, _U32, _P, _P],
             "cuModuleUnload": [_P], "cuModuleGetFunction": [C.POINTER(_P), _P, C.c_char_p],
             "cuFuncGetAttribute": [C.POINTER(_I32), _I32, _P],
+            "cuFuncSetAttribute": [_P, _I32, _I32],
             "cuLaunchKernel": [_P, _U32, _U32, _U32, _U32, _U32, _U32, _U32, _P,
                                C.POINTER(_P), C.POINTER(_P)],
             "cuStreamCreate": [C.POINTER(_P), _U32], "cuStreamDestroy_v2": [_P],
@@ -212,6 +213,8 @@ class CUDAContext:
         self.max_block = tuple(self._attribute(n) for n in (2, 3, 4))
         self.max_grid = tuple(self._attribute(n) for n in (5, 6, 7))
         self.max_shared_bytes = self._attribute(8)
+        # MAX_SHARED_MEMORY_PER_BLOCK_OPTIN: the most a kernel may use after opting in (227 KiB on sm_90).
+        self.max_shared_bytes_optin = self._attribute(97)
         if minimum_compute_capability is not None:
             minimum = tuple(minimum_compute_capability)
             if len(minimum) != 2 or any(type(n) is not int or n < 0 for n in minimum):
@@ -586,15 +589,32 @@ class Kernel:
             self.max_threads = result.value
             self.context.driver.call("cuFuncGetAttribute", C.byref(result), 1, self.handle)
             self.static_shared_bytes = result.value
+        # Without an opt-in, static plus dynamic shared memory stays within the 48 KiB default.
+        self.max_dynamic_shared_bytes = max(0, self.context.max_shared_bytes - self.static_shared_bytes)
+
+    def allow_dynamic_shared(self, nbytes):
+        """Opt in to `nbytes` of dynamic shared memory per block, beyond the 48 KiB default
+        (CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES), up to the device's opt-in limit."""
+        _integer(nbytes, "nbytes", maximum=self.context.max_shared_bytes_optin)
+        if nbytes + self.static_shared_bytes > self.context.max_shared_bytes_optin:
+            raise ValueError(f"{self.name}: {nbytes} dynamic + {self.static_shared_bytes} static shared bytes exceed "
+                             f"the device's {self.context.max_shared_bytes_optin}")
+        if nbytes > self.max_dynamic_shared_bytes:
+            with self.context._activate():
+                self.module._ensure_open()
+                self.context.driver.call("cuFuncSetAttribute", self.handle, 8, nbytes)
+            self.max_dynamic_shared_bytes = nbytes
+        return self
 
     def launch(self, grid, block, args=(), *, shared_bytes=0, stream=None):
         grid = _dimensions(grid, "grid", self.context.max_grid)
         block = _dimensions(block, "block", self.context.max_block)
         if math.prod(block) > min(self.max_threads, self.context.max_threads_per_block):
             raise ValueError("block exceeds kernel/device thread limit")
-        _integer(shared_bytes, "shared_bytes", maximum=self.context.max_shared_bytes)
-        if shared_bytes + self.static_shared_bytes > self.context.max_shared_bytes:
-            raise ValueError("static plus dynamic shared memory exceeds device limit")
+        _integer(shared_bytes, "shared_bytes", maximum=self.context.max_shared_bytes_optin)
+        if shared_bytes > self.max_dynamic_shared_bytes:
+            raise ValueError(f"{self.name}: {shared_bytes} dynamic shared bytes exceed the "
+                             f"{self.max_dynamic_shared_bytes} allowed; call allow_dynamic_shared first")
         with self.context._activate():
             self.module._ensure_open()
             stream_handle = _stream_handle(self.context, stream)

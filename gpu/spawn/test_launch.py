@@ -47,3 +47,39 @@ def test_shape_from_manifest():
     assert k.shape({'rows': 4097}) == ((1025,), 128)
     with pytest.raises(TypeError):
         kernel(None).shape({'rows': 1})
+
+
+class FakeKernel:
+    def __init__(self):
+        self.allowed, self.launched = [], []
+
+    def allow_dynamic_shared(self, nbytes):
+        self.allowed.append(nbytes)
+
+    def launch(self, grid, block, args, *, shared_bytes=0, stream=None):
+        self.launched.append((grid, block, shared_bytes))
+
+
+class FakeContext:
+    def __init__(self, kernel):
+        self.kernel_ = kernel
+
+    def load_ptx(self, path):
+        return self
+
+    def kernel(self, name):
+        return self.kernel_
+
+
+@pytest.mark.parametrize('nbytes', [0, 160 * 1024])
+def test_dynamic_shared_bytes_from_the_manifest(tmp_path, nbytes):
+    """Vx #1984 (PR #1995): shared tensors over 48 KiB are dynamic; the launch opts in and passes the size."""
+    manifest = {'entry': 'k', 'params': [{'name': 'n', 'kind': 'scalar', 'type': 'i32'}],
+                'launch': {'grid': [1], 'block': 128}}
+    if nbytes:
+        manifest['dynamic_shared_bytes'] = nbytes
+    (tmp_path / 'k.json').write_text(json.dumps(manifest))
+    fake = FakeKernel()
+    SpawnKernel(FakeContext(fake), tmp_path / 'k.ptx').launch(n=3)
+    assert fake.allowed == ([nbytes] if nbytes else [])
+    assert fake.launched == [((1,), 128, nbytes)]

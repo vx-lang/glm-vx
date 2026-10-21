@@ -55,6 +55,10 @@ class SpawnKernel:
         self.params = self.manifest['params']
         self.module = context.load_ptx(ptx_path)
         self.kernel = self.module.kernel(self.manifest['entry'])
+        # Shared tensors over 48 KiB are dynamic shared memory (Vx #1984, PR #1995): opt in once.
+        self.shared_bytes = self.manifest.get('dynamic_shared_bytes', 0)
+        if self.shared_bytes:
+            self.kernel.allow_dynamic_shared(self.shared_bytes)
 
     def arguments(self, values):
         missing = {p['name'] for p in self.params} ^ set(values)
@@ -85,5 +89,5 @@ class SpawnKernel:
             raise TypeError('pass both grid and block, or neither')
         if grid is None:
             grid, block = self.shape(values)
-        self.kernel.launch(grid, block, self.arguments(values), stream=stream)
+        self.kernel.launch(grid, block, self.arguments(values), shared_bytes=self.shared_bytes, stream=stream)
         return self

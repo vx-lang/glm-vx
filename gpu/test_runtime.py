@@ -81,7 +81,7 @@ class FakeLibrary:
             write(args[0], C.c_int32, 12000)
         elif name == "cuDeviceGetAttribute":
             attrs = {1: 1024, 2: 1024, 3: 1024, 4: 64, 5: (1 << 31) - 1,
-                     6: 65535, 7: 65535, 8: 49152, 75: self.capability[0], 76: self.capability[1]}
+                     6: 65535, 7: 65535, 8: 49152, 97: 232448, 75: self.capability[0], 76: self.capability[1]}
             write(args[0], C.c_int32, attrs[value(args[1])])
         elif name == "cuCtxCreate_v2":
             self.stack.append(self.handle(args[0]))
@@ -366,6 +366,22 @@ class RuntimeTests(unittest.TestCase):
         module.close()
         with self.assertRaises(RuntimeError):
             kernel.launch(1, 32)
+
+    def test_dynamic_shared_memory_needs_an_opt_in(self):
+        kernel = self.module().kernel("test")  # 1024 static shared bytes in the mock
+        kernel.launch(1, 32, shared_bytes=49152 - 1024)  # within the 48 KiB default: no attribute set
+        self.assertNotIn("cuFuncSetAttribute", self.library.names())
+        with self.assertRaisesRegex(ValueError, "allow_dynamic_shared"):
+            kernel.launch(1, 32, shared_bytes=160 * 1024)
+        kernel.allow_dynamic_shared(160 * 1024)
+        (call,) = [args for name, args in self.library.calls if name == "cuFuncSetAttribute"]
+        self.assertEqual([value(a) for a in call[1:]], [8, 160 * 1024])
+        kernel.launch(1, 32, shared_bytes=160 * 1024)
+        self.assertEqual(len(self.library.launches), 2)
+        kernel.allow_dynamic_shared(64 * 1024)  # already allowed: no second driver call
+        self.assertEqual(self.library.names().count("cuFuncSetAttribute"), 1)
+        with self.assertRaises(ValueError):  # 232448 opt-in limit minus 1024 static
+            kernel.allow_dynamic_shared(232448)
 
     def test_cross_context_arguments_streams_and_events_rejected(self):
         kernel = self.module().kernel("test")
