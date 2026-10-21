@@ -43,7 +43,16 @@ def ptxas_target(ptx_arch: str, ptxas_arch) -> str:
         raise ValueError(f'arch must look like sm_90; got {target!r} / {ptx_arch!r}')
     if int(match[1]) < int(base[1]):
         raise ValueError(f'ptxas arch {target} is older than the PTX target {ptx_arch}')
+    # Arch-specific PTX (sm_90a: wgmma, setmaxnreg) runs only on that exact chip.
+    if ptx_arch.endswith('a') and target != ptx_arch:
+        raise ValueError(f'{ptx_arch} PTX assembles only for {ptx_arch}, not {target}')
     return target
+
+
+def machine_chip(machine: Path):
+    """The `chip:` of the machine file's topology (Vx #1982), or None."""
+    found = re.search(r'^\s*chip:\s*(sm_\w+)', machine.read_text(), re.M)
+    return found[1] if found else None
 
 
 def same_kernel(a: str, b: str) -> bool:
@@ -174,18 +183,23 @@ def main() -> int:
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--vxc', default=os.environ.get('VXC', 'vxc'))
     parser.add_argument('--ptxas', help='assemble with this NVIDIA ptxas; failure is fatal')
-    parser.add_argument('--arch', default='sm_80')
+    parser.add_argument('--arch', help="PTX target; default the machine file's chip:, else sm_80")
     parser.add_argument('--ptxas-arch', help='GPU for --ptxas to assemble for (default --arch), e.g. sm_90 on an H100')
     parser.add_argument('--library', type=Path, help='also build this shared library for Vx to launch from')
     parser.add_argument('--dispatch-lib', default=os.environ.get('VX_DISPATCH_LIB'))
     parser.add_argument('--cc', default=os.environ.get('CC', 'cc'))
     args = parser.parse_args()
     try:
+        # vxc takes the chip from the machine file; --arch (as VX_GPU_CHIP) overrides it.
+        env = dict(os.environ)
+        env.pop('VX_GPU_CHIP', None)
+        if args.arch:
+            env['VX_GPU_CHIP'] = args.arch
+        args.arch = args.arch or machine_chip(args.machine) or 'sm_80'
         ptxas_arch = ptxas_target(args.arch, args.ptxas_arch)
         source = args.source.read_text()
         # `// spawn-include: FILE` pastes FILE (beside SOURCE) in front: shared device helpers.
         included = [args.source.with_name(f).read_text() for f in INCLUDE.findall(source)]
-        env = dict(os.environ, VX_GPU_CHIP=args.arch)
         with tempfile.TemporaryDirectory(prefix='vx-spawn-src-') as temp:
             combined = Path(temp, args.source.name)
             combined.write_text(''.join(included) + source)

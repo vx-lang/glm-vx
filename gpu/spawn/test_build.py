@@ -85,6 +85,16 @@ def test_ptxas_checks_the_device_arch():
         build.ptxas_target('sm_90', 'sm_80')
     with pytest.raises(ValueError, match='look like sm_90'):
         build.ptxas_target('sm_80', '90')
+    # sm_90a PTX (wgmma) loads only on Hopper: assembled for sm_90a itself, never plain sm_90.
+    assert build.ptxas_target('sm_90a', None) == 'sm_90a'
+    with pytest.raises(ValueError, match='only for sm_90a'):
+        build.ptxas_target('sm_90a', 'sm_90')
+
+
+def test_machine_chip(tmp_path):
+    assert build.machine_chip(HERE / 'machine.vx') is None
+    (tmp_path / 'h100.vx').write_text('Topology Device {\n  arch: nvptx64,\n  chip: sm_90a,\n}\n')
+    assert build.machine_chip(tmp_path / 'h100.vx') == 'sm_90a'
 
 
 def test_add_ptx_matches_manifest():
