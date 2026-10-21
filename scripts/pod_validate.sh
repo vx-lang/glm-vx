@@ -12,6 +12,11 @@
 # compressed-tensors Linears to the INT4 device test. PYTHON (default python3), LAYERS (full-width
 # layers, default 4), TOKENS (default 48), STRESS (concurrent stress processes, default 8).
 # Use OMP_NUM_THREADS well below the host's vCPU count (NumPy thrashes on 128-vCPU pods).
+#
+# Toolchain: the vxc bundle (VXC, and VX_DISPATCH_LIB or <bundle>/lib/libvx_cuda_dispatch.so) must
+# include Vx PR #1994 (Vx#1986, vx_cuda_set_stream) on top of #1972/#1974/#1976, or the graph step
+# (gpu/test_spawn_vx_graph.py: Vx on our stream, and in CUDA graphs) fails. host.txt says whether the dispatch library exports it.
+# Do not export VX_CUDA_SYNC or VX_TIME_KERNEL for the whole run: Vx stops a graph capture on either.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 : "${PYTHON:=python3}" "${LAYERS:=4}" "${TOKENS:=48}" "${STRESS:=8}" "${OMP_NUM_THREADS:=16}"
@@ -61,6 +66,10 @@ if [[ -z ${VX_DISPATCH_LIB:-} ]]; then
   candidate=$(dirname "$(command -v "${VXC:-vxc}")")/../lib/libvx_cuda_dispatch.so
   [[ -f $candidate ]] && export VX_DISPATCH_LIB=$candidate
 fi
+{
+  echo "dispatch lib ${VX_DISPATCH_LIB:-none}"
+  echo "vx_cuda_set_stream (Vx PR #1994): $(nm -D --defined-only "${VX_DISPATCH_LIB:-/dev/null}" 2>/dev/null | grep -qw vx_cuda_set_stream && echo exported || echo MISSING)"
+} >> "$out/host.txt"
 step build-spawn bash gpu/spawn/build.sh
 step build-cpu-lib bash kernels/build.sh
 sha256sum gpu/build/*.ptx gpu/build/spawn/*.ptx gpu/build/spawn/*.so > "$out/ptx.sha256" 2>/dev/null
@@ -73,6 +82,10 @@ step test-spawn-hardware hw gpu/test_spawn_hardware.py
 step test-spawn-vx-launch hw gpu/test_spawn_vx_launch.py
 hw_sync() { VX_CUDA_SYNC=1 hw "$@"; }  # Vx waits after each launch, and names the kernel on a fault
 step test-spawn-vx-launch-sync hw_sync gpu/test_spawn_vx_launch.py
+# Vx's launches on our stream and captured in CUDA graphs (glm-vx #9). Each scenario runs in a child
+# process, since Vx stops the program on what a capture cannot hold; -s keeps every child's stderr
+# (Vx's messages) and the eager-vs-replay timing lines in the log, on success too.
+step test-spawn-vx-graph hw -s gpu/test_spawn_vx_graph.py
 step test-hardware-stress hw gpu/test_hardware_stress.py
 
 for mode in f32 int4 fp8 bf16; do

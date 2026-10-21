@@ -36,6 +36,20 @@ Launches remain asynchronous. Use streams/events for GPU execution dependencies
 and timing. Do not use this adapter's context concurrently through external CUDA
 APIs, and do not reuse objects after close or across fork.
 
+``Stream.capture()`` records the work enqueued on a stream into a CUDA graph::
+
+    with ctx.stream() as stream:
+        with stream.capture() as graph:       # mode='thread_local' by default
+            module.kernel("k").launch((4,), (256,), [x, y, n], stream=stream)
+        graph.launch(stream)                  # replay; change inputs in place between replays
+        stream.synchronize()
+
+Nothing runs during the capture. The graph keeps the pointers and scalars of each recorded
+launch, so replays read whatever those buffers hold. While any stream of the context
+captures, this adapter refuses its synchronizing operations (upload, download, close,
+synchronize) instead of letting the driver invalidate the capture. The context owns a graph
+like any other resource: closing it (or the context) synchronizes first.
+
 Every operation pushes this context and restores the caller's prior context.
 Host-side operations are serialized per context. CUDA errors propagate without
 fallback; a failed synchronization prevents unsafe resource destruction. Always
@@ -52,7 +66,7 @@ from pathlib import Path
 import threading
 
 __all__ = ["CUDAError", "CUDAUnavailable", "CUDADriver", "CUDAContext", "DeviceBuffer",
-           "DeviceTensor", "Module", "Kernel", "Stream", "Event", "GLMKernels"]
+           "DeviceTensor", "Module", "Kernel", "Stream", "Event", "Graph", "GLMKernels"]
 
 
 class CUDAError(RuntimeError):
@@ -107,6 +121,11 @@ class CUDADriver:
             "cuEventCreate": [C.POINTER(_P), _U32], "cuEventDestroy_v2": [_P],
             "cuEventRecord": [_P, _P], "cuEventSynchronize": [_P], "cuEventQuery": [_P],
             "cuEventElapsedTime": [C.POINTER(C.c_float), _P, _P],
+            # Stream capture into a CUDA graph (CUDA >= 11.4; the CUDA 12/13 names).
+            "cuStreamBeginCapture_v2": [_P, _I32], "cuStreamEndCapture": [_P, C.POINTER(_P)],
+            "cuStreamIsCapturing": [_P, C.POINTER(_I32)],
+            "cuGraphInstantiateWithFlags": [C.POINTER(_P), _P, C.c_ulonglong],
+            "cuGraphLaunch": [_P, _P], "cuGraphExecDestroy": [_P], "cuGraphDestroy": [_P],
             "cuGetErrorName": [_I32, C.POINTER(C.c_char_p)],
             "cuGetErrorString": [_I32, C.POINTER(C.c_char_p)],
         }
@@ -165,6 +184,7 @@ class CUDAContext:
         self.driver = _driver if _driver is not None else CUDADriver()
         self._lock = threading.RLock()
         self._resources = []
+        self._capturing = set()  # streams between cuStreamBeginCapture and cuStreamEndCapture
         self._closed = True
         self.handle = _P()
         self._pid = os.getpid()
@@ -236,6 +256,10 @@ class CUDAContext:
                 self.driver.call("cuCtxPopCurrent_v2", C.byref(previous))
 
     def _synchronize_current(self):
+        if self._capturing:
+            # The driver would refuse too, but only after invalidating the capture.
+            raise RuntimeError("cannot synchronize the context (upload, download, close or "
+                               "synchronize) while a stream captures a CUDA graph")
         self.driver.call("cuCtxSynchronize")
 
     def synchronize(self):
@@ -281,6 +305,11 @@ class CUDAContext:
 
     def event(self, *, timing=True):
         return Event(self, timing=timing)
+
+    @property
+    def capturing(self):
+        """Whether a stream of this context is capturing a graph (through Stream.capture)."""
+        return bool(self._capturing)
 
     @property
     def closed(self):
@@ -602,7 +631,56 @@ class Stream(_Resource):
     def synchronize(self):
         with self.context._activate():
             self._ensure_open()
+            if self in self.context._capturing:
+                raise RuntimeError("cannot synchronize a stream while it captures a CUDA graph")
             self.context.driver.call("cuStreamSynchronize", self.handle)
+
+    def capture_status(self):
+        """'none', 'active' or 'invalidated' (cuStreamIsCapturing), whoever began the capture."""
+        status = _I32()
+        with self.context._activate():
+            self._ensure_open()
+            self.context.driver.call("cuStreamIsCapturing", self.handle, C.byref(status))
+        return _CAPTURE_STATUS[status.value]
+
+    @contextlib.contextmanager
+    def capture(self, mode="thread_local"):
+        """Record the work enqueued on this stream inside the block into a ``Graph``.
+
+        ``mode`` is the CUstreamCaptureMode: 'thread_local' (the default) refuses unsafe
+        calls such as cuMemAlloc or a context synchronize from this thread only, 'global'
+        from every thread, 'relaxed' from none. The yielded Graph is usable after the block:
+        on a normal exit the capture ends and is instantiated; on an exception the capture
+        is ended and dropped, and the exception propagates.
+        """
+        if mode not in _CAPTURE_MODES:
+            raise ValueError(f"capture mode must be one of {tuple(_CAPTURE_MODES)}")
+        context = self.context
+        with context._activate():
+            self._ensure_open()
+            if self in context._capturing:
+                raise RuntimeError("stream is already capturing a CUDA graph")
+            context.driver.call("cuStreamBeginCapture_v2", self.handle, _CAPTURE_MODES[mode])
+            context._capturing.add(self)
+        graph = Graph(context)
+        try:
+            yield graph
+        except BaseException:
+            self._end_capture(keep=False)
+            raise
+        graph._instantiate(self._end_capture(keep=True))
+
+    def _end_capture(self, *, keep):
+        raw = _P()
+        with self.context._activate():
+            self.context._capturing.discard(self)
+            code = self.context.driver.cuStreamEndCapture(self.handle, C.byref(raw))
+            if keep:
+                self.context.driver.check(code, "cuStreamEndCapture")
+            elif raw.value:
+                # Best effort: the exception that ended the block is the one to report.
+                self.context.driver.cuGraphDestroy(raw)
+        return raw
 
     def query(self):
         """Return False for CUDA_ERROR_NOT_READY, propagate all other errors."""
@@ -624,6 +702,50 @@ class Stream(_Resource):
 
     def _destroy_current(self):
         self.context.driver.call("cuStreamDestroy_v2", self.handle)
+        self._mark_closed()
+        self.handle = _P()
+
+
+_CAPTURE_MODES = {"global": 0, "thread_local": 1, "relaxed": 2}  # CUstreamCaptureMode
+_CAPTURE_STATUS = {0: "none", 1: "active", 2: "invalidated"}  # CUstreamCaptureStatus
+
+
+class Graph(_Resource):
+    """An executable CUDA graph from ``Stream.capture()``; ``launch(stream)`` replays it.
+
+    It becomes usable when the capture block ends. The context owns it from then on; close
+    synchronizes the context first, like every resource here.
+    """
+    def __init__(self, context):
+        self.context, self.handle, self._closed = context, _P(), True
+        self._instantiated = False
+
+    def _instantiate(self, raw):
+        d = self.context.driver
+        with self.context._activate():
+            executable = _P()
+            code = d.cuGraphInstantiateWithFlags(C.byref(executable), raw, 0)
+            if code != 0:
+                d.cuGraphDestroy(raw)
+                d.check(code, "cuGraphInstantiateWithFlags")
+            self.handle, self._instantiated = executable, True
+            self._setup(self.context)
+            d.call("cuGraphDestroy", raw)  # the executable graph does not need its source
+
+    def _ensure_open(self):
+        if not self._instantiated:
+            raise RuntimeError("Graph is not instantiated yet: launch it after its capture block ends")
+        super()._ensure_open()
+
+    def launch(self, stream=None):
+        """Enqueue one replay on ``stream`` (None: the legacy default stream). Asynchronous."""
+        with self.context._activate():
+            self._ensure_open()
+            self.context.driver.call("cuGraphLaunch", self.handle, _stream_handle(self.context, stream))
+        return self
+
+    def _destroy_current(self):
+        self.context.driver.call("cuGraphExecDestroy", self.handle)
         self._mark_closed()
         self.handle = _P()
 

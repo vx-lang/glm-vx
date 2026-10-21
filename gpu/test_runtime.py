@@ -46,6 +46,10 @@ class FakeLibrary:
         self.allocations, self.kernel_names = {}, {}
         self.launches = []
         self.on_launch = None
+        self.capturing = {}  # stream handle -> capture mode
+        self.graphs = {}     # executable graph handle -> launches recorded into it
+        self.recorded = {}   # stream handle -> launches recorded since the capture began
+        self.replays = []    # (executable graph handle, stream handle)
 
     def __getattr__(self, name):
         if name.startswith("cu"):
@@ -108,9 +112,35 @@ class FakeLibrary:
             raw = bytes(allocation[offset:offset + value(args[2])])
             C.memmove(args[0], raw, len(raw))
         elif name == "cuLaunchKernel":
-            self.launches.append((self.kernel_names[value(args[0])], args[1:7], value(args[8])))
+            launch = (self.kernel_names[value(args[0])], args[1:7], value(args[8]))
+            if value(args[8]) in self.capturing:
+                self.recorded[value(args[8])].append(launch)  # recorded, not run
+            else:
+                self.launches.append(launch)
             if self.on_launch is not None:
                 self.on_launch(args)
+        elif name == "cuStreamBeginCapture_v2":
+            if value(args[0]) in self.capturing or not value(args[0]):
+                return 900  # CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED
+            self.capturing[value(args[0])] = value(args[1])
+            self.recorded[value(args[0])] = []
+        elif name == "cuStreamEndCapture":
+            if value(args[0]) not in self.capturing:
+                return 901  # CUDA_ERROR_STREAM_CAPTURE_INVALIDATED (stands in for "not capturing")
+            del self.capturing[value(args[0])]
+            self.graphs[self.handle(args[1])] = self.recorded.pop(value(args[0]))
+        elif name == "cuStreamIsCapturing":
+            write(args[1], C.c_int32, 1 if value(args[0]) in self.capturing else 0)
+        elif name == "cuGraphInstantiateWithFlags":
+            executable = self.handle(args[0])
+            self.graphs[executable] = self.graphs[value(args[1])]
+        elif name == "cuGraphLaunch":
+            self.replays.append((value(args[0]), value(args[1])))
+            self.launches.extend(self.graphs[value(args[0])])
+        elif name in ("cuGraphDestroy", "cuGraphExecDestroy"):
+            del self.graphs[value(args[0])]
+        elif name == "cuCtxSynchronize" and self.capturing:
+            return 900
         elif name == "cuMemGetInfo_v2":
             write(args[0], C.c_size_t, 3 << 30)
             write(args[1], C.c_size_t, 4 << 30)
@@ -608,6 +638,117 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(self.library.launches[-1],
                          ("glm_vx_gpu_fp8_matvec", (33, 1, 1, 128, 1, 1), stream.handle.value))
         self.assertEqual(packed.dtype, "uint8")
+
+    def capture_kernel(self):
+        return self.module().kernel("glm_vx_gpu_add")
+
+    def test_capture_records_then_replays(self):
+        kernel, stream = self.capture_kernel(), self.context.stream()
+        x = self.context.tensor((4,))
+        self.assertEqual(stream.capture_status(), "none")
+        with stream.capture() as graph:
+            self.assertEqual(stream.capture_status(), "active")
+            self.assertTrue(self.context.capturing)
+            kernel.launch(1, 32, [x, C.c_int32(4)], stream=stream)
+            kernel.launch(2, 64, [x, C.c_int32(4)], stream=stream)
+            self.assertEqual(self.library.launches, [])  # recorded, not run
+        self.assertFalse(self.context.capturing)
+        self.assertEqual(stream.capture_status(), "none")
+        begin = [args for name, args in self.library.calls if name == "cuStreamBeginCapture_v2"]
+        self.assertEqual((value(begin[0][0]), value(begin[0][1])), (stream.handle.value, 1))  # thread_local
+        # The source graph is destroyed once instantiated; only the executable one is kept.
+        self.assertEqual(list(self.library.graphs), [graph.handle.value])
+        for _ in range(3):
+            graph.launch(stream)
+        self.assertEqual(self.library.replays, [(graph.handle.value, stream.handle.value)] * 3)
+        self.assertEqual([entry[1][0] for entry in self.library.launches], [1, 2] * 3)
+        graph.launch()  # the legacy default stream
+        self.assertEqual(self.library.replays[-1], (graph.handle.value, None))
+
+    def test_capture_modes_and_refusals(self):
+        stream = self.context.stream()
+        for mode, code in (("global", 0), ("relaxed", 2)):
+            with stream.capture(mode):
+                pass
+            begin = [value(a[1]) for n, a in self.library.calls if n == "cuStreamBeginCapture_v2"]
+            self.assertEqual(begin[-1], code)
+        with self.assertRaises(ValueError):
+            with stream.capture("loose"):
+                pass
+        with stream.capture():
+            with self.assertRaises(RuntimeError):
+                with stream.capture():
+                    pass
+            self.assertTrue(self.context.capturing)  # the outer capture is untouched
+
+    def test_synchronizing_operations_refused_during_capture(self):
+        stream, x = self.context.stream(), self.context.tensor((4,))
+        event = self.context.event().record()
+        with stream.capture() as graph:
+            synced = self.library.names().count("cuCtxSynchronize")
+            for action in (lambda: x.upload(bytes(16)), x.download, self.context.synchronize,
+                           stream.synchronize, x.close, event.close, lambda: graph.launch(stream)):
+                with self.assertRaises(RuntimeError):
+                    action()
+            self.assertEqual(self.library.names().count("cuCtxSynchronize"), synced)
+        self.assertFalse(x.closed)
+        x.upload(bytes(16))  # allowed again once the capture ends
+
+    def test_exception_in_capture_ends_it_and_drops_the_graph(self):
+        kernel, stream, x = self.capture_kernel(), self.context.stream(), self.context.tensor((4,))
+        with self.assertRaises(KeyError):
+            with stream.capture() as graph:
+                kernel.launch(1, 32, [x, C.c_int32(4)], stream=stream)
+                raise KeyError("in the block")
+        self.assertFalse(self.context.capturing)
+        self.assertEqual(stream.capture_status(), "none")
+        self.assertEqual(self.library.graphs, {})  # the captured graph was destroyed
+        self.assertNotIn("cuGraphInstantiateWithFlags", self.library.names())
+        with self.assertRaises(RuntimeError):
+            graph.launch(stream)
+        with stream.capture():  # the stream can capture again
+            pass
+
+    def test_instantiate_failure_destroys_the_source_graph(self):
+        stream = self.context.stream()
+        self.library.errors["cuGraphInstantiateWithFlags"] = 1
+        with self.assertRaises(CUDAError):
+            with stream.capture():
+                pass
+        self.assertEqual(self.library.graphs, {})
+        self.assertFalse(self.context.capturing)
+        del self.library.errors["cuGraphInstantiateWithFlags"]
+
+    def test_end_capture_failure_propagates(self):
+        stream = self.context.stream()
+        self.library.errors["cuStreamEndCapture"] = 901
+        with self.assertRaises(CUDAError) as caught:
+            with stream.capture():
+                pass
+        self.assertEqual(caught.exception.code, 901)
+        self.assertFalse(self.context.capturing)
+        del self.library.errors["cuStreamEndCapture"]
+        self.library.capturing.clear()  # a failed cuStreamEndCapture ends the capture too
+
+    def test_graph_is_context_owned_and_closes_before_its_stream(self):
+        library = FakeLibrary()
+        with CUDAContext(_driver=CUDADriver(_library=library)) as ctx:
+            stream = ctx.stream()
+            with stream.capture() as graph:
+                pass
+        self.assertTrue(graph.closed)
+        names = library.names()
+        self.assertLess(names.index("cuGraphExecDestroy"), names.index("cuStreamDestroy_v2"))
+        self.assertLess(names.index("cuCtxSynchronize"), names.index("cuGraphExecDestroy"))
+        self.assertEqual(library.graphs, {})
+        stream2_library = FakeLibrary()
+        with CUDAContext(_driver=CUDADriver(_library=stream2_library)) as ctx:
+            with ctx.stream().capture() as graph:
+                pass
+            graph.close()
+            self.assertTrue(graph.closed)
+            with self.assertRaises(RuntimeError):
+                graph.launch()
 
     def test_fp8_constructor_ownership_shapes_and_overlap(self):
         kernels = GLMKernels(self.module(), fp8_module=self.module())

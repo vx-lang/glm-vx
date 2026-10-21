@@ -14,6 +14,9 @@ block(128)`, the shape the model launches the hand kernel with. Two launches use
   `vx_launch.py` calls its `pub fn`: Vx's CUDA runtime launches the kernel with that shape, on
   the legacy default stream, without waiting for the GPU. The tensors must come from
   `CUDAContext(primary=True)`, the context Vx's runtime uses; they are passed with no copy.
+  `VxKernel(...)(..., stream=s)` launches on our stream `s` instead (Vx's `vx_cuda_set_stream`,
+  PR #1994, set for the call and reset to null after it), so `s.capture()` can record Vx's
+  launches, with ours, into a CUDA graph. Call each kernel once before capturing.
 - **Python launches it.** `launch.py` (on `gpu/runtime.py`) launches the PTX with the manifest's
   shape, or with any grid and block the caller passes (the hardware tests sweep them).
 
@@ -50,7 +53,8 @@ need a correctly rounded sqrt, which needs #1944 (PR #1955), and the five kernel
 `fast_exp` (device.vx), `ex2.approx.ftz.f32(x * log2 e)` exactly as the hand kernels do, which
 needs nvvm intrinsics in the device image, #1945 (PR #1959). Built and checked with Vx main
 plus PRs #1952, #1954, #1955, #1958, #1959, #1960, #1961, #1962, #1964 (`--emit-ptx`), #1972
-(launch shapes) and #1974 (no wait after each launch). Barrier counts match the hand kernels (softmax 4, router
+(launch shapes) and #1974 (no wait after each launch); the libraries for streams and graphs
+also take #1987, #1976 and #1994 (`vx_cuda_set_stream`, which `nm -D` shows exported). Barrier counts match the hand kernels (softmax 4, router
 1, mla_partial 2). Not ported: gemm_tf32 (`mma.sync m16n8k8`: #350).
 `probes/` holds tensor-core probes (mma.sync on sm_80, wgmma bf16 and block-FP8 on sm_90a) with
 register-tensor accumulators (Vx PR #1991); see `probes/README.md`.
@@ -58,6 +62,10 @@ register-tensor accumulators (Vx PR #1991); see `probes/README.md`.
 `gpu/test_spawn_hardware.py` checks each against the hand kernel, bit for bit, on a GPU, and
 `gpu/test_spawn_vx_launch.py` checks Vx's launch of each against Python's launch of the same
 PTX with the same shape, bit for bit (run it also with `VX_CUDA_SYNC=1`).
+`gpu/test_spawn_vx_graph.py` runs a chain of Vx launches on our stream and as a replayed CUDA
+graph (also mixed with Python launches), bit for bit against the legacy stream, and checks that
+Vx stops a capture on `VX_CUDA_SYNC=1` or `VX_TIME_KERNEL`; it needs the libraries built with
+PR #1994.
 
 ## Build
 
@@ -102,7 +110,8 @@ the bf16, binary16, INT4 and FP8 decodes.
 | A Vx build of the same file (exe or .so) | the host copy of a GPU-only helper stops the program; PR #1958 | #1942 |
 | Grid and block chosen by the program | `grid([..]) block(..)` on the region; PR #1972 | #252 |
 | Launch without a device sync each time | waits only before a copy to the host, a free, or exit; PR #1974 | #25 |
-| Streams, and futures the compiler waits on | everything on the legacy default stream | #25 |
+| A stream of the caller, and CUDA graphs | `vx_cuda_set_stream` (PR #1994): launches, cuBLAS and copies on our stream, temporaries stream-ordered, a stop with a message on a wait during a capture; `gpu/test_spawn_vx_graph.py` | #1986 |
+| Futures the compiler waits on | no waits are emitted; the runtime waits before a host copy, a free, or exit | #25 |
 | TF32 `mma.sync m16n8k8` | WMMA m16n16k8 only | #350 |
 
 Nothing has run on a GPU yet: the next pod runs both test files (`scripts/pod_validate.sh`).
