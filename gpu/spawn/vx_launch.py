@@ -15,15 +15,15 @@ context.stream() is non-blocking by default and is not, so pass nonblocking=Fals
 synchronize at the boundary.
 
 With stream=<Stream>, the call sets that stream for this thread with Vx's
-`vx_cuda_set_stream` (Vx #1986, PR #1994), calls the function, and puts back the stream that
-was set before (`vx_cuda_get_stream`; null, the legacy default stream, with a Vx that lacks it)
-before returning, even on an error. Vx's launch is then ordered on our stream,
+`vx_cuda_set_stream` (Vx #1986, PR #2016, which replaced #1994), calls the function, and puts
+back the stream that was set before (`vx_cuda_get_stream`; null, the legacy default stream, with
+a Vx that lacks it) before returning, even on an error. Vx's launch is then ordered on our stream,
 not on the legacy one, with our own launches on it; and a stream can capture Vx's launches into
 a CUDA graph (Stream.capture()). Call each kernel once before a capture: its first call loads
 the kernel image. While the stream captures, Vx stops the program with a message at anything a
 graph cannot hold (a wait, a host copy, a free that needs a wait, VX_CUDA_SYNC=1,
 VX_TIME_KERNEL). The symbol is looked up in the kernel library's own dependencies, so it is
-the copy of the dispatch library that launches this kernel; a Vx build without PR #1994 lacks
+the copy of the dispatch library that launches this kernel; a Vx build without PR #2016 lacks
 it, which is an error only when a stream is asked for.
 
 VX_CUDA_SYNC=1 makes Vx wait after each launch (on our stream when one is set).
@@ -40,7 +40,7 @@ _DESCRIPTOR = [C.c_void_p, C.c_void_p, C.c_int64, C.c_int64, C.c_int64]
 
 
 class VxStreamUnsupported(RuntimeError):
-    """The Vx dispatch library has no vx_cuda_set_stream (a Vx build without PR #1994)."""
+    """The Vx dispatch library has no vx_cuda_set_stream (a Vx build without PR #2016)."""
 
 
 class VxKernel:
@@ -69,7 +69,7 @@ class VxKernel:
                 raise VxStreamUnsupported(
                     f'{self.manifest["library"]}: its Vx dispatch library '
                     f'({self.manifest.get("dispatch_lib", "libvx_cuda_dispatch.so")}) has no vx_cuda_set_stream, '
-                    'so Vx cannot launch on our stream. Build vxc with Vx PR #1994 (Vx#1986) and rebuild '
+                    'so Vx cannot launch on our stream. Build vxc with Vx PR #2016 (Vx#1986) and rebuild '
                     'the libraries; stream=None still launches on the legacy default stream.') from None
             function.argtypes, function.restype = [C.c_void_p], None
             self._set_stream = function

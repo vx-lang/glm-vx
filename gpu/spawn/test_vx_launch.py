@@ -1,6 +1,6 @@
 """vx_launch.py without a GPU: a fake kernel library and the fake CUDA driver of
 gpu/test_runtime.py. Checks how VxKernel hands our stream to Vx (vx_cuda_set_stream, Vx PR
-#1994) and gives it back; gpu/test_spawn_vx_graph.py runs it for real."""
+#2016) and gives it back; gpu/test_spawn_vx_graph.py runs it for real."""
 import ctypes as C
 import json
 
@@ -28,7 +28,7 @@ class FakeFunction:
 
 
 class FakeKernelLibrary:
-    """lib<kernel>.so: the pub fn and, with PR #1994, vx_cuda_set_stream from its dispatch library."""
+    """lib<kernel>.so: the pub fn and, with PR #2016, vx_cuda_set_stream from its dispatch library."""
     def __init__(self, *, has_set_stream=True, entry_fails=False, current_stream=None):
         self.log = []
         self.glm_vx_spawn_add = FakeFunction(self.log, 'entry', entry_fails)
@@ -94,7 +94,7 @@ def test_an_old_vx_fails_only_when_a_stream_is_asked_for(setup):
     kernel, library, context, _ = setup(has_set_stream=False)
     x, stream = context.tensor((4,)), context.stream()
     kernel(out=x, a=x, n=4)
-    with pytest.raises(VxStreamUnsupported, match=r'PR #1994 \(Vx#1986\)') as caught:
+    with pytest.raises(VxStreamUnsupported, match=r'PR #2016 \(Vx#1986\)') as caught:
         kernel(out=x, a=x, n=4, stream=stream)
     assert '/opt/vx/lib/libvx_cuda_dispatch.so' in str(caught.value)
     assert [name for name, _ in library.log] == ['entry']  # nothing was launched without the stream

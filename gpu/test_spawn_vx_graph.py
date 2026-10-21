@@ -1,4 +1,5 @@
-"""Vx's launches on a stream of ours, and in a CUDA graph (glm-vx #9; Vx #1986, PR #1994).
+"""Vx's launches on a stream of ours, and in a CUDA graph (glm-vx #9; Vx #1986, PR #2016, which
+replaced #1994).
 
 A chain of four gpu/spawn kernels, scale -> add -> rmsnorm_rows -> softmax_rows, that Vx's own
 runtime launches (lib<kernel>.so):
@@ -11,15 +12,15 @@ runtime launches (lib<kernel>.so):
 - mixed: Python launches (SpawnKernel) and Vx launches in one graph;
 - refusals: VX_CUDA_SYNC=1 or VX_TIME_KERNEL during a capture must stop the program with
   Vx's message;
-- first call in a capture (no warm-up): Vx (PR #1994 from d1de7d0a) stops the program and says to
-  call the function once before the recording.
+- first call in a capture (no warm-up): Vx (PR #2016; #1994 from d1de7d0a) stops the program and
+  says to call the function once before the recording.
 
 Every scenario runs in a child process (`python -m gpu.test_spawn_vx_graph SCENARIO`), since
 Vx stops the whole program on what it refuses. Each child's stdout and stderr (Vx's
 messages) is printed, always; run pytest with -s to keep it on success too.
 
 Skipped without the libraries (gpu/spawn/build.sh with VX_DISPATCH_LIB), without
-vx_cuda_set_stream in them (a Vx build without PR #1994), or without a supported GPU.
+vx_cuda_set_stream in them (a Vx build without PR #2016), or without a supported GPU.
 """
 import os
 from pathlib import Path
@@ -303,7 +304,7 @@ def test_vx_stops_on_a_first_call_inside_a_capture():
 
 
 def test_every_library_has_vx_cuda_set_stream():
-    """No GPU needed: each lib<kernel>.so resolves vx_cuda_set_stream (Vx PR #1994)."""
+    """No GPU needed: each lib<kernel>.so resolves vx_cuda_set_stream (Vx PR #2016)."""
     from gpu.spawn.vx_launch import VxKernel
     libraries = sorted(SPAWN.glob('lib*.so'))
     if not libraries:
@@ -314,7 +315,7 @@ def test_every_library_has_vx_cuda_set_stream():
             kernel = VxKernel(ptx)
         except OSError as e:
             pytest.skip(f'cannot load {library.name} here: {e}')
-        kernel.set_stream  # raises VxStreamUnsupported naming PR #1994
+        kernel.set_stream  # raises VxStreamUnsupported naming PR #2016
 
 
 if __name__ == '__main__':
