@@ -122,6 +122,22 @@ or the GPU approximate/FTZ exponential. Real GPU cases explicitly skip when no
 CUDA device exists and fail on missing PTX when a device does exist. The production
 runtime cannot import or select the simulator as a fallback.
 
+## Single-GPU proxy checkpoint (SGLang comparison, #5)
+
+```sh
+.venv/bin/python -m validation.write_proxy --output /data/glm53-proxy --tokenizer-dir GLM53_SNAPSHOT
+python -m sglang.launch_server --model-path /data/glm53-proxy --tp 1 --mem-fraction-static 0.85
+.venv/bin/python -m glm_vx.server --checkpoint /data/glm53-proxy --backend vx-gpu  # resident: #21
+```
+
+`validation/write_proxy.py` writes the real GLM-5.3 config cut to 9 layers (3 dense + 6 MoE, the
+real indexer pattern, every width unchanged) with seeded random weights in the official block-FP8
+layout and tensor names: 64.25 GB, which leaves ~8 GB of KV cache in SGLang's 72.7 GB static pool
+on an 80 GB H100. It streams ~5 GB shards at about 1 GB/s and records every file's sha256 and every
+tensor in `proxy.json`. `--format bf16` (default 3 dense + 2 MoE, 45.7 GB) writes the same model
+unquantized for SGLang's BF16 row; `--layers N` and `--mtp` change the depth; the docstring has the
+byte arithmetic.
+
 ## Remaining performance work
 
 The code removes several obvious data-movement/serialization costs inside the
