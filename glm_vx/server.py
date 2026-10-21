@@ -157,9 +157,11 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             if req:self.server.scheduler.cancel(req)
 
-def main():
+RESIDENT='vx-gpu-resident'
+
+def parse_args(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--backend',choices=['vx','vx-gpu','numpy-reference'],default='vx')
+    p.add_argument('--backend',choices=['vx','vx-gpu',RESIDENT,'numpy-reference'],default='vx')
     source=p.add_mutually_exclusive_group(required=True)
     source.add_argument('--tiny',action='store_true',help='random weights, correctness demo only')
     source.add_argument('--checkpoint',help='local safetensors checkpoint directory')
@@ -170,7 +172,10 @@ def main():
     p.add_argument('--packed-weights',action='store_true',help='opt in to Vx packed GGUF dot products with F32 activations')
     p.add_argument('--tokenizer',help='local tokenizer.json')
     p.add_argument('--host',default='127.0.0.1'); p.add_argument('--port',type=int,default=8000)
-    p.add_argument('--max-sequences',type=int,default=8); p.add_argument('--token-budget',type=int,default=8192)
+    p.add_argument('--max-sequences',type=int,help=f'concurrent sequences; default 8, and 1 (the only choice) for {RESIDENT}')
+    p.add_argument('--token-budget',type=int,default=8192)
+    p.add_argument('--max-waiting',type=int,help=f'requests queued for capacity instead of rejected with 429; default 0, and 32 for {RESIDENT}')
+    p.add_argument('--max-context',type=int,help=f'{RESIDENT} only: prompt+generated tokens per request, the fixed device cache length; default 8192')
     p.add_argument('--prefix-cache-mib',type=int,default=0,help='CPU prompt snapshot storage budget; disabled by default, includes retained Python storage')
     p.add_argument('--max-pending-events',type=int,default=64,help='bounded unread output events per request; slow consumers are terminated')
     p.add_argument('--batched-prefill',action='store_true',help='opt in to bounded layer-wise CPU prefill; one chunk is indivisible')
@@ -180,12 +185,32 @@ def main():
     p.add_argument('--gpu-device',type=int,default=0)
     p.add_argument('--gpu-weight-cache-mib',type=int,default=512)
     p.add_argument('--gpu-tuning',help='verified shape-specific plan produced by python -m gpu.tune')
-    args=p.parse_args()
+    args=p.parse_args(argv)
     if args.packed_weights and (not args.gguf or args.backend != 'vx'):p.error('packed weights requires --gguf and --backend vx')
     if args.prefix_cache_mib<0:p.error('prefix cache must be nonnegative')
     if args.max_pending_events<2:p.error('max pending events must be at least two')
     if args.gpu_weight_cache_mib<0:p.error('GPU weight cache must be nonnegative')
     if args.decoded_cache_mib<0:p.error('decoded cache must be nonnegative')
+    if args.max_waiting is not None and args.max_waiting<0:p.error('max waiting must be nonnegative')
+    if args.backend==RESIDENT:
+        # ResidentGLM holds one sequence's device caches; batched decode is #8.
+        if args.max_sequences not in (None,1):p.error(f'{RESIDENT} serves one sequence at a time: --max-sequences must be 1')
+        if args.prefix_cache_mib:p.error(f'{RESIDENT} does not support the CPU prefix cache')
+        if args.batched_prefill:p.error(f'{RESIDENT} does not support batched CPU prefill')
+        if args.gguf:p.error(f'{RESIDENT} loads --checkpoint or --tiny, not --gguf')
+        if args.gpu_tuning:p.error(f'{RESIDENT} does not use --gpu-tuning')
+        if args.max_context is None:args.max_context=8192
+        if args.max_context<1:p.error('max context must be positive')
+        args.max_sequences=1
+        if args.max_waiting is None:args.max_waiting=32
+    else:
+        if args.max_context is not None:p.error(f'--max-context applies to --backend {RESIDENT} only')
+        if args.max_sequences is None:args.max_sequences=8
+        if args.max_waiting is None:args.max_waiting=0
+    return args
+
+def build_model(args):
+    """(model the scheduler drives, backend, weights, served name)."""
     from .model import Model,tiny_weights
     if args.backend=='vx':
         from kernels.backend import VxBackend
@@ -194,6 +219,7 @@ def main():
         from gpu.backend import GPUBackend
         backend=GPUBackend(args.gpu_ptx_dir,args.gpu_device,args.gpu_weight_cache_mib*1024**2,args.gpu_tuning)
     else:
+        # For vx-gpu-resident the host model only supplies config, weights and embedding rows.
         from .backend import NumpyBackend
         backend=NumpyBackend()
     if args.tiny:
@@ -217,12 +243,22 @@ def main():
         weights=Checkpoint(args.checkpoint,block_size=validated.weight_block_size)
         weights.validate_manifest(validated.tensor_shapes(),inspect_shards=True)
         name='glm-5.3-vx-experimental'
+    model=Model(config,weights,backend,packed_weights=args.packed_weights)
+    if args.backend==RESIDENT:
+        # FP8 / INT4 / BF16 Linears stay packed on the device; weights upload on first use.
+        from gpu import resident
+        backend=resident.ResidentGLM(model,max_tokens=args.max_context,ptx_dir=args.gpu_ptx_dir,device=args.gpu_device)
+        model=resident.ResidentSequenceModel(model,backend)
+    return model,backend,weights,name
+
+def main(argv=None):
+    args=parse_args(argv)
+    model,backend,weights,name=build_model(args)
     tokenizer=None
     if args.tokenizer:
         from tokenizers import Tokenizer
         tokenizer=Tokenizer.from_file(args.tokenizer)
-    model=Model(config,weights,backend,packed_weights=args.packed_weights)
-    scheduler=Scheduler(model,max_sequences=args.max_sequences,token_budget=args.token_budget,prefill_chunk=args.prefill_chunk,decode_prefill_tokens=args.decode_prefill_tokens,prefix_cache_bytes=args.prefix_cache_mib*1024**2,max_pending_events=args.max_pending_events,batched_prefill=args.batched_prefill)
+    scheduler=Scheduler(model,max_sequences=args.max_sequences,token_budget=args.token_budget,prefill_chunk=args.prefill_chunk,decode_prefill_tokens=args.decode_prefill_tokens,prefix_cache_bytes=args.prefix_cache_mib*1024**2,max_pending_events=args.max_pending_events,batched_prefill=args.batched_prefill,max_waiting=args.max_waiting)
     server=Server((args.host,args.port),scheduler,tokenizer,name)
     print(json.dumps({'listening':f'http://{args.host}:{server.server_port}','model':name,'backend':backend.name}),flush=True)
     try:server.serve_forever()

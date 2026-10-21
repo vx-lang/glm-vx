@@ -44,6 +44,19 @@ completion. The compatibility model uses fused compressed MLA across heads, but 
 and uploads the selected KV rows on each attention call. Direct FP8 projection
 is currently a resident API, not integrated into checkpoint serving.
 
+`--backend vx-gpu-resident` serves through `gpu/resident.py` (`ResidentGLM`) instead: weights,
+activations and the MLA / indexer caches stay on the device, and block-FP8 / INT4 / BF16 Linears
+stay packed. It holds one sequence's caches, so it serves one request at a time (`--max-sequences`
+is fixed at 1 until batched decode, #8); further requests wait in a FIFO (`--max-waiting`, default
+32) rather than getting 429. `--max-context` (default 8192) fixes the cache length at startup;
+each request resets the position and reuses the buffers. Weights upload on first use, so the first
+request is slow. The prefix cache and `--batched-prefill` are refused; sampling stays on the host
+(#17).
+
+```sh
+.venv/bin/python -m glm_vx.server --backend vx-gpu-resident --checkpoint DIR --tokenizer DIR/tokenizer.json --max-context 4096
+```
+
 ## Measured layout tuning
 
 ```sh

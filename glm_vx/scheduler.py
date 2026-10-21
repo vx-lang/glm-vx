@@ -4,6 +4,8 @@ The CPU prototype interleaves sequences; it does not claim fused GPU batching.
 Reserve prompt+generation tokens up front so admitted requests cannot exhaust
 this logical token budget halfway through decoding. Byte budgets remain a
 backend deployment concern; token budget is NOT a GPU memory fit guarantee.
+With max_waiting > 0, a request that fits the limits but not the current free
+capacity waits (FIFO, at most max_waiting) instead of being rejected.
 """
 from collections import deque
 from dataclasses import dataclass, field
@@ -41,9 +43,10 @@ class Request:
     prefix_seconds: float = 0.0
 
 class Scheduler:
-    def __init__(self, model, *, max_sequences=8, token_budget=8192, prefill_chunk=16, decode_prefill_tokens=4, prefix_cache_bytes=0, max_pending_events=64, batched_prefill=False):
+    def __init__(self, model, *, max_sequences=8, token_budget=8192, prefill_chunk=16, decode_prefill_tokens=4, prefix_cache_bytes=0, max_pending_events=64, batched_prefill=False, max_waiting=0):
         if min(max_sequences,token_budget,prefill_chunk,decode_prefill_tokens) < 1: raise ValueError("positive limits required")
         if type(max_pending_events) is not int or max_pending_events < 2: raise ValueError("at least two pending events required")
+        if type(max_waiting) is not int or max_waiting < 0: raise ValueError("max_waiting must be a nonnegative integer")
         if type(batched_prefill) is not bool: raise ValueError('batched_prefill must be boolean')
         if batched_prefill and not callable(getattr(model, 'prefill_chunk', None)):
             raise ValueError('model does not support batched prefill')
@@ -59,6 +62,8 @@ class Scheduler:
         self.decode_prefill_tokens = decode_prefill_tokens
         self.lock = threading.Condition()
         self.pending = deque()
+        self.max_waiting = max_waiting
+        self.waiting = deque()  # admitted later, in order, as capacity frees
         self.reserved = 0
         self.count = 0
         self.closed = False
@@ -83,13 +88,28 @@ class Scheduler:
         req.events = queue.Queue(maxsize=min(max_tokens+2, self.max_pending_events))
         with self.lock:
             if self.closed: raise BusyError("scheduler is closed")
-            if self.count >= self.max_sequences or self.reserved+amount > self.token_budget:
-                raise BusyError("admission capacity exhausted")
-            self.reserved += amount
-            self.count += 1
-            self.pending.append(req)
-            self.lock.notify()
+            if self.waiting or not self._fits(amount):
+                if amount > self.token_budget or len(self.waiting) >= self.max_waiting:
+                    raise BusyError("admission capacity exhausted")
+                self.waiting.append(req)
+                return req
+            self._admit(req)
         return req
+
+    def _fits(self, amount):
+        return self.count < self.max_sequences and self.reserved+amount <= self.token_budget
+
+    def _admit(self, req):
+        # Caller holds the lock.
+        self.reserved += req.reservation
+        self.count += 1
+        self.pending.append(req)
+        self.lock.notify()
+
+    def _promote(self):
+        # Caller holds the lock. FIFO: a large head request is not overtaken.
+        while self.waiting and self._fits(self.waiting[0].reservation):
+            self._admit(self.waiting.popleft())
 
     def _finish(self, req, reason, error=None):
         if req.finished: return
@@ -98,13 +118,18 @@ class Scheduler:
         with self.lock:
             self.reserved -= req.reservation
             self.count -= 1
+            self._promote()
             self.lock.notify_all()
         # Keep one terminal slot even for an abandoned consumer.
-        req.events.put_nowait({"type":"done","reason":reason,"error":error,
+        req.events.put_nowait(self._done(req,reason,error))
+
+    @staticmethod
+    def _done(req, reason, error=None):
+        return {"type":"done","reason":reason,"error":error,
             "prompt_tokens":len(req.tokens),"completion_tokens":req.generated,
             "cached_prompt_tokens":req.cached_tokens,
             "timings":{"prefill_seconds":req.prefill_seconds,"decode_seconds":req.decode_seconds,
-                       "prefix_seconds":req.prefix_seconds}})
+                       "prefix_seconds":req.prefix_seconds}}
 
     def _sample(self, logits, req):
         logits = np.asarray(logits,dtype=np.float32)
@@ -227,17 +252,29 @@ class Scheduler:
 
     def status(self):
         with self.lock:
-            return {"active_requests":self.count,"reserved_tokens":self.reserved,
+            return {"active_requests":self.count,"waiting_requests":len(self.waiting),"reserved_tokens":self.reserved,
                     "max_sequences":self.max_sequences,"token_budget":self.token_budget,
                     "max_pending_events":self.max_pending_events,"batched_prefill":self.batched_prefill,"prefix_cache":self.prefix_cache.status()}
 
     def cancel(self, req):
         req.cancelled.set()
-        with self.lock: self.lock.notify_all()
+        with self.lock:
+            # Identity, not dataclass equality.
+            index = next((i for i, r in enumerate(self.waiting) if r is req), None)
+            if index is not None:
+                del self.waiting[index]
+                req.finished = True
+                req.events.put_nowait(self._done(req,"cancelled"))
+                self._promote()  # a removed head may have blocked smaller requests
+            self.lock.notify_all()
 
     def close(self, timeout=10):
         with self.lock:
             self.closed = True
+            for req in self.waiting:
+                req.finished = True
+                req.events.put_nowait(self._done(req,"cancelled"))
+            self.waiting.clear()
             self.lock.notify_all()
         self.thread.join(timeout=timeout)
         if self.thread.is_alive():

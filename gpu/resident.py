@@ -509,3 +509,43 @@ class ResidentGLM:
     def prefill(self, token_ids):
         """Token-by-token prefill; returns the stacked logits of every position."""
         return np.stack([self.forward(t) for t in token_ids]) if len(token_ids) else np.empty((0, int(self.config['vocab_size'])), np.float32)
+
+
+class ResidentSequenceModel:
+    """The scheduler's model interface (new_cache / prefill_token / forward) over one ResidentGLM.
+
+    ResidentGLM holds a single sequence's device caches, so this serves one request at a time
+    (Scheduler max_sequences=1) until batched decode (#8). ``new_cache`` resets the position for
+    the next request; device buffers are reused, never reallocated. The returned handle only
+    guards against a stale request touching the caches after another one took them over.
+    ``config['max_position_embeddings']`` is clamped to ``max_tokens`` so the scheduler rejects
+    requests that do not fit the caches. Prompt tokens before the last skip lm_head.
+    """
+
+    def __init__(self, model, resident):
+        self.model, self.resident, self.backend = model, resident, resident
+        self.config = dict(model.config)
+        limit = int(self.config.get('max_position_embeddings', resident.max_tokens))
+        self.config['max_position_embeddings'] = min(limit, int(resident.max_tokens))
+        self._current = None
+
+    def new_cache(self):
+        self.resident.reset()
+        self._current = object()
+        return self._current
+
+    def _check(self, cache):
+        if cache is None or cache is not self._current:
+            raise RuntimeError('ResidentGLM holds one sequence and this request no longer owns it')
+
+    def prefill_token(self, token_id, cache):
+        self._check(cache)
+        self.resident.forward(token_id, logits=False)
+
+    def forward(self, token_id, cache):
+        self._check(cache)
+        # Logits come back so the scheduler samples on the host; device-side sampling is #17.
+        return self.resident.forward(token_id)
+
+    def close(self):
+        self.resident.close()

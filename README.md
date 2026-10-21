@@ -94,7 +94,9 @@ with validated cache transfer; it is not yet an HTTP worker pool or GPU speedup.
 
 [GPU code](gpu/README.md) adds coalesced F32/FP8 projection, fused residual/RMSNorm,
 warp/block reductions, split online-softmax compressed MLA, and a CUDA Driver API
-runtime. Use `--backend vx-gpu` for the explicitly hybrid serving adapter.
+runtime. Use `--backend vx-gpu` for the explicitly hybrid serving adapter, or
+`--backend vx-gpu-resident --checkpoint DIR` for device-resident decode (weights, activations
+and caches on the GPU; one request at a time, others queue; see [gpu/README.md](gpu/README.md)).
 The [original CPU report](REPORT.md) remains a baseline, not a GPU benchmark.
 
 ## Serving performance
