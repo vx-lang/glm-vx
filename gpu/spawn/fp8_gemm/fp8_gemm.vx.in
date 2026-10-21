@@ -1,0 +1,222 @@
+// Block-FP8 GEMM for H100 (sm_90a), glm-vx #10: TMA into a @STAGES@-stage shared ring, wgmma
+// m64n128k32 e4m3, the scales applied per 128-k block in f32. gpu/FP8-GEMM.md has the design, and
+// gpu/fp8_gemm.py launches it.
+//
+//   C[m, n] = sum_kb a_scale[m, kb] * b_scale[n / 128, kb] * sum_{k in block kb} A[m, k] * B[n, k]
+//
+// A [M, K] and B [N, K] are e4m3 bytes, row-major (K contiguous); a_scale is f32 [M, KB] (the
+// activation's 1 x 128 groups) and b_scale f32 [ceil(N / 128), KB] (the checkpoint's 128 x 128
+// weight_scale_inv; dequant = code * scale), with KB = ceil(K / 128). K % 16 == 0 (TMA's row
+// stride); M, N and K tails are otherwise free: TMA fills elements outside A and B with zeros.
+//
+// A CTA owns a @BLOCK_M@ x 128 tile of C and one k range [kb0, kb0 + nkb) of 128-k blocks (split-K:
+// with splits > 1 each split writes f32 partials to its slice of `out`, and
+// fp8_gemm_reduce.vx sums them). block_id() = (n_tile * splits + split) * tiles_m + m_tile, so the
+// CTAs that read the same B tile are next to each other.
+//
+// Threads: @CONSUMERS@ consumer warpgroup(s) (threads 0 .. @PRODUCER@ - 1, warpgroup w owns rows
+// 64w .. 64w + 63 of the tile; a warpgroup must start at a warp index that is a multiple of 4,
+// PTX ISA 9.7.15.1) and one producer warp (threads @PRODUCER@ ..), of which one thread issues TMA.
+//
+// Shared memory (Vx dynamic shared memory, PR #1995, with aligned(1024), PR #1996):
+//   ring_a: stage s at a_base + @A_STAGE@ s: the A box, @BLOCK_M@ rows x 128 bytes, 128-byte swizzle
+//   ring_b: stage s at b_base + @B_STAGE@ s: the B box, 128 rows x 128 bytes, 128-byte swizzle
+//   bars:   full[s] at bar_base + 8 s (1 arrival + the stage's TMA bytes), empty[s] at
+//           bar_base + 8 (@STAGES@ + s) (@EMPTY_ARRIVALS@ arrivals: lane 0 of each consumer warp)
+// A 128-byte-swizzled box row r of 128 bytes sits at byte 128 r, with its 16-byte chunk c moved to
+// chunk c ^ (r % 8) (CU_TENSOR_MAP_SWIZZLE_128B; the "128B swizzle" of PTX ISA 9.7.15.5.1). wgmma
+// reads it back through a descriptor with swizzle mode 1, SBO 1024 (sm90.vx sw128_desc).
+//
+// Pipeline (stage s = i % @STAGES@, pass parity (i / @STAGES@) & 1):
+//   producer: wait empty[s] (parity ^ 1), arrive.expect_tx(full[s], @TX_BYTES@), TMA A and B into s.
+//   consumer: wait full[s] (parity), 4 wgmma k32 into `part` (commit, wait 0), lane 0 arrives on
+//             empty[s], then acc += part * (a_scale[row, kb] * b_scale[n0 / 128, kb]).
+// The wait 0 before the promotion is DeepGEMM's order too: two 64-register accumulators are what
+// m64n128 leaves room for, not a third to keep a group in flight. The TMA loads of later stages
+// are in flight meanwhile.
+// spawn-include: ../device.vx
+// spawn-include: sm90.vx
+// spawn-include: wgmma_m64n128k32.vx
+
+fn ring_a_address(t: &mut Tensor<i32, [@RING_A_WORDS@], Memory::SMEM, aligned(1024)>) on Topology::Device -> i64 {
+  return mlir!( inputs : (%t = t : memref<@RING_A_WORDS@xi32, 3>), returns : i64, dialects : ["memref", "arith"]) {
+    %p = memref.extract_aligned_pointer_as_index %t : memref<@RING_A_WORDS@xi32, 3> -> index
+    %r = arith.index_cast %p : index to i64
+    macro.yield %r : i64
+  };
+}
+
+fn ring_b_address(t: &mut Tensor<i32, [@RING_B_WORDS@], Memory::SMEM, aligned(1024)>) on Topology::Device -> i64 {
+  return mlir!( inputs : (%t = t : memref<@RING_B_WORDS@xi32, 3>), returns : i64, dialects : ["memref", "arith"]) {
+    %p = memref.extract_aligned_pointer_as_index %t : memref<@RING_B_WORDS@xi32, 3> -> index
+    %r = arith.index_cast %p : index to i64
+    macro.yield %r : i64
+  };
+}
+
+fn bars_address(t: &mut Tensor<i64, [@BARS@], Memory::SMEM>) on Topology::Device -> i64 {
+  return mlir!( inputs : (%t = t : memref<@BARS@xi64, 3>), returns : i64, dialects : ["memref", "arith"]) {
+    %p = memref.extract_aligned_pointer_as_index %t : memref<@BARS@xi64, 3> -> index
+    %r = arith.index_cast %p : index to i64
+    macro.yield %r : i64
+  };
+}
+
+// maps: 256 bytes, the CUtensorMap of A at byte 0 and of B at byte 128 (64-byte aligned each).
+// out: f32 [splits, M, N] (C itself when splits == 1 and bf16_out == 0); out_bf16: u16 [M, N],
+// written instead when splits == 1 and bf16_out != 0. split_blocks: 128-k blocks per split.
+pub fn glm_vx_fp8_gemm_@NAME@(maps: &Tensor<u8, [?], Memory::HBM>, a_scale: &Tensor<f32, [?], Memory::HBM>,
+                         b_scale: &Tensor<f32, [?], Memory::HBM>, out: &mut Tensor<f32, [?], Memory::HBM>,
+                         out_bf16: &mut Tensor<u16, [?], Memory::HBM>, rows_m: i32, rows_n: i32, cols: i32,
+                         splits: i32, split_blocks: i32, bf16_out: i32) -> void {
+  spawn on(Topology::Device) grid([((rows_m + @BLOCK_M@ - 1) / @BLOCK_M@) * ((rows_n + 127) / 128) * splits]) block(@THREADS@) {
+    let tid: i32 = thread_id();
+    let bid: i32 = block_id();
+    // ::fill(0.0) of 64 elements stays a loop with a variable index, which keeps the tensor in local
+    // memory; a constant-bound loop over a REG tensor is unrolled by Vx (PR #1991).
+    let mut acc = unsafe { Tensor<f32, [@ACC@], Memory::REG>::uninit() };
+    let mut part = unsafe { Tensor<f32, [@ACC@], Memory::REG>::uninit() };
+    for r in 0..@ACC@ {
+      acc[r] = 0.0;
+      part[r] = 0.0;
+    }
+    let mut ring_a = unsafe { Tensor<i32, [@RING_A_WORDS@], Memory::SMEM, aligned(1024)>::uninit() };
+    let mut ring_b = unsafe { Tensor<i32, [@RING_B_WORDS@], Memory::SMEM, aligned(1024)>::uninit() };
+    let mut bars = unsafe { Tensor<i64, [@BARS@], Memory::SMEM>::uninit() };
+    let a_base: i64 = ring_a_address(&mut ring_a);
+    let b_base: i64 = ring_b_address(&mut ring_b);
+    let bar_base: i64 = bars_address(&mut bars);
+    let blocks_k: i32 = (cols + 127) / 128;
+    let tiles_m: i32 = (rows_m + @BLOCK_M@ - 1) / @BLOCK_M@;
+    let m_tile: i32 = bid % tiles_m;
+    let rest: i32 = bid / tiles_m;
+    let split: i32 = rest % splits;
+    let m0: i32 = m_tile * @BLOCK_M@;
+    let n0: i32 = (rest / splits) * 128;
+    let kb0: i32 = split * split_blocks;
+    let mut nkb: i32 = blocks_k - kb0;
+    if nkb > split_blocks {
+      nkb = split_blocks;
+    }
+    let mut i: i32 = 0;
+    if tid == 0 {
+      for s in 0..@STAGES@ {
+        let _f: i32 = mbar_init(bar_base + 8 * (s as i64), 1);
+        let _e: i32 = mbar_init(bar_base + 8 * ((@STAGES@ + s) as i64), @EMPTY_ARRIVALS@);
+      }
+      let _b: i32 = fence_barrier_init();
+    }
+    barrier();
+    if tid == @PRODUCER@ {
+      // Only this thread reads the maps, so its fence is the block's (sm90.vx, gpu/FP8-GEMM.md).
+      let a_map: i64 = global_address(maps);
+      let b_map: i64 = a_map + 128;
+      let _fa: i32 = fence_tensormap_acquire(a_map);
+      let _fb: i32 = fence_tensormap_acquire(b_map);
+      let _pa: i32 = prefetch_tensormap(a_map);
+      let _pb: i32 = prefetch_tensormap(b_map);
+      while i < nkb {
+        let s: i32 = i % @STAGES@;
+        let parity: i32 = (i / @STAGES@) & 1;
+        let _m: i32 = mbar_wait(bar_base + 8 * ((@STAGES@ + s) as i64), parity ^ 1);
+        let full: i64 = bar_base + 8 * (s as i64);
+        let _x: i32 = mbar_arrive_expect_tx(full, @TX_BYTES@);
+        let k: i32 = (kb0 + i) * 128;
+        let _ta: i32 = tma_load_2d(a_base + @A_STAGE@ * (s as i64), a_map, k, m0, full);
+        let _tb: i32 = tma_load_2d(b_base + @B_STAGE@ * (s as i64), b_map, k, n0, full);
+        i = i + 1;
+      }
+    } else {
+      // Vx: without this `else`, E3048 says the `if` above has no value (gpu/FP8-GEMM.md).
+      let _idle: i32 = 0;
+    }
+    if tid < @PRODUCER@ {
+      let group: i32 = tid >> 7;
+      let warp: i32 = (tid >> 5) & 3;
+      let lane: i32 = tid & 31;
+      let row_lo: i32 = m0 + 64 * group + 16 * warp + (lane >> 2);
+      let row_hi: i32 = row_lo + 8;
+      // Rows past M read row M - 1's scale: their A rows are zeros (TMA), so their part is 0 and
+      // the scale only has to be finite. They are not stored.
+      let mut srow_lo: i32 = row_lo;
+      if srow_lo > rows_m - 1 {
+        srow_lo = rows_m - 1;
+      }
+      let mut srow_hi: i32 = row_hi;
+      if srow_hi > rows_m - 1 {
+        srow_hi = rows_m - 1;
+      }
+      let kbs: i64 = blocks_k as i64;
+      let a_lo: i64 = (srow_lo as i64) * kbs;
+      let a_hi: i64 = (srow_hi as i64) * kbs;
+      let b_row: i64 = ((n0 / 128) as i64) * kbs;
+      let a_desc: i64 = sw128_desc(a_base + 8192 * (group as i64));
+      let b_desc: i64 = sw128_desc(b_base);
+      while i < nkb {
+        let s: i32 = i % @STAGES@;
+        let parity: i32 = (i / @STAGES@) & 1;
+        let kb: i64 = (kb0 + i) as i64;
+        // The scales are loaded before the wait, so their latency hides behind it.
+        let sb: f32 = b_scale[b_row + kb];
+        let s_lo: f32 = a_scale[a_lo + kb] * sb;
+        let s_hi: f32 = a_scale[a_hi + kb] * sb;
+        let _m: i32 = mbar_wait(bar_base + 8 * (s as i64), parity);
+        let _w: i32 = wgmma_m64n128k32_k128(&mut part, a_desc + @A_STAGE_DESC@ * (s as i64), b_desc + @B_STAGE_DESC@ * (s as i64));
+        if lane == 0 {
+          let _a: i32 = mbar_arrive(bar_base + 8 * ((@STAGES@ + s) as i64));
+        }
+        for j in 0..16 {
+          acc[4 * j] = acc[4 * j] + part[4 * j] * s_lo;
+          acc[4 * j + 1] = acc[4 * j + 1] + part[4 * j + 1] * s_lo;
+          acc[4 * j + 2] = acc[4 * j + 2] + part[4 * j + 2] * s_hi;
+          acc[4 * j + 3] = acc[4 * j + 3] + part[4 * j + 3] * s_hi;
+        }
+        i = i + 1;
+      }
+      // Epilogue: register 4j + q is row row_lo + 8 (q >> 1), column n0 + 8j + 2 (lane % 4) + (q & 1).
+      let n_count: i64 = rows_n as i64;
+      let col0: i32 = n0 + 2 * (lane & 3);
+      let lo_ok: bool = row_lo < rows_m;
+      let hi_ok: bool = row_hi < rows_m;
+      let out_lo: i64 = (row_lo as i64) * n_count + (col0 as i64);
+      let out_hi: i64 = out_lo + 8 * n_count;
+      if bf16_out != 0 && splits == 1 {
+        for j in 0..16 {
+          let c: i32 = col0 + 8 * (j as i32);
+          let off: i64 = 8 * (j as i64);
+          if lo_ok && c < rows_n {
+            out_bf16[out_lo + off] = bf16_bits(acc[4 * j]) as u16;
+          }
+          if lo_ok && c + 1 < rows_n {
+            out_bf16[out_lo + off + 1] = bf16_bits(acc[4 * j + 1]) as u16;
+          }
+          if hi_ok && c < rows_n {
+            out_bf16[out_hi + off] = bf16_bits(acc[4 * j + 2]) as u16;
+          }
+          if hi_ok && c + 1 < rows_n {
+            out_bf16[out_hi + off + 1] = bf16_bits(acc[4 * j + 3]) as u16;
+          }
+        }
+      } else {
+        let slice: i64 = (split as i64) * (rows_m as i64) * n_count;
+        for j in 0..16 {
+          let c: i32 = col0 + 8 * (j as i32);
+          let off: i64 = slice + 8 * (j as i64);
+          if lo_ok && c < rows_n {
+            out[out_lo + off] = acc[4 * j];
+          }
+          if lo_ok && c + 1 < rows_n {
+            out[out_lo + off + 1] = acc[4 * j + 1];
+          }
+          if hi_ok && c < rows_n {
+            out[out_hi + off] = acc[4 * j + 2];
+          }
+          if hi_ok && c + 1 < rows_n {
+            out[out_hi + off + 1] = acc[4 * j + 3];
+          }
+        }
+      }
+    }
+  }
+  return;
+}

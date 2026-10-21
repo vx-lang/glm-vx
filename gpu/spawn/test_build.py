@@ -220,3 +220,16 @@ def test_dynamic_shared_bytes_must_match_the_ptx():
         build.check_dynamic_shared(extern, 0)
     with pytest.raises(ValueError, match='nonnegative integer'):
         build.check_dynamic_shared(ADD_PTX, -1)
+
+
+def test_raise_ptx_version_changes_only_the_header():
+    ptx = '//\n.version 8.0\n.target sm_90a\n.address_size 64\n\tfence.proxy.tensormap::generic.acquire.sys [%rd1], 128;\n'
+    raised, old = build.raise_ptx_version(ptx, '8.3')
+    assert old == '8.0'
+    assert raised == ptx.replace('.version 8.0', '.version 8.3')
+    assert build.raise_ptx_version(ptx, '8.0')[0] == ptx
+    for bad in ('7.8', '8', 'x'):
+        with pytest.raises(ValueError):
+            build.raise_ptx_version(ptx, bad)
+    with pytest.raises(ValueError):
+        build.raise_ptx_version('.target sm_90a\n', '8.3')

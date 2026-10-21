@@ -1,0 +1,29 @@
+// The split-K reduction of the FP8 GEMM (glm-vx #10): C[i] = sum over s of partial[s, i], in
+// order s = 0, 1, .., splits - 1 (deterministic), as f32 into `out` or as bfloat16 (round to
+// nearest even) into `out_bf16` when bf16_out != 0. partial is the f32 [splits, M, N] that
+// fp8_gemm_<variant>.vx writes when splits > 1; count = M * N.
+// spawn-include: ../device.vx
+// spawn-include: sm90.vx
+
+pub fn glm_vx_fp8_gemm_reduce(partial: &Tensor<f32, [?], Memory::HBM>, out: &mut Tensor<f32, [?], Memory::HBM>,
+                              out_bf16: &mut Tensor<u16, [?], Memory::HBM>, count: i32, splits: i32,
+                              bf16_out: i32) -> void {
+  spawn on(Topology::Device) grid([(count + 255) / 256]) block(256) {
+    let idx: i32 = block_id() * 256 + thread_id();
+    if idx < count {
+      let n: i64 = count as i64;
+      let mut sum: f32 = 0.0;
+      let mut s: i32 = 0;
+      while s < splits {
+        sum = sum + partial[(s as i64) * n + (idx as i64)];
+        s = s + 1;
+      }
+      if bf16_out != 0 {
+        out_bf16[idx as i64] = bf16_bits(sum) as u16;
+      } else {
+        out[idx as i64] = sum;
+      }
+    }
+  }
+  return;
+}

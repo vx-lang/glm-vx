@@ -67,6 +67,21 @@ def check_dynamic_shared(ptx, nbytes):
     return nbytes
 
 
+def raise_ptx_version(ptx: str, version: str):
+    """PTX with its `.version` raised to VERSION, and the version vxc wrote. vxc pins sm_90a to PTX
+    8.0, and fence.proxy.tensormap::generic (which a tensor map in global memory needs, CUDA
+    programming guide 4.12.2.2) needs 8.3; a newer version accepts every older instruction, so only
+    the header changes. Never lower it."""
+    found = re.search(r'^\.version (\d+)\.(\d+)\s*$', ptx, re.M)
+    wanted = re.fullmatch(r'(\d+)\.(\d+)', version or '')
+    if not found or not wanted:
+        raise ValueError(f'cannot raise the PTX version to {version!r}: no .version line or a bad version')
+    old, new = (int(found[1]), int(found[2])), (int(wanted[1]), int(wanted[2]))
+    if new < old:
+        raise ValueError(f'--ptx-version {version} is older than the {old[0]}.{old[1]} vxc wrote')
+    return ptx[:found.start()] + f'.version {version}' + ptx[found.end():], f'{old[0]}.{old[1]}'
+
+
 def same_kernel(a: str, b: str) -> bool:
     """Two PTX files hold the same kernel apart from its entry name and label numbering."""
     def body(ptx):
@@ -200,8 +215,12 @@ def main() -> int:
     parser.add_argument('--library', type=Path, help='also build this shared library for Vx to launch from')
     parser.add_argument('--dispatch-lib', default=os.environ.get('VX_DISPATCH_LIB'))
     parser.add_argument('--cc', default=os.environ.get('CC', 'cc'))
+    parser.add_argument('--ptx-version', help="raise the PTX's .version to this (vxc pins sm_90a to 8.0; "
+                        'fence.proxy.tensormap needs 8.3). Not with --library: Vx would load the 8.0 image')
     args = parser.parse_args()
     try:
+        if args.ptx_version and args.library:
+            raise ValueError('--ptx-version and --library: the library would carry the PTX vxc wrote')
         # vxc takes the chip from the machine file; --arch (as VX_GPU_CHIP) overrides it.
         env = dict(os.environ)
         env.pop('VX_GPU_CHIP', None)
@@ -234,6 +253,10 @@ def main() -> int:
         params = kernel_params(kernels[0]['params'])
         check_params(ptx, name, params)
         dynamic_shared = check_dynamic_shared(ptx, kernels[0].get('dynamic_shared_bytes', 0))
+        vxc_ptx_sha = hashlib.sha256(ptx.encode()).hexdigest()
+        raised = None
+        if args.ptx_version:
+            ptx, raised = raise_ptx_version(ptx, args.ptx_version)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         evidence = {'schema': 'glm-vx-spawn-v2', 'entry': name, 'params': params, 'vx_params': kernels[0]['params'],
                     'launch': kernels[0].get('launch'), 'dynamic_shared_bytes': dynamic_shared,
@@ -241,6 +264,8 @@ def main() -> int:
                     'ptx_sha256': hashlib.sha256(ptx.encode()).hexdigest(),
                     'vxc': subprocess.run([args.vxc, '--version'], text=True, stdout=subprocess.PIPE).stdout.strip(),
                     'assembly_validated': False, 'gpu_execution_validated': False}
+        if raised:
+            evidence['ptx_version'] = {'vxc': raised, 'raised_to': args.ptx_version, 'vxc_ptx_sha256': vxc_ptx_sha}
         if args.ptxas:
             with tempfile.TemporaryDirectory(prefix='vx-spawn-') as temp:
                 path = Path(temp, 'k.ptx'); path.write_text(ptx)

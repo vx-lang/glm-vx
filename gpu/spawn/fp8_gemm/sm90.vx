@@ -1,0 +1,122 @@
+// sm_90 helpers for the FP8 GEMM: mbarrier, TMA (cp.async.bulk.tensor) and wgmma descriptors, as
+// inline PTX in mlir! blocks. Each takes and returns scalars only; a shared address is the
+// shared::cta byte address (memref.extract_aligned_pointer_as_index of a `memref<.., 3>`), which
+// PTX takes as a 64-bit register in a [..] operand. Section numbers are the PTX ISA 8.x manual's.
+
+// The generic address of a global tensor's first byte: here, a CUtensorMap that the host encoded
+// and copied into device memory before the launch (gpu/fp8_gemm.py).
+fn global_address(t: &Tensor<u8, [?], Memory::HBM>) on Topology::Device -> i64 {
+  return mlir!( inputs : (%t = t : memref<?xi8>), returns : i64, dialects : ["memref", "arith"]) {
+    %p = memref.extract_aligned_pointer_as_index %t : memref<?xi8> -> index
+    %r = arith.index_cast %p : index to i64
+    macro.yield %r : i64
+  };
+}
+
+// mbarrier.init (9.7.13.15.9): the barrier at `bar` expects `count` arrivals a phase.
+fn mbar_init(bar: i64, count: i32) on Topology::Device -> i32 {
+  return mlir!( inputs : (%b = bar : i64, %c = count : i32), returns : i32, dialects : ["llvm", "arith"]) {
+    llvm.inline_asm has_side_effects "mbarrier.init.shared::cta.b64 [$0], $1;", "l,r" %b, %c : (i64, i32) -> ()
+    %z = arith.constant 0 : i32
+    macro.yield %z : i32
+  };
+}
+
+// Make the mbarrier inits visible to the other threads and to the async proxy (TMA's complete_tx)
+// before anyone uses them (9.7.13.4.20, fence.mbarrier_init); a barrier() follows.
+fn fence_barrier_init() on Topology::Device -> i32 {
+  return mlir!( inputs : (), returns : i32, dialects : ["llvm", "arith"]) {
+    llvm.inline_asm has_side_effects "fence.mbarrier_init.release.cluster;", "" : () -> ()
+    %z = arith.constant 0 : i32
+    macro.yield %z : i32
+  };
+}
+
+// mbarrier.arrive.expect_tx (9.7.13.15.12): arrive once and expect `bytes` of async-proxy writes
+// (the TMA loads of this stage) before the phase completes.
+fn mbar_arrive_expect_tx(bar: i64, bytes: i32) on Topology::Device -> i32 {
+  return mlir!( inputs : (%b = bar : i64, %n = bytes : i32), returns : i32, dialects : ["llvm", "arith"]) {
+    llvm.inline_asm has_side_effects "{ .reg .b64 st; mbarrier.arrive.expect_tx.shared::cta.b64 st, [$0], $1; }", "l,r" %b, %n : (i64, i32) -> ()
+    %z = arith.constant 0 : i32
+    macro.yield %z : i32
+  };
+}
+
+// mbarrier.arrive (9.7.13.15.13), release semantics at CTA scope by default: the consumer warp
+// is done reading this stage.
+fn mbar_arrive(bar: i64) on Topology::Device -> i32 {
+  return mlir!( inputs : (%b = bar : i64), returns : i32, dialects : ["llvm", "arith"]) {
+    llvm.inline_asm has_side_effects "{ .reg .b64 st; mbarrier.arrive.shared::cta.b64 st, [$0]; }", "l" %b : (i64) -> ()
+    %z = arith.constant 0 : i32
+    macro.yield %z : i32
+  };
+}
+
+// mbarrier.try_wait.parity (9.7.13.15.16), acquire at CTA scope: 1 once the phase with this
+// parity has completed. A fresh barrier is in phase 0, and parity 1 (the phase "before" it)
+// counts as completed, which is how the producer's first pass over the ring does not wait.
+fn mbar_try_wait(bar: i64, parity: i32) on Topology::Device -> i32 {
+  return mlir!( inputs : (%b = bar : i64, %p = parity : i32), returns : i32, dialects : ["llvm", "arith"]) {
+    %r = llvm.inline_asm has_side_effects "{ .reg .pred p; mbarrier.try_wait.parity.shared::cta.b64 p, [$1], $2; selp.u32 $0, 1, 0, p; }", "=r,l,r" %b, %p : (i64, i32) -> i32
+    macro.yield %r : i32
+  };
+}
+
+fn mbar_wait(bar: i64, parity: i32) on Topology::Device -> i32 {
+  while mbar_try_wait(bar, parity) == 0 {
+  }
+  return 0;
+}
+
+// fence.proxy.tensormap::generic.acquire.sys (PTX ISA 8.3+): make the host's copy of the tensor
+// map at this generic address visible to the tensormap proxy, which TMA reads it through. The
+// tensormap proxy is not acquired from the generic proxy at kernel start (PTX ISA "Memory
+// synchronization"), so the CUDA programming guide (4.12.2.2) fences a map in global memory once
+// per thread block, with system scope since the host wrote it, before its first use. The PTX
+// needs .version 8.3: build.sh passes build.py --ptx-version 8.3 (vxc writes 8.0 for sm_90a).
+fn fence_tensormap_acquire(map: i64) on Topology::Device -> i32 {
+  return mlir!( inputs : (%m = map : i64), returns : i32, dialects : ["llvm", "arith"]) {
+    llvm.inline_asm has_side_effects "fence.proxy.tensormap::generic.acquire.sys [$0], 128;", "l" %m : (i64) -> ()
+    %z = arith.constant 0 : i32
+    macro.yield %z : i32
+  };
+}
+
+// prefetch.tensormap (9.7.9.15): bring the tensor map at this generic address into the cache.
+fn prefetch_tensormap(map: i64) on Topology::Device -> i32 {
+  return mlir!( inputs : (%m = map : i64), returns : i32, dialects : ["llvm", "arith"]) {
+    llvm.inline_asm has_side_effects "prefetch.tensormap [$0];", "l" %m : (i64) -> ()
+    %z = arith.constant 0 : i32
+    macro.yield %z : i32
+  };
+}
+
+// cp.async.bulk.tensor.2d (9.7.9.25.5.1): the box of the tensor map at generic address `map`
+// whose first element is (c0, c1) (c0 innermost, in elements) goes to shared address `dst`, and
+// its bytes complete_tx on the mbarrier `bar`. Elements outside the tensor are zero. The
+// destination is a shared::cluster address; with no cluster, the CTA's own shared::cta address.
+fn tma_load_2d(dst: i64, map: i64, c0: i32, c1: i32, bar: i64) on Topology::Device -> i32 {
+  return mlir!( inputs : (%d = dst : i64, %m = map : i64, %x = c0 : i32, %y = c1 : i32, %b = bar : i64), returns : i32,
+                dialects : ["llvm", "arith"]) {
+    llvm.inline_asm has_side_effects "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::complete_tx::bytes [$0], [$1, {$2, $3}], [$4];", "l,l,r,r,l" %d, %m, %x, %y, %b : (i64, i64, i32, i32, i64) -> ()
+    %z = arith.constant 0 : i32
+    macro.yield %z : i32
+  };
+}
+
+// The wgmma matrix descriptor (9.7.15.5.1.2) of a K-major tile with 128-byte swizzle at shared
+// byte address `addr` (1024-aligned, so the base offset, bits 51-49, is 0):
+//   bits 13-0  start address >> 4;  bits 29-16  LBO >> 4 = 1 (unused for a swizzled K-major tile
+//   whose k extent is one swizzle row); bits 45-32  SBO >> 4 = 64 (1024 bytes, from one 8-row
+//   group to the next); bits 63-62  swizzle mode 1 (128-byte).
+fn sw128_desc(addr: i64) on Topology::Device -> i64 {
+  return ((addr & 262143) >> 4) | (1 << 16) | (64 << 32) | (1 << 62);
+}
+
+// f32 to bfloat16 bits, round to nearest even (cvt.rn.bf16.f32, 9.7.9.21; sm_80+).
+fn bf16_bits(x: f32) on Topology::Device -> i32 {
+  return mlir!( inputs : (%x = x : f32), returns : i32, dialects : ["llvm"]) {
+    %r = llvm.inline_asm "{ .reg .b16 h; cvt.rn.bf16.f32 h, $1; cvt.u32.u16 $0, h; }", "=r,f" %x : (f32) -> i32
+    macro.yield %r : i32
+  };
+}

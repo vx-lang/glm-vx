@@ -86,6 +86,13 @@ step test-spawn-vx-launch-sync hw_sync gpu/test_spawn_vx_launch.py
 # process, since Vx stops the program on what a capture cannot hold; -s keeps every child's stderr
 # (Vx's messages) and the eager-vs-replay timing lines in the log, on success too.
 step test-spawn-vx-graph hw -s gpu/test_spawn_vx_graph.py
+# The block-FP8 GEMM (glm-vx #10, gpu/FP8-GEMM.md) is sm_90a code: H100/H200 only. Its timings and
+# measured accumulation error go to fp8_gemm_hardware.json.
+if [[ $cap == 9.0 ]]; then
+  step build-fp8-gemm bash gpu/spawn/fp8_gemm/build.sh
+  fp8_hw() { GLM_VX_FP8_GEMM_JSON="$out/fp8_gemm_hardware.json" hw "$@"; }
+  step test-fp8-gemm-hardware fp8_hw gpu/test_fp8_gemm_hardware.py
+fi
 step test-hardware-stress hw gpu/test_hardware_stress.py
 
 for mode in f32 int4 fp8 bf16; do

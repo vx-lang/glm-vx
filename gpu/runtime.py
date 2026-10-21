@@ -66,7 +66,7 @@ from pathlib import Path
 import threading
 
 __all__ = ["CUDAError", "CUDAUnavailable", "CUDADriver", "CUDAContext", "DeviceBuffer",
-           "DeviceTensor", "Module", "Kernel", "Stream", "Event", "Graph", "GLMKernels"]
+           "DeviceTensor", "Module", "Kernel", "Stream", "Event", "Graph", "GLMKernels", "encode_tensor_map_2d"]
 
 
 class CUDAError(RuntimeError):
@@ -137,6 +137,19 @@ class CUDADriver:
                 setattr(self, name, fn)
         except AttributeError as exc:
             raise CUDAUnavailable(f"NVIDIA driver is missing a required CUDA symbol: {exc}") from exc
+        # Optional: present in CUDA 12+ drivers; None otherwise, and only its users fail.
+        optional = {
+            # cuTensorMapEncodeTiled(CUtensorMap*, dataType, rank, globalAddress, globalDim[rank],
+            #   globalStrides[rank - 1], boxDim[rank], elementStrides[rank], interleave, swizzle,
+            #   l2Promotion, oobFill)
+            "cuTensorMapEncodeTiled": [_P, _I32, _U32, _P, C.POINTER(_U64), C.POINTER(_U64),
+                                       C.POINTER(_U32), C.POINTER(_U32), _I32, _I32, _I32, _I32],
+        }
+        for name, argtypes in optional.items():
+            fn = getattr(self.library, name, None)
+            if fn is not None:
+                fn.argtypes, fn.restype = argtypes, _I32
+            setattr(self, name, fn)
 
     def check(self, code, operation):
         if code != 0:
@@ -157,6 +170,61 @@ def _integer(value, name, *, minimum=0, maximum=(1 << 63) - 1):
     if not minimum <= value <= maximum:
         raise ValueError(f"{name} must be between {minimum} and {maximum}")
     return value
+
+
+TENSOR_MAP_BYTES = 128   # sizeof(CUtensorMap); it must sit 64-byte aligned, on the host and the device
+TENSOR_MAP_UINT8 = 0     # CU_TENSOR_MAP_DATA_TYPE_UINT8
+TENSOR_MAP_SWIZZLE = {"none": 0, "32B": 1, "64B": 2, "128B": 3}        # CUtensorMapSwizzle
+TENSOR_MAP_L2_PROMOTION = {"none": 0, "64B": 1, "128B": 2, "256B": 3}  # CUtensorMapL2promotion
+
+
+def encode_tensor_map_2d(driver, address, rows, cols, row_stride, box_rows, box_cols, *, element_bytes=1,
+                         data_type=TENSOR_MAP_UINT8, swizzle="128B", l2_promotion="256B"):
+    """The 128 bytes of a CUtensorMap (cuTensorMapEncodeTiled) for a row-major [rows, cols] matrix
+    at device ``address`` with ``row_stride`` bytes between rows, loaded box_rows x box_cols at a
+    time. Elements outside the matrix load as zero (CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE); there is no
+    interleave. The checks are cuda.h's for cuTensorMapEncodeTiled, so a bad map fails here and not
+    as a driver error.
+
+    The bytes go to device memory 64-byte aligned (a whole allocation, or 64-byte offsets into
+    one) by a copy that finishes before the launch that reads them. A kernel reads a map in global
+    memory through the tensormap proxy, which is not acquired at kernel start, so each thread
+    block that uses it first runs fence.proxy.tensormap::generic.acquire.sys on it (PTX ISA 8.3+;
+    CUDA programming guide 4.12.2.2). Rewrite a map only between launches that read it.
+    """
+    fn = getattr(driver, "cuTensorMapEncodeTiled", None)
+    if fn is None:
+        raise CUDAUnavailable("this NVIDIA driver has no cuTensorMapEncodeTiled (needs CUDA 12 or newer)")
+    _integer(address, "address", minimum=1)
+    for value, name in ((rows, "rows"), (cols, "cols")):
+        _integer(value, name, minimum=1, maximum=1 << 32)
+    for value, name in ((box_rows, "box_rows"), (box_cols, "box_cols")):
+        _integer(value, name, minimum=1, maximum=256)
+    _integer(row_stride, "row_stride", minimum=1, maximum=(1 << 40) - 1)
+    _integer(element_bytes, "element_bytes", minimum=1, maximum=8)
+    if address % 16:
+        raise ValueError("a tensor map's global address must be 16-byte aligned")
+    if row_stride % 16 or row_stride < cols * element_bytes:
+        raise ValueError(f"row_stride {row_stride} must be a multiple of 16 and at least a row ({cols * element_bytes} bytes)")
+    inner = box_cols * element_bytes
+    if inner % 16:
+        raise ValueError(f"a box row ({inner} bytes) must be a multiple of 16 bytes")
+    if swizzle not in TENSOR_MAP_SWIZZLE or l2_promotion not in TENSOR_MAP_L2_PROMOTION:
+        raise ValueError(f"swizzle must be one of {tuple(TENSOR_MAP_SWIZZLE)}, l2_promotion one of {tuple(TENSOR_MAP_L2_PROMOTION)}")
+    if swizzle != "none" and inner > int(swizzle[:-1]):
+        raise ValueError(f"a {swizzle} swizzle takes box rows of at most {swizzle[:-1]} bytes, not {inner}")
+    # The host-side CUtensorMap must be 64-byte aligned too.
+    storage = (C.c_ubyte * (TENSOR_MAP_BYTES + 64))()
+    offset = -C.addressof(storage) % 64
+    target = C.addressof(storage) + offset
+    dims = (_U64 * 2)(cols, rows)
+    strides = (_U64 * 1)(row_stride)
+    box = (_U32 * 2)(box_cols, box_rows)
+    steps = (_U32 * 2)(1, 1)
+    driver.check(fn(_P(target), data_type, 2, _P(address), dims, strides, box, steps, 0,
+                    TENSOR_MAP_SWIZZLE[swizzle], TENSOR_MAP_L2_PROMOTION[l2_promotion], 0),
+                 "cuTensorMapEncodeTiled")
+    return bytes(storage[offset:offset + TENSOR_MAP_BYTES])
 
 
 def _host_bytes(data):
