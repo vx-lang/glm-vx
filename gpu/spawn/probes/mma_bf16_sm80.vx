@@ -1,0 +1,115 @@
+// Probe (glm-vx #10, plan #2): an sm_80 tensor-core GEMM tile through Vx's own GPU path, with the
+// accumulator in a register tensor (Vx #1983, PR #1991). Not one of the 25 kernels: build.sh
+// builds gpu/spawn/*.vx only, and gpu/spawn/probes/build.sh builds this with machine-sm80.vx.
+//
+//   out[m, n] = sum_k A[m, k] * B[n, k]      (f32 accumulate; A, B bfloat16; out f32, row-major)
+//
+// A is [M, K] row-major and B is [N, K] row-major (a weight matrix, out = x W^T), both passed as
+// i32 words that each hold two bfloat16 values, k even in the low half and k + 1 in the high half
+// (little-endian, so word w of a row is elements 2w and 2w + 1). M % 16 == 0, N % 64 == 0 and
+// K % 16 == 0. One warp (block(32)) owns one 16 x 64 tile of out: tile = block_id(), n-tiles
+// fastest. Each pass of the k loop issues 8 mma.sync m16n8k16, one per 8-column strip j.
+//
+// Fragment layout: PTX ISA, section 9.7.14.5.8 "Matrix Fragments for mma.m16n8k16 with
+// floating point type" (.bf16 A/B, .f32 C/D). With g = laneid >> 2 (groupID) and
+// t = laneid % 4 (threadID_in_group):
+//   A (16 x 16, .row), four .b32 registers, each two bf16 (a_i, a_i+1), low half first:
+//     reg 0 = A[g,     2t .. 2t+1]        reg 1 = A[g + 8, 2t .. 2t+1]
+//     reg 2 = A[g,     2t+8 .. 2t+9]      reg 3 = A[g + 8, 2t+8 .. 2t+9]
+//   (rows: g for a0,a1,a4,a5 and g + 8 for a2,a3,a6,a7; cols: 2t + (i & 1), + 8 for i >= 4.)
+//   B (16 x 8, .col), two .b32 registers; B's (row, col) is (k, n), so B[k, n] = Bt[n, k]:
+//     reg 0 = B[2t .. 2t+1, g]            reg 1 = B[2t+8 .. 2t+9, g]
+//   which is word t (and t + 4) of row n = g of our [N, K] B: two consecutive k of one n.
+//   C/D (16 x 8 f32), four registers:
+//     c0 = C[g, 2t]   c1 = C[g, 2t+1]   c2 = C[g + 8, 2t]   c3 = C[g + 8, 2t+1]
+// So acc[4j + q] is c_q of strip j: row g (q < 2) or g + 8 (q >= 2), column n0 + 8j + 2t + (q & 1).
+// spawn-include: ../device.vx
+
+// One mma.sync m16n8k16 into acc[4j .. 4j+3]. j is the variable of an unrolled loop at each call,
+// so once this is inlined the four memref indexes are constants and acc stays in registers. Vx does
+// not force that inlining yet (the known gap of PR #1991); the probe's ptxas -v shows whether it
+// happened (no __local_depot, 0 bytes stack).
+fn mma_strip(acc: &mut Tensor<f32, [32], Memory::REG>, j: i32, a0: i32, a1: i32, a2: i32, a3: i32,
+             b0: i32, b1: i32) on Topology::Device -> i32 {
+  return mlir!( inputs : (%acc = acc : memref<32xf32>, %j = j : i32, %a0 = a0 : i32, %a1 = a1 : i32,
+                          %a2 = a2 : i32, %a3 = a3 : i32, %b0 = b0 : i32, %b1 = b1 : i32),
+                returns : i32, dialects : ["llvm", "memref", "arith"]) {
+    %four = arith.constant 4 : i32
+    %jb = arith.muli %j, %four : i32
+    %i0 = arith.index_cast %jb : i32 to index
+    %one = arith.constant 1 : index
+    %two = arith.constant 2 : index
+    %three = arith.constant 3 : index
+    %i1 = arith.addi %i0, %one : index
+    %i2 = arith.addi %i0, %two : index
+    %i3 = arith.addi %i0, %three : index
+    %c0 = memref.load %acc[%i0] : memref<32xf32>
+    %c1 = memref.load %acc[%i1] : memref<32xf32>
+    %c2 = memref.load %acc[%i2] : memref<32xf32>
+    %c3 = memref.load %acc[%i3] : memref<32xf32>
+    %r = llvm.inline_asm "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {$0,$1,$2,$3}, {$4,$5,$6,$7}, {$8,$9}, {$0,$1,$2,$3};", "=f,=f,=f,=f,r,r,r,r,r,r,0,1,2,3" %a0, %a1, %a2, %a3, %b0, %b1, %c0, %c1, %c2, %c3 : (i32, i32, i32, i32, i32, i32, f32, f32, f32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %o0 = llvm.extractvalue %r[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %o1 = llvm.extractvalue %r[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %o2 = llvm.extractvalue %r[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %o3 = llvm.extractvalue %r[3] : !llvm.struct<(f32, f32, f32, f32)>
+    memref.store %o0, %acc[%i0] : memref<32xf32>
+    memref.store %o1, %acc[%i1] : memref<32xf32>
+    memref.store %o2, %acc[%i2] : memref<32xf32>
+    memref.store %o3, %acc[%i3] : memref<32xf32>
+    %z = arith.constant 0 : i32
+    macro.yield %z : i32
+  };
+}
+
+pub fn glm_vx_probe_mma_bf16(out: &mut Tensor<f32, [?], Memory::HBM>, a: &Tensor<i32, [?], Memory::HBM>,
+                             b: &Tensor<i32, [?], Memory::HBM>, rows_m: i32, rows_n: i32, cols: i32) -> void {
+  spawn on(Topology::Device) grid([(rows_m / 16) * (rows_n / 64)]) block(32) {
+    let lane: i32 = thread_id();
+    let tile: i32 = block_id();
+    let tiles_n: i32 = rows_n / 64;
+    // Declared before the `if`: declared inside it, a `let mut` lowers to an alloca outside the
+    // kernel's entry block, which LLVM's SROA does not promote. Here that left acc[31] in local
+    // memory (a __local_depot in the PTX; ptxas removed it). probes/repro_reg_in_if.vx is that case.
+    let mut acc = Tensor<f32, [32], Memory::REG>::fill(0.0);
+    let mut frag = Tensor<i32, [16], Memory::REG>::fill(0);
+    // kw: the k loop in words, 8 words (16 bf16) per pass; cols is not known when compiling.
+    let mut kw: i64 = 0;
+    if rows_m % 16 == 0 && rows_n % 64 == 0 && cols % 16 == 0 && tiles_n > 0 && tile < (rows_m / 16) * tiles_n {
+      let m0: i32 = (tile / tiles_n) * 16;
+      let n0: i32 = (tile % tiles_n) * 64;
+      let g: i32 = lane >> 2;
+      let t: i32 = lane & 3;
+      let words: i64 = (cols / 2) as i64;
+      let a_lo: i64 = ((m0 + g) as i64) * words + (t as i64);
+      let a_hi: i64 = a_lo + 8 * words;
+      let b_base: i64 = ((n0 + g) as i64) * words + (t as i64);
+      while kw < words {
+        let a0: i32 = a[a_lo + kw];
+        let a1: i32 = a[a_hi + kw];
+        let a2: i32 = a[a_lo + kw + 4];
+        let a3: i32 = a[a_hi + kw + 4];
+        for j in 0..8 {
+          // Strip j is rows n0 + 8j .. n0 + 8j + 7 of B; this lane reads row n0 + 8j + g.
+          let row: i64 = b_base + 8 * (j as i64) * words + kw;
+          frag[2 * j] = b[row];
+          frag[2 * j + 1] = b[row + 4];
+        }
+        for j in 0..8 {
+          let _z: i32 = mma_strip(&mut acc, j as i32, a0, a1, a2, a3, frag[2 * j], frag[2 * j + 1]);
+        }
+        kw = kw + 8;
+      }
+      let n_count: i64 = rows_n as i64;
+      let out_lo: i64 = ((m0 + g) as i64) * n_count + ((n0 + 2 * t) as i64);
+      let out_hi: i64 = out_lo + 8 * n_count;
+      for j in 0..8 {
+        let col: i64 = 8 * (j as i64);
+        out[out_lo + col] = acc[4 * j];
+        out[out_lo + col + 1] = acc[4 * j + 1];
+        out[out_hi + col] = acc[4 * j + 2];
+        out[out_hi + col + 1] = acc[4 * j + 3];
+      }
+    }
+  }
+  return;
+}

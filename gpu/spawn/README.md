@@ -52,6 +52,8 @@ needs nvvm intrinsics in the device image, #1945 (PR #1959). Built and checked w
 plus PRs #1952, #1954, #1955, #1958, #1959, #1960, #1961, #1962, #1964 (`--emit-ptx`), #1972
 (launch shapes) and #1974 (no wait after each launch). Barrier counts match the hand kernels (softmax 4, router
 1, mla_partial 2). Not ported: gemm_tf32 (`mma.sync m16n8k8`: #350).
+`probes/` holds tensor-core probes (mma.sync on sm_80, wgmma bf16 and block-FP8 on sm_90a) with
+register-tensor accumulators (Vx PR #1991); see `probes/README.md`.
 
 `gpu/test_spawn_hardware.py` checks each against the hand kernel, bit for bit, on a GPU, and
 `gpu/test_spawn_vx_launch.py` checks Vx's launch of each against Python's launch of the same

@@ -1,0 +1,78 @@
+// A Vx repro, not a probe (build.sh skips it). With Vx PR #1991, from the Vx checkout:
+//   vxc repro_reg_in_if.vx --host default --machine fleet/a100-40.vx --action emit-llvm -o /dev/null
+// The device image has `.local .align 16 .b8 __local_depot8[128]`: acc[31] is stored to and loaded
+// from local memory (st.local [+124] after the k loop, ld.local before the last store of out),
+// though every index into acc is a constant after the unroll. The `let mut` locals declared inside
+// the `if` lower to allocas outside the kernel's entry block, and LLVM's SROA promotes only
+// entry-block allocas; later passes promote most of them, not all. Moving `let mut acc` and `let mut
+// frag` above the `if` removes the __local_depot. ptxas removes this one (0 bytes
+// stack); in another probe (a loop counter, gpu/spawn/probes/README.md) ptxas kept 8 bytes of stack.
+// The mma here is replaced by adds, so it is about the REG tensor and not the inline asm.
+fn thread_id() on Topology::Device -> i32 {
+  return mlir!( inputs : (), returns : i32, dialects : ["gpu", "arith"]) {
+    %t = gpu.thread_id x
+    %r = "arith.index_cast"(%t) : (index) -> i32
+    macro.yield %r : i32
+  };
+}
+fn block_id() on Topology::Device -> i32 {
+  return mlir!( inputs : (), returns : i32, dialects : ["gpu", "arith"]) {
+    %t = gpu.block_id x
+    %r = "arith.index_cast"(%t) : (index) -> i32
+    macro.yield %r : i32
+  };
+}
+pub fn glm_vx_probe_mma_bf16(out: &mut Tensor<f32, [?], Memory::HBM>, a: &Tensor<i32, [?], Memory::HBM>,
+                             b: &Tensor<i32, [?], Memory::HBM>, rows_m: i32, rows_n: i32, cols: i32) -> void {
+  spawn on(Topology::Device) grid([(rows_m / 16) * (rows_n / 64)]) block(32) {
+    let lane: i32 = thread_id();
+    let tile: i32 = block_id();
+    let tiles_n: i32 = rows_n / 64;
+    if rows_m % 16 == 0 && rows_n % 64 == 0 && cols % 16 == 0 && tiles_n > 0 && tile < (rows_m / 16) * tiles_n {
+      let m0: i32 = (tile / tiles_n) * 16;
+      let n0: i32 = (tile % tiles_n) * 64;
+      let g: i32 = lane >> 2;
+      let t: i32 = lane & 3;
+      let words: i64 = (cols / 2) as i64;
+      let a_lo: i64 = ((m0 + g) as i64) * words + (t as i64);
+      let a_hi: i64 = a_lo + 8 * words;
+      let b_base: i64 = ((n0 + g) as i64) * words + (t as i64);
+      let mut acc = unsafe { Tensor<f32, [32], Memory::REG>::uninit() };
+      for i in 0..32 { acc[i] = 0.0; }
+      let mut frag = unsafe { Tensor<i32, [16], Memory::REG>::uninit() };
+      // kw: the k loop in words, 8 words (16 bf16) per pass; cols is not known when compiling.
+      let mut kw: i64 = 0;
+      while kw < words {
+        let a0: i32 = a[a_lo + kw];
+        let a1: i32 = a[a_hi + kw];
+        let a2: i32 = a[a_lo + kw + 4];
+        let a3: i32 = a[a_hi + kw + 4];
+        for j in 0..8 {
+          // Strip j is rows n0 + 8j .. n0 + 8j + 7 of B; this lane reads row n0 + 8j + g.
+          let row: i64 = b_base + 8 * (j as i64) * words + kw;
+          frag[2 * j] = b[row];
+          frag[2 * j + 1] = b[row + 4];
+        }
+        for j in 0..8 {
+          acc[4 * j] = acc[4 * j] + (frag[2 * j] as f32); acc[4 * j + 1] = acc[4 * j + 1] + (a0 as f32); acc[4 * j + 2] = acc[4 * j + 2] + (a1 as f32); acc[4 * j + 3] = acc[4 * j + 3] + (frag[2 * j + 1] as f32);
+        }
+        kw = kw + 8;
+      }
+      let n_count: i64 = rows_n as i64;
+      let out_lo: i64 = ((m0 + g) as i64) * n_count + ((n0 + 2 * t) as i64);
+      let out_hi: i64 = out_lo + 8 * n_count;
+      for j in 0..8 {
+        let col: i64 = 8 * (j as i64);
+        out[out_lo + col] = acc[4 * j];
+        out[out_lo + col + 1] = acc[4 * j + 1];
+        out[out_hi + col] = acc[4 * j + 2];
+        out[out_hi + col + 1] = acc[4 * j + 3];
+      }
+    }
+  }
+  return;
+}
+
+fn main() -> i32 {
+  return 0;
+}

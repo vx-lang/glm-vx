@@ -1,0 +1,14 @@
+// gpu/spawn/machine.vx (A100, sm_80) plus Memory::REG, so a tensor declared in it stays in
+// registers (Vx #1983, PR #1991). Its capacity is 255 32-bit registers, as in Vx's fleet files.
+Memory HBM { capacity: 40 GiB, bandwidth: 1555 GB/s, managed: explicit, scope: device }
+Memory SMEM { within: Memory::HBM, capacity: 164 KiB, bandwidth: 128 B/cyc, granule: 1 KiB, managed: explicit, scope: sm }
+Memory REG { within: Memory::SMEM, capacity: 1020 B, managed: explicit, scope: thread }
+Topology Device {
+  arch: nvptx64,
+  chip: sm_80,
+  memory: Memory::HBM,
+  visible: [Memory::CPU_DRAM, Memory::HBM, Memory::SMEM, Memory::REG],
+  transfer Memory::CPU_DRAM -> Memory::HBM : 31.5 GB/s,
+  transfer Memory::HBM -> Memory::CPU_DRAM : 31.5 GB/s,
+  transfer Memory::HBM -> Memory::SMEM
+}

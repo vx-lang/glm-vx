@@ -198,8 +198,9 @@ def main() -> int:
         args.arch = args.arch or machine_chip(args.machine) or 'sm_80'
         ptxas_arch = ptxas_target(args.arch, args.ptxas_arch)
         source = args.source.read_text()
-        # `// spawn-include: FILE` pastes FILE (beside SOURCE) in front: shared device helpers.
-        included = [args.source.with_name(f).read_text() for f in INCLUDE.findall(source)]
+        # `// spawn-include: FILE` pastes FILE (relative to SOURCE's directory, so probes/ can
+        # name ../device.vx) in front: shared device helpers.
+        included = [(args.source.parent / f).read_text() for f in INCLUDE.findall(source)]
         with tempfile.TemporaryDirectory(prefix='vx-spawn-src-') as temp:
             combined = Path(temp, args.source.name)
             combined.write_text(''.join(included) + source)

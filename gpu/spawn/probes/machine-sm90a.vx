@@ -1,0 +1,14 @@
+// H100 SXM as Vx's own GPU path sees it, for the wgmma probes: `chip: sm_90a` (Vx PR #1989)
+// gives `.target sm_90a` and PTX 8.0, and Memory::REG (Vx PR #1991) keeps a tensor in registers.
+Memory HBM { capacity: 80 GiB, bandwidth: 3.35 TB/s, managed: explicit, scope: device }
+Memory SMEM { within: Memory::HBM, capacity: 228 KiB, bandwidth: 128 B/cyc, granule: 1 KiB, managed: explicit, scope: sm }
+Memory REG { within: Memory::SMEM, capacity: 1020 B, managed: explicit, scope: thread }
+Topology Device {
+  arch: nvptx64,
+  chip: sm_90a,
+  memory: Memory::HBM,
+  visible: [Memory::CPU_DRAM, Memory::HBM, Memory::SMEM, Memory::REG],
+  transfer Memory::CPU_DRAM -> Memory::HBM : 31.5 GB/s,
+  transfer Memory::HBM -> Memory::CPU_DRAM : 31.5 GB/s,
+  transfer Memory::HBM -> Memory::SMEM
+}

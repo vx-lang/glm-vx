@@ -1,0 +1,32 @@
+// A Vx repro, not a probe (build.sh skips it). From the Vx checkout, with PRs #1959-#1962:
+//   vxc repro_smem_mlir.vx --host default --machine fleet/a100-40.vx --action emit-llvm -o /dev/null
+// An mlir! block that takes a Memory::SMEM tensor as memref<2048xi32> (without memory space 3).
+// vxc exits 101:
+//   'memref.cast' op operand type 'memref<2048xi32, 3>' and result type 'memref<2048xi32>' are cast incompatible
+//   [flat-codegen] program outside the flat subset; using the AST path
+//   Vx Compiler Internal Error: panicked at src/codegen/lower/expr.rs:3567:13:
+//   Function barrier not found
+// The first message has no source position and does not name the mlir! block or say that a shared
+// tensor is memref<..., 3> there; the AST fallback then panics on barrier(). With
+// memref<2048xi32, 3> it compiles (the wgmma probes' smem_address).
+fn smem_address(tile: &mut Tensor<i32, [2048], Memory::SMEM>) on Topology::Device -> i64 {
+  return mlir!( inputs : (%t = tile : memref<2048xi32>), returns : i64, dialects : ["memref", "arith"]) {
+    %p = memref.extract_aligned_pointer_as_index %t : memref<2048xi32> -> index
+    %r = arith.index_cast %p : index to i64
+    macro.yield %r : i64
+  };
+}
+
+pub fn smem(out: &mut Tensor<i32, [?], Memory::HBM>) -> void {
+  spawn on(Topology::Device) {
+    let mut tile = unsafe { Tensor<i32, [2048], Memory::SMEM>::uninit() };
+    tile[0] = 1;
+    barrier();
+    out[0] = tile[0] + (smem_address(&mut tile) as i32);
+  }
+  return;
+}
+
+fn main() -> i32 {
+  return 0;
+}
