@@ -127,7 +127,8 @@ runtime cannot import or select the simulator as a fallback.
 ```sh
 .venv/bin/python -m validation.write_proxy --output /data/glm53-proxy --tokenizer-dir GLM53_SNAPSHOT
 python -m sglang.launch_server --model-path /data/glm53-proxy --tp 1 --mem-fraction-static 0.85
-.venv/bin/python -m glm_vx.server --checkpoint /data/glm53-proxy --backend vx-gpu  # resident: #21
+.venv/bin/python -m glm_vx.server --checkpoint /data/glm53-proxy --backend vx-gpu-resident \
+  --tokenizer /data/glm53-proxy/tokenizer.json
 ```
 
 `validation/write_proxy.py` writes the real GLM-5.3 config cut to 9 layers (3 dense + 6 MoE, the
