@@ -62,6 +62,16 @@ class ContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'no hardware'):
             builder.validate_ptx(entry.replace('%tid.x', ''), ['glm_vx_gpu_test'])
 
+    def test_ptxas_checks_the_device_arch(self):
+        # sm_80 PTX is assembled for the real device (an H100 is sm_90), never for an older one.
+        self.assertEqual(builder.ptxas_target('sm_80', None), 'sm_80')
+        self.assertEqual(builder.ptxas_target('sm_80', 'sm_90'), 'sm_90')
+        self.assertEqual(builder.ptxas_target('sm_80', 'sm_90a'), 'sm_90a')
+        with self.assertRaisesRegex(ValueError, 'older than the PTX target'):
+            builder.ptxas_target('sm_90', 'sm_80')
+        with self.assertRaisesRegex(ValueError, 'look like sm_90'):
+            builder.ptxas_target('sm_80', 'compute_90')
+
     def test_real_vx_device_math(self):
         # Missing tools is a test failure, not a skipped/passing compilation.
         with tempfile.TemporaryDirectory() as temp:

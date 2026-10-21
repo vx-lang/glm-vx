@@ -77,6 +77,16 @@ def test_kernel_params_refuses_what_launch_cannot_pass(change):
         build.kernel_params([vx_param('x', '&Tensor<f32, [?], Memory::HBM>') | change])
 
 
+def test_ptxas_checks_the_device_arch():
+    # sm_80 PTX is assembled for the real device (sm_90 on an H100), never for an older one.
+    assert build.ptxas_target('sm_80', None) == 'sm_80'
+    assert build.ptxas_target('sm_80', 'sm_90') == 'sm_90'
+    with pytest.raises(ValueError, match='older than the PTX target'):
+        build.ptxas_target('sm_90', 'sm_80')
+    with pytest.raises(ValueError, match='look like sm_90'):
+        build.ptxas_target('sm_80', '90')
+
+
 def test_add_ptx_matches_manifest():
     build.check_params(ADD_PTX, 'K', params('out: mut f32[?], a: f32[?], b: f32[?], n: i32'))
 

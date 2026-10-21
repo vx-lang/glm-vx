@@ -34,6 +34,18 @@ def split_top(text: str):
     return [p.strip() for p in parts if p.strip()]
 
 
+def ptxas_target(ptx_arch: str, ptxas_arch) -> str:
+    """The GPU ptxas assembles for: the real device, which may be newer than the PTX target
+    (an H100 runs sm_80 PTX through the driver JIT, so ptxas checks it for sm_90), never older."""
+    target = ptxas_arch or ptx_arch
+    match, base = re.fullmatch(r'sm_(\d+)a?', target), re.fullmatch(r'sm_(\d+)a?', ptx_arch)
+    if not match or not base:
+        raise ValueError(f'arch must look like sm_90; got {target!r} / {ptx_arch!r}')
+    if int(match[1]) < int(base[1]):
+        raise ValueError(f'ptxas arch {target} is older than the PTX target {ptx_arch}')
+    return target
+
+
 def same_kernel(a: str, b: str) -> bool:
     """Two PTX files hold the same kernel apart from its entry name and label numbering."""
     def body(ptx):
@@ -163,11 +175,13 @@ def main() -> int:
     parser.add_argument('--vxc', default=os.environ.get('VXC', 'vxc'))
     parser.add_argument('--ptxas', help='assemble with this NVIDIA ptxas; failure is fatal')
     parser.add_argument('--arch', default='sm_80')
+    parser.add_argument('--ptxas-arch', help='GPU for --ptxas to assemble for (default --arch), e.g. sm_90 on an H100')
     parser.add_argument('--library', type=Path, help='also build this shared library for Vx to launch from')
     parser.add_argument('--dispatch-lib', default=os.environ.get('VX_DISPATCH_LIB'))
     parser.add_argument('--cc', default=os.environ.get('CC', 'cc'))
     args = parser.parse_args()
     try:
+        ptxas_arch = ptxas_target(args.arch, args.ptxas_arch)
         source = args.source.read_text()
         # `// spawn-include: FILE` pastes FILE (beside SOURCE) in front: shared device helpers.
         included = [args.source.with_name(f).read_text() for f in INCLUDE.findall(source)]
@@ -202,11 +216,11 @@ def main() -> int:
         if args.ptxas:
             with tempfile.TemporaryDirectory(prefix='vx-spawn-') as temp:
                 path = Path(temp, 'k.ptx'); path.write_text(ptx)
-                assembled = subprocess.run([args.ptxas, f'-arch={args.arch}', '-v', str(path), '-o', str(Path(temp, 'k.cubin'))],
+                assembled = subprocess.run([args.ptxas, f'-arch={ptxas_arch}', '-v', str(path), '-o', str(Path(temp, 'k.cubin'))],
                                            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 if assembled.returncode:
                     raise ValueError(f'ptxas failed:\n{assembled.stderr}')
-                evidence.update({'assembly_validated': True, 'ptxas_log': assembled.stderr.strip().splitlines()})
+                evidence.update({'assembly_validated': True, 'ptxas_arch': ptxas_arch, 'ptxas_log': assembled.stderr.strip().splitlines()})
         if args.library:
             evidence.update(build_library(args, ''.join(included) + source, name, params, env, ptx))
         args.output.write_text(ptx)

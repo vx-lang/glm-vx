@@ -6,7 +6,7 @@
 # and ends with a summary table; the exit code is the number of failed steps.
 #
 #   source /opt/vx-toolchain/env.sh
-#   scripts/pod_validate.sh [EVIDENCE_DIR]      # default evidence/a100-<UTC date>
+#   scripts/pod_validate.sh [EVIDENCE_DIR]      # default evidence/<gpu>-<UTC date>, e.g. h100-20261022
 #
 # Optional: GLM_VX_INT4_CHECKPOINT=<dir from validation/fetch_tensors.py> adds the real
 # compressed-tensors Linears to the INT4 device test. PYTHON (default python3), LAYERS (full-width
@@ -16,7 +16,13 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 : "${PYTHON:=python3}" "${LAYERS:=4}" "${TOKENS:=48}" "${STRESS:=8}" "${OMP_NUM_THREADS:=16}"
 export OMP_NUM_THREADS
-out=${1:-evidence/a100-$(date -u +%Y%m%d)}
+# The PTX target stays sm_80 (gpu/build.sh), which the driver JITs on newer GPUs; ptxas checks it for
+# the device's own arch (PTXAS_ARCH, e.g. sm_90 on an H100) and runs whenever a CUDA ptxas is found.
+cap=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1)
+gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 | tr '[:upper:]' '[:lower:]' | grep -oE '\b[abhlt][0-9]{2,3}\b' | head -1)
+if [[ -n $cap && -z ${PTXAS_ARCH:-} ]]; then export PTXAS_ARCH=sm_${cap/./}; fi
+if [[ -z ${PTXAS:-} && -x /usr/local/cuda/bin/ptxas ]]; then export PTXAS=/usr/local/cuda/bin/ptxas; fi
+out=${1:-evidence/${gpu:-gpu}-$(date -u +%Y%m%d)}
 if [[ -e $out ]]; then echo "$out exists; preserve evidence" >&2; exit 2; fi
 mkdir -p "$out"
 failed=0
@@ -33,7 +39,8 @@ step() {  # step NAME CMD...: run, log to $out/NAME.txt, record the result
 }
 
 {
-  nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv
+  nvidia-smi --query-gpu=name,driver_version,memory.total,compute_cap --format=csv
+  echo "ptx target ${VX_GPU_ARCH:-sm_80}, ptxas ${PTXAS:-none} for ${PTXAS_ARCH:-${VX_GPU_ARCH:-sm_80}}"
   if git rev-parse -q HEAD >/dev/null 2>&1; then
     echo "repo $(git rev-parse --short HEAD)$(git diff --quiet || echo ' (dirty)')"
   else
@@ -44,8 +51,9 @@ step() {  # step NAME CMD...: run, log to $out/NAME.txt, record the result
   $PYTHON --version
 } > "$out/host.txt" 2>&1
 
-# PTXAS (optional, e.g. /usr/local/cuda/bin/ptxas) also assembles each PTX to an sm_80 cubin; this
-# needs no GPU, so it is worth running before renting one too: PTXAS=... gpu/build.sh
+# PTXAS (default /usr/local/cuda/bin/ptxas when present) also assembles each PTX to a cubin for
+# PTXAS_ARCH; this needs no GPU, so it is worth running before renting one too:
+#   PTXAS=... PTXAS_ARCH=sm_90 gpu/build.sh
 step build-ptx bash gpu/build.sh
 # The spawn kernels also become lib<kernel>.so, launched by Vx's own runtime, when the bundle has
 # the CUDA dispatch library vxc was built with (lib/libvx_cuda_dispatch.so).

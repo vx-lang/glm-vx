@@ -29,6 +29,18 @@ SIGNATURES = {**{name: ("i32", "") for name in INDEX},
     "abort": ("void", ""), "puts": ("void", "ptr"), "vx_gpu_barrier": ("void", ""), "vx_gpu_shared_f32": ("ptr", ""),
     "vx_gpu_mma_tf32_m16n8k8": ("void", "ptr, i32, " + ", ".join(["float"] * 10)),
     "expf": ("float", "float"), "sqrtf": ("float", "float")}
+
+def ptxas_target(ptx_arch: str, ptxas_arch: str | None) -> str:
+    """The GPU ptxas assembles for: the device's own arch, which may be newer than the PTX target
+    (sm_80 PTX assembles for sm_90, as the driver JIT does on an H100), never older."""
+    target = ptxas_arch or ptx_arch
+    match = re.fullmatch(r'sm_(\d+)a?', target)
+    if not match:
+        raise ValueError(f'ptxas arch must look like sm_90; got {target!r}')
+    if int(match[1]) < int(re.fullmatch(r'sm_(\d+)a?', ptx_arch)[1]):
+        raise ValueError(f'ptxas arch {target} is older than the PTX target {ptx_arch}')
+    return target
+
 DECL = re.compile(r"^declare\s+(\w+)\s+@([\w.$]+)\(([^)]*)\)(?:[ \t]+[^\n]*)?$", re.M)
 DEFINE = re.compile(r"^define\s+(?:(?:hidden|internal|private|dso_local)\s+)*(\w+)\s+@([\w.$]+)\(([^)]*)\)([^\n]*)\{", re.M)
 
@@ -189,9 +201,12 @@ def main() -> int:
     parser.add_argument('--vxc', default=os.environ.get('VXC', 'vxc'))
     parser.add_argument('--keep-ir', action='store_true', help='retain LLVM/MLIR beside output')
     parser.add_argument('--ptxas', help='optionally assemble to cubin with this NVIDIA ptxas executable; failure is fatal')
+    parser.add_argument('--ptxas-arch', help='GPU for --ptxas to assemble for (default --arch); use the real device, '
+                        'e.g. sm_90 on an H100, which runs sm_80 PTX through the driver JIT')
     args = parser.parse_args()
     try:
         ptx_isa = ARCH_PTX[args.arch]
+        ptxas_arch = ptxas_target(args.arch, args.ptxas_arch)
         if not 33 <= args.shared_floats <= 12288:
             raise ValueError('shared-floats must be in [33,12288] (max 48 KiB)')
         vxc = find_tool(args.vxc)
@@ -227,7 +242,7 @@ def main() -> int:
             evidence['assembly_validated'] = False
             if ptxas:
                 version = run([ptxas, '--version']).strip()
-                assembled = subprocess.run([ptxas, f'-arch={args.arch}', '-v',
+                assembled = subprocess.run([ptxas, f'-arch={ptxas_arch}', '-v',
                     str(work/'kernel.ptx'), '-o', str(work/'kernel.cubin')],
                     text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 if assembled.returncode:
@@ -235,7 +250,7 @@ def main() -> int:
                 if not (work/'kernel.cubin').is_file():
                     raise ValueError('ptxas succeeded without producing a cubin')
                 (work/'ptxas.log').write_text(assembled.stdout + assembled.stderr)
-                evidence.update({'assembly_validated': True, 'ptxas_version': version,
+                evidence.update({'assembly_validated': True, 'ptxas_version': version, 'ptxas_arch': ptxas_arch,
                     'cubin_sha256': hashlib.sha256((work/'kernel.cubin').read_bytes()).hexdigest()})
             # Publish only after every compiler and structural check succeeded.
             if args.keep_ir:

@@ -3,8 +3,10 @@
 # Idempotent. Checks the driver, locates/installs the toolchain, builds PTX,
 # records host RAM/vCPUs (offload results depend on them), runs hardware tests.
 #
-# Env: VOLUME (weights dir, default /workspace), VXC, VX_GPU_LLVM_BIN, PTXAS,
-#      VX_GPU_ARCH (default sm_80; use sm_89 for L4/4090, sm_86 for A10).
+# Env: VOLUME (weights dir, default /workspace), VXC, VX_GPU_LLVM_BIN,
+#      VX_GPU_ARCH (PTX target, default sm_80: the driver JITs it on any newer GPU, H100 included),
+#      PTXAS (default /usr/local/cuda/bin/ptxas when present), PTXAS_ARCH (the GPU ptxas checks the
+#      PTX for; default the device's own arch from nvidia-smi, e.g. sm_90 on an H100).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 VOLUME=${VOLUME:-/workspace}
@@ -15,11 +17,12 @@ command -v nvidia-smi >/dev/null || { echo "no NVIDIA driver (nvidia-smi missing
 nvidia-smi --query-gpu=name,memory.total,compute_cap,driver_version --format=csv | tee "$OUT/gpu.csv"
 cap=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1)
 [[ ${cap%%.*} -ge 8 ]] || { echo "need compute capability >= 8.0, got $cap" >&2; exit 2; }
-: "${VX_GPU_ARCH:=sm_${cap/./}}"; export VX_GPU_ARCH
+: "${VX_GPU_ARCH:=sm_80}" "${PTXAS_ARCH:=sm_${cap/./}}"; export VX_GPU_ARCH PTXAS_ARCH
+if [[ -z ${PTXAS:-} && -x /usr/local/cuda/bin/ptxas ]]; then export PTXAS=/usr/local/cuda/bin/ptxas; fi
 
 # Host resources: record for every benchmark.
 { echo "vcpus=$(nproc)"; awk '/MemTotal/{printf "host_ram_gib=%.1f\n",$2/1048576}' /proc/meminfo
-  echo "arch=$VX_GPU_ARCH"; echo "git=$(git rev-parse HEAD 2>/dev/null || echo unknown)"; } | tee "$OUT/host.env"
+  echo "arch=$VX_GPU_ARCH"; echo "device_arch=$PTXAS_ARCH"; echo "ptxas=${PTXAS:-none}"; echo "git=$(git rev-parse HEAD 2>/dev/null || echo unknown)"; } | tee "$OUT/host.env"
 
 : "${VXC:=$(command -v vxc || true)}"
 [[ -n $VXC ]] || { echo "vxc not found: install Vx v0.0.2 + LLVM 22 (docs/toolchain.md), set VXC" >&2; exit 3; }
