@@ -22,6 +22,7 @@ class Request:
     max_tokens: int
     temperature: float = 0.0
     seed: int = 0
+    ignore_eos: bool = False
     id: str = field(default_factory=lambda: "cmpl-" + uuid.uuid4().hex)
     events: queue.Queue = field(default_factory=queue.Queue)
     cancelled: threading.Event = field(default_factory=threading.Event)
@@ -64,7 +65,7 @@ class Scheduler:
         self.thread = threading.Thread(target=self._run, name="glm-vx-model", daemon=True)
         self.thread.start()
 
-    def submit(self, tokens, max_tokens, temperature=0.0, seed=0):
+    def submit(self, tokens, max_tokens, temperature=0.0, seed=0, ignore_eos=False):
         cfg = self.model.config
         if not isinstance(tokens,list) or not tokens or any(type(t) is not int or not 0 <= t < cfg['vocab_size'] for t in tokens):
             raise ValueError("prompt must be a nonempty array of valid token IDs")
@@ -72,9 +73,10 @@ class Scheduler:
         if not isinstance(temperature,(int,float)) or isinstance(temperature,bool) or not np.isfinite(temperature) or temperature < 0:
             raise ValueError("temperature must be finite and nonnegative")
         if type(seed) is not int or seed < 0: raise ValueError("seed must be a nonnegative integer")
+        if type(ignore_eos) is not bool: raise ValueError("ignore_eos must be boolean")
         amount = len(tokens) + max_tokens
         if amount > cfg['max_position_embeddings']: raise ValueError("request exceeds context limit")
-        req = Request(tuple(tokens),max_tokens,float(temperature),seed)
+        req = Request(tuple(tokens),max_tokens,float(temperature),seed,ignore_eos)
         req.reservation = amount
         req.rng = np.random.default_rng(seed)
         # Buffer cannot grow unbounded when a client stops reading.
@@ -175,7 +177,7 @@ class Scheduler:
         req.events.put_nowait({"type":"token","token_id":token})
         eos = self.model.config.get('eos_token_id',[])
         if isinstance(eos,int): eos = [eos]
-        reason = "stop" if token in eos else "length" if req.generated >= req.max_tokens else None
+        reason = "stop" if token in eos and not req.ignore_eos else "length" if req.generated >= req.max_tokens else None
         if reason: self._finish(req,reason); return False
         return True
 

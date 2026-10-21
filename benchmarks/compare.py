@@ -1,7 +1,7 @@
 """Cross-engine serving benchmark: the same workload against several OpenAI-compatible servers.
 
-For M5 of the GPU bring-up (issue vx-lang/glm-vx#1): run glm-vx, llama.cpp's `llama-server` and
-vLLM on the same pod, same model, same precision, with the same token-ID prompts, and report
+For M5 of the GPU bring-up (issue vx-lang/glm-vx#1): run glm-vx, llama.cpp's `llama-server`,
+vLLM and SGLang on the same pod, same model, same precision, with the same token-ID prompts, and report
 prefill tokens/s, decode tokens/s, time to first token and peak memory. Nothing is filtered:
 failed requests are recorded with their error, and every per-request number is in the output so
 runs where Vx loses are published like any other.
@@ -10,17 +10,22 @@ runs where Vx loses are published like any other.
       --engine glm-vx=glm-vx@http://127.0.0.1:8000@pid=1234 \
       --engine vllm=vllm@http://127.0.0.1:8001@pid=2345 \
       --engine llama.cpp=llamacpp@http://127.0.0.1:8002@pid=3456 \
+      --engine sglang=sglang@http://127.0.0.1:30000@pid=4567 \
       --model-note "GLM-5.3 FP8, A100-80G" --output compare.json
 
-Engine spec: NAME=KIND@URL[@pid=N][@version=TEXT]. KIND is glm-vx | vllm | llamacpp. Servers are
-started separately (same prompts, greedy decoding); this script only measures.
+Engine spec: NAME=KIND@URL[@pid=N][@version=TEXT]. KIND is glm-vx | vllm | llamacpp | sglang.
+Servers are started separately (same prompts, greedy decoding); this script only measures. `sglang`
+uses SGLang's OpenAI-compatible /v1/completions with token-ID prompts, ignore_eos and
+stream_options.include_usage (SGLang 0.5.10 accepts all three).
 
 Measurement notes (printed into the output): TTFT is client wall-clock to the first streamed token.
 Prefill tokens/s is prompt_tokens / TTFT, which includes the first decode step, and is also reported
 from server-side timings when the engine provides them (llama.cpp does). Decode tokens/s is
-(output_tokens - 1) / (last token time - first token time). Each streamed chunk is counted as one
-output token unless the engine reports token IDs or usage, which take precedence. Peak GPU memory
-is the maximum of `nvidia-smi` memory.used (whole device, so run one engine at a time) sampled
+(output_tokens - 1) / (last token time - first token time); TPOT is its inverse per request, as
+sglang.bench_serving reports it. Each streamed chunk is counted as one output token unless the engine
+reports token IDs or usage, which take precedence. vLLM and SGLang put the last token's text in the
+chunk that carries finish_reason, so that chunk counts; glm-vx's terminal event repeats the output.
+Peak GPU memory is the maximum of `nvidia-smi` memory.used (whole device, so run one engine at a time) sampled
 while requests run; peak host memory is the server pid's VmHWM from /proc.
 """
 import argparse
@@ -37,12 +42,13 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlsplit
 
-KINDS = ('glm-vx', 'vllm', 'llamacpp')
+KINDS = ('glm-vx', 'vllm', 'llamacpp', 'sglang')
+FINAL_CHUNK_HAS_TEXT = ('vllm', 'sglang')  # OpenAI-style delta on the finish_reason chunk
 
 
 def request_body(kind, prompt, tokens):
     body = {'prompt': prompt, 'max_tokens': tokens, 'temperature': 0, 'stream': True}
-    if kind == 'vllm':
+    if kind in ('vllm', 'sglang'):
         body['stream_options'] = {'include_usage': True}
         body['ignore_eos'] = True
     elif kind == 'llamacpp':
@@ -94,7 +100,8 @@ def completion(kind, url, prompt, tokens, timeout=600):
                 piece = choice.get('text')
                 if choice.get('finish_reason') is not None:
                     finish = choice['finish_reason']
-                    continue  # terminal chunks repeat/close; they are not a new token
+                    if kind not in FINAL_CHUNK_HAS_TEXT or ids:
+                        continue  # terminal chunks repeat/close; they are not a new token
                 n = len(ids) if isinstance(ids, list) and ids else (1 if piece else 0)
                 if n:
                     stamps.extend([time.perf_counter()] * n)
@@ -104,9 +111,10 @@ def completion(kind, url, prompt, tokens, timeout=600):
         out = int(usage.get('completion_tokens') or chunk_tokens)
         if out < 1:
             raise RuntimeError('no output tokens')
+        decode_s = (stamps[-1] - stamps[0]) if len(stamps) > 1 else None
         return {'ok': True, 'prompt_tokens': len(prompt), 'output_tokens': out, 'finish_reason': finish,
                 'streamed_tokens': chunk_tokens, 'ttft_s': stamps[0] - started if stamps else None,
-                'decode_s': (stamps[-1] - stamps[0]) if len(stamps) > 1 else None,
+                'decode_s': decode_s, 'tpot_s': decode_s / (out - 1) if decode_s and out > 1 else None,
                 'latency_s': time.perf_counter() - started, 'server_timings': timings}
     except Exception as exc:
         return {'ok': False, 'prompt_tokens': len(prompt), 'latency_s': time.perf_counter() - started,
@@ -138,6 +146,7 @@ def summarize(rows, elapsed):
             'elapsed_s': elapsed, 'output_tokens': sum(r['output_tokens'] for r in ok),
             'aggregate_output_tokens_per_s': sum(r['output_tokens'] for r in ok) / elapsed if elapsed else None,
             'ttft_s': stat([r['ttft_s'] for r in ok if r.get('ttft_s') is not None]),
+            'tpot_s': stat([r['tpot_s'] for r in ok if r.get('tpot_s') is not None]),
             'prefill_tokens_per_s_client': stat(prefill_rates),
             'decode_tokens_per_s_client': stat(decode_rates),
             'prefill_tokens_per_s_server': stat(server_prefill),

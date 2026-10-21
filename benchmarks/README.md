@@ -51,6 +51,58 @@ Admission rejection is a failure, not a fast successful response. Inter-token
 latency measures client receipt, including any transport buffering. Per-prompt
 metrics expose long-prompt starvation that an aggregate median can conceal.
 
+## Two clients, two servers (SGLang comparison)
+
+Both engines are measured by both SGLang's own client and `compare.py`. When
+the two clients agree on the same server, client artifacts are ruled out.
+
+| Client | glm-vx server | SGLang server |
+| --- | --- | --- |
+| `sglang.bench_serving --backend vllm` or `sglang-oai` | `/v1/completions`, text prompts, OpenAI framing | same |
+| `compare.py` | kind `glm-vx` (token IDs, glm-vx framing) or `sglang` | kind `sglang` |
+
+```sh
+# glm-vx (bench_serving sends text, so the server needs the model's tokenizer.json)
+.venv/bin/python -m glm_vx.server --tiny --backend vx --port 8000 --tokenizer TOKDIR/tokenizer.json
+# SGLang
+python -m sglang.launch_server --model-path MODEL --host 127.0.0.1 --port 30000
+
+# SGLang's client. Use the same command for each server and change only --port.
+python -m sglang.bench_serving --backend vllm --host 127.0.0.1 --port 8000 \
+  --tokenizer TOKDIR --dataset-name random --dataset-path sharegpt.json \
+  --random-input-len 32 --random-output-len 16 --random-range-ratio 1 \
+  --num-prompts 16 --max-concurrency 4 --output-file bench.jsonl
+
+# Our client. Token-ID prompts; --vocab-size must match the model.
+.venv/bin/python benchmarks/compare.py --prompt-lengths 32 --tokens 16 --requests 16 \
+  --concurrency 4 --vocab-size 256 --engine glm-vx=glm-vx@http://127.0.0.1:8000@pid=PID1 \
+  --engine sglang=sglang@http://127.0.0.1:30000@pid=PID2 --output compare.json
+```
+
+Notes on `bench_serving` (checked against sglang 0.5.10.post1):
+
+- It sends `model`, `prompt` (text), `best_of: 1`, `max_tokens`, `temperature: 0.0`,
+  `ignore_eos: true` and `stream: true`. It sends no `stream_options`.
+- It takes the model name from `/v1/models` unless you pass `--model`. If you
+  pass `--model` as a path, also pass `--served-model-name` with the name glm-vx
+  reports, because glm-vx rejects any other name.
+- `--tokenizer` must be a directory that `AutoTokenizer` can load: `tokenizer.json`
+  plus `tokenizer_config.json`. A bare `.json` path sends it into SGLang server code.
+- `--dataset-name random` samples from ShareGPT and downloads it unless
+  `--dataset-path` points to a local file. `random-ids` needs no download.
+- It parses every nonblank line as JSON and reads `choices[0].text` from every
+  chunk. A `: comment` keepalive or a `choices: []` chunk therefore fails the
+  request. Passing `stream_options.include_usage` through
+  `--extra-request-body` breaks it the same way, on SGLang and vLLM as well.
+- TPOT is `(latency - ttft) / (output_len - 1)`. `output_len` is the requested
+  length unless a text-bearing chunk carries usage, and both engines stream the
+  requested length because of `ignore_eos`. It also reports a retokenized output
+  count, which should match.
+
+A CPU run of exactly this bench_serving command against
+`glm_vx.server --tiny --backend vx` completed all 16 requests. The tokenizer was
+a 256-word `WordLevel` tokenizer.
+
 ## Measured comparison
 
 Baseline `1fe1f1f`, versus this revision with a four-token decode-time prefill

@@ -38,11 +38,15 @@ def serve(dialect, n_tokens=6, status=200, drop_done=False):
                     time.sleep(GAP)
                 if dialect == 'glm-vx':
                     send({'choices': [{'token_ids': [i + 1], 'finish_reason': None}]})
+                elif dialect == 'sglang' and i == n_tokens - 1:  # last delta rides on the finish chunk
+                    send({'choices': [{'text': f' t{i}', 'finish_reason': 'length'}]})
                 else:
                     send({'choices': [{'text': f' t{i}', 'finish_reason': None}]})
             if dialect == 'glm-vx':
                 send({'choices': [{'token_ids': list(range(1, n_tokens + 1)), 'finish_reason': 'length'}],
                       'usage': {'completion_tokens': n_tokens}})
+            elif dialect == 'sglang':
+                send({'choices': [], 'usage': {'prompt_tokens': 3, 'completion_tokens': n_tokens}})
             elif dialect == 'vllm':
                 send({'choices': [{'text': '', 'finish_reason': 'length'}]})
                 send({'choices': [], 'usage': {'prompt_tokens': 3, 'completion_tokens': n_tokens}})
@@ -58,7 +62,7 @@ def serve(dialect, n_tokens=6, status=200, drop_done=False):
     return f'http://127.0.0.1:{server.server_port}', seen, lambda: (server.shutdown(), server.server_close(), thread.join())
 
 
-@pytest.mark.parametrize('dialect', ['glm-vx', 'vllm', 'llamacpp'])
+@pytest.mark.parametrize('dialect', ['glm-vx', 'vllm', 'llamacpp', 'sglang'])
 def test_each_dialect_is_measured_with_correct_arithmetic(dialect):
     url, seen, stop = serve(dialect)
     try:
@@ -71,7 +75,7 @@ def test_each_dialect_is_measured_with_correct_arithmetic(dialect):
     assert r['latency_s'] >= r['ttft_s'] + r['decode_s'] - 1e-6
     body = seen[0]
     assert body['prompt'] == [1, 2, 3] and body['temperature'] == 0 and body['stream'] is True
-    assert (dialect == 'vllm') == ('stream_options' in body) and (dialect == 'llamacpp') == ('return_tokens' in body)
+    assert (dialect in ('vllm', 'sglang')) == ('stream_options' in body) and (dialect == 'llamacpp') == ('return_tokens' in body)
     if dialect == 'llamacpp':
         assert r['server_timings']['prompt_per_second'] == 321.0
 
@@ -149,3 +153,30 @@ def test_main_runs_two_engines_and_refuses_to_overwrite(tmp_path, monkeypatch):
             cmp.main()  # output exists: refuse
     finally:
         stop_a(); stop_b()
+
+
+@pytest.mark.parametrize('kind', ['glm-vx', 'vllm', 'sglang'])
+def test_openai_kinds_measure_the_real_glm_vx_server(kind):
+    """compare.py's parsers against glm_vx.server itself, so its framing and theirs cannot drift."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    from glm_vx.scheduler import Scheduler
+    from glm_vx.server import Server
+    from test_scheduler import Model
+
+    class EOS(Model):
+        config = {**Model.config, 'eos_token_id': [4]}  # greedy toy output hits 4 early
+    sched = Scheduler(EOS())
+    server = Server(('127.0.0.1', 0), sched)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        r = cmp.completion(kind, f'http://127.0.0.1:{server.server_port}', [1, 2], 6, timeout=10)
+    finally:
+        server.shutdown(); server.server_close(); sched.close(); thread.join()
+    assert r['ok'], r
+    if kind == 'glm-vx':  # no ignore_eos: stops at EOS
+        assert r['finish_reason'] == 'stop' and r['output_tokens'] < 6
+    else:
+        assert r['finish_reason'] == 'length' and r['output_tokens'] == r['streamed_tokens'] == 6
+        assert r['tpot_s'] == pytest.approx(r['decode_s'] / 5)

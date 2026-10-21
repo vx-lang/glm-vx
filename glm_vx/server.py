@@ -7,7 +7,13 @@ import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from .detok import IncrementalText
 from .scheduler import Scheduler, BusyError
+
+# OpenAI /v1/completions subset. ignore_eos and stream_options are what sglang.bench_serving and
+# vLLM-style clients send; n and best_of are accepted only as 1. Anything else is rejected.
+COMPLETION_FIELDS={'model','prompt','max_tokens','temperature','seed','stream','ignore_eos',
+    'stream_options','n','best_of'}
 
 class Server(ThreadingHTTPServer):
     daemon_threads = True
@@ -25,6 +31,7 @@ class Server(ThreadingHTTPServer):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
+    heartbeat_seconds = 10
     def setup(self):
         super().setup()
         self.connection.settimeout(30)
@@ -54,6 +61,34 @@ class Handler(BaseHTTPRequestHandler):
         try:return self.connection.recv(1,socket.MSG_PEEK | socket.MSG_DONTWAIT)==b''
         except BlockingIOError:return False
         except OSError:return True
+    def _options(self,body):
+        """Validate an OpenAI-compatible completion body; return (prompt, submit kwargs, opts)."""
+        unknown=set(body)-COMPLETION_FIELDS
+        if unknown: raise ValueError('unsupported fields: '+', '.join(sorted(unknown)))
+        if 'model' in body and body['model']!=self.server.model_name:
+            raise ValueError(f'unknown model; this server serves {self.server.model_name!r} (see /v1/models)')
+        stream=body.get('stream',False)
+        if type(stream) is not bool: raise ValueError('stream must be boolean')
+        ignore_eos=body.get('ignore_eos',False)
+        if type(ignore_eos) is not bool: raise ValueError('ignore_eos must be boolean')
+        for key in ('n','best_of'):
+            value=body.get(key)
+            if value is not None and (type(value) is not int or value!=1): raise ValueError(key+' must be 1')
+        options=body.get('stream_options')
+        if options is not None:
+            if not stream: raise ValueError('stream_options requires stream')
+            if not isinstance(options,dict) or set(options)-{'include_usage'} or type(options.get('include_usage',False)) is not bool:
+                raise ValueError('stream_options supports only boolean include_usage')
+        prompt=body.get('prompt')
+        if isinstance(prompt,str):
+            if self.server.tokenizer is None: raise ValueError('text needs --tokenizer; tiny demo accepts token IDs')
+            prompt=self.server.tokenizer.encode(prompt).ids
+        # OpenAI clients always send `model`; they get OpenAI stream framing (text deltas, a
+        # text-only terminal chunk). Requests without it keep the glm-vx framing, whose terminal
+        # event repeats the complete text and token IDs.
+        return prompt,dict(max_tokens=body.get('max_tokens',16),temperature=body.get('temperature',0),
+            seed=body.get('seed',0),ignore_eos=ignore_eos),dict(stream=stream,openai='model' in body,
+            include_usage=bool(options and options.get('include_usage')))
     def do_POST(self):
         req=None; streaming=False
         try:
@@ -67,17 +102,11 @@ class Handler(BaseHTTPRequestHandler):
             if len(raw)!=size: raise ValueError('incomplete body')
             body=json.loads(raw)
             if not isinstance(body,dict): raise ValueError('JSON object required')
-            unknown=set(body)-{'model','prompt','max_tokens','temperature','seed','stream'}
-            if unknown: raise ValueError('unsupported fields: '+', '.join(sorted(unknown)))
-            if body.get('model',self.server.model_name)!=self.server.model_name: raise ValueError('unknown model')
-            if type(body.get('stream',False)) is not bool: raise ValueError('stream must be boolean')
-            prompt=body.get('prompt')
-            if isinstance(prompt,str):
-                if self.server.tokenizer is None: raise ValueError('text needs --tokenizer; tiny demo accepts token IDs')
-                prompt=self.server.tokenizer.encode(prompt).ids
-            req=self.server.scheduler.submit(prompt,body.get('max_tokens',16),body.get('temperature',0),body.get('seed',0))
-            ids=[]; created=int(time.time())
-            if body.get('stream',False):
+            prompt,submit,opts=self._options(body)
+            req=self.server.scheduler.submit(prompt,**submit)
+            ids=[]; created=int(time.time()); detok=IncrementalText(self.server.tokenizer)
+            head={'id':req.id,'object':'text_completion','created':created,'model':self.server.model_name}
+            if opts['stream']:
                 self.send_response(200)
                 self.send_header('Content-Type','text/event-stream')
                 self.send_header('Cache-Control','no-cache'); self.send_header('Connection','close')
@@ -87,29 +116,37 @@ class Handler(BaseHTTPRequestHandler):
                 if self._disconnected():return
                 try: event=req.events.get(timeout=.25)
                 except queue.Empty:
-                    if streaming and time.monotonic()-last_heartbeat>=10:
-                        self.wfile.write(b': keepalive\n\n'); self.wfile.flush()
+                    if streaming and time.monotonic()-last_heartbeat>=self.heartbeat_seconds:
+                        # An SSE comment is the usual keepalive, but sglang.bench_serving feeds every
+                        # nonblank line to json.loads, so OpenAI-framed streams send a blank line.
+                        self.wfile.write(b'\n' if opts['openai'] else b': keepalive\n\n'); self.wfile.flush()
                         last_heartbeat=time.monotonic()
                     continue
                 if event['type']=='token':
                     ids.append(event['token_id'])
                     if streaming:
-                        self._sse({'id':req.id,'object':'text_completion','created':created,'model':self.server.model_name,
-                            'choices':[{'index':0,'text':'','token_ids':[ids[-1]],'finish_reason':None}]})
+                        self._sse({**head,'choices':[{'index':0,'text':detok.push(ids[-1]),'token_ids':[ids[-1]],
+                            'logprobs':None,'finish_reason':None}]})
                 else:
                     if event['reason'] in ('error', 'backpressure'):
                         if streaming: self._sse({'error':event['error']})
                         else: self._json(500,{'error':event['error']})
                     else:
-                        text=self.server.tokenizer.decode(ids) if self.server.tokenizer else ''
-                        result={'id':req.id,'object':'text_completion','created':created,'model':self.server.model_name,
-                            'choices':[{'index':0,'text':text,'token_ids':ids,'finish_reason':event['reason']}],
-                            'usage':{'prompt_tokens':event['prompt_tokens'],'completion_tokens':event['completion_tokens'],
-                                'total_tokens':event['prompt_tokens']+event['completion_tokens'],
-                                'prompt_tokens_details':{'cached_tokens':event['cached_prompt_tokens']}},
-                            'timings':event['timings']}
-                        if streaming:self._sse(result)
-                        else:self._json(200,result)
+                        usage={'prompt_tokens':event['prompt_tokens'],'completion_tokens':event['completion_tokens'],
+                            'total_tokens':event['prompt_tokens']+event['completion_tokens'],
+                            'prompt_tokens_details':{'cached_tokens':event['cached_prompt_tokens']}}
+                        if streaming and opts['openai']:
+                            # Terminal chunk carries only the held-back text tail, so concatenated
+                            # deltas are the completion and no client counts the text twice.
+                            self._sse({**head,'choices':[{'index':0,'text':detok.flush(),'logprobs':None,
+                                'finish_reason':event['reason']}],'usage':usage,'timings':event['timings']})
+                            if opts['include_usage']:self._sse({**head,'choices':[],'usage':usage})
+                        else:
+                            text=self.server.tokenizer.decode(ids) if self.server.tokenizer else ''
+                            result={**head,'choices':[{'index':0,'text':text,'token_ids':ids,'logprobs':None,
+                                'finish_reason':event['reason']}],'usage':usage,'timings':event['timings']}
+                            if streaming:self._sse(result)
+                            else:self._json(200,result)
                     if streaming:self.wfile.write(b'data: [DONE]\n\n'); self.wfile.flush()
                     return
         except BusyError as exc:self._json(429,{'error':str(exc)})

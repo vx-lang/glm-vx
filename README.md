@@ -60,11 +60,18 @@ curl http://127.0.0.1:8000/v1/completions \
 `/v1/completions` accepts one nonempty token-ID prompt or a string when a local
 `--tokenizer tokenizer.json` is provided. Greedy sampling is the default; finite
 nonnegative temperature and an optional seed support reproducible sampling.
-Unknown options are rejected. This is a **completion API subset**, not a claim
-of complete OpenAI chat/tool-call compatibility. SSE emits exact token IDs;
-decoded text is returned in the final event to avoid corrupting split UTF-8/BPE
-pieces. Final `token_ids` contains the complete output, while earlier events
-contain one delta ID each. Clients must not concatenate the final full list again.
+`ignore_eos`, `stream_options.include_usage`, and `n`/`best_of` equal to 1 are
+accepted for OpenAI benchmark clients; other unknown options are rejected. This
+is a **completion API subset**, not a claim of complete OpenAI chat/tool-call
+compatibility. Each SSE token event carries its exact token ID and a `text`
+delta that is emitted only once the decoded text is stable, so split UTF-8/BPE
+pieces are held back rather than corrupted. The terminal event depends on the
+request. A request that names `model`, as every OpenAI client does, gets OpenAI
+framing: the terminal chunk has only the held-back text tail, `finish_reason`
+and `usage`, followed by a `choices: []` usage chunk if `include_usage` was set,
+and keepalives are blank lines. A request without `model` gets the glm-vx
+framing: the final event repeats the complete text and `token_ids` (clients must
+not concatenate it again), and keepalives are SSE comments.
 
 The service binds loopback by default. It has no authentication or TLS; place a
 suitable gateway in front before exposing it to a network.
