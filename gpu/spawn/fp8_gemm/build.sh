@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Build the block-FP8 GEMM (sm_90a) into gpu/build/spawn/fp8_gemm/: the kernel variants and the
 # split-K reduction, with machine-sm90a.vx. Not part of gpu/spawn/build.sh (whose kernels are
-# sm_80). Needs a vxc with Vx PRs #1991 (REG tensors), #1995 (dynamic shared memory) and #1996
-# (aligned(N)), on main with #1989 (sm_90a). With PTXAS set, each kernel is assembled for sm_90a
-# and the script prints its registers, stack, spills and shared memory.
+# sm_80). Needs a vxc from Vx main (which has #1989, sm_90a; #1995, dynamic shared memory; and
+# #1996, aligned(N)) with PR #2058 (REG tensors; it replaced #1991) and #2013 (grid/block). With
+# PTXAS set, each kernel is assembled for sm_90a and the script prints its registers, stack, spills
+# and shared memory.
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
 : "${PYTHON:=python3}"

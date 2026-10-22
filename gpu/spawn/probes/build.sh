@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build the tensor-core probes into gpu/build/spawn/probes/ (not part of gpu/spawn/build.sh). A
 # probe named *_sm80.vx builds with machine-sm80.vx, *_sm90a.vx with machine-sm90a.vx. Needs a
-# vxc with register tensors (Vx PR #1991) and, for sm_90a, the chip from the machine file (#1989).
+# vxc with register tensors (Vx PR #2058, which replaced #1991) and, for sm_90a, the chip from the
+# machine file (#1989).
 # With PTXAS set, each probe is assembled for its chip and the script prints ptxas -v, whether the
 # PTX has a __local_depot, and the size of the cubin's .text section (the SASS).
 set -euo pipefail

@@ -57,9 +57,9 @@ plus PRs #1952, #1954, #1955, #1958, #1959, #1960, #1961, #1962, #1964 (`--emit-
 also take #1987, #1976 and #1994 (`vx_cuda_set_stream`, which `nm -D` shows exported). Barrier counts match the hand kernels (softmax 4, router
 1, mla_partial 2). Not ported: gemm_tf32 (`mma.sync m16n8k8`: #350).
 `probes/` holds tensor-core probes (mma.sync on sm_80, wgmma bf16 and block-FP8 on sm_90a) with
-register-tensor accumulators (Vx PR #1991); see `probes/README.md`.
+register-tensor accumulators (Vx PR #2058, was #1991); see `probes/README.md`.
 `fp8_gemm/` holds the block-FP8 GEMM for H100 (TMA, mbarrier ring, wgmma e4m3; sm_90a, its own
-`build.sh` and machine file; Vx PRs #1991, #1995, #1996); see `gpu/FP8-GEMM.md`.
+`build.sh` and machine file; Vx PRs #2058 (was #1991), #1995, #1996); see `gpu/FP8-GEMM.md`.
 
 `gpu/test_spawn_hardware.py` checks each against the hand kernel, bit for bit, on a GPU, and
 `gpu/test_spawn_vx_launch.py` checks Vx's launch of each against Python's launch of the same

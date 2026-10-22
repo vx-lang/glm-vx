@@ -204,7 +204,9 @@ H100's actual accumulation precision for these data.
 
 ## Vx PRs required
 
-Built with a vxc made from Vx `c041a98d` (main with #1989, sm_90a) merged with these PRs:
+Built with a vxc made from Vx `c041a98d` (main with #1989, sm_90a) merged with these PRs. Since
+then #1995 and #1996 are on Vx main, #2058 replaced #1991 (same commits, checked with
+`git range-diff`), and #2013/#2014 replaced #1972/#1974:
 
 | PR | What it gives this kernel |
 | --- | --- |
@@ -305,5 +307,6 @@ python -m pytest -q gpu/test_fp8_gemm.py                    # any machine
 OMP_NUM_THREADS=16 python -m pytest -q gpu/test_fp8_gemm_hardware.py   # H100; JSON in gpu/build/
 ```
 
-The pod's toolchain bundle (vxc 390c2534) lacks #1991, #1995 and #1996. Build the vxc from
-`vxfp8` on the pod, or bring its PTX: the PTX is portable, and only `build.sh`'s checks need vxc.
+The pod's toolchain bundle (vxc 390c2534) lacks these PRs. Build the vxc on the pod from Vx main
+with #2058 and #2013 (and #2002 for PTX 8.3), or bring its PTX: the PTX is portable, and only
+`build.sh`'s checks need vxc.
