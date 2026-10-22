@@ -2,7 +2,7 @@
 # Build the block-FP8 GEMM (sm_90a) into gpu/build/spawn/fp8_gemm/: the kernel variants and the
 # split-K reduction, with machine-sm90a.vx. Not part of gpu/spawn/build.sh (whose kernels are
 # sm_80). Needs a vxc from Vx main (which has #1989, sm_90a; #1995, dynamic shared memory; #1996,
-# aligned(N); and #2058, REG tensors, which replaced #1991) with #2013 (grid/block). With
+# aligned(N); and #2058, REG tensors, which replaced #1991) with #2065 (grid/block). With
 # PTXAS set, each kernel is assembled for sm_90a and the script prints its registers, stack, spills
 # and shared memory.
 set -euo pipefail

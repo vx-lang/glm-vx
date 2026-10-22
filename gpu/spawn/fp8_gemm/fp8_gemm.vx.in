@@ -73,7 +73,7 @@ pub fn glm_vx_fp8_gemm_@NAME@(maps: &Tensor<u8, [?], Memory::HBM>, a_scale: &Ten
     let tid: i32 = thread_id();
     let bid: i32 = block_id();
     // The shared tensors come before any loop: over 48 KiB of shared memory declared after a loop
-    // crashes vxc in "Lowering Vx to Standard" (Vx #1995 with #2058; reported to vx-21).
+    // crashes a vxc with #1995 and #2058 but not #2064 (Vx #2061).
     let mut ring_a = unsafe { Tensor<i32, [@RING_A_WORDS@], Memory::SMEM, aligned(1024)>::uninit() };
     let mut ring_b = unsafe { Tensor<i32, [@RING_B_WORDS@], Memory::SMEM, aligned(1024)>::uninit() };
     let mut bars = unsafe { Tensor<i64, [@BARS@], Memory::SMEM>::uninit() };

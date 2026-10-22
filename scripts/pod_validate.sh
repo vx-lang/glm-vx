@@ -14,7 +14,7 @@
 # Use OMP_NUM_THREADS well below the host's vCPU count (NumPy thrashes on 128-vCPU pods).
 #
 # Toolchain: the vxc bundle (VXC, and VX_DISPATCH_LIB or <bundle>/lib/libvx_cuda_dispatch.so) must
-# include Vx PR #2016 (Vx#1986, vx_cuda_set_stream) on top of #2013/#2014/#2015 (which replaced
+# include Vx PR #2068 (Vx#1986, vx_cuda_set_stream) on top of #2065/#2066/#2067 (which replaced
 # #1994 on #1972/#1974/#1976), or the graph step
 # (gpu/test_spawn_vx_graph.py: Vx on our stream, and in CUDA graphs) fails. host.txt says whether the dispatch library exports it.
 # Do not export VX_CUDA_SYNC or VX_TIME_KERNEL for the whole run: Vx stops a graph capture on either.
@@ -69,7 +69,7 @@ if [[ -z ${VX_DISPATCH_LIB:-} ]]; then
 fi
 {
   echo "dispatch lib ${VX_DISPATCH_LIB:-none}"
-  echo "vx_cuda_set_stream (Vx PR #2016): $(nm -D --defined-only "${VX_DISPATCH_LIB:-/dev/null}" 2>/dev/null | grep -qw vx_cuda_set_stream && echo exported || echo MISSING)"
+  echo "vx_cuda_set_stream (Vx PR #2068): $(nm -D --defined-only "${VX_DISPATCH_LIB:-/dev/null}" 2>/dev/null | grep -qw vx_cuda_set_stream && echo exported || echo MISSING)"
 } >> "$out/host.txt"
 step build-spawn bash gpu/spawn/build.sh
 step build-cpu-lib bash kernels/build.sh

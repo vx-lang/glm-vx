@@ -127,7 +127,7 @@ because the host wrote it, before first use. The producer thread is the only rea
 so it runs `fence.proxy.tensormap::generic.acquire.sys [map], 128` on each one, then
 `prefetch.tensormap`.
 
-That fence needs PTX ISA 8.3, and vxc pins sm_90a to 8.0. ptxas reports `Feature 'fence.proxy
+That fence needs PTX ISA 8.3. A vxc without Vx PR #2002 (on main now) pins sm_90a to 8.0. ptxas reports `Feature 'fence.proxy
 with unidirection proxy fence' requires PTX ISA .version 8.3`. So `build.sh` passes
 `build.py --ptx-version 8.3`:
 
@@ -136,8 +136,8 @@ with unidirection proxy fence' requires PTX ISA .version 8.3`. So `build.sh` pas
 - The manifest records `ptx_version: {vxc: 8.0, raised_to: 8.3, vxc_ptx_sha256}`.
 - PTX 8.3 needs a CUDA 12.3 or newer driver.
 
-The proper fix is for Vx to emit PTX 8.3 or newer for sm_90a, or to let the machine file name the
-version. A `CUtensorMap` parameter would remove the fence altogether.
+#2002 makes vxc emit PTX 8.3 for sm_90a, so with a current vxc the flag changes nothing; it stays
+for older builds. A `CUtensorMap` parameter would remove the fence altogether.
 
 Rules for the maps:
 
@@ -207,7 +207,7 @@ H100's actual accumulation precision for these data.
 
 Built with a vxc made from Vx `c041a98d` (main with #1989, sm_90a) merged with these PRs. Since
 then #1995, #1996 and #2058 are on Vx main (#2058 replaced #1991: same commits, checked with
-`git range-diff`), and #2013/#2014 replaced #1972/#1974:
+`git range-diff`), and #2065/#2066 replaced #1972/#1974:
 
 | PR | What it gives this kernel |
 | --- | --- |
@@ -231,9 +231,9 @@ The 25 sm_80 spawn kernels with this vxc:
 
 ## Numbers
 
-ptxas (CUDA 13.1, `-arch=sm_90a -v`), with a vxc from Vx main (`dfae3065`, which has #1995 and
-#1996) merged with the #2013-#2016 launch stack, #2058 and #2002. The vxc of `c041a98d` gives the
-same registers, stack and shared memory for this source.
+ptxas (CUDA 13.1, `-arch=sm_90a -v`), with a vxc from Vx main `7608e6f7` (which has #1995, #1996,
+#2002 and #2058) merged with the #2065-#2068 launch stack and #2064. The vxc of `c041a98d` gives
+the same registers, stack and shared memory for this source.
 
 | Kernel | Registers | Stack | Spills | Dynamic shared | Block | SASS |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -278,16 +278,15 @@ H100 writes `fp8_gemm_hardware.json` with time, TFLOP/s and GB/s per shape.
    out in that reversed order. Here the barriers (declared last) land at offset 0, B at 1024 and A
    at 66560, which wastes 960 bytes of padding. It is harmless for this kernel, which takes each
    tensor's address. The fix is to move each slot after the previous one.
-4. **vxc writes PTX 8.0 for sm_90a.** `fence.proxy.tensormap` needs 8.3, so a tensor map in global
-   memory needs the `--ptx-version` workaround described above. The asks, in order:
-   - emit PTX 8.3 or newer for sm_90a;
+4. **Fixed by #2002:** vxc wrote PTX 8.0 for sm_90a, and `fence.proxy.tensormap` needs 8.3 (the
+   `--ptx-version` workaround above). The asks that remain, in order:
    - a `CUtensorMap` kernel parameter (`.param .align 64 .b8 [128]`), which removes the fence;
    - `setmaxnreg`.
-5. **Over 48 KiB of shared memory declared after a loop crashes vxc** (SIGSEGV in "Lowering Vx to
-   Standard"; Vx #1995 together with #2058, the register tensors: plain main before #2058 compiles
-   it). Two shared tensors that are both used, after a `for` or `while` in the spawn body, are
-   enough. The kernel declares its shared tensors before the accumulator loop, which avoids it.
-   Repro sent to vx-21:
+5. **Fixed by #2064 (Vx #2061): over 48 KiB of shared memory declared after a loop crashed
+   vxc** (SIGSEGV in "Lowering Vx to Standard"; Vx #1995 together with #2058, the register tensors:
+   plain main before #2058 compiles it). Two shared tensors that are both used, after a `for` or `while` in the spawn body, are
+   enough. The kernel declares its shared tensors before the accumulator loop, which avoids it;
+   with #2064 the other order gives the same PTX. The repro:
 
    ```vx
    pub fn k() -> void {
@@ -324,11 +323,14 @@ H100 writes `fp8_gemm_hardware.json` with time, TFLOP/s and GB/s per shape.
 ## Build and test
 
 ```
-VXC=<vxfp8 vxc> PTXAS=/usr/local/cuda/bin/ptxas gpu/spawn/fp8_gemm/build.sh
+VXC=<vxc> PTXAS=/usr/local/cuda/bin/ptxas gpu/spawn/fp8_gemm/build.sh
 python -m pytest -q gpu/test_fp8_gemm.py                    # any machine
 OMP_NUM_THREADS=16 python -m pytest -q gpu/test_fp8_gemm_hardware.py   # H100; JSON in gpu/build/
 ```
 
 The pod's toolchain bundle (vxc 390c2534) lacks these PRs. Build the vxc on the pod from Vx main
-(which has #2058) with #2013 (and #2002 for PTX 8.3), or bring its PTX: the PTX is portable, and only
-`build.sh`'s checks need vxc.
+(which has #2058 and #2002) with the launch stack #2065-#2068 and #2064, or bring its PTX: the
+PTX is portable, and only `build.sh`'s checks need vxc. A vxc run from its cargo target directory
+(not an installed bundle with `stdlib/` and `lib/` beside `bin/`) needs
+`VX_STD_PATH=<Vx>/stdlib/std:<Vx>/stdlib`, and for `--library` builds a full `cargo build` and
+`VX_RUNTIME_LIB_DIR=<target>/release`.
