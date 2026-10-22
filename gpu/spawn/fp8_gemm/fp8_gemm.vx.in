@@ -72,6 +72,11 @@ pub fn glm_vx_fp8_gemm_@NAME@(maps: &Tensor<u8, [?], Memory::HBM>, a_scale: &Ten
   spawn on(Topology::Device) grid([((rows_m + @BLOCK_M@ - 1) / @BLOCK_M@) * ((rows_n + 127) / 128) * splits]) block(@THREADS@) {
     let tid: i32 = thread_id();
     let bid: i32 = block_id();
+    // The shared tensors come before any loop: over 48 KiB of shared memory declared after a loop
+    // crashes vxc in "Lowering Vx to Standard" (Vx #1995 with #2058; reported to vx-21).
+    let mut ring_a = unsafe { Tensor<i32, [@RING_A_WORDS@], Memory::SMEM, aligned(1024)>::uninit() };
+    let mut ring_b = unsafe { Tensor<i32, [@RING_B_WORDS@], Memory::SMEM, aligned(1024)>::uninit() };
+    let mut bars = unsafe { Tensor<i64, [@BARS@], Memory::SMEM>::uninit() };
     // ::fill(0.0) of 64 elements stays a loop with a variable index, which keeps the tensor in local
     // memory; a constant-bound loop over a REG tensor is unrolled by Vx (PR #1991).
     let mut acc = unsafe { Tensor<f32, [@ACC@], Memory::REG>::uninit() };
@@ -80,9 +85,6 @@ pub fn glm_vx_fp8_gemm_@NAME@(maps: &Tensor<u8, [?], Memory::HBM>, a_scale: &Ten
       acc[r] = 0.0;
       part[r] = 0.0;
     }
-    let mut ring_a = unsafe { Tensor<i32, [@RING_A_WORDS@], Memory::SMEM, aligned(1024)>::uninit() };
-    let mut ring_b = unsafe { Tensor<i32, [@RING_B_WORDS@], Memory::SMEM, aligned(1024)>::uninit() };
-    let mut bars = unsafe { Tensor<i64, [@BARS@], Memory::SMEM>::uninit() };
     let a_base: i64 = ring_a_address(&mut ring_a);
     let b_base: i64 = ring_b_address(&mut ring_b);
     let bar_base: i64 = bars_address(&mut bars);

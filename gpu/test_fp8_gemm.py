@@ -239,7 +239,7 @@ def manifest(entry, tensors, scalars, shared):
 
 @pytest.fixture
 def fake(tmp_path):
-    shared = {'m64': 99328, 'm128': 132096}
+    shared = {'m64': 98368, 'm128': 131136}
     for name in F.VARIANTS:
         (tmp_path / f'fp8_gemm_{name}.ptx').write_text('// fake\n')
         (tmp_path / f'fp8_gemm_{name}.json').write_text(json.dumps(
@@ -276,7 +276,7 @@ def test_wrapper_launches_one_kernel_and_uploads_both_maps(fake):
     p = gemm(a, sa, b, sb, out, m=128, n=6144, k=12288, splits=1)
     assert [l['kernel'] for l in launches] == ['glm_vx_fp8_gemm_m128']
     l = launches[0]
-    assert (l['grid'], l['block'], l['shared']) == (p.grid, 288, 132096) == (48, 288, 132096)
+    assert (l['grid'], l['block'], l['shared']) == (p.grid, 288, 131136) == (48, 288, 131136)
     # params: 5 tensors x 5 words, then rows_m, rows_n, cols, splits, split_blocks, bf16_out
     assert [l['scalar'](25 + i) for i in range(6)] == [128, 6144, 12288, 1, 96, 1]
     assert l['pointer'](20) == out.pointer                      # out_bf16's aligned pointer
@@ -301,7 +301,7 @@ def test_wrapper_split_k_runs_the_reduction(fake):
     p = gemm(a, sa, b, sb, out, m=1, n=2048, k=6144)
     assert p.variant.name == 'm64' and p.splits > 1
     main, reduce = launches
-    assert (main['kernel'], main['block'], main['shared']) == ('glm_vx_fp8_gemm_m64', 160, 99328)
+    assert (main['kernel'], main['block'], main['shared']) == ('glm_vx_fp8_gemm_m64', 160, 98368)
     assert main['scalar'](28) == p.splits and main['scalar'](29) == p.split_blocks
     workspace = main['pointer'](15)
     assert workspace != out.pointer

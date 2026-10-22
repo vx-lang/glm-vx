@@ -54,12 +54,13 @@ B box (128 x 128 bytes). Both use 128-byte swizzle in 1024-aligned buffers
 - `full[s]`: 1 arrival plus the stage's TMA bytes.
 - `empty[s]`: one arrival from lane 0 of each consumer warp.
 
-Dynamic shared memory per variant (Vx puts the barriers first, then pads to 1024):
+Dynamic shared memory per variant. Vx lays the tensors out in declaration order: the A ring at 0,
+the B ring after it (both 1024-aligned) and the barriers last.
 
 | Variant | Dynamic shared | CTAs per SM |
 | --- | --- | --- |
-| m64 | 99,328 B | 2 |
-| m128 | 132,096 B | 1 |
+| m64 | 98,368 B | 2 |
+| m128 | 131,136 B | 1 |
 
 **Producer loop.** For each k block:
 
@@ -205,7 +206,7 @@ H100's actual accumulation precision for these data.
 ## Vx PRs required
 
 Built with a vxc made from Vx `c041a98d` (main with #1989, sm_90a) merged with these PRs. Since
-then #1995 and #1996 are on Vx main, #2058 replaced #1991 (same commits, checked with
+then #1995, #1996 and #2058 are on Vx main (#2058 replaced #1991: same commits, checked with
 `git range-diff`), and #2013/#2014 replaced #1972/#1974:
 
 | PR | What it gives this kernel |
@@ -230,15 +231,17 @@ The 25 sm_80 spawn kernels with this vxc:
 
 ## Numbers
 
-ptxas (CUDA 13.1, `-arch=sm_90a -v`):
+ptxas (CUDA 13.1, `-arch=sm_90a -v`), with a vxc from Vx main (`dfae3065`, which has #1995 and
+#1996) merged with the #2013-#2016 launch stack, #2058 and #2002. The vxc of `c041a98d` gives the
+same registers, stack and shared memory for this source.
 
 | Kernel | Registers | Stack | Spills | Dynamic shared | Block | SASS |
 | --- | --- | --- | --- | --- | --- | --- |
-| `fp8_gemm_m64` | 158 | 0 | 0 | 99,328 B | 160 | 19,968 B (1,248 instructions) |
-| `fp8_gemm_m128` | 159 | 0 | 0 | 132,096 B | 288 | 19,968 B (1,248 instructions) |
+| `fp8_gemm_m64` | 158 | 0 | 0 | 98,368 B | 160 | 19,840 B (1,240 instructions) |
+| `fp8_gemm_m128` | 158 | 0 | 0 | 131,136 B | 288 | 19,840 B (1,240 instructions) |
 | `fp8_gemm_reduce` | 32 | 0 | 0 | 0 | 256 | 3,712 B (232 instructions) |
 
-Neither variant has a `__local_depot`. Register use fits both block sizes: 159 x 288 = 45.8k of 64k.
+Neither variant has a `__local_depot`. Register use fits both block sizes: 158 x 288 = 45.5k of 64k.
 
 GPU numbers have not been measured: there was no H100 here. `scripts/pod_validate.sh` on an
 H100 writes `fp8_gemm_hardware.json` with time, TFLOP/s and GB/s per shape.
@@ -270,8 +273,8 @@ H100 writes `fp8_gemm_hardware.json` with time, TFLOP/s and GB/s per shape.
    the tensor in local memory: 528 bytes of stack, and every promotion goes through `ld.local`. A
    `for r in 0..64 { acc[r] = 0.0; }` loop is unrolled and fixes it. `::fill` of a REG tensor
    should unroll, or be refused, like any other variable index (E6033).
-3. **#1995's views no longer keep declaration order once 2731ec40 is merged.** 2731ec40 moves each
-   late alloca to `entry.begin()` in walk order, which reverses them. #1995 then lays the views
+3. **Fixed by 1341c84c (in #2058):** #1995's views no longer kept declaration order once
+   2731ec40 was merged. 2731ec40 moves each late alloca to `entry.begin()` in walk order, which reverses them. #1995 then lays the views
    out in that reversed order. Here the barriers (declared last) land at offset 0, B at 1024 and A
    at 66560, which wastes 960 bytes of padding. It is harmless for this kernel, which takes each
    tensor's address. The fix is to move each slot after the previous one.
@@ -280,6 +283,25 @@ H100 writes `fp8_gemm_hardware.json` with time, TFLOP/s and GB/s per shape.
    - emit PTX 8.3 or newer for sm_90a;
    - a `CUtensorMap` kernel parameter (`.param .align 64 .b8 [128]`), which removes the fence;
    - `setmaxnreg`.
+5. **Over 48 KiB of shared memory declared after a loop crashes vxc** (SIGSEGV in "Lowering Vx to
+   Standard"; Vx #1995 together with #2058, the register tensors: plain main before #2058 compiles
+   it). Two shared tensors that are both used, after a `for` or `while` in the spawn body, are
+   enough. The kernel declares its shared tensors before the accumulator loop, which avoids it.
+   Repro sent to vx-21:
+
+   ```vx
+   pub fn k() -> void {
+     spawn on(Topology::Device) {
+       for _r in 0..1 {
+       }
+       let mut ring = unsafe { Tensor<i32, [16384], Memory::SMEM>::uninit() };
+       let mut bars = unsafe { Tensor<i32, [1], Memory::SMEM>::uninit() };
+       ring[0] = 0;
+       bars[0] = 0;
+     }
+     return;
+   }
+   ```
 
 ## What is left for DeepGEMM-level speed
 
@@ -308,5 +330,5 @@ OMP_NUM_THREADS=16 python -m pytest -q gpu/test_fp8_gemm_hardware.py   # H100; J
 ```
 
 The pod's toolchain bundle (vxc 390c2534) lacks these PRs. Build the vxc on the pod from Vx main
-with #2058 and #2013 (and #2002 for PTX 8.3), or bring its PTX: the PTX is portable, and only
+(which has #2058) with #2013 (and #2002 for PTX 8.3), or bring its PTX: the PTX is portable, and only
 `build.sh`'s checks need vxc.

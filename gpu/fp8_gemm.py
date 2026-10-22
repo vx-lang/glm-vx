@@ -351,9 +351,9 @@ def simulate(a_codes, a_scale, b_codes, b_scale, p, *, bf16=False, desc=sw128_de
     blocks_k = p.blocks_k
     a_scale = np.asarray(a_scale, np.float32).reshape(-1)
     b_scale = np.asarray(b_scale, np.float32).reshape(-1)
-    b_base = 1024
-    a_base = b_base + v.stages * v.b_stage
-    smem = np.zeros(a_base + v.stages * v.a_stage, np.uint8)
+    a_base = 0  # Vx's layout: the A ring, then the B ring (1024-aligned), then the barriers
+    b_base = a_base + v.stages * v.a_stage
+    smem = np.zeros(b_base + v.stages * v.b_stage, np.uint8)
     rows_f, cols_f = fragment_index()
     partial = np.zeros((p.splits, m, n), np.float32)
     out_bf16 = np.zeros((m, n), np.uint16)
