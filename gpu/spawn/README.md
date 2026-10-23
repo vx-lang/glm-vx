@@ -103,6 +103,13 @@ graph (also mixed with Python launches), bit for bit against the legacy stream, 
 Vx stops a capture on `VX_CUDA_SYNC=1` or `VX_TIME_KERNEL`; it needs the libraries built with
 #2100.
 
+`gpu/test_spawn_vx_host.py` needs no GPU: with no device visible, Vx runs each region in order
+on the CPU (`gpu/spawn/host.py` calls a library with NumPy arrays, in a worker process per
+library). It checks all 25 against NumPy, bit for bit where the reference follows the hand
+kernel's order (lane-strided partials, the warp tree 16, 8, 4, 2, 1, the block's second stage),
+which is every kernel without exp; the others to 2e-6 (1e-5 for MLA). That pins the order Vx
+#260's ordered reductions must keep. Run it after `build.sh` (with `VX_DISPATCH_LIB`).
+
 ## Build
 
 ```sh
@@ -139,6 +146,7 @@ block sums and maxima on shared memory.
 | A stable entry name and documented parameter order | `vxc --emit-ptx` (PR #1964): the entry is the function's name, the parameters its own in declared order | #251 |
 | Correctly rounded sqrt / div (the norms) | `sqrt.approx` / `rsqrt.approx` in 390c2534; `sqrt.rn` + `rcp.rn` with PR #1955 | #1944 |
 | Bit casts (`f32::from_bits`) | not a pure call to the proof; bf16 decode uses exact arithmetic instead | #1943 |
+| Several Vx libraries in one process | every library's kernel is `vx_npu_kernel_0`: the host path finds it with `dlsym(RTLD_DEFAULT, ..)` and the GPU path caches it by name, so the second library runs the first one's kernel; `host.py` uses a process per library, and `test_spawn_vx_launch.py` / `test_spawn_vx_graph.py` fail until the fix | #2114 |
 | Scalars passed by value | E6003 unless `machine.vx` lists CPU_DRAM as visible | #1947 |
 | Raw pointers in a region | silent host fallback before PR #1959, which takes them and warns on any other fallback; kernels take `[?]` tensors | #1945 |
 | Shared memory `::new()` | zero-fill races with other warps; use `unsafe { ::uninit() }` | #1946 |

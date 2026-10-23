@@ -80,6 +80,10 @@ hw() { $PYTHON -m pytest -q -rs "$@" | tee /dev/stderr | grep -qE '[0-9]+ passed
 step test-hardware hw gpu/test_hardware.py gpu/test_gemm_hardware.py gpu/test_index_scores_hardware.py gpu/test_topk_hardware.py
 step test-quant-hardware hw gpu/test_quant_hardware.py
 step test-spawn-hardware hw gpu/test_spawn_hardware.py
+# The same libraries on the CPU (Vx runs the regions in order with no device visible), against NumPy.
+step test-spawn-vx-host hw gpu/test_spawn_vx_host.py
+# Until Vx #2114 is fixed, a second Vx library in one process launches the first one's kernel
+# (every library's kernel is vx_npu_kernel_0, the key of Vx's cache), so the next two steps fail.
 step test-spawn-vx-launch hw gpu/test_spawn_vx_launch.py
 hw_sync() { VX_CUDA_SYNC=1 hw "$@"; }  # Vx waits after each launch, and names the kernel on a fault
 step test-spawn-vx-launch-sync hw_sync gpu/test_spawn_vx_launch.py

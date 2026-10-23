@@ -93,7 +93,9 @@ def test_spawn_bf16_decode_is_exact_for_every_encoding(context):
     dw, dx, out = upload(context, codes), upload(context, np.ones(1, 'f4')), context.tensor((65536,))
     SpawnKernel(context, BUILD / 'spawn/bf16_matvec.ptx').launch(65536 // 8, 256, rows=65536, cols=1, weight=dw, x=dx, out=out)
     context.synchronize()
-    expected = (codes.astype(np.uint32) << 16).view(np.float32)
+    # The row sum starts at +0.0, so the code of -0.0 comes out as +0.0.
+    with np.errstate(invalid='ignore'):
+        expected = (codes.astype(np.uint32) << 16).view(np.float32) + np.float32(0)
     np.testing.assert_array_equal(download(out).view(np.uint32)[~np.isnan(expected)],
                                   expected.view(np.uint32)[~np.isnan(expected)])
     assert np.isnan(download(out)[np.isnan(expected)]).all()
