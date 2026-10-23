@@ -11,8 +11,6 @@ pub fn glm_vx_spawn_softmax_rows(out: &mut Tensor<f32, [?, ?], Memory::HBM>, x: 
     for row in 0..rows across blocks {
       if dim > 0 && threads >= 32 && threads <= 1024 && threads % 32 == 0 {
         let mut a = unsafe { Tensor<f32, [1024], Memory::SMEM>::uninit() };
-        let mut b = unsafe { Tensor<f32, [1024], Memory::SMEM>::uninit() };
-        let mut row_max = unsafe { Tensor<f32, [1], Memory::SMEM>::uninit() };
         let base: i32 = row * dim;
         for t in 0..1024 across lanes {
           let mut maximum: f32 = x[base];
@@ -22,9 +20,8 @@ pub fn glm_vx_spawn_softmax_rows(out: &mut Tensor<f32, [?, ?], Memory::HBM>, x: 
           }
           a[t] = maximum;
         }
-        block_max!(b, a, threads);
-        for t in 0..1 across lanes { row_max[t] = b[0]; }
-        for d in 0..dim across lanes(256) { out[row][d] = (x[base + d] - row_max[0]).fast_exp(); }
+        let row_max: f32 = lanes::max(&a, threads);
+        for d in 0..dim across lanes(256) { out[row][d] = (x[base + d] - row_max).fast_exp(); }
         for t in 0..1024 across lanes {
           let mut sum: f32 = 0.0;
           if t < threads {
@@ -33,8 +30,8 @@ pub fn glm_vx_spawn_softmax_rows(out: &mut Tensor<f32, [?, ?], Memory::HBM>, x: 
           }
           a[t] = sum;
         }
-        block_sum!(b, a, threads);
-        for d in 0..dim across lanes(256) { out[row][d] = out[row][d] / b[0]; }
+        let total: f32 = lanes::sum(&a, threads);
+        for d in 0..dim across lanes(256) { out[row][d] = out[row][d] / total; }
       }
     }
   }

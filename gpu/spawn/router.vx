@@ -74,9 +74,9 @@ pub fn glm_vx_spawn_router(indices: &mut Tensor<i32, [?], Memory::HBM>, weights:
           if lane < k { value = weights[lane]; }
           sa[lane] = value;
         }
-        warp_sums!(sb, sa, 1);
+        let total: f32 = lanes::sum(&sa, 32);
         for lane in 0..32 across lanes {
-          if lane < k { weights[lane] = weights[lane] / (sb[0] + 0.00000000000000000001) * scale; }
+          if lane < k { weights[lane] = weights[lane] / (total + 0.00000000000000000001) * scale; }
         }
       }
     }

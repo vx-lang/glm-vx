@@ -1,7 +1,7 @@
 // glm_vx_gpu_index_scores through Vx's own GPU path: DSA index scores, one warp of 32 lanes per
 // token (four per block) and all heads in one launch. score = sum_h weights[h] *
 // relu(dot(q_h, key) * scale); the caller supplies causal keys and weights already scaled by
-// heads**-0.5. Each head is a warp sum (device.vx), then one lane per token adds its term.
+// heads**-0.5. Each head is a lanes::sum over the token's subgroup, added to its score.
 // spawn-include: device.vx
 
 pub fn glm_vx_spawn_index_scores(out: &mut Tensor<f32, [?], Memory::HBM>, q: &Tensor<f32, [?], Memory::HBM>,
@@ -9,33 +9,29 @@ pub fn glm_vx_spawn_index_scores(out: &mut Tensor<f32, [?], Memory::HBM>, q: &Te
                                  tokens: i32, heads: i32, dim: i32, scale: f32) -> void {
   spawn on(Topology::Device) {
     for tb in 0..(tokens - 1) / 4 + 1 across blocks {
-      let mut a = unsafe { Tensor<f32, [128], Memory::SMEM>::uninit() };
-      let mut b = unsafe { Tensor<f32, [128], Memory::SMEM>::uninit() };
-      let mut score = unsafe { Tensor<f32, [4], Memory::SMEM>::uninit() };
-      for w in 0..4 across lanes { score[w] = 0.0; }
-      for head in 0..heads {
-        for w in 0..4 across lanes { for lane in 0..32 across lanes {
-          let token: i32 = tb * 4 + w;
-          let mut dot: f32 = 0.0;
-          if token < tokens {
-            let mut d: i32 = lane;
-            while d < dim {
-              dot = dot + q[head * dim + d] * keys[token * dim + d];
-              d = d + 32;
+      let mut a = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
+      for w in 0..4 across subgroups {
+        let mut score: f32 = 0.0;
+        for head in 0..heads {
+          for lane in 0..32 across lanes {
+            let token: i32 = tb * 4 + w;
+            let mut dot: f32 = 0.0;
+            if token < tokens {
+              let mut d: i32 = lane;
+              while d < dim {
+                dot = dot + q[head * dim + d] * keys[token * dim + d];
+                d = d + 32;
+              }
             }
+            a[w][lane] = dot;
           }
-          a[w * 32 + lane] = dot;
-        } }
-        warp_sums!(b, a, 4);
-        for w in 0..4 across lanes {
-          let scaled: f32 = b[w * 32] * scale;
-          let mut activated: f32 = scaled;
-          if activated < 0.0 { activated = 0.0; }
-          score[w] = score[w] + weights[head] * activated;
+          let total: f32 = lanes::sum(&a[w], 32);
+          // A name computed from a lane sum does not count as uniform yet, so `total * scale`
+          // is written out where `scaled` would be.
+          let activated: f32 = if total * scale < 0.0 { 0.0 } else { total * scale };
+          score = score + weights[head] * activated;
         }
-      }
-      for w in 0..4 across lanes {
-        if tb * 4 + w < tokens && heads > 0 && dim > 0 { out[tb * 4 + w] = score[w]; }
+        if tb * 4 + w < tokens && heads > 0 && dim > 0 { out[tb * 4 + w] = score; }
       }
     }
   }

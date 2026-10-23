@@ -1,6 +1,6 @@
 // glm_vx_gpu_matvec through Vx's own GPU path: out[rows] = weight[rows, cols] x[cols], one
-// warp of 32 lanes per row, four rows per block, adjacent lanes on adjacent columns, then the
-// warp sum of device.vx. Same arithmetic order as the hand kernel, so results should be
+// subgroup of 32 lanes per row, four rows per block, adjacent lanes on adjacent columns, then
+// lanes::sum over the subgroup. Same arithmetic order as the hand kernel, so results should be
 // bitwise equal.
 // spawn-include: device.vx
 
@@ -8,23 +8,22 @@ pub fn glm_vx_spawn_matvec(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Ten
                            x: &Tensor<f32, [?], Memory::HBM>, rows: i32, cols: i32) -> void {
   spawn on(Topology::Device) {
     for rb in 0..(rows - 1) / 4 + 1 across blocks {
-      let mut a = unsafe { Tensor<f32, [128], Memory::SMEM>::uninit() };
-      let mut b = unsafe { Tensor<f32, [128], Memory::SMEM>::uninit() };
-      for w in 0..4 across lanes { for lane in 0..32 across lanes {
-        let row: i32 = rb * 4 + w;
-        let mut sum: f32 = 0.0;
-        if row < rows {
-          let mut c: i32 = lane;
-          while c < cols {
-            sum = sum + weight[row * cols + c] * x[c];
-            c = c + 32;
+      let mut a = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
+      for w in 0..4 across subgroups {
+        for lane in 0..32 across lanes {
+          let row: i32 = rb * 4 + w;
+          let mut sum: f32 = 0.0;
+          if row < rows {
+            let mut c: i32 = lane;
+            while c < cols {
+              sum = sum + weight[row * cols + c] * x[c];
+              c = c + 32;
+            }
           }
+        a[w][lane] = sum;
         }
-        a[w * 32 + lane] = sum;
-      } }
-      warp_sums!(b, a, 4);
-      for w in 0..4 across lanes {
-        if rb * 4 + w < rows && cols >= 0 { out[rb * 4 + w] = b[w * 32]; }
+        let total: f32 = lanes::sum(&a[w], 32);
+        if rb * 4 + w < rows && cols >= 0 { out[rb * 4 + w] = total; }
       }
     }
   }

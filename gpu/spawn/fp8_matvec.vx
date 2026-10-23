@@ -8,37 +8,36 @@ pub fn glm_vx_spawn_fp8_matvec(out: &mut Tensor<f32, [?], Memory::HBM>, weight: 
                                rows: i32, cols: i32) -> void {
   spawn on(Topology::Device) {
     for rb in 0..(rows - 1) / 4 + 1 across blocks {
-      let mut a = unsafe { Tensor<f32, [128], Memory::SMEM>::uninit() };
-      let mut b = unsafe { Tensor<f32, [128], Memory::SMEM>::uninit() };
-      for w in 0..4 across lanes { for lane in 0..32 across lanes {
-        let row: i64 = ((rb * 4 + w) as i64);
-        let mut sum: f32 = 0.0;
-        if row < (rows as i64) {
-          let k: i64 = cols as i64;
-          let scale_cols: i64 = (k + 127) / 128;
-          let row_base: i64 = row * k;
-          let scale_base: i64 = (row / 128) * scale_cols;
-          let mut tile: i64 = 0;
-          while tile < scale_cols {
-            let scale: f32 = scales[scale_base + tile];
-            let tile_base: i64 = tile * 128 + (lane as i64);
-            let mut step: i32 = 0;
-            while step < 4 {
-              let col: i64 = tile_base + ((step * 32) as i64);
-              if col < k {
-                let value: f32 = fp8_decode!(weight[row_base + col] as i32);
-                sum = sum + (value * scale) * x[col];
+      let mut a = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
+      for w in 0..4 across subgroups {
+        for lane in 0..32 across lanes {
+          let row: i64 = ((rb * 4 + w) as i64);
+          let mut sum: f32 = 0.0;
+          if row < (rows as i64) {
+            let k: i64 = cols as i64;
+            let scale_cols: i64 = (k + 127) / 128;
+            let row_base: i64 = row * k;
+            let scale_base: i64 = (row / 128) * scale_cols;
+            let mut tile: i64 = 0;
+            while tile < scale_cols {
+              let scale: f32 = scales[scale_base + tile];
+              let tile_base: i64 = tile * 128 + (lane as i64);
+              let mut step: i32 = 0;
+              while step < 4 {
+                let col: i64 = tile_base + ((step * 32) as i64);
+                if col < k {
+                  let value: f32 = fp8_decode!(weight[row_base + col] as i32);
+                  sum = sum + (value * scale) * x[col];
+                }
+                step = step + 1;
               }
-              step = step + 1;
+              tile = tile + 1;
             }
-            tile = tile + 1;
           }
+          a[w][lane] = sum;
         }
-        a[w * 32 + lane] = sum;
-      } }
-      warp_sums!(b, a, 4);
-      for w in 0..4 across lanes {
-        if rb * 4 + w < rows && cols >= 0 { out[rb * 4 + w] = b[w * 32]; }
+        let total: f32 = lanes::sum(&a[w], 32);
+        if rb * 4 + w < rows && cols >= 0 { out[rb * 4 + w] = total; }
       }
     }
   }

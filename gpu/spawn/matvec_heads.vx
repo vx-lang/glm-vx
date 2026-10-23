@@ -10,26 +10,25 @@ pub fn glm_vx_spawn_matvec_heads(out: &mut Tensor<f32, [?, ?], Memory::HBM>, wei
   spawn on(Topology::Device) {
     for h in 0..heads across blocks {
       for rb in 0..(rows - 1) / 4 + 1 across blocks {
-        let mut a = unsafe { Tensor<f32, [128], Memory::SMEM>::uninit() };
-        let mut b = unsafe { Tensor<f32, [128], Memory::SMEM>::uninit() };
-        for w in 0..4 across lanes { for lane in 0..32 across lanes {
-          let r: i64 = ((rb * 4 + w) as i64);
-          let mut sum: f32 = 0.0;
-          if r < (rows as i64) {
-            let wbase: i64 = (h as i64) * (w_stride as i64) + r * (cols as i64);
-            let xbase: i64 = (h as i64) * (x_stride as i64);
-            let mut c: i32 = lane;
-            while c < cols {
-              sum = sum + weight[wbase + (c as i64)] * x[xbase + (c as i64)];
-              c = c + 32;
+        let mut a = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
+        for w in 0..4 across subgroups {
+          for lane in 0..32 across lanes {
+            let r: i64 = ((rb * 4 + w) as i64);
+            let mut sum: f32 = 0.0;
+            if r < (rows as i64) {
+              let wbase: i64 = (h as i64) * (w_stride as i64) + r * (cols as i64);
+              let xbase: i64 = (h as i64) * (x_stride as i64);
+              let mut c: i32 = lane;
+              while c < cols {
+                sum = sum + weight[wbase + (c as i64)] * x[xbase + (c as i64)];
+                c = c + 32;
+              }
             }
+            a[w][lane] = sum;
           }
-          a[w * 32 + lane] = sum;
-        } }
-        warp_sums!(b, a, 4);
-        // A head's rows fit in its row of out, so heads do not overlap.
-        for w in 0..4 across lanes {
-          if rb * 4 + w < rows && rows <= out_stride && cols >= 0 { out[h][rb * 4 + w] = b[w * 32]; }
+          let total: f32 = lanes::sum(&a[w], 32);
+          // A head's rows fit in its row of out, so heads do not overlap.
+          if rb * 4 + w < rows && rows <= out_stride && cols >= 0 { out[h][rb * 4 + w] = total; }
         }
       }
     }

@@ -12,7 +12,6 @@ pub fn glm_vx_spawn_residual_rmsnorm(out: &mut Tensor<f32, [?, ?], Memory::HBM>,
     for row in 0..rows across blocks {
       if dim > 0 && eps > 0.0 && threads >= 32 && threads <= 1024 && threads % 32 == 0 {
         let mut a = unsafe { Tensor<f32, [1024], Memory::SMEM>::uninit() };
-        let mut b = unsafe { Tensor<f32, [1024], Memory::SMEM>::uninit() };
         let base: i32 = row * dim;
         for d in 0..dim across lanes(256) { residual_out[row][d] = x[base + d] + residual[base + d]; }
         for t in 0..1024 across lanes {
@@ -27,9 +26,9 @@ pub fn glm_vx_spawn_residual_rmsnorm(out: &mut Tensor<f32, [?, ?], Memory::HBM>,
           }
           a[t] = ss;
         }
-        block_sum!(b, a, threads);
+        let total: f32 = lanes::sum(&a, threads);
         for d in 0..dim across lanes(256) {
-          let inv: f32 = 1.0 / (b[0] / (dim as f32) + eps).sqrt();
+          let inv: f32 = 1.0 / (total / (dim as f32) + eps).sqrt();
           out[row][d] = residual_out[row][d] * inv * weight[d];
         }
       }

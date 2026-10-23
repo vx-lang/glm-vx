@@ -11,8 +11,6 @@ pub fn glm_vx_spawn_layernorm(out: &mut Tensor<f32, [?, ?], Memory::HBM>, x: &Te
     for row in 0..rows across blocks {
       if dim > 0 && eps > 0.0 && threads >= 32 && threads <= 1024 && threads % 32 == 0 {
         let mut a = unsafe { Tensor<f32, [1024], Memory::SMEM>::uninit() };
-        let mut b = unsafe { Tensor<f32, [1024], Memory::SMEM>::uninit() };
-        let mut mean = unsafe { Tensor<f32, [1], Memory::SMEM>::uninit() };
         let base: i32 = row * dim;
         for t in 0..1024 across lanes {
           let mut s: f32 = 0.0;
@@ -22,24 +20,24 @@ pub fn glm_vx_spawn_layernorm(out: &mut Tensor<f32, [?, ?], Memory::HBM>, x: &Te
           }
           a[t] = s;
         }
-        block_sum!(b, a, threads);
-        for t in 0..1 across lanes { mean[t] = b[0] / (dim as f32); }
+        let sum: f32 = lanes::sum(&a, threads);
+        let mean: f32 = sum / (dim as f32);
         for t in 0..1024 across lanes {
           let mut ss: f32 = 0.0;
           if t < threads {
             let mut d: i32 = t;
             while d < dim {
-              let c: f32 = x[base + d] - mean[0];
+              let c: f32 = x[base + d] - mean;
               ss = ss + c * c;
               d = d + threads;
             }
           }
           a[t] = ss;
         }
-        block_sum!(b, a, threads);
+        let squares: f32 = lanes::sum(&a, threads);
         for d in 0..dim across lanes(256) {
-          let inv: f32 = 1.0 / (b[0] / (dim as f32) + eps).sqrt();
-          out[row][d] = (x[base + d] - mean[0]) * inv * weight[d] + bias[d];
+          let inv: f32 = 1.0 / (squares / (dim as f32) + eps).sqrt();
+          out[row][d] = (x[base + d] - mean) * inv * weight[d] + bias[d];
         }
       }
     }

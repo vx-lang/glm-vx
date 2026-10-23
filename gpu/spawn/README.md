@@ -16,19 +16,20 @@ also cover every pass. A kernel whose rows have a run-time length writes a rank-
 times numbers; `launch.py` passes a rank-2 `DeviceTensor` as its 7-word descriptor. A row's
 index may then be anything, as in topk's `hist[t][digit]`.
 
-All 25 kernels build with one vxc, from Vx main (1bda2cb7 on: `device.vx` uses `if` values that read
-a tensor, #2112, and several libraries in one process each run their own kernel, #2134), which no longer parses
+All 25 kernels build with one vxc, from Vx PR #2117 (2809a55b, the `lanes::` reductions, with main's
+#2134 so that several libraries in one process each run their own kernel; Vx main once it merges), which no longer parses
 `grid([..]) block(n)`. What the proof takes in a loop shapes them:
 
 - **No calls it cannot read.** A function call (other than the stdlib's pure scalar ones, such
   as `f32::sqrt` and `f32::fast_exp`), an `mlir!` block and `barrier()` are refused in an
-  `across` loop. So `device.vx` holds macros, which expand in the loop: the decoders, `sigmoid`,
-  and the reductions.
-- **Reductions in shared memory.** A warp sum is five lane loops on shared memory (offsets 16, 8,
-  4, 2, 1, as vxk_warp_sum), each reading one tensor and writing another, since a pass may not
-  read an element that another pass of the same loop writes. Each lane loop ends with a barrier,
-  so a warp sum costs five barriers where the hand kernels shuffle: correct first, until
-  reductions become library routines (Vx #260).
+  `across` loop. So `device.vx` holds macros, which expand in the loop: the decoders and
+  `sigmoid`.
+- **Reductions are Vx's.** `lanes::sum` and `lanes::max` (Vx #260, PR #2117) combine a tensor's
+  elements over the lanes of a block or of a subgroup, in the hand kernels' order (offsets 16, 8,
+  4, 2, 1 with shuffles, then a second group over the warps' results), so the results stay the
+  same to the last bit. A warp-per-row kernel runs `for w in 0..4 across subgroups`, each
+  subgroup's lanes writing its row of a [4, 32] tensor and summing it. A name computed from a
+  lane sum does not count as uniform yet (index_scores writes `total * scale` out twice).
 - **Results that do not depend on the launch.** A block reduction follows the hand kernel
   launched with `threads` threads, which the norms, softmax and mla_partial take as a parameter:
   a 1024-lane loop in which lane t < threads sums d = t, t + threads, .. and the rest add zeros.
@@ -63,24 +64,24 @@ Two launches use the same PTX:
 | `scaled_add.vx` | `glm_vx_gpu_scaled_add` | 20 |
 | `rope_glm.vx` | `glm_vx_gpu_rope_glm` | 28 |
 | `rope_strided.vx` | `glm_vx_gpu_rope_strided` | 28 |
-| `matvec.vx` | `glm_vx_gpu_matvec` | 38 |
-| `matvec_heads.vx` | `glm_vx_gpu_matvec_heads` (out is [heads, out_stride]) | 48 |
-| `index_scores.vx` | `glm_vx_gpu_index_scores` | 43 |
-| `bf16_matvec.vx` | `glm_vx_gpu_bf16_matvec` | 47 |
-| `bf16_matmul.vx` | `glm_vx_gpu_bf16_matmul` (out is [M, N]) | 53 |
-| `int4_matvec.vx` | `glm_vx_gpu_int4_matvec` | 50 |
-| `int4_matmul.vx` | `glm_vx_gpu_int4_matmul` (out is [M, N]) | 56 |
-| `fp8_matvec.vx` | `glm_vx_gpu_fp8_matvec` | 61 |
-| `fp8_matmul.vx` | `glm_vx_gpu_fp8_matmul` (out is [M, N]) | 62 |
+| `matvec.vx` | `glm_vx_gpu_matvec` | 25 |
+| `matvec_heads.vx` | `glm_vx_gpu_matvec_heads` (out is [heads, out_stride]) | 32 |
+| `index_scores.vx` | `glm_vx_gpu_index_scores` | 29 |
+| `bf16_matvec.vx` | `glm_vx_gpu_bf16_matvec` | 31 |
+| `bf16_matmul.vx` | `glm_vx_gpu_bf16_matmul` (out is [M, N]) | 37 |
+| `int4_matvec.vx` | `glm_vx_gpu_int4_matvec` | 33 |
+| `int4_matmul.vx` | `glm_vx_gpu_int4_matmul` (out is [M, N]) | 40 |
+| `fp8_matvec.vx` | `glm_vx_gpu_fp8_matvec` | 45 |
+| `fp8_matmul.vx` | `glm_vx_gpu_fp8_matmul` (out is [M, N]) | 46 |
 | `gemm_f32.vx` | `glm_vx_gpu_gemm_f32` | 32 |
 | `topk.vx` | `glm_vx_gpu_topk_stable` (its own scratch: `gpu.topk.spawn_buffers`) | 32 |
-| `rmsnorm_rows.vx` | `glm_vx_gpu_rmsnorm_rows`, and `glm_vx_gpu_rmsnorm` as rows = 1 | 38 |
-| `residual_rmsnorm.vx` | `glm_vx_gpu_residual_rmsnorm` | 36 |
-| `layernorm.vx` | `glm_vx_gpu_layernorm` | 40 |
-| `softmax_rows.vx` | `glm_vx_gpu_softmax_rows`, and `glm_vx_gpu_softmax` as rows = 1 | 40 |
+| `rmsnorm_rows.vx` | `glm_vx_gpu_rmsnorm_rows`, and `glm_vx_gpu_rmsnorm` as rows = 1 | 23 |
+| `residual_rmsnorm.vx` | `glm_vx_gpu_residual_rmsnorm` | 24 |
+| `layernorm.vx` | `glm_vx_gpu_layernorm` | 26 |
+| `softmax_rows.vx` | `glm_vx_gpu_softmax_rows`, and `glm_vx_gpu_softmax` as rows = 1 | 29 |
 | `swiglu.vx` | `glm_vx_gpu_swiglu` | 25 |
-| `router.vx` | `glm_vx_gpu_router` | 28 |
-| `mla_partial.vx` | `glm_vx_gpu_mla_partial` (numerator [tasks, rank], stats [tasks, 2]) | 40 |
+| `router.vx` | `glm_vx_gpu_router` | 27 |
+| `mla_partial.vx` | `glm_vx_gpu_mla_partial` (numerator [tasks, rank], stats [tasks, 2]) | 27 |
 | `mla_merge.vx` | `glm_vx_gpu_mla_merge` (out is [heads, rank]) | 32 |
 
 All assemble with ptxas for sm_80 with no spills; none has run on a GPU yet. The norms, softmax
@@ -133,23 +134,20 @@ size, stride). `launch.py` takes the arguments by name.
 descriptor layout differ from the PTX, whose mutable tensors are not the ones the kernel
 stores to, or whose element types differ from the width of the loads made through each tensor
 (address arithmetic is traced from the descriptor's pointer).
-`device.vx` holds macros: the bf16, binary16, INT4 and FP8 decodes, `sigmoid`, and the warp and
-block sums and maxima on shared memory.
+`device.vx` holds macros: the bf16, binary16, INT4 and FP8 decodes, and `sigmoid`.
 
 ## Performance: what to measure first (from the PTX, not yet timed)
 
-- **Shared-memory reductions.** Each lane-loop step is a barrier: a warp-per-row reduction is 5
-  steps, a block reduction 11 (`block_sum!`, against the hand kernels' shuffles and one or two
-  barriers). It hurts most where a reduction sits in a loop: `mla_partial` does one per selected
-  token (about 13 barriers a token with 1024 lanes), `index_scores` one per head. Vx #260.
+- **Reductions.** With `lanes::` (Vx #260), a warp-per-row kernel has one barrier where it had
+  seven, a block reduction two where it had eleven, and every kernel with a reduction uses 13 to
+  17 fewer registers. router's argmax is still five lane loops on shared memory, until Vx's argmax.
 - **Inner loops are not unrolled.** The hand kernels' `for` over `(cols + 31) / 32` steps unrolls
   four times (four load pairs in flight); the spawn kernels' `while` keeps one. Unrolled by hand in
-  the same order (bit for bit the same), matvec goes from 38 to 48 registers (the hand kernel: 30),
-  so whether it pays is a measurement: try it on matvec, bf16_matvec, matvec_heads, bf16_matmul and
-  index_scores.
-- **Registers.** The spawn kernels use 17 to 62 (table above): the matvecs 38 to 61, where the
-  hand ones use 26 to 32 (the lane loops' indices, and 64-bit addressing). vxc's device code is LLVM O2 (MLIR's
-  NVVM target default); O3 adds 10 to 30 registers to most kernels and unrolls none of these loops.
+  the same order (bit for bit the same) it costs registers, so whether it pays is a measurement:
+  try it on matvec, bf16_matvec, matvec_heads, bf16_matmul and index_scores.
+- **Registers.** The spawn kernels use 17 to 46 (table above); matvec, bf16_matvec and matvec_heads 25 to 32,
+  as the hand ones (26 to 32). vxc's device code is LLVM O2 (MLIR's NVVM target default); O3 adds
+  10 to 30 registers to most kernels and unrolls none of these loops.
 - **topk** keeps its per-lane histograms in global memory (`scratch`, 256 x 256 per pass).
 - Neither side contracts to FMA (`mul.rn` + `add.rn`), so that is not a difference.
 
@@ -157,7 +155,8 @@ block sums and maxima on shared memory.
 
 | Need | Today | Vx issue |
 | --- | --- | --- |
-| Reductions (sum, max) in an `across` loop | lane loops on shared memory, five barriers per warp sum; to become library routines, OpenMP style | #260 |
+| Reductions (sum, max) in an `across` loop | `lanes::sum` and `lanes::max`, ordered as the hand kernels; PR #2117, not merged: build vxc from it. Argmax is next; router's is lane loops on shared memory | #260 |
+| A name computed from a lane sum as uniform | E6032 on `let scaled = total * scale;` then `if scaled < 0.0`; index_scores writes the expression out | (to file) |
 | Device functions in an `across` loop | refused (the proof does not read their bodies); the helpers are macros | #2076 D4 |
 | `mlir!` blocks in an `across` loop (exp as the hand kernels, wgmma, TMA) | refused; exp is libdevice expf, the tensor-core kernels are not built | #2076 D1 to D3 |
 | A stable entry name and documented parameter order | `vxc --emit-ptx` (PR #1964): the entry is the function's name, the parameters its own in declared order | #251 |

@@ -19,7 +19,6 @@ pub fn glm_vx_spawn_mla_partial(numerator: &mut Tensor<f32, [?, ?], Memory::HBM>
       if heads > 0 && rank > 0 && rope_dim >= 0 && tokens >= 0 && count >= 0 && selection_stride >= 0 && splits > 0
          && threads >= 32 && threads <= 1024 && threads % 32 == 0 && threads >= rank {
         let mut a = unsafe { Tensor<f32, [1024], Memory::SMEM>::uninit() };
-        let mut b = unsafe { Tensor<f32, [1024], Memory::SMEM>::uninit() };
         let mut acc = unsafe { Tensor<f32, [1024], Memory::SMEM>::uninit() };
         let mut state = unsafe { Tensor<f32, [2], Memory::SMEM>::uninit() };
         let h: i32 = task / splits;
@@ -42,11 +41,11 @@ pub fn glm_vx_spawn_mla_partial(numerator: &mut Tensor<f32, [?, ?], Memory::HBM>
             }
             a[t] = dot;
           }
-          block_sum!(b, a, threads);
+          let dot: f32 = lanes::sum(&a, threads);
           for t in 0..1024 across lanes {
             let token: i32 = selected[h * selection_stride + j];
             if token >= 0 && token < tokens {
-              let score: f32 = b[0] * scale;
+              let score: f32 = dot * scale;
               let m: f32 = state[0];
               let l: f32 = state[1];
               let mut next_m: f32 = score;
@@ -65,7 +64,7 @@ pub fn glm_vx_spawn_mla_partial(numerator: &mut Tensor<f32, [?, ?], Memory::HBM>
           for t in 0..1 across lanes {
             let token: i32 = selected[h * selection_stride + j];
             if token >= 0 && token < tokens {
-              let score: f32 = b[0] * scale;
+              let score: f32 = dot * scale;
               let m: f32 = state[0];
               let l: f32 = state[1];
               let mut next_m: f32 = score;
