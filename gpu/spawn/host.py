@@ -6,12 +6,10 @@ runtime runs a region's loops in order on the host: every block, every lane loop
 GPU's, except where the two targets' arithmetic differs (exp, and contraction to FMA by ptxas).
 
 The library must not see a GPU, or it launches on it with host pointers; so each call runs in a
-worker process started with CUDA_VISIBLE_DEVICES empty. Each library gets its own worker: every
-Vx library names its kernel vx_npu_kernel_0, and Vx's runtime finds a host kernel with
-dlsym(RTLD_DEFAULT, ..), so a second library in a process runs the first one's kernel (the same
-name keys Vx's cache of loaded GPU kernels). A tensor is a C-contiguous NumPy array
-(a rank-1 parameter takes any array as its flat view), a scalar a Python number; the call returns
-the mutable tensors by name.
+worker process started with CUDA_VISIBLE_DEVICES empty, one for every library (Vx main 1bda2cb7
+on, #2134: each library runs its own kernel, though all of them name it vx_npu_kernel_0). A
+tensor is a C-contiguous NumPy array (a rank-1 parameter takes any array as its flat view), a
+scalar a Python number; the call returns the mutable tensors by name.
 """
 import concurrent.futures
 import ctypes as C
@@ -67,13 +65,13 @@ def _call_in_worker(ptx_path, values):
 
 
 class Host:
-    """Worker processes that run kernel libraries on the CPU, one per library; close() stops them."""
+    """A worker process that runs kernel libraries on the CPU; close() stops it."""
 
     def __init__(self):
-        self._pools = {}
+        self._worker = None
 
-    def _pool(self, ptx_path):
-        if ptx_path not in self._pools:
+    def _pool(self):
+        if self._worker is None:
             saved = os.environ.get('CUDA_VISIBLE_DEVICES')
             os.environ['CUDA_VISIBLE_DEVICES'] = ''
             try:
@@ -84,14 +82,14 @@ class Host:
                     del os.environ['CUDA_VISIBLE_DEVICES']
                 else:
                     os.environ['CUDA_VISIBLE_DEVICES'] = saved
-            self._pools[ptx_path] = pool
-        return self._pools[ptx_path]
+            self._worker = pool
+        return self._worker
 
     def __call__(self, ptx_path, **values):
         ptx_path = str(Path(ptx_path).resolve())
-        return self._pool(ptx_path).submit(_call_in_worker, ptx_path, values).result()
+        return self._pool().submit(_call_in_worker, ptx_path, values).result()
 
     def close(self):
-        for pool in self._pools.values():
-            pool.shutdown()
-        self._pools.clear()
+        if self._worker is not None:
+            self._worker.shutdown()
+            self._worker = None

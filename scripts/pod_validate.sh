@@ -13,8 +13,8 @@
 # layers, default 4), TOKENS (default 48), STRESS (concurrent stress processes, default 8).
 # Use OMP_NUM_THREADS well below the host's vCPU count (NumPy thrashes on 128-vCPU pods).
 #
-# Toolchain: one vxc bundle from Vx main (a6efd340 or later: the `across` loops of #2095 to #2097, the
-# `if` values of #2112 in device.vx's macros, and
+# Toolchain: one vxc bundle from Vx main (1bda2cb7 or later: the `across` loops of #2095 to #2097, the
+# `if` values of #2112 in device.vx's macros, each library's own kernel in one process (#2134), and
 # vx_cuda_set_stream of #2100, which the graph step needs; host.txt says whether the dispatch library
 # exports it). VXC, and VX_DISPATCH_LIB or <bundle>/lib/libvx_cuda_dispatch.so.
 # Do not export VX_CUDA_SYNC or VX_TIME_KERNEL for the whole run: Vx stops a graph capture on either.
@@ -82,8 +82,6 @@ step test-quant-hardware hw gpu/test_quant_hardware.py
 step test-spawn-hardware hw gpu/test_spawn_hardware.py
 # The same libraries on the CPU (Vx runs the regions in order with no device visible), against NumPy.
 step test-spawn-vx-host hw gpu/test_spawn_vx_host.py
-# Until Vx #2114 is fixed, a second Vx library in one process launches the first one's kernel
-# (every library's kernel is vx_npu_kernel_0, the key of Vx's cache), so the next two steps fail.
 step test-spawn-vx-launch hw gpu/test_spawn_vx_launch.py
 hw_sync() { VX_CUDA_SYNC=1 hw "$@"; }  # Vx waits after each launch, and names the kernel on a fault
 step test-spawn-vx-launch-sync hw_sync gpu/test_spawn_vx_launch.py
