@@ -154,37 +154,27 @@ macro_rules! warp_maxes {
           for dv_w in 0..$rows across lanes { for dv_i in 0..16 across lanes {
             let dv_a: f32 = $src[dv_w * 32 + dv_i];
             let dv_b: f32 = $src[dv_w * 32 + dv_i + 16];
-            let mut dv_m: f32 = dv_a;
-            if dv_b > dv_a { dv_m = dv_b; }
-            $dst[dv_w * 32 + dv_i] = dv_m;
+            $dst[dv_w * 32 + dv_i] = if dv_b > dv_a { dv_b } else { dv_a };
           } }
           for dv_w in 0..$rows across lanes { for dv_i in 0..8 across lanes {
             let dv_a: f32 = $dst[dv_w * 32 + dv_i];
             let dv_b: f32 = $dst[dv_w * 32 + dv_i + 8];
-            let mut dv_m: f32 = dv_a;
-            if dv_b > dv_a { dv_m = dv_b; }
-            $src[dv_w * 32 + dv_i] = dv_m;
+            $src[dv_w * 32 + dv_i] = if dv_b > dv_a { dv_b } else { dv_a };
           } }
           for dv_w in 0..$rows across lanes { for dv_i in 0..4 across lanes {
             let dv_a: f32 = $src[dv_w * 32 + dv_i];
             let dv_b: f32 = $src[dv_w * 32 + dv_i + 4];
-            let mut dv_m: f32 = dv_a;
-            if dv_b > dv_a { dv_m = dv_b; }
-            $dst[dv_w * 32 + dv_i] = dv_m;
+            $dst[dv_w * 32 + dv_i] = if dv_b > dv_a { dv_b } else { dv_a };
           } }
           for dv_w in 0..$rows across lanes { for dv_i in 0..2 across lanes {
             let dv_a: f32 = $dst[dv_w * 32 + dv_i];
             let dv_b: f32 = $dst[dv_w * 32 + dv_i + 2];
-            let mut dv_m: f32 = dv_a;
-            if dv_b > dv_a { dv_m = dv_b; }
-            $src[dv_w * 32 + dv_i] = dv_m;
+            $src[dv_w * 32 + dv_i] = if dv_b > dv_a { dv_b } else { dv_a };
           } }
           for dv_w in 0..$rows across lanes {
             let dv_a: f32 = $src[dv_w * 32];
             let dv_b: f32 = $src[dv_w * 32 + 1];
-            let mut dv_m: f32 = dv_a;
-            if dv_b > dv_a { dv_m = dv_b; }
-            $dst[dv_w * 32] = dv_m;
+            $dst[dv_w * 32] = if dv_b > dv_a { dv_b } else { dv_a };
           }
         }
     };
@@ -199,9 +189,7 @@ macro_rules! block_sum {
         unsafe {
           warp_sums!($dst, $src, 32);
           for dv_i in 0..32 across lanes {
-            let mut dv_v: f32 = 0.0;
-            if dv_i < $threads / 32 { dv_v = $dst[dv_i * 32]; }
-            $src[dv_i] = dv_v;
+            $src[dv_i] = if dv_i < $threads / 32 { $dst[dv_i * 32] } else { 0.0 };
           }
           warp_sums!($dst, $src, 1);
         }
@@ -212,9 +200,7 @@ macro_rules! block_max {
         unsafe {
           warp_maxes!($dst, $src, 32);
           for dv_i in 0..32 across lanes {
-            let mut dv_v: f32 = $dst[0];
-            if dv_i < $threads / 32 { dv_v = $dst[dv_i * 32]; }
-            $src[dv_i] = dv_v;
+            $src[dv_i] = if dv_i < $threads / 32 { $dst[dv_i * 32] } else { $dst[0] };
           }
           warp_maxes!($dst, $src, 1);
         }

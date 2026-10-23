@@ -16,7 +16,8 @@ also cover every pass. A kernel whose rows have a run-time length writes a rank-
 times numbers; `launch.py` passes a rank-2 `DeviceTensor` as its 7-word descriptor. A row's
 index may then be anything, as in topk's `hist[t][digit]`.
 
-All 25 kernels build with one vxc, from Vx main (b151bb8c on), which no longer parses
+All 25 kernels build with one vxc, from Vx main (a6efd340 on: `device.vx` uses `if` values that read
+a tensor, #2112), which no longer parses
 `grid([..]) block(n)`. What the proof takes in a loop shapes them:
 
 - **No calls it cannot read.** A function call (other than the stdlib's pure scalar ones, such
@@ -138,8 +139,6 @@ block sums and maxima on shared memory.
 | A stable entry name and documented parameter order | `vxc --emit-ptx` (PR #1964): the entry is the function's name, the parameters its own in declared order | #251 |
 | Correctly rounded sqrt / div (the norms) | `sqrt.approx` / `rsqrt.approx` in 390c2534; `sqrt.rn` + `rcp.rn` with PR #1955 | #1944 |
 | Bit casts (`f32::from_bits`) | not a pure call to the proof; bf16 decode uses exact arithmetic instead | #1943 |
-| `if` as a value that reads a tensor | the flat code generator declines it and the GPU lowering then fails; the macros assign in each branch | #2108 |
-| `blk + t` as a write index (equal coefficients) | refused by the order of the names; write `out[blk]` or `out[blk * 4 + t]` with t in 0..4 | #2109 |
 | Scalars passed by value | E6003 unless `machine.vx` lists CPU_DRAM as visible | #1947 |
 | Raw pointers in a region | silent host fallback before PR #1959, which takes them and warns on any other fallback; kernels take `[?]` tensors | #1945 |
 | Shared memory `::new()` | zero-fill races with other warps; use `unsafe { ::uninit() }` | #1946 |

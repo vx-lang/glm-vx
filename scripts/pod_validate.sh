@@ -13,7 +13,8 @@
 # layers, default 4), TOKENS (default 48), STRESS (concurrent stress processes, default 8).
 # Use OMP_NUM_THREADS well below the host's vCPU count (NumPy thrashes on 128-vCPU pods).
 #
-# Toolchain: one vxc bundle from Vx main (b151bb8c or later: the `across` loops of #2095 to #2097 and
+# Toolchain: one vxc bundle from Vx main (a6efd340 or later: the `across` loops of #2095 to #2097, the
+# `if` values of #2112 in device.vx's macros, and
 # vx_cuda_set_stream of #2100, which the graph step needs; host.txt says whether the dispatch library
 # exports it). VXC, and VX_DISPATCH_LIB or <bundle>/lib/libvx_cuda_dispatch.so.
 # Do not export VX_CUDA_SYNC or VX_TIME_KERNEL for the whole run: Vx stops a graph capture on either.
