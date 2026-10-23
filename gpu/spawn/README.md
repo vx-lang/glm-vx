@@ -16,8 +16,9 @@ also cover every pass. A kernel whose rows have a run-time length writes a rank-
 times numbers; `launch.py` passes a rank-2 `DeviceTensor` as its 7-word descriptor. A row's
 index may then be anything, as in topk's `hist[t][digit]`.
 
-All 25 kernels build with one vxc, from Vx PR #2117 (2809a55b, the `lanes::` reductions, with main's
-#2134 so that several libraries in one process each run their own kernel; Vx main once it merges), which no longer parses
+All 25 kernels build with one vxc, from Vx PR #2124 (952e8cdb, stacked on #2117's `lanes::` reductions,
+with main's #2134 so that several libraries in one process each run their own kernel; Vx main once they
+merge), which no longer parses
 `grid([..]) block(n)`. What the proof takes in a loop shapes them:
 
 - **No calls it cannot read.** A function call (other than the stdlib's pure scalar ones, such
@@ -28,8 +29,7 @@ All 25 kernels build with one vxc, from Vx PR #2117 (2809a55b, the `lanes::` red
   elements over the lanes of a block or of a subgroup, in the hand kernels' order (offsets 16, 8,
   4, 2, 1 with shuffles, then a second group over the warps' results), so the results stay the
   same to the last bit. A warp-per-row kernel runs `for w in 0..4 across subgroups`, each
-  subgroup's lanes writing its row of a [4, 32] tensor and summing it. A name computed from a
-  lane sum does not count as uniform yet (index_scores writes `total * scale` out twice).
+  subgroup's lanes writing its row of a [4, 32] tensor and summing it.
 - **Results that do not depend on the launch.** A block reduction follows the hand kernel
   launched with `threads` threads, which the norms, softmax and mla_partial take as a parameter:
   a 1024-lane loop in which lane t < threads sums d = t, t + threads, .. and the rest add zeros.
@@ -155,8 +155,7 @@ stores to, or whose element types differ from the width of the loads made throug
 
 | Need | Today | Vx issue |
 | --- | --- | --- |
-| Reductions (sum, max) in an `across` loop | `lanes::sum` and `lanes::max`, ordered as the hand kernels; PR #2117, not merged: build vxc from it. Argmax is next; router's is lane loops on shared memory | #260 |
-| A name computed from a lane sum as uniform | E6032 on `let scaled = total * scale;` then `if scaled < 0.0`; index_scores writes the expression out | (to file) |
+| Reductions (sum, max) in an `across` loop | `lanes::sum` and `lanes::max`, ordered as the hand kernels; PRs #2117 and #2124, not merged: build vxc from #2124. Argmax is next; router's is lane loops on shared memory | #260 |
 | Device functions in an `across` loop | refused (the proof does not read their bodies); the helpers are macros | #2076 D4 |
 | `mlir!` blocks in an `across` loop (exp as the hand kernels, wgmma, TMA) | refused; exp is libdevice expf, the tensor-core kernels are not built | #2076 D1 to D3 |
 | A stable entry name and documented parameter order | `vxc --emit-ptx` (PR #1964): the entry is the function's name, the parameters its own in declared order | #251 |

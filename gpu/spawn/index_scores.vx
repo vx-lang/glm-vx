@@ -26,9 +26,9 @@ pub fn glm_vx_spawn_index_scores(out: &mut Tensor<f32, [?], Memory::HBM>, q: &Te
             a[w][lane] = dot;
           }
           let total: f32 = lanes::sum(&a[w], 32);
-          // A name computed from a lane sum does not count as uniform yet, so `total * scale`
-          // is written out where `scaled` would be.
-          let activated: f32 = if total * scale < 0.0 { 0.0 } else { total * scale };
+          let scaled: f32 = total * scale;
+          let mut activated: f32 = scaled;
+          if activated < 0.0 { activated = 0.0; }
           score = score + weights[head] * activated;
         }
         if tb * 4 + w < tokens && heads > 0 && dim > 0 { out[tb * 4 + w] = score; }
