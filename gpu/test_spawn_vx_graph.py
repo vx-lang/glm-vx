@@ -70,8 +70,9 @@ def run_chain(launch, t, stream, *, say=None):
     """launch(kernel, stream, **values) for each step of the chain; say(name) before each."""
     steps = (('scale', dict(out=t['s'], x=t['x'], alpha=0.37, n=N)),
              ('add', dict(out=t['a'], a=t['s'], b=t['y'], n=N)),
-             ('rmsnorm_rows', dict(out=t['r'], x=t['a'], weight=t['w'], rows=ROWS, dim=DIM, eps=1e-5)),
-             ('softmax_rows', dict(out=t['o'], x=t['r'], rows=ROWS, dim=DIM)))
+             ('rmsnorm_rows', dict(out=t['r'].view((ROWS, DIM)), x=t['a'], weight=t['w'], rows=ROWS, dim=DIM, eps=1e-5,
+                                   threads=256)),
+             ('softmax_rows', dict(out=t['o'].view((ROWS, DIM)), x=t['r'], rows=ROWS, dim=DIM, threads=256)))
     for name, values in steps:
         if say:
             say(name)

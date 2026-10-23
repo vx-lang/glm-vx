@@ -12,6 +12,14 @@ def scratch_ints(tokens, k):
     return SCRATCH_BASE + 2 * max(min(k, tokens), 0)
 
 
+def spawn_buffers(tokens, k):
+    """(shape, dtype) of gpu/spawn/topk.vx's scratch, order_a and order_b: a histogram row per
+    lane, then a row per candidate of a lane's positions; and the sort's two buffers of the power
+    of two at or above min(k, tokens)."""
+    sort = 1 << (min(k, tokens) - 1).bit_length()
+    return [((256 + -(-tokens // 256), 256), 'int32'), ((sort,), 'int64'), ((sort,), 'int64')]
+
+
 class TopK:
     def __init__(self, module):
         self.context = module.context

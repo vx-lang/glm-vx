@@ -2,58 +2,62 @@
 // with one f32 scale per 128x128 block. experts == 0: weight[N, K] and
 // scales[ceil(N/128), ceil(K/128)] for all rows; experts > 0: stacked [E, ...] and
 // expert_ids[M] picks each row's expert, an id outside [0, E) writing zeros. Each 128-column
-// tile's raw-value dot product is summed before its scale, as gpu/fp8_batched.vx.
+// tile's raw-value dot product is summed before its scale, as gpu/fp8_batched.vx. One warp of
+// 32 lanes per (n, m), four m per block; out is [M, N].
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_fp8_matmul(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<u8, [?], Memory::HBM>,
+pub fn glm_vx_spawn_fp8_matmul(out: &mut Tensor<f32, [?, ?], Memory::HBM>, weight: &Tensor<u8, [?], Memory::HBM>,
                                scales: &Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
                                expert_ids: &Tensor<i32, [?], Memory::HBM>, rows_m: i32, rows_n: i32, cols: i32,
                                experts: i32) -> void {
-  spawn on(Topology::Device) grid([(rows_m * rows_n - 1) / 4 + 1]) block(128) {
-    let tid: i32 = thread_id();
-    let lane: i32 = tid & 31;
-    let block: i32 = block_dim();
-    let warps: i32 = block / 32;
-    let task: i64 = (block_id() as i64) * (warps as i64) + ((tid / 32) as i64);
-    if rows_m > 0 && rows_n > 0 && cols >= 0 && experts >= 0 && block >= 32 && block <= 1024 && block % 32 == 0
-       && task < (rows_m as i64) * (rows_n as i64) {
-      let m_count: i64 = rows_m as i64;
-      let n_count: i64 = rows_n as i64;
-      let n: i64 = task / m_count;
-      let m: i64 = task % m_count;
-      let k: i64 = cols as i64;
-      let scale_cols: i64 = (k + 127) / 128;
-      let scale_rows: i64 = (n_count + 127) / 128;
-      let mut expert: i64 = 0;
-      let mut valid: i32 = 1;
-      if experts > 0 {
-        let id: i32 = expert_ids[m];
-        if id < 0 { valid = 0; }
-        if id >= experts { valid = 0; }
-        expert = id as i64;
-      }
-      let mut sum: f32 = 0.0;
-      if valid != 0 {
-        let row_base: i64 = (expert * n_count + n) * k;
-        let scale_base: i64 = (expert * scale_rows + n / 128) * scale_cols;
-        let mut tile: i64 = 0;
-        while tile < scale_cols {
-          let tile_base: i64 = tile * 128 + (lane as i64);
-          let mut part: f32 = 0.0;
-          let mut step: i32 = 0;
-          while step < 4 {
-            let col: i64 = tile_base + ((step * 32) as i64);
-            if col < k {
-              part = part + fp8_decode(weight[row_base + col] as i32) * x[m * k + col];
+  spawn on(Topology::Device) {
+    for n in 0..rows_n across blocks {
+      for mb in 0..(rows_m - 1) / 4 + 1 across blocks {
+        let mut a = unsafe { Tensor<f32, [128], Memory::SMEM>::uninit() };
+        let mut b = unsafe { Tensor<f32, [128], Memory::SMEM>::uninit() };
+        for w in 0..4 across lanes { for lane in 0..32 across lanes {
+          let m: i64 = ((mb * 4 + w) as i64);
+          let mut sum: f32 = 0.0;
+          if m < (rows_m as i64) && cols >= 0 && experts >= 0 {
+            let n_count: i64 = rows_n as i64;
+            let k: i64 = cols as i64;
+            let scale_cols: i64 = (k + 127) / 128;
+            let scale_rows: i64 = (n_count + 127) / 128;
+            let mut expert: i64 = 0;
+            let mut valid: i32 = 1;
+            if experts > 0 {
+              let id: i32 = expert_ids[m];
+              if id < 0 { valid = 0; }
+              if id >= experts { valid = 0; }
+              expert = id as i64;
             }
-            step = step + 1;
+            if valid != 0 {
+              let row_base: i64 = (expert * n_count + (n as i64)) * k;
+              let scale_base: i64 = (expert * scale_rows + (n as i64) / 128) * scale_cols;
+              let mut tile: i64 = 0;
+              while tile < scale_cols {
+                let tile_base: i64 = tile * 128 + (lane as i64);
+                let mut part: f32 = 0.0;
+                let mut step: i32 = 0;
+                while step < 4 {
+                  let col: i64 = tile_base + ((step * 32) as i64);
+                  if col < k {
+                    part = part + fp8_decode!(weight[row_base + col] as i32) * x[m * k + col];
+                  }
+                  step = step + 1;
+                }
+                sum = sum + part * scales[scale_base + tile];
+                tile = tile + 1;
+              }
+            }
           }
-          sum = sum + part * scales[scale_base + tile];
-          tile = tile + 1;
+          a[w * 32 + lane] = sum;
+        } }
+        warp_sums!(b, a, 4);
+        for w in 0..4 across lanes {
+          if mb * 4 + w < rows_m && cols >= 0 && experts >= 0 { out[mb * 4 + w][n] = b[w * 32]; }
         }
       }
-      let total: f32 = warp_sum(sum);
-      if lane == 0 { out[m * n_count + n] = total; }
     }
   }
   return;

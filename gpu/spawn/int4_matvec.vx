@@ -1,44 +1,49 @@
 // glm_vx_gpu_int4_matvec through Vx's own GPU path. Group-128 symmetric INT4 codes, two per
 // byte (element 2i in the low nibble), one raw 16-bit scale per (row, group): binary16 for
-// scale_kind 0, bfloat16 for 1. One warp per row; each 128-column group is 64 bytes, lane
-// reads bytes lane and lane+32, sums the raw-code dot product, then applies the group scale,
-// the order the hand kernel and glm_vx/quant.py use.
+// scale_kind 0, bfloat16 for 1. One warp of 32 lanes per row (four per block); each
+// 128-column group is 64 bytes, lane reads bytes lane and lane+32, sums the raw-code dot
+// product, then applies the group scale, the order the hand kernel and glm_vx/quant.py use.
 // spawn-include: device.vx
 
 pub fn glm_vx_spawn_int4_matvec(out: &mut Tensor<f32, [?], Memory::HBM>, packed: &Tensor<u8, [?], Memory::HBM>,
                                 scales: &Tensor<u16, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
                                 rows: i32, cols: i32, scale_kind: i32) -> void {
-  spawn on(Topology::Device) grid([(rows - 1) / 4 + 1]) block(128) {
-    let tid: i32 = thread_id();
-    let lane: i32 = tid & 31;
-    let block: i32 = block_dim();
-    let warps: i32 = block / 32;
-    let row: i64 = (block_id() as i64) * (warps as i64) + ((tid / 32) as i64);
-    if rows > 0 && cols >= 0 && block >= 32 && block <= 1024 && block % 32 == 0 && row < (rows as i64) {
-      let k: i64 = cols as i64;
-      let groups: i64 = (k + 127) / 128;
-      let row_bytes: i64 = (k + 1) / 2;
-      let mut sum: f32 = 0.0;
-      let mut group: i64 = 0;
-      while group < groups {
-        let scale: f32 = group_scale(scales[row * groups + group] as i32, scale_kind);
-        let mut part: f32 = 0.0;
-        let mut step: i32 = 0;
-        while step < 2 {
-          let byte_index: i64 = group * 64 + ((step * 32 + lane) as i64);
-          let col: i64 = byte_index * 2;
-          if col < k {
-            let byte: i32 = packed[row * row_bytes + byte_index] as i32;
-            part = part + int4_code(byte, 0) * x[col];
-            if col + 1 < k { part = part + int4_code(byte, 1) * x[col + 1]; }
+  spawn on(Topology::Device) {
+    for rb in 0..(rows - 1) / 4 + 1 across blocks {
+      let mut a = unsafe { Tensor<f32, [128], Memory::SMEM>::uninit() };
+      let mut b = unsafe { Tensor<f32, [128], Memory::SMEM>::uninit() };
+      for w in 0..4 across lanes { for lane in 0..32 across lanes {
+        let row: i64 = ((rb * 4 + w) as i64);
+        let mut sum: f32 = 0.0;
+        if row < (rows as i64) {
+          let k: i64 = cols as i64;
+          let groups: i64 = (k + 127) / 128;
+          let row_bytes: i64 = (k + 1) / 2;
+          let mut group: i64 = 0;
+          while group < groups {
+            let scale: f32 = group_scale!(scales[row * groups + group] as i32, scale_kind);
+            let mut part: f32 = 0.0;
+            let mut step: i32 = 0;
+            while step < 2 {
+              let byte_index: i64 = group * 64 + ((step * 32 + lane) as i64);
+              let col: i64 = byte_index * 2;
+              if col < k {
+                let byte: i32 = packed[row * row_bytes + byte_index] as i32;
+                part = part + int4_code!(byte, 0) * x[col];
+                if col + 1 < k { part = part + int4_code!(byte, 1) * x[col + 1]; }
+              }
+              step = step + 1;
+            }
+            sum = sum + part * scale;
+            group = group + 1;
           }
-          step = step + 1;
         }
-        sum = sum + part * scale;
-        group = group + 1;
+        a[w * 32 + lane] = sum;
+      } }
+      warp_sums!(b, a, 4);
+      for w in 0..4 across lanes {
+        if rb * 4 + w < rows && cols >= 0 { out[rb * 4 + w] = b[w * 32]; }
       }
-      let total: f32 = warp_sum(sum);
-      if lane == 0 { out[row] = total; }
     }
   }
   return;

@@ -1,26 +1,32 @@
 // glm_vx_gpu_bf16_matvec through Vx's own GPU path: out[rows] = W[rows, cols] x[cols] with W
-// raw bfloat16 bits, one warp per row, i64 indexing, float32 accumulation.
+// raw bfloat16 bits, one warp of 32 lanes per row (four per block), i64 indexing, float32
+// accumulation, and the warp sum of device.vx.
 // spawn-include: device.vx
 
 pub fn glm_vx_spawn_bf16_matvec(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<u16, [?], Memory::HBM>,
                                 x: &Tensor<f32, [?], Memory::HBM>, rows: i32, cols: i32) -> void {
-  spawn on(Topology::Device) grid([(rows - 1) / 4 + 1]) block(128) {
-    let tid: i32 = thread_id();
-    let lane: i32 = tid & 31;
-    let block: i32 = block_dim();
-    let warps: i32 = block / 32;
-    let row: i64 = (block_id() as i64) * (warps as i64) + ((tid / 32) as i64);
-    if rows > 0 && cols >= 0 && block >= 32 && block <= 1024 && block % 32 == 0 && row < (rows as i64) {
-      let k: i64 = cols as i64;
-      let row_base: i64 = row * k;
-      let mut sum: f32 = 0.0;
-      let mut col: i64 = lane as i64;
-      while col < k {
-        sum = sum + bf16_decode(weight[row_base + col] as i32) * x[col];
-        col = col + 32;
+  spawn on(Topology::Device) {
+    for rb in 0..(rows - 1) / 4 + 1 across blocks {
+      let mut a = unsafe { Tensor<f32, [128], Memory::SMEM>::uninit() };
+      let mut b = unsafe { Tensor<f32, [128], Memory::SMEM>::uninit() };
+      for w in 0..4 across lanes { for lane in 0..32 across lanes {
+        let row: i64 = ((rb * 4 + w) as i64);
+        let mut sum: f32 = 0.0;
+        if row < (rows as i64) {
+          let k: i64 = cols as i64;
+          let row_base: i64 = row * k;
+          let mut col: i64 = lane as i64;
+          while col < k {
+            sum = sum + bf16_decode!(weight[row_base + col] as i32) * x[col];
+            col = col + 32;
+          }
+        }
+        a[w * 32 + lane] = sum;
+      } }
+      warp_sums!(b, a, 4);
+      for w in 0..4 across lanes {
+        if rb * 4 + w < rows && cols >= 0 { out[rb * 4 + w] = b[w * 32]; }
       }
-      let total: f32 = warp_sum(sum);
-      if lane == 0 { out[row] = total; }
     }
   }
   return;

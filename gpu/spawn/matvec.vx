@@ -1,25 +1,31 @@
 // glm_vx_gpu_matvec through Vx's own GPU path: out[rows] = weight[rows, cols] x[cols], one
-// warp per row, adjacent lanes on adjacent columns, then a full-warp shuffle sum. Same
-// arithmetic order as the hand kernel, so results should be bitwise equal.
+// warp of 32 lanes per row, four rows per block, adjacent lanes on adjacent columns, then the
+// warp sum of device.vx. Same arithmetic order as the hand kernel, so results should be
+// bitwise equal.
 // spawn-include: device.vx
 
 pub fn glm_vx_spawn_matvec(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<f32, [?], Memory::HBM>,
                            x: &Tensor<f32, [?], Memory::HBM>, rows: i32, cols: i32) -> void {
-  spawn on(Topology::Device) grid([(rows - 1) / 4 + 1]) block(128) {
-    let tid: i32 = thread_id();
-    let block: i32 = block_dim();
-    let lane: i32 = tid % 32;
-    let row: i32 = block_id() * (block / 32) + tid / 32;
-    // Same launch contract as the hand kernel: block a multiple of 32, at most 1024.
-    if block >= 32 && block <= 1024 && block % 32 == 0 && row < rows && cols >= 0 {
-      let mut sum: f32 = 0.0;
-      let mut c: i32 = lane;
-      while c < cols {
-        sum = sum + weight[row * cols + c] * x[c];
-        c = c + 32;
+  spawn on(Topology::Device) {
+    for rb in 0..(rows - 1) / 4 + 1 across blocks {
+      let mut a = unsafe { Tensor<f32, [128], Memory::SMEM>::uninit() };
+      let mut b = unsafe { Tensor<f32, [128], Memory::SMEM>::uninit() };
+      for w in 0..4 across lanes { for lane in 0..32 across lanes {
+        let row: i32 = rb * 4 + w;
+        let mut sum: f32 = 0.0;
+        if row < rows {
+          let mut c: i32 = lane;
+          while c < cols {
+            sum = sum + weight[row * cols + c] * x[c];
+            c = c + 32;
+          }
+        }
+        a[w * 32 + lane] = sum;
+      } }
+      warp_sums!(b, a, 4);
+      for w in 0..4 across lanes {
+        if rb * 4 + w < rows && cols >= 0 { out[rb * 4 + w] = b[w * 32]; }
       }
-      let total: f32 = warp_sum(sum);
-      if lane == 0 { out[row] = total; }
     }
   }
   return;

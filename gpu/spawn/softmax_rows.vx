@@ -1,33 +1,41 @@
 // glm_vx_gpu_softmax_rows (and glm_vx_gpu_softmax, which is rows = 1) through Vx's own GPU
 // path. One block per row: the block maximum, exp(x - max) stored and summed, then a divide,
-// in the hand kernel's order. exp is fast_exp (device.vx).
+// in the order of the hand kernel launched with `threads` threads (rmsnorm_rows.vx). exp is
+// f32::fast_exp, not the hand kernel's ex2.approx.ftz (see sigmoid in device.vx). out is
+// [rows, dim].
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_softmax_rows(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
-                                 rows: i32, dim: i32) -> void {
-  spawn on(Topology::Device) grid([rows]) block(256) {
-    let mut shared = unsafe { Tensor<f32, [33], Memory::SMEM>::uninit() };
-    let tid: i32 = thread_id();
-    let block: i32 = block_dim();
-    let row: i32 = block_id();
-    // Uniform per block, so every thread of a running block reaches the barriers.
-    if rows > 0 && dim > 0 && row < rows && block >= 32 && block <= 1024 && block % 32 == 0 {
-      let base: i32 = row * dim;
-      let mut maximum: f32 = x[base];
-      let mut d: i32 = tid;
-      while d < dim { if x[base + d] > maximum { maximum = x[base + d]; } d = d + block; }
-      let row_max: f32 = block_max(maximum, &mut shared);
-      let mut sum: f32 = 0.0;
-      d = tid;
-      while d < dim {
-        let v: f32 = fast_exp(x[base + d] - row_max);
-        out[base + d] = v;
-        sum = sum + v;
-        d = d + block;
+pub fn glm_vx_spawn_softmax_rows(out: &mut Tensor<f32, [?, ?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                                 rows: i32, dim: i32, threads: i32) -> void {
+  spawn on(Topology::Device) {
+    for row in 0..rows across blocks {
+      if dim > 0 && threads >= 32 && threads <= 1024 && threads % 32 == 0 {
+        let mut a = unsafe { Tensor<f32, [1024], Memory::SMEM>::uninit() };
+        let mut b = unsafe { Tensor<f32, [1024], Memory::SMEM>::uninit() };
+        let mut row_max = unsafe { Tensor<f32, [1], Memory::SMEM>::uninit() };
+        let base: i32 = row * dim;
+        for t in 0..1024 across lanes {
+          let mut maximum: f32 = x[base];
+          if t < threads {
+            let mut d: i32 = t;
+            while d < dim { if x[base + d] > maximum { maximum = x[base + d]; } d = d + threads; }
+          }
+          a[t] = maximum;
+        }
+        block_max!(b, a, threads);
+        for t in 0..1 across lanes { row_max[t] = b[0]; }
+        for d in 0..dim across lanes(256) { out[row][d] = (x[base + d] - row_max[0]).fast_exp(); }
+        for t in 0..1024 across lanes {
+          let mut sum: f32 = 0.0;
+          if t < threads {
+            let mut d: i32 = t;
+            while d < dim { sum = sum + out[row][d]; d = d + threads; }
+          }
+          a[t] = sum;
+        }
+        block_sum!(b, a, threads);
+        for d in 0..dim across lanes(256) { out[row][d] = out[row][d] / b[0]; }
       }
-      let denominator: f32 = block_sum(sum, &mut shared);
-      d = tid;
-      while d < dim { out[base + d] = out[base + d] / denominator; d = d + block; }
     }
   }
   return;

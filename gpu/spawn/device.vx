@@ -1,198 +1,222 @@
 import core::num;
 // Device helpers shared by the gpu/spawn kernels; build.py pastes this file in front of a
-// kernel that declares `// spawn-include: device.vx`. Thread ids and warp shuffles are
-// gpu-dialect mlir! blocks until Vx has builtins for them (#260).
-fn thread_id() on Topology::Device -> i32 {
-  return mlir!( inputs : (), returns : i32, dialects : ["gpu", "arith"]) {
-    %t = gpu.thread_id x
-    %r = "arith.index_cast"(%t) : (index) -> i32
-    macro.yield %r : i32
-  };
-}
-fn block_id() on Topology::Device -> i32 {
-  return mlir!( inputs : (), returns : i32, dialects : ["gpu", "arith"]) {
-    %t = gpu.block_id x
-    %r = "arith.index_cast"(%t) : (index) -> i32
-    macro.yield %r : i32
-  };
-}
-fn block_dim() on Topology::Device -> i32 {
-  return mlir!( inputs : (), returns : i32, dialects : ["gpu", "arith"]) {
-    %t = gpu.block_dim x
-    %r = "arith.index_cast"(%t) : (index) -> i32
-    macro.yield %r : i32
-  };
-}
-fn grid_dim() on Topology::Device -> i32 {
-  return mlir!( inputs : (), returns : i32, dialects : ["gpu", "arith"]) {
-    %t = gpu.grid_dim x
-    %r = "arith.index_cast"(%t) : (index) -> i32
-    macro.yield %r : i32
-  };
-}
-// Full-warp shfl.sync.down with clamp 31; a lane past the warp gets its own value back.
-fn shuffle_down(value: f32, delta: i32) on Topology::Device -> f32 {
-  return mlir!( inputs : (%v = value : f32, %d = delta : i32), returns : f32, dialects : ["gpu", "arith"]) {
-    %w = "arith.constant"() {value = 32 : i32} : () -> i32
-    %r, %ok = gpu.shuffle down %v, %d, %w : f32
-    macro.yield %r : f32
-  };
-}
-// The hand kernels' vxk_warp_sum, in the same order, so lane 0 gets a bitwise-equal total.
-fn warp_sum(value: f32) on Topology::Device -> f32 {
-  let mut sum: f32 = value;
-  sum = sum + shuffle_down(sum, 16);
-  sum = sum + shuffle_down(sum, 8);
-  sum = sum + shuffle_down(sum, 4);
-  sum = sum + shuffle_down(sum, 2);
-  sum = sum + shuffle_down(sum, 1);
-  return sum;
-}
-
-// Full-warp shfl.sync.idx with clamp 31: every lane gets lane `source`'s value.
-fn shuffle_idx(value: f32, source: i32) on Topology::Device -> f32 {
-  return mlir!( inputs : (%v = value : f32, %s = source : i32), returns : f32, dialects : ["gpu", "arith"]) {
-    %w = "arith.constant"() {value = 32 : i32} : () -> i32
-    %r, %ok = gpu.shuffle idx %v, %s, %w : f32
-    macro.yield %r : f32
-  };
-}
-// The hand kernels' vxk_warp_max: lane 0 gets the warp's maximum (`other > result`, as there).
-fn warp_max(value: f32) on Topology::Device -> f32 {
-  let mut result: f32 = value;
-  let mut delta: i32 = 16;
-  while delta > 0 {
-    let other: f32 = shuffle_down(result, delta);
-    if other > result { result = other; }
-    delta = delta / 2;
-  }
-  return result;
-}
-// exp(x) exactly as the hand kernels compute it: ex2.approx.ftz.f32(x * log2 e), log2 e =
-// 0f3FB8AA3B. The NVVM intrinsic stays in the device image from Vx #1945 (PR #1959) on;
-// math.exp2 would give ex2.approx.f32, which differs when exp(x) is subnormal.
-fn fast_exp(x: f32) on Topology::Device -> f32 {
-  return mlir!( inputs : (%x = x : f32), returns : f32, dialects : ["llvm", "arith"]) {
-    %c = "arith.constant"() {value = 1.44269502 : f32} : () -> f32
-    %y = "arith.mulf"(%x, %c) : (f32, f32) -> f32
-    %r = llvm.call_intrinsic "llvm.nvvm.ex2.approx.ftz.f"(%y) : (f32) -> f32
-    macro.yield %r : f32
-  };
-}
-// The hand kernels' vxk_sigmoid: the exp argument is never positive, so it cannot overflow.
-fn sigmoid(x: f32) on Topology::Device -> f32 {
-  let mut result: f32 = 0.0;
-  if x >= 0.0 { result = 1.0 / (1.0 + fast_exp(0.0 - x)); }
-  else { let z: f32 = fast_exp(x); result = z / (1.0 + z); }
-  return result;
-}
+// kernel that declares `// spawn-include: device.vx`. They are macros, not functions: the race
+// proof of an `across` loop refuses a call to a function whose body it does not read, so each
+// helper expands in the loop. A macro expands to an expression, so a helper with statements is
+// an `unsafe { .. }` block. Names inside start with `dv_`, so they do not hide the caller's.
 
 // bfloat16 bits to f32, exact for all 65,536 encodings: gpu/bf16.vx's glm_vx_bf16_decode
-// unchanged. A bit cast would be shorter, but f32::from_bits crashes vxc in device code (#1943).
-fn bf16_decode(bits: i32) on Topology::Device -> f32 {
-  let exponent: i32 = (bits >> 7) & 255;
-  let mantissa: i32 = bits & 127;
-  let mut magnitude: f32 = (mantissa as f32) / 128.0;
-  let mut shift: i32 = -126;
-  if exponent > 0 {
-    magnitude = ((128 + mantissa) as f32) / 128.0;
-    shift = exponent - 127;
-  }
-  let mut power: f32 = 1.0;
-  while shift > 30 { power = power * 1073741824.0; shift = shift - 30; }
-  while shift < -30 { power = power / 1073741824.0; shift = shift + 30; }
-  if shift >= 0 { power = power * ((1 << shift) as f32); }
-  if shift < 0 { power = power / ((1 << (0 - shift)) as f32); }
-  magnitude = magnitude * power;
-  if exponent == 255 {
-    if mantissa == 0 { magnitude = 1.0 / 0.0; }
-    if mantissa != 0 { magnitude = 0.0 / 0.0; }
-  }
-  let mut sign: f32 = 1.0;
-  if (bits & 32768) != 0 { sign = -1.0; }
-  return magnitude * sign;
+// unchanged. f32::from_bits is not one of the calls the race proof takes as pure.
+macro_rules! bf16_decode {
+    ($bits:expr) => {
+        unsafe {
+          let dv_bits: i32 = $bits;
+          let dv_exponent: i32 = (dv_bits >> 7) & 255;
+          let dv_mantissa: i32 = dv_bits & 127;
+          let mut dv_magnitude: f32 = (dv_mantissa as f32) / 128.0;
+          let mut dv_shift: i32 = -126;
+          if dv_exponent > 0 {
+            dv_magnitude = ((128 + dv_mantissa) as f32) / 128.0;
+            dv_shift = dv_exponent - 127;
+          }
+          let mut dv_power: f32 = 1.0;
+          while dv_shift > 30 { dv_power = dv_power * 1073741824.0; dv_shift = dv_shift - 30; }
+          while dv_shift < -30 { dv_power = dv_power / 1073741824.0; dv_shift = dv_shift + 30; }
+          if dv_shift >= 0 { dv_power = dv_power * ((1 << dv_shift) as f32); }
+          if dv_shift < 0 { dv_power = dv_power / ((1 << (0 - dv_shift)) as f32); }
+          dv_magnitude = dv_magnitude * dv_power;
+          if dv_exponent == 255 {
+            if dv_mantissa == 0 { dv_magnitude = 1.0 / 0.0; }
+            if dv_mantissa != 0 { dv_magnitude = 0.0 / 0.0; }
+          }
+          let mut dv_sign: f32 = 1.0;
+          if (dv_bits & 32768) != 0 { dv_sign = -1.0; }
+          dv_magnitude * dv_sign
+        }
+    };
 }
 
 // IEEE binary16 bits to f32, exact for every encoding: gpu/int4.vx's glm_vx_i4_half.
-fn half_decode(bits: i32) on Topology::Device -> f32 {
-  let exponent: i32 = (bits >> 10) & 31;
-  let mantissa: i32 = bits & 1023;
-  let mut magnitude: f32 = (mantissa as f32) / 16777216.0;
-  if exponent > 0 {
-    let mut power: f32 = 1.0;
-    if exponent >= 15 { power = ((1 << (exponent - 15)) as f32); }
-    if exponent < 15 { power = 1.0 / ((1 << (15 - exponent)) as f32); }
-    magnitude = ((1024 + mantissa) as f32) * power / 1024.0;
-  }
-  if exponent == 31 {
-    if mantissa == 0 { magnitude = 1.0 / 0.0; }
-    if mantissa != 0 { magnitude = 0.0 / 0.0; }
-  }
-  let mut sign: f32 = 1.0;
-  if (bits & 32768) != 0 { sign = -1.0; }
-  return magnitude * sign;
+macro_rules! half_decode {
+    ($bits:expr) => {
+        unsafe {
+          let dv_bits: i32 = $bits;
+          let dv_exponent: i32 = (dv_bits >> 10) & 31;
+          let dv_mantissa: i32 = dv_bits & 1023;
+          let mut dv_magnitude: f32 = (dv_mantissa as f32) / 16777216.0;
+          if dv_exponent > 0 {
+            let mut dv_power: f32 = 1.0;
+            if dv_exponent >= 15 { dv_power = ((1 << (dv_exponent - 15)) as f32); }
+            if dv_exponent < 15 { dv_power = 1.0 / ((1 << (15 - dv_exponent)) as f32); }
+            dv_magnitude = ((1024 + dv_mantissa) as f32) * dv_power / 1024.0;
+          }
+          if dv_exponent == 31 {
+            if dv_mantissa == 0 { dv_magnitude = 1.0 / 0.0; }
+            if dv_mantissa != 0 { dv_magnitude = 0.0 / 0.0; }
+          }
+          let mut dv_sign: f32 = 1.0;
+          if (dv_bits & 32768) != 0 { dv_sign = -1.0; }
+          dv_magnitude * dv_sign
+        }
+    };
 }
 
-fn group_scale(bits: i32, kind: i32) on Topology::Device -> f32 {
-  let mut scale: f32 = 0.0;
-  if kind != 0 { scale = bf16_decode(bits); } else { scale = half_decode(bits); }
-  return scale;
+// A raw 16-bit group scale: bfloat16 when kind != 0, binary16 otherwise.
+macro_rules! group_scale {
+    ($bits:expr, $kind:expr) => {
+        unsafe {
+          let dv_scale_bits: i32 = $bits;
+          let mut dv_scale: f32 = 0.0;
+          if $kind != 0 { dv_scale = bf16_decode!(dv_scale_bits); } else { dv_scale = half_decode!(dv_scale_bits); }
+          dv_scale
+        }
+    };
 }
 
 // Signed 4-bit code: high 0 is the low nibble, 1 the high nibble.
-fn int4_code(byte: i32, high: i32) on Topology::Device -> f32 {
-  let mut nibble: i32 = byte & 15;
-  if high != 0 { nibble = (byte >> 4) & 15; }
-  if nibble >= 8 { nibble = nibble - 16; }
-  return nibble as f32;
+macro_rules! int4_code {
+    ($byte:expr, $high:expr) => {
+        unsafe {
+          let dv_byte: i32 = $byte;
+          let mut dv_nibble: i32 = dv_byte & 15;
+          if $high != 0 { dv_nibble = (dv_byte >> 4) & 15; }
+          if dv_nibble >= 8 { dv_nibble = dv_nibble - 16; }
+          dv_nibble as f32
+        }
+    };
 }
 
 // e4m3fn byte to f32, exact: gpu/fp8.vx's glm_vx_fp8_decode (= fp8_batched.vx's
 // glm_vx_fp8m_decode). No infinity; S.1111.111 is NaN.
-fn fp8_decode(bits: i32) on Topology::Device -> f32 {
-  let exponent: i32 = (bits >> 3) & 15;
-  let mantissa: i32 = bits & 7;
-  let mut magnitude: f32 = (mantissa as f32) / 512.0;
-  if exponent > 0 {
-    let power: i32 = 1 << (exponent - 1);
-    magnitude = ((8 + mantissa) as f32) * (power as f32) / 512.0;
-  }
-  if exponent == 15 { if mantissa == 7 { magnitude = 0.0 / 0.0; } }
-  let mut sign: f32 = 1.0;
-  if (bits & 128) != 0 { sign = -1.0; }
-  return magnitude * sign;
+macro_rules! fp8_decode {
+    ($bits:expr) => {
+        unsafe {
+          let dv_bits: i32 = $bits;
+          let dv_exponent: i32 = (dv_bits >> 3) & 15;
+          let dv_mantissa: i32 = dv_bits & 7;
+          let mut dv_magnitude: f32 = (dv_mantissa as f32) / 512.0;
+          if dv_exponent > 0 {
+            let dv_power: i32 = 1 << (dv_exponent - 1);
+            dv_magnitude = ((8 + dv_mantissa) as f32) * (dv_power as f32) / 512.0;
+          }
+          if dv_exponent == 15 { if dv_mantissa == 7 { dv_magnitude = 0.0 / 0.0; } }
+          let mut dv_sign: f32 = 1.0;
+          if (dv_bits & 128) != 0 { dv_sign = -1.0; }
+          dv_magnitude * dv_sign
+        }
+    };
 }
 
-
-// The hand kernels' vxk_block_sum and vxk_block_max: a uniform call by every thread, block a
-// multiple of 32 in [32, 1024]. `shared` holds one partial per warp and the broadcast slot
-// [32]; declare it in the region as `unsafe { Tensor<f32, [33], Memory::SMEM>::uninit() }`.
-// A shared tensor argument and barrier() in a helper need Vx #1956 and #1957 (PRs #1961, #1962).
-fn block_sum(value: f32, shared: &mut Tensor<f32, [33], Memory::SMEM>) on Topology::Device -> f32 {
-  let tid: i32 = thread_id();
-  let partial: f32 = warp_sum(value);
-  if tid % 32 == 0 { shared[tid / 32] = partial; }
-  barrier();
-  if tid < 32 {
-    let mut v: f32 = 0.0;
-    if tid < block_dim() / 32 { v = shared[tid]; }
-    let total: f32 = warp_sum(v);
-    if tid == 0 { shared[32] = total; }
-  }
-  barrier();
-  return shared[32];
+// The hand kernels' vxk_sigmoid: the exp argument is never positive, so it cannot overflow.
+// exp is f32::fast_exp (libdevice's expf), not the hand kernels' ex2.approx.ftz(x * log2 e):
+// that one needs an `mlir!` block, which an `across` loop takes only from Vx #2076 D1-D3 on.
+macro_rules! sigmoid {
+    ($x:expr) => {
+        unsafe {
+          let dv_x: f32 = $x;
+          let mut dv_result: f32 = 0.0;
+          if dv_x >= 0.0 { dv_result = 1.0 / (1.0 + (0.0 - dv_x).fast_exp()); }
+          else { let dv_z: f32 = dv_x.fast_exp(); dv_result = dv_z / (1.0 + dv_z); }
+          dv_result
+        }
+    };
 }
-fn block_max(value: f32, shared: &mut Tensor<f32, [33], Memory::SMEM>) on Topology::Device -> f32 {
-  let tid: i32 = thread_id();
-  let partial: f32 = warp_max(value);
-  if tid % 32 == 0 { shared[tid / 32] = partial; }
-  barrier();
-  if tid < 32 {
-    let mut v: f32 = shared[0];
-    if tid < block_dim() / 32 { v = shared[tid]; }
-    let total: f32 = warp_max(v);
-    if tid == 0 { shared[32] = total; }
-  }
-  barrier();
-  return shared[32];
+
+// The hand kernels' warp reductions, written with lane loops on shared memory in place of
+// shuffles. `src` holds `rows` warps of 32 partials, warp w at w * 32; each step is a lane
+// loop (so a barrier), reading one tensor and writing the other, in vxk_warp_sum's order
+// (offsets 16, 8, 4, 2, 1). Warp w's total ends in dst[w * 32]; src is overwritten.
+macro_rules! warp_sums {
+    ($dst:ident, $src:ident, $rows:expr) => {
+        unsafe {
+          for dv_w in 0..$rows across lanes { for dv_i in 0..16 across lanes {
+            $dst[dv_w * 32 + dv_i] = $src[dv_w * 32 + dv_i] + $src[dv_w * 32 + dv_i + 16];
+          } }
+          for dv_w in 0..$rows across lanes { for dv_i in 0..8 across lanes {
+            $src[dv_w * 32 + dv_i] = $dst[dv_w * 32 + dv_i] + $dst[dv_w * 32 + dv_i + 8];
+          } }
+          for dv_w in 0..$rows across lanes { for dv_i in 0..4 across lanes {
+            $dst[dv_w * 32 + dv_i] = $src[dv_w * 32 + dv_i] + $src[dv_w * 32 + dv_i + 4];
+          } }
+          for dv_w in 0..$rows across lanes { for dv_i in 0..2 across lanes {
+            $src[dv_w * 32 + dv_i] = $dst[dv_w * 32 + dv_i] + $dst[dv_w * 32 + dv_i + 2];
+          } }
+          for dv_w in 0..$rows across lanes {
+            $dst[dv_w * 32] = $src[dv_w * 32] + $src[dv_w * 32 + 1];
+          }
+        }
+    };
+}
+// vxk_warp_max: the same steps, keeping the other value when `other > result`.
+macro_rules! warp_maxes {
+    ($dst:ident, $src:ident, $rows:expr) => {
+        unsafe {
+          for dv_w in 0..$rows across lanes { for dv_i in 0..16 across lanes {
+            let dv_a: f32 = $src[dv_w * 32 + dv_i];
+            let dv_b: f32 = $src[dv_w * 32 + dv_i + 16];
+            let mut dv_m: f32 = dv_a;
+            if dv_b > dv_a { dv_m = dv_b; }
+            $dst[dv_w * 32 + dv_i] = dv_m;
+          } }
+          for dv_w in 0..$rows across lanes { for dv_i in 0..8 across lanes {
+            let dv_a: f32 = $dst[dv_w * 32 + dv_i];
+            let dv_b: f32 = $dst[dv_w * 32 + dv_i + 8];
+            let mut dv_m: f32 = dv_a;
+            if dv_b > dv_a { dv_m = dv_b; }
+            $src[dv_w * 32 + dv_i] = dv_m;
+          } }
+          for dv_w in 0..$rows across lanes { for dv_i in 0..4 across lanes {
+            let dv_a: f32 = $src[dv_w * 32 + dv_i];
+            let dv_b: f32 = $src[dv_w * 32 + dv_i + 4];
+            let mut dv_m: f32 = dv_a;
+            if dv_b > dv_a { dv_m = dv_b; }
+            $dst[dv_w * 32 + dv_i] = dv_m;
+          } }
+          for dv_w in 0..$rows across lanes { for dv_i in 0..2 across lanes {
+            let dv_a: f32 = $dst[dv_w * 32 + dv_i];
+            let dv_b: f32 = $dst[dv_w * 32 + dv_i + 2];
+            let mut dv_m: f32 = dv_a;
+            if dv_b > dv_a { dv_m = dv_b; }
+            $src[dv_w * 32 + dv_i] = dv_m;
+          } }
+          for dv_w in 0..$rows across lanes {
+            let dv_a: f32 = $src[dv_w * 32];
+            let dv_b: f32 = $src[dv_w * 32 + 1];
+            let mut dv_m: f32 = dv_a;
+            if dv_b > dv_a { dv_m = dv_b; }
+            $dst[dv_w * 32] = dv_m;
+          }
+        }
+    };
+}
+
+// The hand kernels' vxk_block_sum and vxk_block_max for a block of `threads` threads (a
+// multiple of 32 in [32, 1024]): `src` (1024 elements) holds thread t's partial at t, the
+// per-warp totals pad with 0 (sum) or warp 0's (max) past threads / 32, as there. The total
+// ends in dst[0]. Results follow `threads`, not the launch: the kernels take it as a parameter.
+macro_rules! block_sum {
+    ($dst:ident, $src:ident, $threads:expr) => {
+        unsafe {
+          warp_sums!($dst, $src, 32);
+          for dv_i in 0..32 across lanes {
+            let mut dv_v: f32 = 0.0;
+            if dv_i < $threads / 32 { dv_v = $dst[dv_i * 32]; }
+            $src[dv_i] = dv_v;
+          }
+          warp_sums!($dst, $src, 1);
+        }
+    };
+}
+macro_rules! block_max {
+    ($dst:ident, $src:ident, $threads:expr) => {
+        unsafe {
+          warp_maxes!($dst, $src, 32);
+          for dv_i in 0..32 across lanes {
+            let mut dv_v: f32 = $dst[0];
+            if dv_i < $threads / 32 { dv_v = $dst[dv_i * 32]; }
+            $src[dv_i] = dv_v;
+          }
+          warp_maxes!($dst, $src, 1);
+        }
+    };
 }

@@ -13,22 +13,34 @@ of `(n - 1) / 256 + 1` blocks of 256 lanes, which the manifest's `launch` record
 loop strides by the grid and a lane loop by the block, so any grid and block the caller passes
 also cover every pass. A kernel whose rows have a run-time length writes a rank-2 tensor
 (`out[row][col]`), because the race proof (L4) reads an index only as a sum of loop indices
-times numbers; `launch.py` passes a rank-2 `DeviceTensor` as its 7-word descriptor.
+times numbers; `launch.py` passes a rank-2 `DeviceTensor` as its 7-word descriptor. A row's
+index may then be anything, as in topk's `hist[t][digit]`.
 
-Two vxc builds are in use until every kernel is on `across`:
+All 25 kernels build with one vxc, from Vx main (b151bb8c on), which no longer parses
+`grid([..]) block(n)`. What the proof takes in a loop shapes them:
 
-- **Vx main** (b151bb8c on): `add`, `copy`, `scale`, `scaled_add`, `rope_glm`, `rope_strided` and
-  `gemm_f32`, on `across`. Main no longer parses `grid([..]) block(n)`.
-- **The old launch stack** (Vx 7608e6f7 plus the closed PRs #2065 to #2068 and #2064): the other
-  18 kernels, `probes/` and `fp8_gemm/`, still on `grid([..]) block(n)`. The proof refuses what
-  they need in an `across` loop: warp shuffles, `barrier()` and `fast_exp` are `mlir!` blocks or
-  calls it cannot see into, and the `mlir!` blocks of the tensor-core kernels wait for declared
-  writes (Vx #2076).
+- **No calls it cannot read.** A function call (other than the stdlib's pure scalar ones, such
+  as `f32::sqrt` and `f32::fast_exp`), an `mlir!` block and `barrier()` are refused in an
+  `across` loop. So `device.vx` holds macros, which expand in the loop: the decoders, `sigmoid`,
+  and the reductions.
+- **Reductions in shared memory.** A warp sum is five lane loops on shared memory (offsets 16, 8,
+  4, 2, 1, as vxk_warp_sum), each reading one tensor and writing another, since a pass may not
+  read an element that another pass of the same loop writes. Each lane loop ends with a barrier,
+  so a warp sum costs five barriers where the hand kernels shuffle: correct first, and the
+  shuffles come back as an MLIR pass.
+- **Results that do not depend on the launch.** A block reduction follows the hand kernel
+  launched with `threads` threads, which the norms, softmax and mla_partial take as a parameter:
+  a 1024-lane loop in which lane t < threads sums d = t, t + threads, .. and the rest add zeros.
+- **Uniform control around lane loops.** A condition or loop bound around a lane loop may read
+  only block indices and host values, so data-dependent state (mla_partial's m and l, topk's key
+  prefix) lives in shared memory, and a one-lane loop updates it after the lanes have read it.
+- **exp is libdevice's.** `f32::fast_exp` is expf from libdevice, where the hand kernels use
+  `ex2.approx.ftz.f32(x * log2 e)` in an `mlir!` block; the five kernels with exp differ from
+  them in the last bits (the hardware tests compare them within 1e-5) until an `across` loop takes
+  an `mlir!` block that declares it writes nothing (Vx #2076 D1 to D3).
 
-`ONLY=across` or `ONLY=grid` makes `build.sh` build one kind (it greps each source for
-`across blocks`), so each vxc builds its own; `scripts/pod_validate.sh` takes the main vxc as
-`VXC_ACROSS`. Each `lib<kernel>.so` links the dispatch library of the vxc that built it, by path,
-so a process that loads both kinds holds two Vx runtimes, each with its own stream setting.
+`probes/` and `fp8_gemm/` (wgmma, TMA, mbarriers) are not built: their `mlir!` blocks wait for
+declared writes (Vx #2076).
 
 Two launches use the same PTX:
 
@@ -37,7 +49,7 @@ Two launches use the same PTX:
   the legacy default stream, without waiting for the GPU. The tensors must come from
   `CUDAContext(primary=True)`, the context Vx's runtime uses; they are passed with no copy.
   `VxKernel(...)(..., stream=s)` launches on our stream `s` instead (Vx's `vx_cuda_set_stream`,
-  #2100 on main, PR #2068 on the old stack, set for the call; the stream set before is put back after it), so `s.capture()` can
+  #2100, set for the call; the stream set before is put back after it), so `s.capture()` can
   record Vx's launches, with ours, into a CUDA graph. Call each kernel once before capturing.
 - **Python launches it.** `launch.py` (on `gpu/runtime.py`) launches the PTX with the manifest's
   shape, or with any grid and block the caller passes (the hardware tests sweep them).
@@ -50,46 +62,45 @@ Two launches use the same PTX:
 | `scaled_add.vx` | `glm_vx_gpu_scaled_add` | 20 |
 | `rope_glm.vx` | `glm_vx_gpu_rope_glm` | 28 |
 | `rope_strided.vx` | `glm_vx_gpu_rope_strided` | 28 |
-| `matvec.vx` | `glm_vx_gpu_matvec` | 26 |
-| `matvec_heads.vx` | `glm_vx_gpu_matvec_heads` | 32 |
-| `index_scores.vx` | `glm_vx_gpu_index_scores` | 26 |
-| `bf16_matvec.vx` | `glm_vx_gpu_bf16_matvec` | 26 |
-| `bf16_matmul.vx` | `glm_vx_gpu_bf16_matmul` | 31 |
-| `int4_matvec.vx` | `glm_vx_gpu_int4_matvec` | 31 |
-| `int4_matmul.vx` | `glm_vx_gpu_int4_matmul` | 37 |
-| `fp8_matvec.vx` | `glm_vx_gpu_fp8_matvec` | 30 |
-| `fp8_matmul.vx` | `glm_vx_gpu_fp8_matmul` | 38 |
+| `matvec.vx` | `glm_vx_gpu_matvec` | 38 |
+| `matvec_heads.vx` | `glm_vx_gpu_matvec_heads` (out is [heads, out_stride]) | 48 |
+| `index_scores.vx` | `glm_vx_gpu_index_scores` | 43 |
+| `bf16_matvec.vx` | `glm_vx_gpu_bf16_matvec` | 47 |
+| `bf16_matmul.vx` | `glm_vx_gpu_bf16_matmul` (out is [M, N]) | 53 |
+| `int4_matvec.vx` | `glm_vx_gpu_int4_matvec` | 50 |
+| `int4_matmul.vx` | `glm_vx_gpu_int4_matmul` (out is [M, N]) | 56 |
+| `fp8_matvec.vx` | `glm_vx_gpu_fp8_matvec` | 61 |
+| `fp8_matmul.vx` | `glm_vx_gpu_fp8_matmul` (out is [M, N]) | 62 |
 | `gemm_f32.vx` | `glm_vx_gpu_gemm_f32` | 32 |
-| `topk.vx` | `glm_vx_gpu_topk_stable` | 38 |
-| `rmsnorm_rows.vx` | `glm_vx_gpu_rmsnorm_rows`, and `glm_vx_gpu_rmsnorm` as rows = 1 | 16 |
-| `residual_rmsnorm.vx` | `glm_vx_gpu_residual_rmsnorm` | 18 |
-| `layernorm.vx` | `glm_vx_gpu_layernorm` | 21 |
-| `softmax_rows.vx` | `glm_vx_gpu_softmax_rows`, and `glm_vx_gpu_softmax` as rows = 1 | 18 |
-| `swiglu.vx` | `glm_vx_gpu_swiglu` | 17 |
-| `router.vx` | `glm_vx_gpu_router` | 22 |
-| `mla_partial.vx` | `glm_vx_gpu_mla_partial` | 25 |
-| `mla_merge.vx` | `glm_vx_gpu_mla_merge` | 32 |
+| `topk.vx` | `glm_vx_gpu_topk_stable` (its own scratch: `gpu.topk.spawn_buffers`) | 32 |
+| `rmsnorm_rows.vx` | `glm_vx_gpu_rmsnorm_rows`, and `glm_vx_gpu_rmsnorm` as rows = 1 | 38 |
+| `residual_rmsnorm.vx` | `glm_vx_gpu_residual_rmsnorm` | 36 |
+| `layernorm.vx` | `glm_vx_gpu_layernorm` | 40 |
+| `softmax_rows.vx` | `glm_vx_gpu_softmax_rows`, and `glm_vx_gpu_softmax` as rows = 1 | 40 |
+| `swiglu.vx` | `glm_vx_gpu_swiglu` | 25 |
+| `router.vx` | `glm_vx_gpu_router` | 28 |
+| `mla_partial.vx` | `glm_vx_gpu_mla_partial` (numerator [tasks, rank], stats [tasks, 2]) | 40 |
+| `mla_merge.vx` | `glm_vx_gpu_mla_merge` (out is [heads, rank]) | 32 |
 
-All assemble with ptxas for sm_80 with no spills; none has run on a GPU yet. The three norms
-need a correctly rounded sqrt, which needs #1944 (PR #1955), and the five kernels with exp use
-`fast_exp` (device.vx), `ex2.approx.ftz.f32(x * log2 e)` exactly as the hand kernels do, which
-needs nvvm intrinsics in the device image, #1945 (PR #1959). Built and checked with Vx main
-plus PRs #1952, #1954, #1955, #1958, #1959, #1960, #1961, #1962, #1964 (`--emit-ptx`), #1972
-(launch shapes) and #1974 (no wait after each launch); the libraries for streams and graphs
-also take #1987, #1976 and #1994 (`vx_cuda_set_stream`, which `nm -D` shows exported). Barrier counts match the hand kernels (softmax 4, router
-1, mla_partial 2). Not ported: gemm_tf32 (`mma.sync m16n8k8`: #350).
+All assemble with ptxas for sm_80 with no spills; none has run on a GPU yet. The norms, softmax
+and mla_partial launch 1024 lanes; a warp-per-row kernel has four rows per block of 128.
+topk keeps gpu/topk.vx's radix select, then, because the hand kernel's compaction and rank write
+at computed positions, puts each lane's candidates in its own column of scratch, gathers them,
+and sorts them by (key, position) as one i64 with a bitonic sort (a numpy model of it matches
+`np.argsort(-scores, kind='stable')`). Not ported: gemm_tf32 (`mma.sync m16n8k8`: #350).
 `probes/` holds tensor-core probes (mma.sync on sm_80, wgmma bf16 and block-FP8 on sm_90a) with
-register-tensor accumulators (Vx PR #2058, was #1991); see `probes/README.md`.
-`fp8_gemm/` holds the block-FP8 GEMM for H100 (TMA, mbarrier ring, wgmma e4m3; sm_90a, its own
-`build.sh` and machine file; Vx PRs #2058 (was #1991), #1995, #1996); see `gpu/FP8-GEMM.md`.
+register-tensor accumulators; see `probes/README.md`. `fp8_gemm/` holds the block-FP8 GEMM for
+H100 (TMA, mbarrier ring, wgmma e4m3; sm_90a, its own `build.sh` and machine file); see
+`gpu/FP8-GEMM.md`. Both are still written with `grid([..]) block(n)` and wait for Vx #2076.
 
-`gpu/test_spawn_hardware.py` checks each against the hand kernel, bit for bit, on a GPU, and
+`gpu/test_spawn_hardware.py` checks each against the hand kernel, bit for bit (within 1e-5 for
+the five with exp), on a GPU, and
 `gpu/test_spawn_vx_launch.py` checks Vx's launch of each against Python's launch of the same
 PTX with the same shape, bit for bit (run it also with `VX_CUDA_SYNC=1`).
 `gpu/test_spawn_vx_graph.py` runs a chain of Vx launches on our stream and as a replayed CUDA
 graph (also mixed with Python launches), bit for bit against the legacy stream, and checks that
 Vx stops a capture on `VX_CUDA_SYNC=1` or `VX_TIME_KERNEL`; it needs the libraries built with
-#2100 (main) or PR #2068 (the old stack).
+#2100.
 
 ## Build
 
@@ -114,26 +125,25 @@ size, stride). `launch.py` takes the arguments by name.
 descriptor layout differ from the PTX, whose mutable tensors are not the ones the kernel
 stores to, or whose element types differ from the width of the loads made through each tensor
 (address arithmetic is traced from the descriptor's pointer).
-`device.vx` holds thread-id and shuffle helpers, warp sum and max, `fast_exp` and `sigmoid`, and
-the bf16, binary16, INT4 and FP8 decodes.
+`device.vx` holds macros: the bf16, binary16, INT4 and FP8 decodes, `sigmoid`, and the warp and
+block sums and maxima on shared memory.
 
 ## What Vx is missing
 
 | Need | Today | Vx issue |
 | --- | --- | --- |
-| Thread ids, warp shuffles | `mlir!` gpu-dialect helpers in `device.vx` | #260 |
+| Warp shuffles in an `across` loop | lane loops on shared memory, five barriers per warp sum; an MLIR pass is to put the shuffles back | #260 |
+| Device functions in an `across` loop | refused (the proof does not read their bodies); the helpers are macros | #2076 D4 |
+| `mlir!` blocks in an `across` loop (exp as the hand kernels, wgmma, TMA) | refused; exp is libdevice expf, the tensor-core kernels are not built | #2076 D1 to D3 |
 | A stable entry name and documented parameter order | `vxc --emit-ptx` (PR #1964): the entry is the function's name, the parameters its own in declared order | #251 |
 | Correctly rounded sqrt / div (the norms) | `sqrt.approx` / `rsqrt.approx` in 390c2534; `sqrt.rn` + `rcp.rn` with PR #1955 | #1944 |
-| A shared tensor passed to a device function | `memref.cast` dropped address space 3 and the fallback panicked; PR #1961 fixes it, and `block_sum` / `block_max` live in device.vx | #1956 |
-| `barrier()` inside a device function | gave no device image, no warning; PR #1962 fixes it | #1957 |
-| exp as the hand kernels compute it, `ex2.approx.ftz.f32(x * log2 e)` | `llvm.call_intrinsic "llvm.nvvm.ex2.approx.ftz.f"` in an mlir! block, with PR #1959 | #1945 |
-| Bit casts (`f32::from_bits`) | crash; bf16 decode uses exact arithmetic instead | #1943 |
+| Bit casts (`f32::from_bits`) | not a pure call to the proof; bf16 decode uses exact arithmetic instead | #1943 |
+| `if` as a value in a region | the flat code generator declines it and the GPU lowering then fails; the macros use statements | |
 | Scalars passed by value | E6003 unless `machine.vx` lists CPU_DRAM as visible | #1947 |
 | Raw pointers in a region | silent host fallback before PR #1959, which takes them and warns on any other fallback; kernels take `[?]` tensors | #1945 |
 | Shared memory `::new()` | zero-fill races with other warps; use `unsafe { ::uninit() }` | #1946 |
 | A Vx build of the same file (exe or .so) | the host copy of a GPU-only helper stops the program; PR #1958 | #1942 |
-| Grid and block chosen by the program | `across` loops (merged, #2095 to #2097); `grid([..]) block(..)` on the old stack (PR #2065, closed) | #252 |
-| A reduction over lanes (warp sum, block sum) inside `across` | none: shuffles are `mlir!`, and `barrier()` is refused; asked on Vx | #252 |
+| Grid and block chosen by the program | `across` loops (merged, #2095 to #2097) | #252 |
 | Launch without a device sync each time | waits only before a copy to the host, a free, or exit; merged as #2098 (was #2066) | #25 |
 | A stream of the caller, and CUDA graphs | `vx_cuda_set_stream` (merged as #2100, was #2068): launches, cuBLAS and copies on our stream, temporaries stream-ordered, a stop with a message on a wait during a capture; `gpu/test_spawn_vx_graph.py` | #1986 |
 | Futures the compiler waits on | no waits are emitted; the runtime waits before a host copy, a free, or exit | #25 |

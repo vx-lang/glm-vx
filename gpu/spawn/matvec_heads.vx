@@ -1,31 +1,37 @@
 // glm_vx_gpu_matvec_heads through Vx's own GPU path: per-head matvec in one launch,
-// out[h*out_stride + r] = sum_c weight[h*w_stride + r*cols + c] * x[h*x_stride + c]. A warp
-// owns one (head, row); the column loop and warp sum are matvec's, so each head matches a
-// separate matvec bit for bit.
+// out[h, r] = sum_c weight[h*w_stride + r*cols + c] * x[h*x_stride + c], out is
+// [heads, out_stride]. A warp of 32 lanes owns one (head, row), four rows per block; the column
+// loop and warp sum are matvec's, so each head matches a separate matvec bit for bit.
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_matvec_heads(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<f32, [?], Memory::HBM>,
+pub fn glm_vx_spawn_matvec_heads(out: &mut Tensor<f32, [?, ?], Memory::HBM>, weight: &Tensor<f32, [?], Memory::HBM>,
                                  x: &Tensor<f32, [?], Memory::HBM>, heads: i32, rows: i32, cols: i32,
                                  w_stride: i32, x_stride: i32, out_stride: i32) -> void {
-  spawn on(Topology::Device) grid([(heads * rows - 1) / 4 + 1]) block(128) {
-    let tid: i32 = thread_id();
-    let block: i32 = block_dim();
-    let lane: i32 = tid % 32;
-    let index: i64 = (block_id() as i64) * ((block / 32) as i64) + ((tid / 32) as i64);
-    if heads > 0 && rows > 0 && cols >= 0 && block >= 32 && block <= 1024 && block % 32 == 0
-       && index < (heads as i64) * (rows as i64) {
-      let h: i64 = index / (rows as i64);
-      let r: i64 = index % (rows as i64);
-      let wbase: i64 = h * (w_stride as i64) + r * (cols as i64);
-      let xbase: i64 = h * (x_stride as i64);
-      let mut sum: f32 = 0.0;
-      let mut c: i32 = lane;
-      while c < cols {
-        sum = sum + weight[wbase + (c as i64)] * x[xbase + (c as i64)];
-        c = c + 32;
+  spawn on(Topology::Device) {
+    for h in 0..heads across blocks {
+      for rb in 0..(rows - 1) / 4 + 1 across blocks {
+        let mut a = unsafe { Tensor<f32, [128], Memory::SMEM>::uninit() };
+        let mut b = unsafe { Tensor<f32, [128], Memory::SMEM>::uninit() };
+        for w in 0..4 across lanes { for lane in 0..32 across lanes {
+          let r: i64 = ((rb * 4 + w) as i64);
+          let mut sum: f32 = 0.0;
+          if r < (rows as i64) {
+            let wbase: i64 = (h as i64) * (w_stride as i64) + r * (cols as i64);
+            let xbase: i64 = (h as i64) * (x_stride as i64);
+            let mut c: i32 = lane;
+            while c < cols {
+              sum = sum + weight[wbase + (c as i64)] * x[xbase + (c as i64)];
+              c = c + 32;
+            }
+          }
+          a[w * 32 + lane] = sum;
+        } }
+        warp_sums!(b, a, 4);
+        // A head's rows fit in its row of out, so heads do not overlap.
+        for w in 0..4 across lanes {
+          if rb * 4 + w < rows && rows <= out_stride && cols >= 0 { out[h][rb * 4 + w] = b[w * 32]; }
+        }
       }
-      let total: f32 = warp_sum(sum);
-      if lane == 0 { out[h * (out_stride as i64) + r] = total; }
     }
   }
   return;

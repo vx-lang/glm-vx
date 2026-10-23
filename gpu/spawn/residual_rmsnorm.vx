@@ -1,29 +1,38 @@
 // glm_vx_gpu_residual_rmsnorm through Vx's own GPU path. One block per row: residual_out =
-// x + residual, then out = rmsnorm(residual_out) * weight (correctly rounded sqrt, Vx #1944).
+// x + residual, then out = rmsnorm(residual_out) * weight (correctly rounded sqrt, Vx #1944),
+// summed as the hand kernel launched with `threads` threads (rmsnorm_rows.vx). out and
+// residual_out are [rows, dim].
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_residual_rmsnorm(out: &mut Tensor<f32, [?], Memory::HBM>, residual_out: &mut Tensor<f32, [?], Memory::HBM>,
+pub fn glm_vx_spawn_residual_rmsnorm(out: &mut Tensor<f32, [?, ?], Memory::HBM>, residual_out: &mut Tensor<f32, [?, ?], Memory::HBM>,
                                      x: &Tensor<f32, [?], Memory::HBM>, residual: &Tensor<f32, [?], Memory::HBM>,
-                                     weight: &Tensor<f32, [?], Memory::HBM>, rows: i32, dim: i32, eps: f32) -> void {
-  spawn on(Topology::Device) grid([rows]) block(256) {
-    let mut shared = unsafe { Tensor<f32, [33], Memory::SMEM>::uninit() };
-    let tid: i32 = thread_id();
-    let row: i32 = block_id();
-    let block: i32 = block_dim();
-    if rows > 0 && dim > 0 && eps > 0.0 && row < rows && block >= 32 && block <= 1024 && block % 32 == 0 {
-      let base: i32 = row * dim;
-      let mut ss: f32 = 0.0;
-      let mut d: i32 = tid;
-      while d < dim {
-        let v: f32 = x[base + d] + residual[base + d];
-        residual_out[base + d] = v;
-        ss = ss + v * v;
-        d = d + block;
+                                     weight: &Tensor<f32, [?], Memory::HBM>, rows: i32, dim: i32, eps: f32,
+                                     threads: i32) -> void {
+  spawn on(Topology::Device) {
+    for row in 0..rows across blocks {
+      if dim > 0 && eps > 0.0 && threads >= 32 && threads <= 1024 && threads % 32 == 0 {
+        let mut a = unsafe { Tensor<f32, [1024], Memory::SMEM>::uninit() };
+        let mut b = unsafe { Tensor<f32, [1024], Memory::SMEM>::uninit() };
+        let base: i32 = row * dim;
+        for d in 0..dim across lanes(256) { residual_out[row][d] = x[base + d] + residual[base + d]; }
+        for t in 0..1024 across lanes {
+          let mut ss: f32 = 0.0;
+          if t < threads {
+            let mut d: i32 = t;
+            while d < dim {
+              let v: f32 = residual_out[row][d];
+              ss = ss + v * v;
+              d = d + threads;
+            }
+          }
+          a[t] = ss;
+        }
+        block_sum!(b, a, threads);
+        for d in 0..dim across lanes(256) {
+          let inv: f32 = 1.0 / (b[0] / (dim as f32) + eps).sqrt();
+          out[row][d] = residual_out[row][d] * inv * weight[d];
+        }
       }
-      let total: f32 = block_sum(ss, &mut shared);
-      let inv: f32 = 1.0 / (total / (dim as f32) + eps).sqrt();
-      d = tid;
-      while d < dim { out[base + d] = residual_out[base + d] * inv * weight[d]; d = d + block; }
     }
   }
   return;

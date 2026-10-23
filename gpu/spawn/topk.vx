@@ -1,148 +1,221 @@
 // glm_vx_gpu_topk_stable through Vx's own GPU path: ids sorted by (descending score, ascending
-// position), the first min(k, tokens) of np.argsort(-scores, kind='stable'). Same algorithm,
-// scratch layout and launch contract as gpu/topk.vx (one block of exactly 256 threads; see
-// TOPK.md): a deterministic four-pass radix select, compaction in position order, then a rank.
-// Scores arrive as raw float32 bits in an i32 tensor. Loops are while loops so that no loop is
-// taken for the region's parallel loop.
+// position), the first min(k, tokens) of np.argsort(-scores, kind='stable'). One block of 256
+// lanes. The select is gpu/topk.vx's deterministic four-pass radix select (TOPK.md); the rest
+// is new, because the hand kernel's compaction and final rank write at computed positions,
+// which the race proof of `across` cannot follow:
+//   - each lane writes its histogram row, hist[t][digit], and its candidates in its own
+//     column, scratch[256 + j][t], so a write's index always names the lane;
+//   - lane s gathers candidate s into order_a by a binary search of the per-lane offsets;
+//   - a bitonic sort of (key, position) as one i64, ping-ponging order_a and order_b, puts
+//     them in order; lane r reads id r.
+// Scores arrive as raw float32 bits in an i32 tensor. scratch is [256 + ceil(tokens / 256),
+// 256]; order_a and order_b hold at least the power of two at or above min(k, tokens).
 // spawn-include: device.vx
 
 // Order-preserving map from float32 bits to [0, 2^32): bigger key == bigger score; NaN is 0.
-fn topk_key(bits: i32) on Topology::Device -> i64 {
-  let b: i64 = (bits as i64) & 4294967295;
-  let man: i64 = b & 8388607;
-  let mut key: i64 = b + 2147483648;
-  if b >= 2147483648 { key = 4294967295 - b; }
-  if b == 2147483648 { key = 2147483648; }
-  if ((b >> 23) & 255) == 255 && man != 0 { key = 0; }
-  return key;
+macro_rules! topk_key {
+    ($bits:expr) => {
+        unsafe {
+          let dv_b: i64 = ($bits as i64) & 4294967295;
+          let dv_man: i64 = dv_b & 8388607;
+          let mut dv_key: i64 = dv_b + 2147483648;
+          if dv_b >= 2147483648 { dv_key = 4294967295 - dv_b; }
+          if dv_b == 2147483648 { dv_key = 2147483648; }
+          if ((dv_b >> 23) & 255) == 255 && dv_man != 0 { dv_key = 0; }
+          dv_key
+        }
+    };
 }
 
 pub fn glm_vx_spawn_topk_stable(out_ids: &mut Tensor<i32, [?], Memory::HBM>, scores: &Tensor<i32, [?], Memory::HBM>,
-                                scratch: &mut Tensor<i32, [?], Memory::HBM>, tokens: i32, k: i32) -> void {
-  spawn on(Topology::Device) grid([1]) block(256) {
-    // The condition is uniform across the block, so every thread reaches the same barriers.
-    if tokens > 0 && k > 0 && block_dim() == 256 {
-      let tid: i64 = thread_id() as i64;
-      let t_count: i64 = tokens as i64;
-      let mut kk: i64 = k as i64;
-      if kk > t_count { kk = t_count; }
-      let total: i64 = 65536;
-      let ctrl: i64 = 65792;
-      let cg: i64 = 65800;
-      let ce: i64 = 66056;
-      let selb: i64 = 66312;
-      let take: i64 = 66568;
-      let cand_pos: i64 = 66824;
-      let cand_key: i64 = cand_pos + kk;
-      let mut prefix: i64 = 0;
-      let mut remaining: i64 = kk;
-      let mut pass: i64 = 0;
-      while pass < 4 {
-        let shift: i64 = 24 - 8 * pass;
-        let mut bin: i64 = 0;
-        while bin < 256 { scratch[tid * 256 + bin] = 0; bin = bin + 1; }
-        let mut i: i64 = tid;
-        while i < t_count {
-          let key: i64 = topk_key(scores[i]);
-          if (key >> (shift + 8)) == prefix {
-            let slot: i64 = tid * 256 + ((key >> shift) & 255);
-            scratch[slot] = scratch[slot] + 1;
-          }
-          i = i + 256;
-        }
-        barrier();
-        let mut sum: i64 = 0;
-        let mut owner: i64 = 0;
-        while owner < 256 { sum = sum + (scratch[owner * 256 + tid] as i64); owner = owner + 1; }
-        scratch[total + tid] = sum as i32;
-        barrier();
-        if tid == 0 {
-          let mut cumulative: i64 = 0;
-          let mut digit: i64 = 0;
-          let mut below: i64 = 0;
-          let mut found: i32 = 0;
-          let mut b: i64 = 255;
-          while b >= 0 {
-            if found == 0 {
-              let c: i64 = scratch[total + b] as i64;
-              if cumulative + c >= remaining { found = 1; digit = b; below = cumulative; }
-              if found == 0 { cumulative = cumulative + c; }
+                                scratch: &mut Tensor<i32, [?, ?], Memory::HBM>,
+                                order_a: &mut Tensor<i64, [?], Memory::HBM>, order_b: &mut Tensor<i64, [?], Memory::HBM>,
+                                tokens: i32, k: i32) -> void {
+  spawn on(Topology::Device) {
+    for blk in 0..1 across blocks {
+      if tokens > 0 && k > 0 {
+        let mut total = unsafe { Tensor<i32, [256], Memory::SMEM>::uninit() };
+        let mut ctrl = unsafe { Tensor<i64, [2], Memory::SMEM>::uninit() };
+        let mut cg = unsafe { Tensor<i32, [256], Memory::SMEM>::uninit() };
+        let mut ce = unsafe { Tensor<i32, [256], Memory::SMEM>::uninit() };
+        let mut selb = unsafe { Tensor<i32, [256], Memory::SMEM>::uninit() };
+        let mut take = unsafe { Tensor<i32, [256], Memory::SMEM>::uninit() };
+        let kk: i32 = k.min(tokens);
+        let chunk: i32 = (tokens + 255) / 256;
+        // p, the power of two at or above kk, is 2^bits.
+        let v0: i32 = kk - 1;
+        let v1: i32 = v0 | (v0 >> 1);
+        let v2: i32 = v1 | (v1 >> 2);
+        let v3: i32 = v2 | (v2 >> 4);
+        let v4: i32 = v3 | (v3 >> 8);
+        let v5: i32 = v4 | (v4 >> 16);
+        let p: i32 = v5 + 1;
+        let c1: i32 = v5 - ((v5 >> 1) & 1431655765);
+        let c2: i32 = (c1 & 858993459) + ((c1 >> 2) & 858993459);
+        let c3: i32 = (c2 + (c2 >> 4)) & 252645135;
+        let c4: i32 = c3 + (c3 >> 8);
+        let bits: i32 = (c4 + (c4 >> 16)) & 63;
+        let stages: i32 = bits * (bits + 1) / 2;
+
+        // ctrl[0] is the key prefix found so far, ctrl[1] how many of the keys with it to take.
+        for t in 0..1 across lanes { ctrl[t] = 0; ctrl[t + 1] = kk as i64; }
+        for pass in 0..4 {
+          let shift: i64 = (24 - 8 * pass) as i64;
+          for t in 0..256 across lanes {
+            for bin in 0..256 { scratch[t][bin] = 0; }
+            let prefix: i64 = ctrl[0];
+            let mut i: i32 = t;
+            while i < tokens {
+              let key: i64 = topk_key!(scores[i]);
+              if (key >> (shift + 8)) == prefix {
+                let digit: i32 = ((key >> shift) & 255) as i32;
+                scratch[t][digit] = scratch[t][digit] + 1;
+              }
+              i = i + 256;
             }
-            b = b - 1;
           }
-          scratch[ctrl] = ((prefix * 256 + digit) - 2147483648) as i32;
-          scratch[ctrl + 1] = (remaining - below) as i32;
+          for t in 0..256 across lanes {
+            let mut sum: i32 = 0;
+            for owner in 0..256 { sum = sum + scratch[owner][t]; }
+            total[t] = sum;
+          }
+          for t in 0..1 across lanes {
+            let prefix: i64 = ctrl[t];
+            let remaining: i64 = ctrl[t + 1];
+            let mut cumulative: i64 = 0;
+            let mut digit: i64 = 0;
+            let mut below: i64 = 0;
+            let mut found: i32 = 0;
+            let mut b: i32 = 255;
+            while b >= 0 {
+              if found == 0 {
+                let c: i64 = total[b] as i64;
+                if cumulative + c >= remaining { found = 1; digit = b as i64; below = cumulative; }
+                if found == 0 { cumulative = cumulative + c; }
+              }
+              b = b - 1;
+            }
+            ctrl[t] = prefix * 256 + digit;
+            ctrl[t + 1] = remaining - below;
+          }
         }
-        barrier();
-        prefix = (scratch[ctrl] as i64) + 2147483648;
-        remaining = scratch[ctrl + 1] as i64;
-        barrier();
-        pass = pass + 1;
-      }
-      // prefix is now the k-th largest key; `remaining` of the elements equal to it are selected.
-      let chunk: i64 = (t_count + 255) / 256;
-      let lo: i64 = tid * chunk;
-      let mut hi: i64 = lo + chunk;
-      if hi > t_count { hi = t_count; }
-      let mut greater: i64 = 0;
-      let mut equal: i64 = 0;
-      let mut pos: i64 = lo;
-      while pos < hi {
-        let key: i64 = topk_key(scores[pos]);
-        if key > prefix { greater = greater + 1; }
-        if key == prefix { equal = equal + 1; }
-        pos = pos + 1;
-      }
-      scratch[cg + tid] = greater as i32;
-      scratch[ce + tid] = equal as i32;
-      barrier();
-      if tid == 0 {
-        let mut equal_before: i64 = 0;
-        let mut selected_before: i64 = 0;
-        let mut o: i64 = 0;
-        while o < 256 {
-          let mut grant: i64 = remaining - equal_before;
-          if grant < 0 { grant = 0; }
-          let have: i64 = scratch[ce + o] as i64;
-          if grant > have { grant = have; }
-          scratch[selb + o] = selected_before as i32;
-          scratch[take + o] = grant as i32;
-          equal_before = equal_before + have;
-          selected_before = selected_before + (scratch[cg + o] as i64) + grant;
-          o = o + 1;
+
+        // ctrl[0] is now the kk-th largest key; ctrl[1] of the keys equal to it are selected,
+        // the first ones in position order. Lane t owns positions [t * chunk, t * chunk + chunk).
+        for t in 0..256 across lanes {
+          let prefix: i64 = ctrl[0];
+          let lo: i32 = t * chunk;
+          let mut hi: i32 = lo + chunk;
+          if hi > tokens { hi = tokens; }
+          let mut greater: i32 = 0;
+          let mut equal: i32 = 0;
+          let mut pos: i32 = lo;
+          while pos < hi {
+            let key: i64 = topk_key!(scores[pos]);
+            if key > prefix { greater = greater + 1; }
+            if key == prefix { equal = equal + 1; }
+            pos = pos + 1;
+          }
+          cg[t] = greater;
+          ce[t] = equal;
         }
-      }
-      barrier();
-      let mut slot: i64 = scratch[selb + tid] as i64;
-      let mut grant_left: i64 = scratch[take + tid] as i64;
-      pos = lo;
-      while pos < hi {
-        let key: i64 = topk_key(scores[pos]);
-        let mut chosen: i32 = 0;
-        if key > prefix { chosen = 1; }
-        if key == prefix { if grant_left > 0 { chosen = 1; grant_left = grant_left - 1; } }
-        if chosen != 0 {
-          scratch[cand_pos + slot] = pos as i32;
-          scratch[cand_key + slot] = (key - 2147483648) as i32;
-          slot = slot + 1;
+        for t in 0..1 across lanes {
+          let remaining: i64 = ctrl[1];
+          let mut equal_before: i64 = 0;
+          let mut selected_before: i32 = 0;
+          for o in 0..256 {
+            let mut grant: i64 = remaining - equal_before;
+            if grant < 0 { grant = 0; }
+            let have: i64 = ce[o] as i64;
+            if grant > have { grant = have; }
+            selb[o + t] = selected_before;
+            take[o + t] = grant as i32;
+            equal_before = equal_before + have;
+            selected_before = selected_before + cg[o] + (grant as i32);
+          }
         }
-        pos = pos + 1;
-      }
-      barrier();
-      // Candidates are in position order, so among equal keys the earlier index ranks first.
-      let mut mine: i64 = tid;
-      while mine < kk {
-        let my_key: i32 = scratch[cand_key + mine];
-        let mut rank: i64 = 0;
-        let mut o: i64 = 0;
-        while o < kk {
-          let other_key: i32 = scratch[cand_key + o];
-          if other_key > my_key { rank = rank + 1; }
-          if other_key == my_key { if o < mine { rank = rank + 1; } }
-          o = o + 1;
+        for t in 0..256 across lanes {
+          let prefix: i64 = ctrl[0];
+          let lo: i32 = t * chunk;
+          let mut hi: i32 = lo + chunk;
+          if hi > tokens { hi = tokens; }
+          let mut grant_left: i32 = take[t];
+          let mut j: i32 = 0;
+          let mut pos: i32 = lo;
+          while pos < hi {
+            let key: i64 = topk_key!(scores[pos]);
+            let mut chosen: i32 = 0;
+            if key > prefix { chosen = 1; }
+            if key == prefix { if grant_left > 0 { chosen = 1; grant_left = grant_left - 1; } }
+            if chosen != 0 { scratch[256 + j][t] = pos; j = j + 1; }
+            pos = pos + 1;
+          }
         }
-        out_ids[rank] = scratch[cand_pos + mine];
-        mine = mine + 256;
+
+        // Candidate s is lane t's (s - selb[t])-th, t the last lane with selb[t] <= s. As one
+        // i64, a candidate is its key above its position reversed, so a bigger value ranks
+        // first; the padding up to p is the smallest i64.
+        for s in 0..p across lanes(256) {
+          let mut value: i64 = -9223372036854775807 - 1;
+          if s < kk {
+            let mut lo: i32 = 0;
+            let mut hi: i32 = 255;
+            while lo < hi {
+              let mid: i32 = (lo + hi + 1) / 2;
+              if selb[mid] <= s { lo = mid; } else { hi = mid - 1; }
+            }
+            let pos: i32 = scratch[256 + s - selb[lo]][lo];
+            let key: i64 = topk_key!(scores[pos]);
+            value = (key - 2147483648) * 4294967296 + (4294967295 - (pos as i64));
+          }
+          order_a[s] = value;
+        }
+        // Bitonic sort, descending: stage st is the merge of blocks of 2^m with partner
+        // distance d, in the order (m, d) = (1, 1), (2, 2), (2, 1), (3, 4), ..; two stages per
+        // round, a to b then b to a, and a stage past the last copies.
+        for round in 0..(stages + 1) / 2 {
+          for i in 0..p across lanes(256) {
+            let st: i32 = round * 2;
+            let x: i64 = order_a[i];
+            let mut value: i64 = x;
+            if st < stages {
+              let mut m: i32 = 1;
+              let mut before: i32 = 0;
+              while before + m <= st { before = before + m; m = m + 1; }
+              let size: i32 = 1 << m;
+              let d: i32 = size >> (st - before + 1);
+              let y: i64 = order_a[i ^ d];
+              let mut larger: i64 = x;
+              let mut smaller: i64 = y;
+              if y > x { larger = y; smaller = x; }
+              value = smaller;
+              if ((i & d) == 0) == ((i & size) == 0) { value = larger; }
+            }
+            order_b[i] = value;
+          }
+          for i in 0..p across lanes(256) {
+            let st: i32 = round * 2 + 1;
+            let x: i64 = order_b[i];
+            let mut value: i64 = x;
+            if st < stages {
+              let mut m: i32 = 1;
+              let mut before: i32 = 0;
+              while before + m <= st { before = before + m; m = m + 1; }
+              let size: i32 = 1 << m;
+              let d: i32 = size >> (st - before + 1);
+              let y: i64 = order_b[i ^ d];
+              let mut larger: i64 = x;
+              let mut smaller: i64 = y;
+              if y > x { larger = y; smaller = x; }
+              value = smaller;
+              if ((i & d) == 0) == ((i & size) == 0) { value = larger; }
+            }
+            order_a[i] = value;
+          }
+        }
+        for r in 0..kk across lanes(256) {
+          out_ids[r] = (4294967295 - (order_a[r] & 4294967295)) as i32;
+        }
       }
     }
   }

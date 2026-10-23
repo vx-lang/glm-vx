@@ -13,13 +13,9 @@
 # layers, default 4), TOKENS (default 48), STRESS (concurrent stress processes, default 8).
 # Use OMP_NUM_THREADS well below the host's vCPU count (NumPy thrashes on 128-vCPU pods).
 #
-# Toolchain: two vxc bundles while the spawn kernels move to `across` (gpu/spawn/README.md).
-# VXC_ACROSS (and VX_DISPATCH_LIB_ACROSS or <bundle>/lib/libvx_cuda_dispatch.so) is a vxc from Vx main
-# (b151bb8c on), which builds the kernels on `across`; without it those are not built. The vxc
-# bundle (VXC, and VX_DISPATCH_LIB or <bundle>/lib/libvx_cuda_dispatch.so) builds the rest, still on
-# `grid([..]) block(n)`: Vx 7608e6f7 plus the closed PRs #2065 to #2068 and #2064. It must
-# include #2068 (Vx#1986, vx_cuda_set_stream), or the graph step
-# (gpu/test_spawn_vx_graph.py: Vx on our stream, and in CUDA graphs) fails. host.txt says whether the dispatch library exports it.
+# Toolchain: one vxc bundle from Vx main (b151bb8c or later: the `across` loops of #2095 to #2097 and
+# vx_cuda_set_stream of #2100, which the graph step needs; host.txt says whether the dispatch library
+# exports it). VXC, and VX_DISPATCH_LIB or <bundle>/lib/libvx_cuda_dispatch.so.
 # Do not export VX_CUDA_SYNC or VX_TIME_KERNEL for the whole run: Vx stops a graph capture on either.
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -72,15 +68,9 @@ if [[ -z ${VX_DISPATCH_LIB:-} ]]; then
 fi
 {
   echo "dispatch lib ${VX_DISPATCH_LIB:-none}"
-  echo "vx_cuda_set_stream (Vx #2100, was PR #2068): $(nm -D --defined-only "${VX_DISPATCH_LIB:-/dev/null}" 2>/dev/null | grep -qw vx_cuda_set_stream && echo exported || echo MISSING)"
+  echo "vx_cuda_set_stream (Vx #2100): $(nm -D --defined-only "${VX_DISPATCH_LIB:-/dev/null}" 2>/dev/null | grep -qw vx_cuda_set_stream && echo exported || echo MISSING)"
 } >> "$out/host.txt"
-step build-spawn env ONLY=grid bash gpu/spawn/build.sh
-if [[ -n ${VXC_ACROSS:-} ]]; then
-  across_lib=${VX_DISPATCH_LIB_ACROSS:-$(dirname "$(command -v "$VXC_ACROSS")")/../lib/libvx_cuda_dispatch.so}
-  [[ -f $across_lib ]] || across_lib=
-  echo "vxc (across) $("$VXC_ACROSS" --version 2>&1 | head -1), dispatch lib ${across_lib:-none}" >> "$out/host.txt"
-  step build-spawn-across env ONLY=across VXC="$VXC_ACROSS" VX_DISPATCH_LIB="$across_lib" bash gpu/spawn/build.sh
-fi
+step build-spawn bash gpu/spawn/build.sh
 step build-cpu-lib bash kernels/build.sh
 sha256sum gpu/build/*.ptx gpu/build/spawn/*.ptx gpu/build/spawn/*.so > "$out/ptx.sha256" 2>/dev/null
 
@@ -96,13 +86,9 @@ step test-spawn-vx-launch-sync hw_sync gpu/test_spawn_vx_launch.py
 # process, since Vx stops the program on what a capture cannot hold; -s keeps every child's stderr
 # (Vx's messages) and the eager-vs-replay timing lines in the log, on success too.
 step test-spawn-vx-graph hw -s gpu/test_spawn_vx_graph.py
-# The block-FP8 GEMM (glm-vx #10, gpu/FP8-GEMM.md) is sm_90a code: H100/H200 only. Its timings and
-# measured accumulation error go to fp8_gemm_hardware.json.
-if [[ $cap == 9.0 ]]; then
-  step build-fp8-gemm bash gpu/spawn/fp8_gemm/build.sh
-  fp8_hw() { GLM_VX_FP8_GEMM_JSON="$out/fp8_gemm_hardware.json" hw "$@"; }
-  step test-fp8-gemm-hardware fp8_hw gpu/test_fp8_gemm_hardware.py
-fi
+# The block-FP8 GEMM (glm-vx #10, gpu/FP8-GEMM.md) is not built: its wgmma, TMA and mbarrier
+# `mlir!` blocks cannot be in an `across` loop until Vx #2076 (declared writes) lands, and Vx main
+# no longer takes `grid([..]) block(n)`. Its step comes back with that.
 step test-hardware-stress hw gpu/test_hardware_stress.py
 
 for mode in f32 int4 fp8 bf16; do

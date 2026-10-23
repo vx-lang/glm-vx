@@ -1,59 +1,89 @@
 // glm_vx_gpu_mla_partial through Vx's own GPU path. Absorbed MLA: score = dot(q_latent,
 // cache_latent) + dot(q_rope, cache_rope); the cache latent is also the value. One block per
-// (head, split), one value per thread, online softmax over this split's selected tokens. exp is
-// fast_exp (device.vx); the block sum is written out (see rmsnorm_rows.vx).
+// (head, split) task, one value per lane, online softmax over this split's selected tokens.
+// The score is summed as the hand kernel launched with `threads` threads (a multiple of 32 in
+// [32, 1024], at least rank; rmsnorm_rows.vx). The running state lives in shared memory: acc
+// per lane, and m, l in `state`, which a one-lane loop updates after the lanes have read it.
+// exp is f32::fast_exp (see sigmoid in device.vx). numerator is [heads * splits, rank] and
+// stats [heads * splits, 2] (m, l).
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_mla_partial(numerator: &mut Tensor<f32, [?], Memory::HBM>, stats: &mut Tensor<f32, [?], Memory::HBM>,
+pub fn glm_vx_spawn_mla_partial(numerator: &mut Tensor<f32, [?, ?], Memory::HBM>, stats: &mut Tensor<f32, [?, ?], Memory::HBM>,
                                 q_latent: &Tensor<f32, [?], Memory::HBM>, q_rope: &Tensor<f32, [?], Memory::HBM>,
                                 cache_latent: &Tensor<f32, [?], Memory::HBM>, cache_rope: &Tensor<f32, [?], Memory::HBM>,
                                 selected: &Tensor<i32, [?], Memory::HBM>, heads: i32, rank: i32, rope_dim: i32,
-                                tokens: i32, count: i32, selection_stride: i32, splits: i32, scale: f32) -> void {
-  spawn on(Topology::Device) grid([heads * splits]) block((rank + 31) / 32 * 32) {
-    let mut shared = unsafe { Tensor<f32, [33], Memory::SMEM>::uninit() };
-    let tid: i32 = thread_id();
-    let block: i32 = block_dim();
-    let task: i32 = block_id();
-    // Uniform per block; the token tests below are too (every thread reads the same id).
-    if heads > 0 && rank > 0 && rope_dim >= 0 && tokens >= 0 && count >= 0 && selection_stride >= 0 && splits > 0
-       && block >= 32 && block <= 1024 && block % 32 == 0 && block >= rank && task < heads * splits {
-      let h: i32 = task / splits;
-      let split: i32 = task % splits;
-      let mut m: f32 = 0.0;
-      let mut l: f32 = 0.0;
-      let mut acc: f32 = 0.0;
-      let mut j: i32 = split;
-      while j < count {
-        let token: i32 = selected[h * selection_stride + j];
-        if token >= 0 && token < tokens {
-          let mut dot: f32 = 0.0;
-          let mut value: f32 = 0.0;
-          if tid < rank {
-            value = cache_latent[token * rank + tid];
-            dot = q_latent[h * rank + tid] * value;
+                                tokens: i32, count: i32, selection_stride: i32, splits: i32, scale: f32,
+                                threads: i32) -> void {
+  spawn on(Topology::Device) {
+    for task in 0..heads * splits across blocks {
+      if heads > 0 && rank > 0 && rope_dim >= 0 && tokens >= 0 && count >= 0 && selection_stride >= 0 && splits > 0
+         && threads >= 32 && threads <= 1024 && threads % 32 == 0 && threads >= rank {
+        let mut a = unsafe { Tensor<f32, [1024], Memory::SMEM>::uninit() };
+        let mut b = unsafe { Tensor<f32, [1024], Memory::SMEM>::uninit() };
+        let mut acc = unsafe { Tensor<f32, [1024], Memory::SMEM>::uninit() };
+        let mut state = unsafe { Tensor<f32, [2], Memory::SMEM>::uninit() };
+        let h: i32 = task / splits;
+        let split: i32 = task % splits;
+        for t in 0..1024 across lanes { acc[t] = 0.0; }
+        for t in 0..2 across lanes { state[t] = 0.0; }
+        // This split's tokens are j = split, split + splits, .. below count.
+        for q in 0..(count - split + splits - 1) / splits {
+          let j: i32 = split + q * splits;
+          for t in 0..1024 across lanes {
+            let token: i32 = selected[h * selection_stride + j];
+            let mut dot: f32 = 0.0;
+            if token >= 0 && token < tokens && t < threads {
+              if t < rank { dot = q_latent[h * rank + t] * cache_latent[token * rank + t]; }
+              let mut d: i32 = t;
+              while d < rope_dim {
+                dot = dot + q_rope[h * rope_dim + d] * cache_rope[token * rope_dim + d];
+                d = d + threads;
+              }
+            }
+            a[t] = dot;
           }
-          let mut d: i32 = tid;
-          while d < rope_dim {
-            dot = dot + q_rope[h * rope_dim + d] * cache_rope[token * rope_dim + d];
-            d = d + block;
+          block_sum!(b, a, threads);
+          for t in 0..1024 across lanes {
+            let token: i32 = selected[h * selection_stride + j];
+            if token >= 0 && token < tokens {
+              let score: f32 = b[0] * scale;
+              let m: f32 = state[0];
+              let l: f32 = state[1];
+              let mut next_m: f32 = score;
+              let mut alpha: f32 = 0.0;
+              let mut beta: f32 = 1.0;
+              if l > 0.0 {
+                if m > score { next_m = m; }
+                alpha = (m - next_m).fast_exp();
+                beta = (score - next_m).fast_exp();
+              }
+              let mut value: f32 = 0.0;
+              if t < rank { value = cache_latent[token * rank + t]; }
+              acc[t] = acc[t] * alpha + beta * value;
+            }
           }
-          let score: f32 = block_sum(dot, &mut shared) * scale;
-          let mut next_m: f32 = score;
-          let mut alpha: f32 = 0.0;
-          let mut beta: f32 = 1.0;
-          if l > 0.0 {
-            if m > score { next_m = m; }
-            alpha = fast_exp(m - next_m);
-            beta = fast_exp(score - next_m);
+          for t in 0..1 across lanes {
+            let token: i32 = selected[h * selection_stride + j];
+            if token >= 0 && token < tokens {
+              let score: f32 = b[0] * scale;
+              let m: f32 = state[0];
+              let l: f32 = state[1];
+              let mut next_m: f32 = score;
+              let mut alpha: f32 = 0.0;
+              let mut beta: f32 = 1.0;
+              if l > 0.0 {
+                if m > score { next_m = m; }
+                alpha = (m - next_m).fast_exp();
+                beta = (score - next_m).fast_exp();
+              }
+              state[t] = next_m;
+              state[t + 1] = l * alpha + beta;
+            }
           }
-          acc = acc * alpha + beta * value;
-          l = l * alpha + beta;
-          m = next_m;
         }
-        j = j + splits;
+        for t in 0..rank across lanes(256) { numerator[task][t] = acc[t]; }
+        for t in 0..2 across lanes { stats[task][t] = state[t]; }
       }
-      if tid < rank { numerator[task * rank + tid] = acc; }
-      if tid == 0 { stats[task * 2] = m; stats[task * 2 + 1] = l; }
     }
   }
   return;

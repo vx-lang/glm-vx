@@ -71,26 +71,28 @@ def mla_partial(rng, heads=4, rank=64, rope=64, tokens=300, count=37, splits=4, 
     return dict(heads=heads, rank=rank, rope_dim=rope, tokens=tokens, count=count, selection_stride=stride,
                 splits=splits, selected=selected, cache_latent=normal(rng, tokens * rank), q_latent=normal(rng, heads * rank),
                 q_rope=normal(rng, heads * rope), cache_rope=normal(rng, tokens * rope), scale=rank ** -0.5,
-                numerator=np.zeros(heads * splits * rank, 'f4'), stats=np.zeros(heads * splits * 2, 'f4'))
+                threads=-(-rank // 32) * 32, numerator=np.zeros((heads * splits, rank), 'f4'),
+                stats=np.zeros((heads * splits, 2), 'f4'))
 
 
 def mla_merge(rng, heads=4, rank=64, splits=4):
     stats = normal(rng, heads * splits * 2)
     stats[1::2] = np.abs(stats[1::2]) + 0.5  # denominators
     return dict(heads=heads, rank=rank, splits=splits, stats=stats, numerator=normal(rng, heads * splits * rank),
-                out=np.zeros(heads * rank, 'f4'))
+                out=np.zeros((heads, rank), 'f4'))
 
 
 def topk(rng, tokens=5000, k=2048):
-    from gpu.topk import scratch_ints
+    from gpu.topk import spawn_buffers
     scores = rng.integers(-4, 4, size=tokens).astype('f4')
     scores[3], scores[7] = np.nan, -0.0
-    return dict(tokens=tokens, k=k, scratch=np.zeros(scratch_ints(tokens, k), 'i4'), scores=scores.view('i4'),
+    scratch, order_a, order_b = (np.zeros(s, t) for s, t in spawn_buffers(tokens, k))
+    return dict(tokens=tokens, k=k, scratch=scratch, order_a=order_a, order_b=order_b, scores=scores.view('i4'),
                 out_ids=np.zeros(min(k, tokens), 'i4'))
 
 
 # One case per kernel, at sizes with a tail; scalars are Python numbers, tensors numpy arrays
-# (of the parameter's rank: rope and gemm_f32 write a rank-2 out).
+# (of the parameter's rank: a kernel whose writes the race proof checks by row writes a rank-2 out).
 CASES = {
     'add': lambda r: dict(n=100003, a=normal(r, 100003), b=normal(r, 100003), out=np.zeros(100003, 'f4')),
     'copy': lambda r: dict(n=1000, x=normal(r, 1000), out=np.zeros(1000, 'f4')),
@@ -104,7 +106,7 @@ CASES = {
     'matvec': lambda r: dict(rows=7, cols=131, weight=normal(r, 7 * 131), x=normal(r, 131), out=np.zeros(7, 'f4')),
     'matvec_heads': lambda r: dict(heads=8, rows=37, cols=131, w_stride=37 * 131 + 5, x_stride=140,
                                    weight=normal(r, 8 * (37 * 131 + 5)), x=normal(r, 8 * 140), out_stride=40,
-                                   out=normal(r, 8 * 40)),
+                                   out=normal(r, 8 * 40).reshape(8, 40)),
     'index_scores': lambda r: dict(tokens=37, heads=16, dim=128, q=normal(r, 16 * 128), keys=normal(r, 37 * 128),
                                    scale=128 ** -0.5, weights=normal(r, 16, 0.25), out=np.zeros(37, 'f4')),
     'bf16_matvec': lambda r: dict(rows=96, cols=6144, weight=bf16(r, 96 * 6144), x=normal(r, 6144), out=np.zeros(96, 'f4')),
@@ -113,21 +115,22 @@ CASES = {
     'fp8_matvec': lambda r: dict(rows=300, cols=6144, scales=r.uniform(0.001, 0.1, size=3 * 48).astype('f4'),
                                  weight=fp8(r, 300 * 6144), x=normal(r, 6144), out=np.zeros(300, 'f4')),
     'bf16_matmul': lambda r: dict(rows_m=6, rows_n=300, cols=257, experts=3, expert_ids=routing(r, 6, 3),
-                                  weight=bf16(r, 3 * 300 * 257), x=normal(r, 6 * 257), out=np.zeros(6 * 300, 'f4')),
+                                  weight=bf16(r, 3 * 300 * 257), x=normal(r, 6 * 257), out=np.zeros((6, 300), 'f4')),
     'int4_matmul': lambda r: dict(rows_m=6, rows_n=300, cols=257, experts=3, expert_ids=routing(r, 6, 3),
                                   scales=int4_scales(r, 3 * 300 * 3, 0), scale_kind=0, packed=int4(r, 3 * 300, 257),
-                                  x=normal(r, 6 * 257), out=np.zeros(6 * 300, 'f4')),
+                                  x=normal(r, 6 * 257), out=np.zeros((6, 300), 'f4')),
     'fp8_matmul': lambda r: dict(rows_m=6, rows_n=300, cols=257, experts=3, expert_ids=routing(r, 6, 3),
                                  weight=fp8(r, 3 * 300 * 257), x=normal(r, 6 * 257),
-                                 scales=r.uniform(0.001, 0.1, size=3 * 3 * 3).astype('f4'), out=np.zeros(6 * 300, 'f4')),
+                                 scales=r.uniform(0.001, 0.1, size=3 * 3 * 3).astype('f4'), out=np.zeros((6, 300), 'f4')),
     'gemm_f32': lambda r: dict(m=33, n=65, k=256, a=normal(r, 33 * 256), b=normal(r, 256 * 65), out=np.full((33, 65), 7, 'f4')),
     'rmsnorm_rows': lambda r: dict(rows=5, dim=6144, eps=1e-5, x=normal(r, 5 * 6144), weight=normal(r, 6144),
-                                   out=np.zeros(5 * 6144, 'f4')),
+                                   threads=256, out=np.zeros((5, 6144), 'f4')),
     'residual_rmsnorm': lambda r: dict(rows=7, dim=333, eps=1e-5, x=normal(r, 7 * 333), residual=normal(r, 7 * 333),
-                                       residual_out=np.zeros(7 * 333, 'f4'), weight=normal(r, 333), out=np.zeros(7 * 333, 'f4')),
+                                       residual_out=np.zeros((7, 333), 'f4'), weight=normal(r, 333), threads=96,
+                                       out=np.zeros((7, 333), 'f4')),
     'layernorm': lambda r: dict(rows=9, dim=333, eps=1e-6, x=normal(r, 9 * 333) + 3, weight=normal(r, 333),
-                                bias=normal(r, 333), out=np.zeros(9 * 333, 'f4')),
-    'softmax_rows': lambda r: dict(rows=4, dim=2048, x=normal(r, 4 * 2048, 3), out=np.zeros(4 * 2048, 'f4')),
+                                bias=normal(r, 333), threads=64, out=np.zeros((9, 333), 'f4')),
+    'softmax_rows': lambda r: dict(rows=4, dim=2048, x=normal(r, 4 * 2048, 3), threads=1024, out=np.zeros((4, 2048), 'f4')),
     'router': lambda r: dict(experts=256, k=8, indices=np.zeros(8, 'i4'), logits=normal(r, 256),
                              bias=normal(r, 256, 0.1), weights=np.zeros(8, 'f4'), scale=2.5),
     'topk': topk,

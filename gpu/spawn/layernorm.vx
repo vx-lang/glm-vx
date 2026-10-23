@@ -1,33 +1,47 @@
 // glm_vx_gpu_layernorm through Vx's own GPU path (the DSA indexer key norm). One block per row;
 // the mean first, then the variance of the centered values, correctly rounded sqrt (Vx #1944).
+// Both sums follow the hand kernel launched with `threads` threads, as rmsnorm_rows.vx. out is
+// [rows, dim].
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_layernorm(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+pub fn glm_vx_spawn_layernorm(out: &mut Tensor<f32, [?, ?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
                               weight: &Tensor<f32, [?], Memory::HBM>, bias: &Tensor<f32, [?], Memory::HBM>,
-                              rows: i32, dim: i32, eps: f32) -> void {
-  spawn on(Topology::Device) grid([rows]) block(256) {
-    let mut shared = unsafe { Tensor<f32, [33], Memory::SMEM>::uninit() };
-    let tid: i32 = thread_id();
-    let row: i32 = block_id();
-    let block: i32 = block_dim();
-    if rows > 0 && dim > 0 && eps > 0.0 && row < rows && block >= 32 && block <= 1024 && block % 32 == 0 {
-      let base: i32 = row * dim;
-      let mut s: f32 = 0.0;
-      let mut d: i32 = tid;
-      while d < dim { s = s + x[base + d]; d = d + block; }
-      let sum: f32 = block_sum(s, &mut shared);
-      let mean: f32 = sum / (dim as f32);
-      let mut ss: f32 = 0.0;
-      d = tid;
-      while d < dim {
-        let c: f32 = x[base + d] - mean;
-        ss = ss + c * c;
-        d = d + block;
+                              rows: i32, dim: i32, eps: f32, threads: i32) -> void {
+  spawn on(Topology::Device) {
+    for row in 0..rows across blocks {
+      if dim > 0 && eps > 0.0 && threads >= 32 && threads <= 1024 && threads % 32 == 0 {
+        let mut a = unsafe { Tensor<f32, [1024], Memory::SMEM>::uninit() };
+        let mut b = unsafe { Tensor<f32, [1024], Memory::SMEM>::uninit() };
+        let mut mean = unsafe { Tensor<f32, [1], Memory::SMEM>::uninit() };
+        let base: i32 = row * dim;
+        for t in 0..1024 across lanes {
+          let mut s: f32 = 0.0;
+          if t < threads {
+            let mut d: i32 = t;
+            while d < dim { s = s + x[base + d]; d = d + threads; }
+          }
+          a[t] = s;
+        }
+        block_sum!(b, a, threads);
+        for t in 0..1 across lanes { mean[t] = b[0] / (dim as f32); }
+        for t in 0..1024 across lanes {
+          let mut ss: f32 = 0.0;
+          if t < threads {
+            let mut d: i32 = t;
+            while d < dim {
+              let c: f32 = x[base + d] - mean[0];
+              ss = ss + c * c;
+              d = d + threads;
+            }
+          }
+          a[t] = ss;
+        }
+        block_sum!(b, a, threads);
+        for d in 0..dim across lanes(256) {
+          let inv: f32 = 1.0 / (b[0] / (dim as f32) + eps).sqrt();
+          out[row][d] = (x[base + d] - mean[0]) * inv * weight[d] + bias[d];
+        }
       }
-      let sq: f32 = block_sum(ss, &mut shared);
-      let inv: f32 = 1.0 / (sq / (dim as f32) + eps).sqrt();
-      d = tid;
-      while d < dim { out[base + d] = (x[base + d] - mean) * inv * weight[d] + bias[d]; d = d + block; }
     }
   }
   return;

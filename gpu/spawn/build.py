@@ -19,7 +19,7 @@ import argparse, hashlib, json, os, re, subprocess, sys, tempfile
 from pathlib import Path
 
 SCALARS = {'i32': '.u32', 'i64': '.u64', 'f32': '.f32'}
-ELEMENT_BITS = {'f32': 32, 'i32': 32, 'u16': 16, 'u8': 8}
+ELEMENT_BITS = {'f32': 32, 'i32': 32, 'i64': 64, 'u16': 16, 'u8': 8}
 INCLUDE = re.compile(r'^//\s*spawn-include:\s*(\S+)\s*$', re.M)
 
 
@@ -151,6 +151,9 @@ def derived(body: str, base: str):
     to a fixed point, so a load through base + row offset + column offset is still traced."""
     steps = [(m[1], set(re.findall(r'%rd\d+', m[2]))) for m in
              re.finditer(r'^\s*(?:add|sub|mov|cvta)[.\w]*\s+(%rd\d+),([^;]*);', body, re.M)]
+    # mad.lo a, b, c, base: only the addend is an address (a row base plus row * stride).
+    steps += [(m[1], {m[2]}) for m in
+              re.finditer(r'^\s*mad\.lo\.[su]64\s+(%rd\d+),[^;]*,\s*(%rd\d+);', body, re.M)]
     found, grew = {base}, True
     while grew:
         grew = False
@@ -195,9 +198,11 @@ def check_params(ptx: str, entry: str, params):
             stored.add(p['name'])
         # Element width: loads through this tensor must be as wide as its element in the manifest,
         # which catches a manifest whose read-only tensors of different types are out of place.
+        # vxc may load an i64 as two 32-bit halves, or only the half it uses.
         widths = {int(w) for a in addresses
                   for w in re.findall(rf'ld\.global(?:\.nc)?\.[bsuf](\d+)\s+%\w+, \[{re.escape(a)}(?:\+\d+)?\]', body)}
-        if widths - {ELEMENT_BITS[p['element']]}:
+        allowed = {ELEMENT_BITS[p['element']]} | ({32} if p['element'] == 'i64' else set())
+        if widths - allowed:
             raise ValueError(f'{p["name"]} is {p["element"]} in the manifest but loaded {sorted(widths)} bits wide')
     declared = {p['name'] for p in params if p['kind'] == 'memref' and p['mut']}
     if stored != declared:
