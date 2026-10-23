@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from gpu.spawn.launch import SpawnKernel, launch_size
+from gpu.spawn.launch import SpawnKernel, descriptor_words, launch_size
 
 
 @pytest.mark.parametrize('expression,values,expected', [
@@ -34,6 +34,20 @@ def test_refuses_what_vx_would_not_compute(expression, values):
 def test_numbers_and_parameters():
     assert launch_size(256, {}) == 256
     assert launch_size({'param': 'rows'}, {'rows': 7}) == 7
+
+
+class Shaped:
+    def __init__(self, *shape):
+        self.shape, self.size = shape, 1
+        for d in shape:
+            self.size *= d
+
+
+def test_descriptor_words_are_row_major():
+    assert descriptor_words({'name': 'x', 'rank': 1}, Shaped(4, 5)) == [0, 20, 1]  # rank 1: the flat view
+    assert descriptor_words({'name': 'x', 'rank': 2}, Shaped(4, 5)) == [0, 4, 5, 5, 1]
+    with pytest.raises(TypeError, match='rank 2'):
+        descriptor_words({'name': 'x', 'rank': 2}, Shaped(20))
 
 
 def kernel(launch):

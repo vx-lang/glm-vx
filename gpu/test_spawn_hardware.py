@@ -219,7 +219,7 @@ def test_spawn_rope_glm_matches_hand_kernel(context, heads, dim, grid, block):
     dx, dc, ds = upload(context, x), upload(context, cos), upload(context, sin)
     s, h = context.tensor((heads * dim,)), context.tensor((heads * dim,))
     compare(context, 'rope_glm', hand_kernel(context, 'kernels.ptx', 'glm_vx_gpu_rope_glm'), grid, block,
-            dict(heads=heads, dim=dim, x=dx, cosine=dc, sine=ds, out=s),
+            dict(heads=heads, dim=dim, x=dx, cosine=dc, sine=ds, out=s.view((heads, dim))),
             [h, dx, dc, ds, C.c_int32(heads), C.c_int32(dim)], {'out': (s, h)})
 
 
@@ -234,7 +234,7 @@ def test_spawn_rope_strided_matches_hand_kernel(context, heads, dim, x_stride, o
     fill = rng.normal(size=heads * out_stride).astype('f4')
     s, h = upload(context, fill), upload(context, fill)
     compare(context, 'rope_strided', hand_kernel(context, 'kernels.ptx', 'glm_vx_gpu_rope_strided'), grid, block,
-            dict(heads=heads, dim=dim, x_stride=x_stride, out_stride=out_stride, x=dx, cosine=dc, sine=ds, out=s),
+            dict(heads=heads, dim=dim, x_stride=x_stride, out_stride=out_stride, x=dx, cosine=dc, sine=ds, out=s.view((heads, out_stride))),
             [h, dx, dc, ds, C.c_int32(heads), C.c_int32(dim), C.c_int32(x_stride), C.c_int32(out_stride)], {'out': (s, h)})
 
 
@@ -275,7 +275,7 @@ def test_spawn_gemm_f32_matches_hand_kernel(context, m, n, k):
     da, db = upload(context, a), upload(context, b)
     s, h = upload(context, np.full(m * n, 7, 'f4')), upload(context, np.full(m * n, 7, 'f4'))
     compare(context, 'gemm_f32', hand_kernel(context, 'gemm.ptx', 'glm_vx_gpu_gemm_f32'), -(-(m * n) // 128), 128,
-            dict(m=m, n=n, k=k, a=da, b=db, out=s), [h, da, db, C.c_int32(m), C.c_int32(n), C.c_int32(k)], {'out': (s, h)})
+            dict(m=m, n=n, k=k, a=da, b=db, out=s.view((m, n))), [h, da, db, C.c_int32(m), C.c_int32(n), C.c_int32(k)], {'out': (s, h)})
 
 
 # Batched and grouped matmuls: experts == 0 (dense, expert_ids unread) and experts > 0 with an

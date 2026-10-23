@@ -1,0 +1,15 @@
+// A100 as Vx's own GPU path sees it, for the kernels on `across`: machine.vx plus the topology's
+// `levels:`, which Vx main reads (and needs from #2102 on) and the old launch stack's vxc refuses.
+// CPU_DRAM is listed as visible only so captured scalars passed by value compile (Vx #1947);
+// kernels here read device memory only.
+Memory HBM { capacity: 40 GiB, bandwidth: 1555 GB/s, managed: explicit, scope: device }
+Memory SMEM { within: Memory::HBM, capacity: 164 KiB, bandwidth: 128 B/cyc, granule: 1 KiB, managed: explicit, scope: sm }
+Topology Device {
+  arch: nvptx64,
+  levels: [blocks(max_lanes: 1024, memory: cta), subgroups(lanes: 32), lanes(memory: thread)],
+  memory: Memory::HBM,
+  visible: [Memory::CPU_DRAM, Memory::HBM, Memory::SMEM],
+  transfer Memory::CPU_DRAM -> Memory::HBM : 31.5 GB/s,
+  transfer Memory::HBM -> Memory::CPU_DRAM : 31.5 GB/s,
+  transfer Memory::HBM -> Memory::SMEM
+}

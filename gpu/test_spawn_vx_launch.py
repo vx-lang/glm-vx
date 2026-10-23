@@ -89,7 +89,8 @@ def topk(rng, tokens=5000, k=2048):
                 out_ids=np.zeros(min(k, tokens), 'i4'))
 
 
-# One case per kernel, at sizes with a tail; scalars are Python numbers, tensors numpy arrays.
+# One case per kernel, at sizes with a tail; scalars are Python numbers, tensors numpy arrays
+# (of the parameter's rank: rope and gemm_f32 write a rank-2 out).
 CASES = {
     'add': lambda r: dict(n=100003, a=normal(r, 100003), b=normal(r, 100003), out=np.zeros(100003, 'f4')),
     'copy': lambda r: dict(n=1000, x=normal(r, 1000), out=np.zeros(1000, 'f4')),
@@ -97,9 +98,9 @@ CASES = {
     'scaled_add': lambda r: dict(slot=5, weights=normal(r, 8), n=6144, x=normal(r, 6144), out=normal(r, 6144)),
     'swiglu': lambda r: dict(n=12288, gate=normal(r, 12288, 6), up=normal(r, 12288), out=np.zeros(12288, 'f4')),
     'rope_glm': lambda r: dict(heads=16, dim=64, x=normal(r, 1024), cosine=normal(r, 32), sine=normal(r, 32),
-                               out=np.zeros(1024, 'f4')),
+                               out=np.zeros((16, 64), 'f4')),
     'rope_strided': lambda r: dict(heads=16, dim=64, x_stride=192, out_stride=128, x=normal(r, 16 * 192),
-                                   cosine=normal(r, 32), sine=normal(r, 32), out=normal(r, 16 * 128)),
+                                   cosine=normal(r, 32), sine=normal(r, 32), out=normal(r, 16 * 128).reshape(16, 128)),
     'matvec': lambda r: dict(rows=7, cols=131, weight=normal(r, 7 * 131), x=normal(r, 131), out=np.zeros(7, 'f4')),
     'matvec_heads': lambda r: dict(heads=8, rows=37, cols=131, w_stride=37 * 131 + 5, x_stride=140,
                                    weight=normal(r, 8 * (37 * 131 + 5)), x=normal(r, 8 * 140), out_stride=40,
@@ -119,7 +120,7 @@ CASES = {
     'fp8_matmul': lambda r: dict(rows_m=6, rows_n=300, cols=257, experts=3, expert_ids=routing(r, 6, 3),
                                  weight=fp8(r, 3 * 300 * 257), x=normal(r, 6 * 257),
                                  scales=r.uniform(0.001, 0.1, size=3 * 3 * 3).astype('f4'), out=np.zeros(6 * 300, 'f4')),
-    'gemm_f32': lambda r: dict(m=33, n=65, k=256, a=normal(r, 33 * 256), b=normal(r, 256 * 65), out=np.full(33 * 65, 7, 'f4')),
+    'gemm_f32': lambda r: dict(m=33, n=65, k=256, a=normal(r, 33 * 256), b=normal(r, 256 * 65), out=np.full((33, 65), 7, 'f4')),
     'rmsnorm_rows': lambda r: dict(rows=5, dim=6144, eps=1e-5, x=normal(r, 5 * 6144), weight=normal(r, 6144),
                                    out=np.zeros(5 * 6144, 'f4')),
     'residual_rmsnorm': lambda r: dict(rows=7, dim=333, eps=1e-5, x=normal(r, 7 * 333), residual=normal(r, 7 * 333),

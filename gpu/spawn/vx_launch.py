@@ -1,10 +1,10 @@
 """Launch a gpu/spawn kernel through Vx's own runtime: call the kernel's `pub fn` in the shared
-library build.py --library made, and Vx's CUDA backend launches it with the shape of its
-`spawn on(..) grid([..]) block(..)` region (Vx #252).
+library build.py --library made, and Vx's CUDA backend launches it with the shape that the
+region's `across` loops give (Vx #252).
 
 The tensors must live in the device's primary context (CUDAContext(primary=True)), the one
-Vx's runtime uses, and are passed with no copy: a rank-1 tensor is the five words of its
-memref descriptor (pointer, aligned pointer, offset 0, size, stride 1), and a scalar is passed
+Vx's runtime uses, and are passed with no copy: a tensor is its memref descriptor (pointer,
+aligned pointer, offset 0, sizes, row-major strides; launch.descriptor_words), and a scalar is passed
 by value, in the order of the function's parameters. The call runs with that context current,
 since Vx stops on any other (Vx abi.md section 3.6).
 
@@ -15,7 +15,7 @@ context.stream() is non-blocking by default and is not, so pass nonblocking=Fals
 synchronize at the boundary.
 
 With stream=<Stream>, the call sets that stream for this thread with Vx's
-`vx_cuda_set_stream` (Vx #1986, PR #2068, which replaced #1994), calls the function, and puts
+`vx_cuda_set_stream` (Vx #1986; on main as #2100, was PR #2068), calls the function, and puts
 back the stream that was set before (`vx_cuda_get_stream`; null, the legacy default stream, with
 a Vx that lacks it) before returning, even on an error. Vx's launch is then ordered on our stream,
 not on the legacy one, with our own launches on it; and a stream can capture Vx's launches into
@@ -23,8 +23,8 @@ a CUDA graph (Stream.capture()). Call each kernel once before a capture: its fir
 the kernel image. While the stream captures, Vx stops the program with a message at anything a
 graph cannot hold (a wait, a host copy, a free that needs a wait, VX_CUDA_SYNC=1,
 VX_TIME_KERNEL). The symbol is looked up in the kernel library's own dependencies, so it is
-the copy of the dispatch library that launches this kernel; a Vx build without PR #2068 lacks
-it, which is an error only when a stream is asked for.
+the copy of the dispatch library that launches this kernel; a Vx build without #2100 (or the
+old stack's #2068) lacks it, which is an error only when a stream is asked for.
 
 VX_CUDA_SYNC=1 makes Vx wait after each launch (on our stream when one is set).
 """
@@ -33,14 +33,18 @@ import json
 from pathlib import Path
 
 from gpu.runtime import DeviceTensor, Stream
+from gpu.spawn.launch import descriptor_words
 
 _SCALAR = {'i32': C.c_int32, 'i64': C.c_int64, 'f32': C.c_float}
 _ELEMENT = {'f32': 'float32', 'u16': 'uint16', 'u8': 'uint8', 'i32': 'int32'}
-_DESCRIPTOR = [C.c_void_p, C.c_void_p, C.c_int64, C.c_int64, C.c_int64]
+
+
+def _descriptor(rank):
+    return [C.c_void_p, C.c_void_p] + [C.c_int64] * (1 + 2 * rank)
 
 
 class VxStreamUnsupported(RuntimeError):
-    """The Vx dispatch library has no vx_cuda_set_stream (a Vx build without PR #2068)."""
+    """The Vx dispatch library has no vx_cuda_set_stream (a Vx build without #2100 or #2068)."""
 
 
 class VxKernel:
@@ -54,7 +58,7 @@ class VxKernel:
         self.function = getattr(self.library, self.manifest['entry'])
         self.function.restype = None
         self.function.argtypes = [t for p in self.params
-                                  for t in (_DESCRIPTOR if p['kind'] == 'memref' else [_SCALAR[p['type']]])]
+                                  for t in (_descriptor(p.get('rank', 1)) if p['kind'] == 'memref' else [_SCALAR[p['type']]])]
         self._set_stream = None
         self._get_stream = False  # not looked up yet; None when Vx lacks vx_cuda_get_stream
 
@@ -69,7 +73,7 @@ class VxKernel:
                 raise VxStreamUnsupported(
                     f'{self.manifest["library"]}: its Vx dispatch library '
                     f'({self.manifest.get("dispatch_lib", "libvx_cuda_dispatch.so")}) has no vx_cuda_set_stream, '
-                    'so Vx cannot launch on our stream. Build vxc with Vx PR #2068 (Vx#1986) and rebuild '
+                    'so Vx cannot launch on our stream. Build vxc from Vx main (#2100, Vx#1986) and rebuild '
                     'the libraries; stream=None still launches on the legacy default stream.') from None
             function.argtypes, function.restype = [C.c_void_p], None
             self._set_stream = function
@@ -102,7 +106,7 @@ class VxKernel:
             if not getattr(value.context, 'primary', False):
                 raise ValueError(f'{p["name"]} must live in the primary context: CUDAContext(primary=True)')
             context = value.context
-            args += [value.pointer, value.pointer, 0, value.size, 1]
+            args += [value.pointer, value.pointer, *descriptor_words(p, value)]
         if stream is not None:
             if not isinstance(stream, Stream):
                 raise TypeError('stream must be a gpu.runtime.Stream or None')

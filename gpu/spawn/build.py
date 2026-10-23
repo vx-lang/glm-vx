@@ -136,11 +136,11 @@ def kernel_params(manifest_params):
             params.append({'name': p['name'], 'kind': 'scalar', 'type': p['type']})
         elif p['kind'] == 'tensor':
             element = re.match(r'&(?:mut )?Tensor<(\w+),', p['type'])
-            if not element or element[1] not in ELEMENT_BITS or p['rank'] != 1 or p['words'] != 5:
+            if not element or element[1] not in ELEMENT_BITS or p['rank'] not in (1, 2) or p['words'] != 3 + 2 * p['rank']:
                 raise ValueError(f'unsupported tensor parameter {p}')
             if p['mutable'] != p['type'].startswith('&mut '):
                 raise ValueError(f'manifest mutable flag disagrees with the type: {p}')
-            params.append({'name': p['name'], 'kind': 'memref', 'element': element[1], 'rank': 1, 'mut': p['mutable']})
+            params.append({'name': p['name'], 'kind': 'memref', 'element': element[1], 'rank': p['rank'], 'mut': p['mutable']})
         else:
             raise ValueError(f'unknown parameter kind {p}')
     return params
@@ -170,8 +170,9 @@ def check_params(ptx: str, entry: str, params):
         if p['kind'] == 'scalar':
             expected.append((SCALARS[p['type']], False)); owner.append(index)
         else:
-            expected += [('.u64', True), ('.u64', True), ('.u64', False), ('.u64', False), ('.u64', False)]
-            owner += [index] * 5
+            words = 3 + 2 * p['rank']
+            expected += [('.u64', True), ('.u64', True)] + [('.u64', False)] * (words - 2)
+            owner += [index] * words
     got = [(m[1].replace('.b', '.u'), bool(m[2])) for m in actual]
     if got != expected:
         raise ValueError(f'PTX parameters {got} do not match the vxc manifest {expected}')

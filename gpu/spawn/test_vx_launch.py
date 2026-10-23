@@ -94,7 +94,7 @@ def test_an_old_vx_fails_only_when_a_stream_is_asked_for(setup):
     kernel, library, context, _ = setup(has_set_stream=False)
     x, stream = context.tensor((4,)), context.stream()
     kernel(out=x, a=x, n=4)
-    with pytest.raises(VxStreamUnsupported, match=r'PR #2068 \(Vx#1986\)') as caught:
+    with pytest.raises(VxStreamUnsupported, match=r'#2100, Vx#1986') as caught:
         kernel(out=x, a=x, n=4, stream=stream)
     assert '/opt/vx/lib/libvx_cuda_dispatch.so' in str(caught.value)
     assert [name for name, _ in library.log] == ['entry']  # nothing was launched without the stream

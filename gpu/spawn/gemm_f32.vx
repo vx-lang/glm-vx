@@ -1,22 +1,21 @@
 // glm_vx_gpu_gemm_f32 through Vx's own GPU path: out[m, n] = a[m, k] b[k, n] in full f32, one
-// thread per output, blocks of exactly 128 threads (gpu/gemm.py's plan).
+// lane per output: a block per row (grid-stride), 128 lanes over its columns. out is [m, n].
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_gemm_f32(out: &mut Tensor<f32, [?], Memory::HBM>, a: &Tensor<f32, [?], Memory::HBM>,
+pub fn glm_vx_spawn_gemm_f32(out: &mut Tensor<f32, [?, ?], Memory::HBM>, a: &Tensor<f32, [?], Memory::HBM>,
                              b: &Tensor<f32, [?], Memory::HBM>, m: i32, n: i32, k: i32) -> void {
-  spawn on(Topology::Device) grid([(m * n - 1) / 128 + 1]) block(128) {
-    let index: i64 = (block_id() as i64) * 128 + (thread_id() as i64);
-    if m > 0 && n > 0 && k >= 0 && block_dim() == 128 && index < (m as i64) * (n as i64) {
-      let row: i64 = index / (n as i64);
-      let col: i64 = index % (n as i64);
-      let kk: i64 = k as i64;
-      let mut sum: f32 = 0.0;
-      let mut q: i64 = 0;
-      while q < kk {
-        sum = sum + a[row * kk + q] * b[q * (n as i64) + col];
-        q = q + 1;
+  spawn on(Topology::Device) {
+    for row in 0..m across blocks {
+      for col in 0..n across lanes(128) {
+        let kk: i64 = k as i64;
+        let mut sum: f32 = 0.0;
+        let mut q: i64 = 0;
+        while q < kk {
+          sum = sum + a[(row as i64) * kk + q] * b[q * (n as i64) + (col as i64)];
+          q = q + 1;
+        }
+        out[row][col] = sum;
       }
-      out[index] = sum;
     }
   }
   return;

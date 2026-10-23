@@ -7,27 +7,49 @@ the region, lowers it through the gpu dialect and NVVM, and `vxc --emit-ptx` wri
 with a manifest of its parameters. `build.py` runs that and checks the manifest against the
 PTX. There is no extern adapter and no `llc` step of ours.
 
-Each region gives its launch shape, `spawn on(Topology::Device) grid([(rows - 1) / 4 + 1])
-block(128)`, the shape the model launches the hand kernel with. Two launches use the same PTX:
+Each region gets its launch shape from its `across` loops (Vx #252, merged as #2095 to #2097):
+`for blk in 0..(n - 1) / 256 + 1 across blocks { for t in 0..256 across lanes { .. } }` is a grid
+of `(n - 1) / 256 + 1` blocks of 256 lanes, which the manifest's `launch` records. The block
+loop strides by the grid and a lane loop by the block, so any grid and block the caller passes
+also cover every pass. A kernel whose rows have a run-time length writes a rank-2 tensor
+(`out[row][col]`), because the race proof (L4) reads an index only as a sum of loop indices
+times numbers; `launch.py` passes a rank-2 `DeviceTensor` as its 7-word descriptor.
+
+Two vxc builds are in use until every kernel is on `across`:
+
+- **Vx main** (b151bb8c on): `add`, `copy`, `scale`, `scaled_add`, `rope_glm`, `rope_strided` and
+  `gemm_f32`, on `across`. Main no longer parses `grid([..]) block(n)`.
+- **The old launch stack** (Vx 7608e6f7 plus the closed PRs #2065 to #2068 and #2064): the other
+  18 kernels, `probes/` and `fp8_gemm/`, still on `grid([..]) block(n)`. The proof refuses what
+  they need in an `across` loop: warp shuffles, `barrier()` and `fast_exp` are `mlir!` blocks or
+  calls it cannot see into, and the `mlir!` blocks of the tensor-core kernels wait for declared
+  writes (Vx #2076).
+
+`ONLY=across` or `ONLY=grid` makes `build.sh` build one kind (it greps each source for
+`across blocks`), so each vxc builds its own; `scripts/pod_validate.sh` takes the main vxc as
+`VXC_ACROSS`. Each `lib<kernel>.so` links the dispatch library of the vxc that built it, by path,
+so a process that loads both kinds holds two Vx runtimes, each with its own stream setting.
+
+Two launches use the same PTX:
 
 - **Vx launches it.** `build.py --library` also builds `lib<kernel>.so` from the same file, and
   `vx_launch.py` calls its `pub fn`: Vx's CUDA runtime launches the kernel with that shape, on
   the legacy default stream, without waiting for the GPU. The tensors must come from
   `CUDAContext(primary=True)`, the context Vx's runtime uses; they are passed with no copy.
   `VxKernel(...)(..., stream=s)` launches on our stream `s` instead (Vx's `vx_cuda_set_stream`,
-  PR #2068, set for the call; the stream set before is put back after it), so `s.capture()` can
+  #2100 on main, PR #2068 on the old stack, set for the call; the stream set before is put back after it), so `s.capture()` can
   record Vx's launches, with ours, into a CUDA graph. Call each kernel once before capturing.
 - **Python launches it.** `launch.py` (on `gpu/runtime.py`) launches the PTX with the manifest's
   shape, or with any grid and block the caller passes (the hardware tests sweep them).
 
 | Kernel | Replaces | Registers (sm_80) |
 | --- | --- | --- |
-| `add.vx` | `glm_vx_gpu_add` | 14 |
-| `copy.vx` | `glm_vx_gpu_copy` | 10 |
-| `scale.vx` | `glm_vx_gpu_scale` | 12 |
-| `scaled_add.vx` | `glm_vx_gpu_scaled_add` | 14 |
-| `rope_glm.vx` | `glm_vx_gpu_rope_glm` | 27 |
-| `rope_strided.vx` | `glm_vx_gpu_rope_strided` | 27 |
+| `add.vx` | `glm_vx_gpu_add` | 20 |
+| `copy.vx` | `glm_vx_gpu_copy` | 17 |
+| `scale.vx` | `glm_vx_gpu_scale` | 18 |
+| `scaled_add.vx` | `glm_vx_gpu_scaled_add` | 20 |
+| `rope_glm.vx` | `glm_vx_gpu_rope_glm` | 28 |
+| `rope_strided.vx` | `glm_vx_gpu_rope_strided` | 28 |
 | `matvec.vx` | `glm_vx_gpu_matvec` | 26 |
 | `matvec_heads.vx` | `glm_vx_gpu_matvec_heads` | 32 |
 | `index_scores.vx` | `glm_vx_gpu_index_scores` | 26 |
@@ -67,7 +89,7 @@ PTX with the same shape, bit for bit (run it also with `VX_CUDA_SYNC=1`).
 `gpu/test_spawn_vx_graph.py` runs a chain of Vx launches on our stream and as a replayed CUDA
 graph (also mixed with Python launches), bit for bit against the legacy stream, and checks that
 Vx stops a capture on `VX_CUDA_SYNC=1` or `VX_TIME_KERNEL`; it needs the libraries built with
-PR #2068 (which replaced #1994).
+#2100 (main) or PR #2068 (the old stack).
 
 ## Build
 
@@ -110,9 +132,10 @@ the bf16, binary16, INT4 and FP8 decodes.
 | Raw pointers in a region | silent host fallback before PR #1959, which takes them and warns on any other fallback; kernels take `[?]` tensors | #1945 |
 | Shared memory `::new()` | zero-fill races with other warps; use `unsafe { ::uninit() }` | #1946 |
 | A Vx build of the same file (exe or .so) | the host copy of a GPU-only helper stops the program; PR #1958 | #1942 |
-| Grid and block chosen by the program | `grid([..]) block(..)` on the region; PR #2065 (was #1972) | #252 |
-| Launch without a device sync each time | waits only before a copy to the host, a free, or exit; PR #2066 (was #1974) | #25 |
-| A stream of the caller, and CUDA graphs | `vx_cuda_set_stream` (PR #2068, was #1994): launches, cuBLAS and copies on our stream, temporaries stream-ordered, a stop with a message on a wait during a capture; `gpu/test_spawn_vx_graph.py` | #1986 |
+| Grid and block chosen by the program | `across` loops (merged, #2095 to #2097); `grid([..]) block(..)` on the old stack (PR #2065, closed) | #252 |
+| A reduction over lanes (warp sum, block sum) inside `across` | none: shuffles are `mlir!`, and `barrier()` is refused; asked on Vx | #252 |
+| Launch without a device sync each time | waits only before a copy to the host, a free, or exit; merged as #2098 (was #2066) | #25 |
+| A stream of the caller, and CUDA graphs | `vx_cuda_set_stream` (merged as #2100, was #2068): launches, cuBLAS and copies on our stream, temporaries stream-ordered, a stop with a message on a wait during a capture; `gpu/test_spawn_vx_graph.py` | #1986 |
 | Futures the compiler waits on | no waits are emitted; the runtime waits before a host copy, a free, or exit | #25 |
 | TF32 `mma.sync m16n8k8` | WMMA m16n16k8 only | #350 |
 

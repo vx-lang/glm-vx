@@ -1,11 +1,11 @@
 """Launch kernels built by gpu/spawn/build.py with the existing CUDA runtime (gpu/runtime.py).
 
 The manifest (.json beside the .ptx) gives the entry name and the parameters, which vxc takes
-in the order the function declares them. Arguments are passed by name. A rank-1 tensor
-argument expands to its memref descriptor: base and aligned pointer (both the tensor's device
-pointer), offset 0, size, stride 1. Without grid and block, a launch takes the shape the
-kernel's `spawn on(..) grid([..]) block(..)` gives in the manifest (Vx #252), which is the
-shape Vx's own launch uses; each computed size is evaluated as Vx does, in i32 with
+in the order the function declares them. Arguments are passed by name. A tensor argument
+expands to its memref descriptor: base and aligned pointer (both the tensor's device pointer),
+offset 0, then its sizes and row-major strides (rank 1: size, stride 1). Without grid and
+block, a launch takes the shape that the kernel's `across` loops give in the manifest (Vx #252),
+which is the shape Vx's own launch uses; each computed size is evaluated as Vx does, in i32 with
 division and remainder truncating toward zero.
 """
 import ast
@@ -48,6 +48,20 @@ def launch_size(size, values):
     return evaluate(ast.parse(size['computed'], mode='eval').body)
 
 
+def descriptor_words(param, value):
+    """Offset, sizes and strides of the memref descriptor for a DeviceTensor (row-major, offset 0).
+    A rank-1 parameter takes any tensor as its flat view; a rank-2 one needs a rank-2 tensor."""
+    rank = param.get('rank', 1)
+    if rank == 1:
+        return [0, value.size, 1]
+    if len(value.shape) != rank:
+        raise TypeError(f'{param["name"]} must have rank {rank}, not shape {tuple(value.shape)}')
+    strides = [1] * rank
+    for axis in range(rank - 2, -1, -1):
+        strides[axis] = strides[axis + 1] * value.shape[axis + 1]
+    return [0, *value.shape, *strides]
+
+
 class SpawnKernel:
     def __init__(self, context, ptx_path):
         ptx_path = Path(ptx_path)
@@ -74,7 +88,7 @@ class SpawnKernel:
                 raise TypeError(f'{p["name"]} must be a DeviceTensor')
             if str(value.dtype) != _ELEMENT[p['element']]:
                 raise TypeError(f'{p["name"]} is {value.dtype}, expected {_ELEMENT[p["element"]]}')
-            args += [value, value, C.c_uint64(0), C.c_uint64(value.size), C.c_uint64(1)]
+            args += [value, value] + [C.c_uint64(w) for w in descriptor_words(p, value)]
         return args
 
     def shape(self, values):

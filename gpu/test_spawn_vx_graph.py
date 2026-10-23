@@ -1,4 +1,4 @@
-"""Vx's launches on a stream of ours, and in a CUDA graph (glm-vx #9; Vx #1986, PR #2068, which
+"""Vx's launches on a stream of ours, and in a CUDA graph (glm-vx #9; Vx #1986, #2100 on main, PR #2068, which
 replaced #1994).
 
 A chain of four gpu/spawn kernels, scale -> add -> rmsnorm_rows -> softmax_rows, that Vx's own
@@ -304,7 +304,7 @@ def test_vx_stops_on_a_first_call_inside_a_capture():
 
 
 def test_every_library_has_vx_cuda_set_stream():
-    """No GPU needed: each lib<kernel>.so resolves vx_cuda_set_stream (Vx PR #2068)."""
+    """No GPU needed: each lib<kernel>.so resolves vx_cuda_set_stream (Vx #2100, was PR #2068)."""
     from gpu.spawn.vx_launch import VxKernel
     libraries = sorted(SPAWN.glob('lib*.so'))
     if not libraries:
@@ -315,7 +315,7 @@ def test_every_library_has_vx_cuda_set_stream():
             kernel = VxKernel(ptx)
         except OSError as e:
             pytest.skip(f'cannot load {library.name} here: {e}')
-        kernel.set_stream  # raises VxStreamUnsupported naming PR #2068
+        kernel.set_stream  # raises VxStreamUnsupported naming #2100
 
 
 if __name__ == '__main__':

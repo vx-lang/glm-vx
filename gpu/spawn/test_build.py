@@ -71,10 +71,28 @@ def test_kernel_params_takes_the_element_from_the_vx_type():
                                                                          ('scalar', None, None)]
 
 
-@pytest.mark.parametrize('change', [{'mutable': True}, {'rank': 2, 'words': 7}, {'type': '&Tensor<f16, [?], Memory::HBM>'}])
+@pytest.mark.parametrize('change', [{'mutable': True}, {'rank': 3, 'words': 9}, {'rank': 2, 'words': 5},
+                                    {'type': '&Tensor<f16, [?], Memory::HBM>'}])
 def test_kernel_params_refuses_what_launch_cannot_pass(change):
     with pytest.raises(ValueError):
         build.kernel_params([vx_param('x', '&Tensor<f32, [?], Memory::HBM>') | change])
+
+
+def test_kernel_params_takes_a_rank_2_tensor():
+    p = vx_param('out', '&mut Tensor<f32, [?, ?], Memory::HBM>') | {'rank': 2, 'words': 7}
+    assert build.kernel_params([p])[0]['rank'] == 2
+
+
+def test_rank_2_descriptor_is_seven_words():
+    # out: a rank-2 descriptor (pointer, aligned pointer, offset, 2 sizes, 2 strides), then n.
+    ptx = ('.visible .entry K(\n\t.param .u64 .ptr .align 1 K_param_0,\n\t.param .u64 .ptr .align 1 K_param_1,\n'
+           + ''.join(f'\t.param .u64 K_param_{i},\n' for i in range(2, 7)) + '\t.param .u32 K_param_7\n)\n{\n'
+           '\tld.param.b64 \t%rd4, [K_param_1];\n\tcvta.to.global.u64 \t%rd1, %rd4;\n'
+           '\tst.global.b32 \t[%rd1], %r9;\n\tret;\n}\n')
+    out = vx_param('out', '&mut Tensor<f32, [?, ?], Memory::HBM>') | {'rank': 2, 'words': 7}
+    build.check_params(ptx, 'K', build.kernel_params([out, vx_param('n', 'i32')]))
+    with pytest.raises(ValueError, match='do not match'):
+        build.check_params(ptx, 'K', params('out: mut f32[?], n: i32'))
 
 
 def test_ptxas_checks_the_device_arch():
@@ -115,14 +133,30 @@ def test_add_ptx_rejects_wrong_manifest(text):
 
 VXC = os.environ.get('VXC')
 needs_vxc = pytest.mark.skipif(not VXC or not shutil.which(VXC), reason='set VXC to a vxc with --emit-ptx')
+# A vxc from Vx main builds the kernels on `across`, one of the old launch stack the rest (README.md):
+# ONLY=across or ONLY=grid, as for build.sh, runs the tests of the kind that VXC builds.
+ONLY = os.environ.get('ONLY')
+
+
+def kind(source):
+    return 'across' if ' across blocks' in Path(source).read_text() else 'grid'
+
+
+def needs_kind(name):
+    return pytest.mark.skipif(ONLY not in (None, name), reason=f'VXC builds {ONLY} kernels (ONLY)')
+
+
+def machine_for(source):
+    return HERE / ('machine_across.vx' if kind(source) == 'across' else 'machine.vx')
 
 
 def run_build(source, output):
     return subprocess.run([sys.executable, str(HERE / 'build.py'), '--source', str(source),
-                           '--machine', str(HERE / 'machine.vx'), '--output', str(output)], text=True, capture_output=True)
+                           '--machine', str(machine_for(source)), '--output', str(output)], text=True, capture_output=True)
 
 
 @needs_vxc
+@needs_kind('across')
 def test_builds_add_from_vx(tmp_path):
     out = tmp_path / 'add.ptx'
     result = run_build(HERE / 'add.vx', out)
@@ -133,9 +167,9 @@ def test_builds_add_from_vx(tmp_path):
 
 @needs_vxc
 @pytest.mark.parametrize('kernel,first,second,message', [
-    ('add', 'out', 'a', 'mut'),
-    ('int4_matvec', 'packed', 'scales', 'bits wide'),
-    ('fp8_matvec', 'weight', 'scales', 'bits wide'),
+    pytest.param('add', 'out', 'a', 'mut', marks=needs_kind('across')),
+    pytest.param('int4_matvec', 'packed', 'scales', 'bits wide', marks=needs_kind('grid')),
+    pytest.param('fp8_matvec', 'weight', 'scales', 'bits wide', marks=needs_kind('grid')),
 ])
 def test_check_catches_a_manifest_out_of_place(tmp_path, kernel, first, second, message):
     """The PTX check is independent of vxc's manifest: swap two of its entries and it refuses."""
@@ -152,6 +186,7 @@ def test_check_catches_a_manifest_out_of_place(tmp_path, kernel, first, second, 
 
 
 @needs_vxc
+@needs_kind('across')
 def test_refuses_two_kernels_in_one_file(tmp_path):
     source = (HERE / 'copy.vx').read_text()
     second = source[source.index('pub fn'):].replace('glm_vx_spawn_copy', 'glm_vx_spawn_copy_again')
@@ -165,7 +200,7 @@ def test_refuses_two_kernels_in_one_file(tmp_path):
 def test_every_kernel_has_a_launch_shape_that_launch_reads(tmp_path):
     from gpu.spawn.launch import launch_size
     for source in sorted(HERE.glob('*.vx')):
-        if source.stem in ('machine', 'device'):
+        if source.stem in ('machine', 'machine_across', 'device') or ONLY not in (None, kind(source)):
             continue
         out = tmp_path / f'{source.stem}.ptx'
         result = run_build(source, out)
@@ -184,21 +219,23 @@ needs_dispatch = pytest.mark.skipif(not (VXC and DISPATCH and shutil.which('llvm
 
 
 def run_library(source, output):
-    return subprocess.run([sys.executable, str(HERE / 'build.py'), '--source', str(source), '--machine', str(HERE / 'machine.vx'),
+    return subprocess.run([sys.executable, str(HERE / 'build.py'), '--source', str(source), '--machine', str(machine_for(source)),
                            '--output', str(output), '--library', str(output.with_name('lib' + output.stem + '.so'))],
                           text=True, capture_output=True)
 
 
 @needs_dispatch
+@needs_kind('across')
 def test_library_carries_the_checked_kernel(tmp_path):
     result = run_library(HERE / 'add.vx', tmp_path / 'add.ptx')
     assert result.returncode == 0, result.stderr
     manifest = json.loads((tmp_path / 'add.json').read_text())
     assert manifest['library'] == 'libadd.so' and (tmp_path / 'libadd.so').exists()
-    assert manifest['launch'] == {'block': 256, 'grid': [{'computed': '((n - 1) / 256) + 1'}]}
+    assert manifest['launch'] == {'block': 256, 'grid': [{'computed': '((n - 1) / 256) + 1'}], 'grid_loops': True}
 
 
 @needs_dispatch
+@needs_kind('across')
 def test_library_refuses_a_parameter_the_kernel_does_not_use(tmp_path):
     # The pub fn would take `unused`, the kernel would not: the C call would not line up.
     source = (HERE / 'copy.vx').read_text().replace(', n: i32)', ', n: i32, unused: i32)')

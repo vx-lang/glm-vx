@@ -5,14 +5,16 @@
 
 pub fn glm_vx_spawn_scaled_add(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
                                weights: &Tensor<f32, [?], Memory::HBM>, slot: i32, n: i32) -> void {
-  spawn on(Topology::Device) grid([(n - 1) / 256 + 1]) block(256) {
+  spawn on(Topology::Device) {
     let w: f32 = weights[slot];
-    let stride: i32 = grid_dim() * block_dim();
-    let mut i: i32 = block_id() * block_dim() + thread_id();
-    while i < n {
-      let weighted: f32 = x[i] * w;
-      out[i] = out[i] + weighted;
-      i = i + stride;
+    for blk in 0..(n - 1) / 256 + 1 across blocks {
+      for t in 0..256 across lanes {
+        let i: i32 = blk * 256 + t;
+        if i < n {
+          let weighted: f32 = x[i] * w;
+          out[i] = out[i] + weighted;
+        }
+      }
     }
   }
   return;

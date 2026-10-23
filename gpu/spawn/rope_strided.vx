@@ -1,27 +1,29 @@
 // glm_vx_gpu_rope_strided through Vx's own GPU path: RoPE on a strided slice of rows; head h
 // reads x[h*x_stride ..] and writes out[h*out_stride ..], arithmetic identical to rope_glm.
+// out is [heads, out_stride]; x stays flat, since only writes need an index that fixes the lane.
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_rope_strided(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+pub fn glm_vx_spawn_rope_strided(out: &mut Tensor<f32, [?, ?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
                                  cosine: &Tensor<f32, [?], Memory::HBM>, sine: &Tensor<f32, [?], Memory::HBM>,
                                  heads: i32, dim: i32, x_stride: i32, out_stride: i32) -> void {
-  spawn on(Topology::Device) grid([(heads * (dim / 2) - 1) / 256 + 1]) block(256) {
-    if heads > 0 && dim > 0 && dim % 2 == 0 {
-      let pairs: i32 = dim / 2;
-      let stride: i32 = grid_dim() * block_dim();
-      let mut i: i32 = block_id() * block_dim() + thread_id();
-      while i < heads * pairs {
-        let h: i32 = i / pairs;
-        let p: i32 = i % pairs;
-        let xb: i32 = h * x_stride;
-        let ob: i32 = h * out_stride;
-        let a: f32 = x[xb + p * 2];
-        let b: f32 = x[xb + p * 2 + 1];
-        let c: f32 = cosine[p];
-        let s: f32 = sine[p];
-        out[ob + p] = a * c - b * s;
-        out[ob + pairs + p] = b * c + a * s;
-        i = i + stride;
+  spawn on(Topology::Device) {
+    for h in 0..heads across blocks {
+      for j in 0..dim across lanes(128) {
+        // A head's dim outputs fit in its row of out, so rows do not overlap.
+        if dim % 2 == 0 && dim <= out_stride {
+          let pairs: i32 = dim / 2;
+          let xb: i32 = h * x_stride;
+          if j < pairs {
+            let a: f32 = x[xb + j * 2];
+            let b: f32 = x[xb + j * 2 + 1];
+            out[h][j] = a * cosine[j] - b * sine[j];
+          } else {
+            let p: i32 = j - pairs;
+            let a: f32 = x[xb + p * 2];
+            let b: f32 = x[xb + p * 2 + 1];
+            out[h][j] = b * cosine[p] + a * sine[p];
+          }
+        }
       }
     }
   }

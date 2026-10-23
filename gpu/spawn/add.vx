@@ -7,12 +7,14 @@
 // its own index.
 pub fn glm_vx_spawn_add(out: &mut Tensor<f32, [?], Memory::HBM>, a: &Tensor<f32, [?], Memory::HBM>,
                         b: &Tensor<f32, [?], Memory::HBM>, n: i32) -> void {
-  spawn on(Topology::Device) grid([(n - 1) / 256 + 1]) block(256) {
-    let stride: i32 = grid_dim() * block_dim();
-    let mut i: i32 = block_id() * block_dim() + thread_id();
-    while i < n {
-      out[i] = a[i] + b[i];
-      i = i + stride;
+  spawn on(Topology::Device) {
+    for blk in 0..(n - 1) / 256 + 1 across blocks {
+      for t in 0..256 across lanes {
+        let i: i32 = blk * 256 + t;
+        if i < n {
+          out[i] = a[i] + b[i];
+        }
+      }
     }
   }
   return;

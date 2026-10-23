@@ -1,26 +1,30 @@
 // glm_vx_gpu_rope_glm through Vx's own GPU path: GLM interleaved RoPE over [heads, dim], with
-// each head's output packed as [rotated even, rotated odd]. Grid-stride over heads * dim/2.
+// each head's output packed as [rotated even, rotated odd]. A block per head (grid-stride),
+// a lane per output element; out is [heads, dim].
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_rope_glm(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+pub fn glm_vx_spawn_rope_glm(out: &mut Tensor<f32, [?, ?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
                              cosine: &Tensor<f32, [?], Memory::HBM>, sine: &Tensor<f32, [?], Memory::HBM>,
                              heads: i32, dim: i32) -> void {
-  spawn on(Topology::Device) grid([(heads * (dim / 2) - 1) / 256 + 1]) block(256) {
-    if heads > 0 && dim > 0 && dim % 2 == 0 {
-      let pairs: i32 = dim / 2;
-      let stride: i32 = grid_dim() * block_dim();
-      let mut i: i32 = block_id() * block_dim() + thread_id();
-      while i < heads * pairs {
-        let h: i32 = i / pairs;
-        let p: i32 = i % pairs;
-        let base: i32 = h * dim;
-        let a: f32 = x[base + p * 2];
-        let b: f32 = x[base + p * 2 + 1];
-        let c: f32 = cosine[p];
-        let s: f32 = sine[p];
-        out[base + p] = a * c - b * s;
-        out[base + pairs + p] = b * c + a * s;
-        i = i + stride;
+  spawn on(Topology::Device) {
+    for h in 0..heads across blocks {
+      // Element j < dim / 2 is pair j rotated even, the rest pair j - dim / 2 rotated odd: one
+      // write per lane, so the race proof sees that no two lanes write the same element.
+      for j in 0..dim across lanes(128) {
+        if dim % 2 == 0 {
+          let pairs: i32 = dim / 2;
+          let base: i32 = h * dim;
+          if j < pairs {
+            let a: f32 = x[base + j * 2];
+            let b: f32 = x[base + j * 2 + 1];
+            out[h][j] = a * cosine[j] - b * sine[j];
+          } else {
+            let p: i32 = j - pairs;
+            let a: f32 = x[base + p * 2];
+            let b: f32 = x[base + p * 2 + 1];
+            out[h][j] = b * cosine[p] + a * sine[p];
+          }
+        }
       }
     }
   }
