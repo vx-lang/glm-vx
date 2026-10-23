@@ -136,6 +136,23 @@ stores to, or whose element types differ from the width of the loads made throug
 `device.vx` holds macros: the bf16, binary16, INT4 and FP8 decodes, `sigmoid`, and the warp and
 block sums and maxima on shared memory.
 
+## Performance: what to measure first (from the PTX, not yet timed)
+
+- **Shared-memory reductions.** Each lane-loop step is a barrier: a warp-per-row reduction is 5
+  steps, a block reduction 11 (`block_sum!`, against the hand kernels' shuffles and one or two
+  barriers). It hurts most where a reduction sits in a loop: `mla_partial` does one per selected
+  token (about 13 barriers a token with 1024 lanes), `index_scores` one per head. Vx #260.
+- **Inner loops are not unrolled.** The hand kernels' `for` over `(cols + 31) / 32` steps unrolls
+  four times (four load pairs in flight); the spawn kernels' `while` keeps one. Unrolled by hand in
+  the same order (bit for bit the same), matvec goes from 38 to 48 registers (the hand kernel: 30),
+  so whether it pays is a measurement: try it on matvec, bf16_matvec, matvec_heads, bf16_matmul and
+  index_scores.
+- **Registers.** The spawn kernels use 17 to 62 (table above): the matvecs 38 to 61, where the
+  hand ones use 26 to 32 (the lane loops' indices, and 64-bit addressing). vxc's device code is LLVM O2 (MLIR's
+  NVVM target default); O3 adds 10 to 30 registers to most kernels and unrolls none of these loops.
+- **topk** keeps its per-lane histograms in global memory (`scratch`, 256 x 256 per pass).
+- Neither side contracts to FMA (`mul.rn` + `add.rn`), so that is not a difference.
+
 ## What Vx is missing
 
 | Need | Today | Vx issue |
