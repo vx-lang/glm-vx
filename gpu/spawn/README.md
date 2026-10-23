@@ -26,8 +26,8 @@ All 25 kernels build with one vxc, from Vx main (b151bb8c on), which no longer p
 - **Reductions in shared memory.** A warp sum is five lane loops on shared memory (offsets 16, 8,
   4, 2, 1, as vxk_warp_sum), each reading one tensor and writing another, since a pass may not
   read an element that another pass of the same loop writes. Each lane loop ends with a barrier,
-  so a warp sum costs five barriers where the hand kernels shuffle: correct first, and the
-  shuffles come back as an MLIR pass.
+  so a warp sum costs five barriers where the hand kernels shuffle: correct first, until
+  reductions become library routines (Vx #260).
 - **Results that do not depend on the launch.** A block reduction follows the hand kernel
   launched with `threads` threads, which the norms, softmax and mla_partial take as a parameter:
   a 1024-lane loop in which lane t < threads sums d = t, t + threads, .. and the rest add zeros.
@@ -132,13 +132,14 @@ block sums and maxima on shared memory.
 
 | Need | Today | Vx issue |
 | --- | --- | --- |
-| Warp shuffles in an `across` loop | lane loops on shared memory, five barriers per warp sum; an MLIR pass is to put the shuffles back | #260 |
+| Reductions (sum, max) in an `across` loop | lane loops on shared memory, five barriers per warp sum; to become library routines, OpenMP style | #260 |
 | Device functions in an `across` loop | refused (the proof does not read their bodies); the helpers are macros | #2076 D4 |
 | `mlir!` blocks in an `across` loop (exp as the hand kernels, wgmma, TMA) | refused; exp is libdevice expf, the tensor-core kernels are not built | #2076 D1 to D3 |
 | A stable entry name and documented parameter order | `vxc --emit-ptx` (PR #1964): the entry is the function's name, the parameters its own in declared order | #251 |
 | Correctly rounded sqrt / div (the norms) | `sqrt.approx` / `rsqrt.approx` in 390c2534; `sqrt.rn` + `rcp.rn` with PR #1955 | #1944 |
 | Bit casts (`f32::from_bits`) | not a pure call to the proof; bf16 decode uses exact arithmetic instead | #1943 |
-| `if` as a value in a region | the flat code generator declines it and the GPU lowering then fails; the macros use statements | |
+| `if` as a value that reads a tensor | the flat code generator declines it and the GPU lowering then fails; the macros assign in each branch | #2108 |
+| `blk + t` as a write index (equal coefficients) | refused by the order of the names; write `out[blk]` or `out[blk * 4 + t]` with t in 0..4 | #2109 |
 | Scalars passed by value | E6003 unless `machine.vx` lists CPU_DRAM as visible | #1947 |
 | Raw pointers in a region | silent host fallback before PR #1959, which takes them and warns on any other fallback; kernels take `[?]` tensors | #1945 |
 | Shared memory `::new()` | zero-fill races with other warps; use `unsafe { ::uninit() }` | #1946 |
