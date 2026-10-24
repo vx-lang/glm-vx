@@ -349,6 +349,28 @@ def test_device_experts_equal_the_host_loop(kind):
     assert 'scaled_add' not in device.launches
 
 
+needs_mla_decode = pytest.mark.skipif(not (SPAWN / 'libmla_decode.so').exists(),
+                                      reason='gpu/spawn mla_decode not built (gpu/spawn/build.sh)')
+
+
+@needs_mla_decode
+def test_fused_attention_matches_partial_then_merge():
+    """mla_decode in one launch against the hand mla_partial and mla_merge: the same algorithm,
+    exp aside (libm expf on the host against ex2.approx). This model selects at most 4 tokens, so
+    one split; test_spawn_vx_host.py checks several splits against the spawn partial and merge."""
+    model = build(seed=67)
+    fused = ResidentGLM(model, ctx=Context(), max_tokens=32, fused_attention=True)
+    plain = ResidentGLM(model, ctx=Context(), max_tokens=32)
+    try:
+        got, want = fused.prefill(TOKENS), plain.prefill(TOKENS)
+        assert fused.launches['mla_decode'] == model.n_layers * len(TOKENS)
+        assert 'mla_partial' not in fused.launches and 'mla_merge' not in fused.launches
+    finally:
+        fused.close()
+        plain.close()
+    np.testing.assert_allclose(got, want, rtol=1e-4, atol=1e-5)
+
+
 @needs_spawn
 def test_device_experts_preload_uploads_each_projection_once_stacked():
     model, _ = int4_model(61, GLM_INT4)

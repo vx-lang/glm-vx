@@ -96,8 +96,10 @@ def build_library(args, combined_text, name, params, env, ptx):
     so they must be exactly the kernel's, in the manifest's order, for the call to line up."""
     declared = re.search(rf'^pub fn {name}\((.*?)\)\s*->', combined_text, re.M | re.S)
     names = [item.split(':', 1)[0].strip() for item in split_top(declared[1])] if declared else None
-    if names != [p['name'] for p in params]:
-        raise ValueError(f'pub fn {name} takes {names}, but the kernel uses {[p["name"] for p in params]}')
+    # The arrival count is the kernel's, not the function's: Vx's host side makes it (Vx #2188).
+    kernel_names = [p['name'] for p in params if p['kind'] != 'arrivals']
+    if names != kernel_names:
+        raise ValueError(f'pub fn {name} takes {names}, but the kernel uses {kernel_names}')
     if not args.dispatch_lib or not Path(args.dispatch_lib).is_file():
         raise ValueError('--library needs --dispatch-lib (or VX_DISPATCH_LIB): the libvx_cuda_dispatch.so vxc was built with')
     dispatch = Path(args.dispatch_lib).resolve()
@@ -127,16 +129,25 @@ def build_library(args, combined_text, name, params, env, ptx):
 
 def kernel_params(manifest_params):
     """vxc's parameter list in our form. vxc's `element` is the MLIR type (u16 is i16), so the
-    element comes from the Vx type, `&Tensor<u16, [?], Memory::HBM>`."""
+    element comes from the Vx type, `&Tensor<u16, [?], Memory::HBM>`. A kernel with code after a
+    group of blocks (Vx #2187) takes the groups' arrival counts last, as `arrivals` (Vx #2188):
+    `elements` u32s, zeroed before the first launch, which each group's last pass zeroes again."""
     params = []
-    for p in manifest_params:
+    for index, p in enumerate(manifest_params):
+        if p['kind'] == 'arrivals':
+            if index != len(manifest_params) - 1 or p['element'] != 'i32' or p['rank'] != 1 or p['words'] != 5 \
+               or not p.get('zero_before_first_launch'):
+                raise ValueError(f'unsupported arrivals parameter {p}')
+            params.append({'name': p['name'], 'kind': 'arrivals', 'element': 'i32', 'rank': 1,
+                           'elements': p['elements']})
+            continue
         if p['kind'] == 'scalar':
             if p['type'] not in SCALARS or p['words'] != 1:
                 raise ValueError(f'unsupported scalar parameter {p}')
             params.append({'name': p['name'], 'kind': 'scalar', 'type': p['type']})
         elif p['kind'] == 'tensor':
             element = re.match(r'&(?:mut )?Tensor<(\w+),', p['type'])
-            if not element or element[1] not in ELEMENT_BITS or p['rank'] not in (1, 2) or p['words'] != 3 + 2 * p['rank']:
+            if not element or element[1] not in ELEMENT_BITS or p['rank'] not in (1, 2, 3) or p['words'] != 3 + 2 * p['rank']:
                 raise ValueError(f'unsupported tensor parameter {p}')
             if p['mutable'] != p['type'].startswith('&mut '):
                 raise ValueError(f'manifest mutable flag disagrees with the type: {p}')

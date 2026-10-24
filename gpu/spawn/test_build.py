@@ -71,7 +71,7 @@ def test_kernel_params_takes_the_element_from_the_vx_type():
                                                                          ('scalar', None, None)]
 
 
-@pytest.mark.parametrize('change', [{'mutable': True}, {'rank': 3, 'words': 9}, {'rank': 2, 'words': 5},
+@pytest.mark.parametrize('change', [{'mutable': True}, {'rank': 4, 'words': 11}, {'rank': 2, 'words': 5},
                                     {'type': '&Tensor<f16, [?], Memory::HBM>'}])
 def test_kernel_params_refuses_what_launch_cannot_pass(change):
     with pytest.raises(ValueError):
@@ -81,6 +81,27 @@ def test_kernel_params_refuses_what_launch_cannot_pass(change):
 def test_kernel_params_takes_a_rank_2_tensor():
     p = vx_param('out', '&mut Tensor<f32, [?, ?], Memory::HBM>') | {'rank': 2, 'words': 7}
     assert build.kernel_params([p])[0]['rank'] == 2
+
+
+def test_kernel_params_takes_a_rank_3_tensor():
+    p = vx_param('out', '&mut Tensor<f32, [?, ?, ?], Memory::HBM>') | {'rank': 3, 'words': 9}
+    assert build.kernel_params([p])[0]['rank'] == 3
+
+
+ARRIVALS = {'element': 'i32', 'elements': {'param': 'heads'}, 'kind': 'arrivals', 'name': 'arrivals', 'rank': 1,
+            'words': 5, 'zero_before_first_launch': True}
+
+
+def test_kernel_params_takes_the_arrival_count_last():
+    ps = build.kernel_params([vx_param('heads', 'i32'), ARRIVALS])
+    assert ps[1] == {'name': 'arrivals', 'kind': 'arrivals', 'element': 'i32', 'rank': 1, 'elements': {'param': 'heads'}}
+
+
+@pytest.mark.parametrize('params', [[ARRIVALS, vx_param('heads', 'i32')], [ARRIVALS | {'zero_before_first_launch': False}],
+                                    [ARRIVALS | {'rank': 2, 'words': 7}]])
+def test_kernel_params_refuses_an_arrival_count_launch_cannot_pass(params):
+    with pytest.raises(ValueError):
+        build.kernel_params(params)
 
 
 def test_rank_2_descriptor_is_seven_words():

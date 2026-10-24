@@ -42,6 +42,11 @@ decodes exactly and sums in the float32 matvec's order, so the logits equal the 
 same bf16 values bit for bit. Norms, biases, embeddings and ``kv_b_proj`` stay float32.
 GGUF packed weights, expert placement and tracing are not supported.
 
+``fused_attention=True`` runs each layer's MLA decode in one launch, gpu/spawn's mla_decode (the
+block of each head's last split merges that head), in place of mla_partial then mla_merge. Its exp
+is libdevice's expf, not the hand kernels' ex2.approx, so logits differ from the default in the last
+bits. It needs Vx's code of a group of blocks (#2185 to #2188, on Vx main from c3716538).
+
 Not a performance claim: no timing is made here, and launches are still one per op.
 ``device_experts`` needs the gpu/spawn kernels built (gpu/spawn/build.sh into ptx_dir/spawn) with a
 vxc that has Vx's lanes:: reductions (see gpu/spawn/README.md); it has not run on a GPU yet.
@@ -82,7 +87,7 @@ class ResidentGLM:
     name = 'vx-gpu-resident'
 
     def __init__(self, model, *, max_tokens=4096, ptx_dir=None, device=0, ctx=None, max_weight_bytes=None,
-                 device_topk=True, device_experts=False):
+                 device_topk=True, device_experts=False, fused_attention=False):
         if getattr(model, 'packed_weights', False):
             raise NotImplementedError('ResidentGLM supports expanded float32 weights only')
         if getattr(model, 'expert_placement', None) is not None:
@@ -93,6 +98,7 @@ class ResidentGLM:
         self.max_tokens = max_tokens
         self.device_topk = bool(device_topk)
         self.device_experts = bool(device_experts)
+        self.fused_attention = bool(fused_attention)
         self.max_weight_bytes = max_weight_bytes
         self.weight_bytes = 0
         self._room = self._plan = None  # preload's fit check, see preload()
@@ -313,6 +319,8 @@ class ResidentGLM:
         self.numerator = t((self.heads, self.splits_max, self.rank))
         self.stats = t((self.heads, self.splits_max, 2))
         self.attended = t((self.heads, self.rank))
+        if self.fused_attention:  # mla_decode's per-head arrival counts: zero once, its last splits re-zero them
+            self.arrivals = t((self.heads,), 'int32', np.zeros(self.heads, np.int32))
         self.heads_out = t((self.heads * self.value_dim,))
         self.iq, self.iq_rot = t((self.index_heads * self.index_dim,)), t((self.index_heads * self.index_dim,))
         self.ik, self.ik_norm = t((self.index_dim,)), t((self.index_dim,))
@@ -605,11 +613,18 @@ class ResidentGLM:
         block = ((self.rank + 31) // 32) * 32
         scale = F(_f32(qk ** -0.5, 'MLA scale', True))
         tokens = position + 1
-        self._launch('mla_partial', self.heads * splits, block,
-                     [self.numerator, self.stats, self.latent_q, self.rot_q, self.latents[layer], self.rope_keys[layer],
-                      self.selected, I(self.heads), I(self.rank), I(self.rot), I(tokens), I(count), I(0), I(splits), scale])
-        self._launch('mla_merge', self.heads, 256,
-                     [self.attended, self.numerator, self.stats, I(self.heads), I(self.rank), I(splits)])
+        if self.fused_attention:
+            self._spawn('mla_decode', out=self.attended, numerator=self.numerator, stats=self.stats,
+                        q_latent=self.latent_q, q_rope=self.rot_q, cache_latent=self.latents[layer],
+                        cache_rope=self.rope_keys[layer], selected=self.selected, heads=self.heads, rank=self.rank,
+                        rope_dim=self.rot, tokens=tokens, count=count, selection_stride=0, splits=splits,
+                        scale=scale.value, threads=block, arrivals=self.arrivals)
+        else:
+            self._launch('mla_partial', self.heads * splits, block,
+                         [self.numerator, self.stats, self.latent_q, self.rot_q, self.latents[layer], self.rope_keys[layer],
+                          self.selected, I(self.heads), I(self.rank), I(self.rot), I(tokens), I(count), I(0), I(splits), scale])
+            self._launch('mla_merge', self.heads, 256,
+                         [self.attended, self.numerator, self.stats, I(self.heads), I(self.rank), I(splits)])
         value_w = kv_b.view((self.heads * (self.nope + self.value_dim) - self.nope, self.rank), offset=self.nope * self.rank * 4)
         self._launch('matvec_heads', (self.heads * self.value_dim + warps - 1) // warps, 128,
                      [self.heads_out, value_w, self.attended, I(self.heads), I(self.value_dim), I(self.rank),

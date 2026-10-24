@@ -16,8 +16,9 @@ also cover every pass. A kernel whose rows have a run-time length writes a rank-
 times numbers; `launch.py` passes a rank-2 `DeviceTensor` as its 7-word descriptor. A row's
 index may then be anything, as in topk's `hist[t][digit]`.
 
-All 38 kernels build with Vx main from 9c52374c on (the `lanes::` reductions of #2117, #2124 and
-#2128, and #2134: several libraries in one process each run their own kernel). It no longer parses
+All 39 kernels build with Vx main from c3716538 on (the `lanes::` reductions of #2117, #2124 and
+#2128; #2134: several libraries in one process each run their own kernel; and for mla_decode, the
+code of a group of blocks and its arrival counts, #2185 to #2188). It no longer parses
 `grid([..]) block(n)`. What the proof takes in a loop shapes them:
 
 - **No calls it cannot read.** A function call (other than the stdlib's pure scalar ones, such
@@ -94,6 +95,7 @@ Two launches use the same PTX:
 | `bf16_moe_gate_up.vx`, `bf16_moe_down.vx` | new: the same for bf16 experts | 47, 47 |
 | `int4_moe_gate_up.vx`, `int4_moe_down.vx` | new: the same for INT4 experts | 47, 47 |
 | `fp8_moe_gate_up.vx`, `fp8_moe_down.vx` | new: the same for FP8 experts | 69, 56 |
+| `mla_decode.vx` | new: mla_partial and mla_merge in one launch (Vx #2187 code of a group, #2188 arrival counts) | 31 |
 
 The five expert kernels let a decode step run its MoE without reading the router's ids on the
 host (`gpu/resident.py` downloads them on every MoE layer today, a sync that also keeps a decode
@@ -111,6 +113,16 @@ finds the ascending order once (`id_rank!`, `slot_of_rank!`); the dot products a
 (gpu/resident.py) runs its MoE layers through them, with each expert projection uploaded once per
 layer as one tensor; `gpu/test_resident.py` checks the logits against the host loop bit for bit on
 the CPU, and `gpu/test_resident_device_experts_hardware.py` does the same on a GPU (not run yet).
+
+`mla_decode` is a grid of heads x splits: block (h, split) runs mla_partial's task, and the code
+after the split loop, head h's group code (Vx #2187), runs in the block of h's last split to end,
+as soon as h's splits end: mla_merge for h, on all its lanes. It takes the heads' arrival counts as
+its last parameter, `arrivals` (Vx #2188): `heads` int32s, zeroed once; each head's last split zeroes
+its count again, so launches and graph replays reuse the buffer. numerator and stats are rank 3,
+[heads, splits, ..], so the race proof sees each split write its own elements. It equals
+mla_partial then mla_merge bit for bit (`gpu/test_spawn_vx_host.py`; on a GPU,
+`gpu/test_spawn_hardware.py`, three launches on one buffer), and `ResidentGLM(...,
+fused_attention=True)` runs it.
 
 All assemble with ptxas for sm_80 with no spills; none has run on a GPU yet. The norms, softmax
 and mla_partial launch 1024 lanes; a warp-per-row kernel has four rows per block of 128.

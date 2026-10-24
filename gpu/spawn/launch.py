@@ -3,7 +3,10 @@
 The manifest (.json beside the .ptx) gives the entry name and the parameters, which vxc takes
 in the order the function declares them. Arguments are passed by name. A tensor argument
 expands to its memref descriptor: base and aligned pointer (both the tensor's device pointer),
-offset 0, then its sizes and row-major strides (rank 1: size, stride 1). Without grid and
+offset 0, then its sizes and row-major strides (rank 1: size, stride 1). A kernel with code after
+a group of blocks takes `arrivals` too: an int32 DeviceTensor of the manifest's `elements` counts,
+zeroed once before its first launch (each group's last block zeroes its count again, so launches
+and graph replays reuse it; two launches in flight at once need two). Without grid and
 block, a launch takes the shape that the kernel's `across` loops give in the manifest (Vx #252),
 which is the shape Vx's own launch uses; each computed size is evaluated as Vx does, in i32 with
 division and remainder truncating toward zero.
@@ -88,6 +91,8 @@ class SpawnKernel:
                 raise TypeError(f'{p["name"]} must be a DeviceTensor')
             if str(value.dtype) != _ELEMENT[p['element']]:
                 raise TypeError(f'{p["name"]} is {value.dtype}, expected {_ELEMENT[p["element"]]}')
+            if p['kind'] == 'arrivals' and value.size < launch_size(p['elements'], values):
+                raise ValueError(f'{p["name"]} needs {launch_size(p["elements"], values)} counts, got {value.size}')
             args += [value, value] + [C.c_uint64(w) for w in descriptor_words(p, value)]
         return args
 

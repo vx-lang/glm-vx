@@ -687,3 +687,29 @@ def test_mla(run, heads, rank, rope, tokens, count, splits, stride, threads):
     np.testing.assert_allclose(part['stats'], stats, rtol=1e-5, atol=1e-37)
     np.testing.assert_allclose(part['numerator'], num, rtol=1e-5, atol=1e-6)
     np.testing.assert_allclose(out, expected, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize('heads,rank,rope,tokens,count,splits,stride,threads', [
+    (2, 48, 4, 7, 5, 3, 0, 64), (2, 48, 4, 7, 5, 8, 0, 64), (2, 48, 4, 7, 0, 3, 0, 64), (3, 48, 4, 7, 5, 1, 0, 64),
+    (8, 512, 64, 1024, 96, 4, 0, 512), (4, 64, 64, 300, 37, 4, 37, 64)])
+def test_mla_decode_equals_partial_then_merge(run, heads, rank, rope, tokens, count, splits, stride, threads):
+    """mla_decode (one launch; head h's last split merges h) leaves mla_partial's partials and
+    mla_merge's result, bit for bit."""
+    rng = np.random.default_rng(heads * 3 + rank + count + splits)
+    q, qr = rng.normal(size=(heads, rank)).astype(F), rng.normal(size=(heads, rope)).astype(F)
+    kv, kr = rng.normal(size=(tokens, rank)).astype(F), rng.normal(size=(tokens, rope)).astype(F)
+    selected = rng.integers(0, tokens, size=max(1, (heads if stride else 1) * max(count, 1))).astype(np.int32)
+    if count:
+        selected[1 % selected.size] = -1
+        selected[-1] = tokens + 5
+    common = dict(q_latent=q, q_rope=qr, cache_latent=kv, cache_rope=kr, selected=selected, heads=heads, rank=rank,
+                  rope_dim=rope, tokens=tokens, count=count, selection_stride=stride, splits=splits,
+                  scale=rank ** -0.5, threads=threads)
+    part = run('mla_partial', numerator=np.zeros((heads * splits, rank), F), stats=np.zeros((heads * splits, 2), F), **common)
+    want = run('mla_merge', out=np.zeros((heads, rank), F), numerator=part['numerator'], stats=part['stats'],
+               heads=heads, rank=rank, splits=splits)['out']
+    got = run('mla_decode', out=np.full((heads, rank), 7, F), numerator=np.zeros((heads, splits, rank), F),
+              stats=np.zeros((heads, splits, 2), F), arrivals=np.zeros(heads, np.int32), **common)
+    bits_equal(got['numerator'].reshape(heads * splits, rank), part['numerator'])
+    bits_equal(got['stats'].reshape(heads * splits, 2), part['stats'])
+    bits_equal(got['out'], want)

@@ -36,6 +36,9 @@ def _call_in_worker(ptx_path, values):
     missing = {p['name'] for p in params} ^ set(values)
     if missing:
         raise TypeError(f'{manifest["entry"]}: arguments do not match parameters: {sorted(missing)}')
+    # The arrival count of a group's code (Vx #2188) is taken, as launch.py takes it, but it is not
+    # an argument of the library's function: Vx's host side makes its own.
+    params = [p for p in params if p['kind'] != 'arrivals']
     if ptx_path not in _libraries:
         _libraries[ptx_path] = C.CDLL(str(ptx_path.with_name(manifest['library'])))
     function = getattr(_libraries[ptx_path], manifest['entry'])

@@ -509,3 +509,41 @@ def test_spawn_mla_matches_hand_kernels(context, heads, rank, rope, tokens, coun
     np.testing.assert_allclose(download(stats[0]), download(stats[1]), **EXP)
     np.testing.assert_allclose(download(num[0]), download(num[1]), **EXP)
     np.testing.assert_allclose(download(out[0]), download(out[1]), **EXP)
+
+
+# mla_decode: mla_partial and mla_merge in one launch, the block of each head's last split merging
+# that head (Vx #2187). Launched three times on one arrivals buffer: each launch must leave the
+# counts at zero for the next (Vx #2188) and give the spawn partial-then-merge result bit for bit.
+@pytest.mark.skipif(not (BUILD / 'spawn/mla_decode.ptx').exists(), reason='mla_decode not built (gpu/spawn/build.sh)')
+@pytest.mark.parametrize('heads,rank,rope,tokens,count,splits,stride,block', [
+    (2, 48, 4, 7, 5, 3, 0, 64), (2, 48, 4, 7, 5, 8, 0, 64), (3, 48, 4, 7, 5, 1, 0, 64),
+    (64, 512, 64, 4096, 2048, 16, 0, 512), (4, 64, 64, 300, 37, 4, 37, 64)])
+def test_spawn_mla_decode_equals_partial_then_merge(context, heads, rank, rope, tokens, count, splits, stride, block):
+    rng = np.random.default_rng(heads * 3 + rank + count + splits)
+    q, qr = rng.normal(size=heads * rank).astype('f4'), rng.normal(size=heads * rope).astype('f4')
+    kv, kr = rng.normal(size=tokens * rank).astype('f4'), rng.normal(size=tokens * rope).astype('f4')
+    selected = rng.integers(0, tokens, size=max(1, (heads if stride else 1) * max(count, 1))).astype('i4')
+    if count:
+        selected[1 % selected.size] = -1
+        selected[-1] = tokens + 5
+    dq, dqr, dkv, dkr, dsel = (upload(context, a) for a in (q, qr, kv, kr, selected))
+    common = dict(heads=heads, rank=rank, rope_dim=rope, tokens=tokens, count=count, selection_stride=stride,
+                  splits=splits, selected=dsel, cache_latent=dkv, q_latent=dq, q_rope=dqr, cache_rope=dkr,
+                  scale=rank ** -0.5, threads=block)
+    num, stats, out = context.tensor((heads * splits * rank,)), context.tensor((heads * splits * 2,)), context.tensor((heads * rank,))
+    SpawnKernel(context, BUILD / 'spawn/mla_partial.ptx').launch(
+        heads * splits, block, numerator=num.view((heads * splits, rank)), stats=stats.view((heads * splits, 2)), **common)
+    SpawnKernel(context, BUILD / 'spawn/mla_merge.ptx').launch(
+        heads, 256, heads=heads, rank=rank, splits=splits, stats=stats, numerator=num, out=out.view((heads, rank)))
+    arrivals = upload(context, np.zeros(heads, 'i4'))
+    decode = SpawnKernel(context, BUILD / 'spawn/mla_decode.ptx')
+    for _ in range(3):
+        d_num, d_stats = context.tensor((heads, splits, rank)), context.tensor((heads, splits, 2))
+        d_out = upload(context, np.full(heads * rank, 7, 'f4'))
+        decode.launch((heads, splits), block, out=d_out.view((heads, rank)), numerator=d_num, stats=d_stats,
+                      arrivals=arrivals, **common)
+        context.synchronize()
+        np.testing.assert_array_equal(download(arrivals).view('i4'), 0)
+        np.testing.assert_array_equal(download(d_num).view('u4').ravel(), download(num).view('u4'))
+        np.testing.assert_array_equal(download(d_stats).view('u4').ravel(), download(stats).view('u4'))
+        np.testing.assert_array_equal(download(d_out).view('u4'), download(out).view('u4'))
