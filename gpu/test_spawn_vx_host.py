@@ -326,6 +326,93 @@ def test_moe_sum_in_ascending_id_order(run, experts, k):
     bits_equal(total, expected)
 
 
+# The fused MoE kernels: moe_gate_up for all k experts, then moe_down, must leave what the
+# per-expert kernels leave (gate, up, swiglu, down, expert_scaled_add for each slot from zeros).
+
+def moe_weights(rng, fmt, experts, rows, cols):
+    """One projection's weights for all experts in `fmt`: (tensors by kernel name, extra args)."""
+    if fmt == 'bf16':
+        return {'weight': (rng.normal(size=(experts, rows, cols)).astype(F).view(np.uint32) >> 16).astype(np.uint16)}, {}
+    if fmt == 'fp8':
+        codes = rng.integers(0, 256, size=(experts, rows, cols), dtype=np.uint8)
+        codes[(codes & 0x7F) == 0x7F] = 0
+        return {'weight': codes, 'scales': rng.uniform(0.001, 0.1, size=(experts, -(-rows // 128), -(-cols // 128))).astype(F)}, {}
+    if fmt == 'int4':
+        packed = rng.integers(0, 256, size=(experts, rows, -(-cols // 2)), dtype=np.uint8)
+        if cols % 2:
+            packed[..., -1] &= 0x0F
+        magnitudes = rng.uniform(0.001, 0.1, size=(experts, rows, -(-cols // 128))).astype(F)
+        return {'packed': packed, 'scales': (magnitudes.view(np.uint32) >> 16).astype(np.uint16)}, {'scale_kind': 1}
+    return {'weight': rng.normal(size=(experts, rows, cols)).astype(F) * F(0.2)}, {}
+
+
+def moe_prefix(fmt):
+    return '' if fmt == 'f32' else fmt + '_'
+
+
+def per_expert_moe(run, fmt, gate, up, down, x, ids, weights, experts, inter, hidden):
+    k, total = len(ids), np.zeros(hidden, F)
+    for slot in range(k):
+        common = dict(ids=ids, k=k, slot=slot, experts=experts)
+        (gw, ge), (uw, ue), (dw, de) = gate, up, down
+        g = run(moe_prefix(fmt) + 'expert_matvec', out=np.zeros(inter, F), x=x, rows=inter, cols=hidden, **gw, **ge, **common)['out']
+        u = run(moe_prefix(fmt) + 'expert_matvec', out=np.zeros(inter, F), x=x, rows=inter, cols=hidden, **uw, **ue, **common)['out']
+        a = run('swiglu', out=np.zeros(inter, F), gate=g, up=u, n=inter)['out']
+        y = run(moe_prefix(fmt) + 'expert_matvec', out=np.zeros(hidden, F), x=a, rows=hidden, cols=inter, **dw, **de, **common)['out']
+        total = run('expert_scaled_add', out=total, x=y, weights=weights, ids=ids, k=k, slot=slot, n=hidden)['out']
+    return total
+
+
+def fused_moe(run, fmt, gate, up, down, x, ids, weights, experts, inter, hidden):
+    k = len(ids)
+    (gw, extra), (uw, _), (dw, _) = gate, up, down
+    gate_args = {'gate' if n in ('weight', 'packed') else 'gate_scales': v for n, v in gw.items()}
+    gate_args.update({'up' if n in ('weight', 'packed') else 'up_scales': v for n, v in uw.items()})
+    act = run(moe_prefix(fmt) + 'moe_gate_up', act=np.full(k * inter, 7, F), x=x, ids=ids, k=k, experts=experts,
+              inter=inter, up_row=0, stride=inter, cols=hidden, **gate_args, **extra)['act']
+    down_args = {'down' if n in ('weight', 'packed') else 'scales': v for n, v in dw.items()}
+    return run(moe_prefix(fmt) + 'moe_down', out=np.full(hidden, 7, F), act=act, weights=weights, ids=ids, k=k,
+               experts=experts, rows=hidden, cols=inter, **down_args, **extra)['out']
+
+
+@pytest.mark.parametrize('fmt', ['f32', 'bf16', 'fp8', 'int4'])
+@pytest.mark.parametrize('experts,k,inter,hidden', [(1, 1, 3, 5), (12, 8, 9, 131), (256, 8, 130, 300)])
+def test_fused_moe_equals_the_per_expert_kernels(run, fmt, experts, k, inter, hidden):
+    rng = np.random.default_rng(experts * 7 + inter)
+    gate, up = moe_weights(rng, fmt, experts, inter, hidden), moe_weights(rng, fmt, experts, inter, hidden)
+    down = moe_weights(rng, fmt, experts, hidden, inter)
+    x, ids = rng.normal(size=hidden).astype(F), expert_ids(rng, experts, k)
+    weights = rng.uniform(0.01, 1, size=k).astype(F)
+    args = (gate, up, down, x, ids, weights, experts, inter, hidden)
+    bits_equal(fused_moe(run, fmt, *args), per_expert_moe(run, fmt, *args))
+
+
+def test_fused_moe_gate_up_reads_the_fused_layout(run):
+    """gate_up as one [E, 2 * inter, cols] tensor (stride 2 * inter, up rows from inter) equals
+    separate gate and up projections cut from it."""
+    rng = np.random.default_rng(5)
+    experts, k, inter, hidden = 12, 8, 9, 131
+    gate_up = rng.normal(size=(experts, 2 * inter, hidden)).astype(F)
+    x, ids = rng.normal(size=hidden).astype(F), expert_ids(rng, experts, k)
+    common = dict(act=np.zeros(k * inter, F), x=x, ids=ids, k=k, experts=experts, inter=inter, cols=hidden)
+    got = run('moe_gate_up', gate=gate_up, up=gate_up, up_row=inter, stride=2 * inter, **common)['act']
+    want = run('moe_gate_up', gate=np.ascontiguousarray(gate_up[:, :inter]), up=np.ascontiguousarray(gate_up[:, inter:]),
+               up_row=0, stride=inter, **common)['act']
+    bits_equal(got, want)
+
+
+def test_fused_moe_out_of_range_id_adds_zero(run):
+    rng = np.random.default_rng(9)
+    experts, inter, hidden = 4, 3, 6
+    gate, up = moe_weights(rng, 'f32', experts, inter, hidden), moe_weights(rng, 'f32', experts, inter, hidden)
+    down = moe_weights(rng, 'f32', experts, hidden, inter)
+    x, weights = rng.normal(size=hidden).astype(F), np.array([0.5, 0.25], F)
+    args = (gate, up, down, x)
+    got = fused_moe(run, 'f32', *args, np.array([2, 9], np.int32), weights, experts, inter, hidden)
+    only = fused_moe(run, 'f32', *args, np.array([2], np.int32), weights[:1], experts, inter, hidden)
+    bits_equal(got, only)
+
+
 @pytest.mark.parametrize('heads,rows,cols,w_stride,x_stride,out_stride', [
     (1, 1, 1, 1, 1, 1), (8, 37, 131, 37 * 131 + 5, 140, 40)])
 def test_matvec_heads(run, heads, rows, cols, w_stride, x_stride, out_stride):

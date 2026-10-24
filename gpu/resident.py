@@ -10,9 +10,10 @@ only host traffic per token is:
     np.argsort(-scores, kind='stable')). ``device_topk=False`` restores the host argsort (scores
     down, ids up) for comparison;
   * per MoE layer, the k routed expert ids down (to pick which expert weights to launch), unless
-    ``device_experts=True``: then the experts run through gpu/spawn's *_expert_matvec kernels,
-    which read the ids on the device (each MoE projection's experts are uploaded back to back,
-    one tensor per projection and layer), and a decode step makes no host read until the logits;
+    ``device_experts=True``: then the experts run in two launches, gpu/spawn's moe_gate_up and
+    moe_down, which read the ids on the device (each MoE projection's experts are uploaded back to
+    back, one tensor per projection and layer), and a decode step makes no host read until the
+    logits;
   * the logits down.
 
 Numerics follow `GlmMoeDsaModel` operation for operation (same kernels, same reduction orders,
@@ -333,6 +334,8 @@ class ResidentGLM:
             k = int(c['num_experts_per_tok'])
             self.router_logits = t((experts,))
             self.route_ids, self.route_weights = t((k,), 'int32'), t((k,))
+            if self.device_experts:  # each routed expert's SwiGLU output, in ascending id order
+                self.moe_act = t((k * int(c['moe_intermediate_size']),))
         vocab = int(c['vocab_size'])
         self.logits = t((vocab,))
         # Per-layer caches, all rows the caller has produced so far stay on the device.
@@ -500,40 +503,36 @@ class ResidentGLM:
         self._weights[key] = entry
         return entry
 
-    def _expert_project(self, prefix, name, slot, x, out):
-        """out = W x for the expert in router slot `slot` of ascending id order, chosen on the device."""
-        fmt, tensors, (rows, cols), extra = self._stacked_experts(prefix, name)
-        if out.shape != (rows,) or x.shape != (cols,):
-            raise ValueError(f'{prefix}.experts {name}: weight is {rows}x{cols}, got x {x.shape} -> out {out.shape}')
-        common = dict(out=out, x=x, ids=self.route_ids, k=int(self.config['num_experts_per_tok']), slot=int(slot),
-                      experts=int(self.config['n_routed_experts']), rows=rows, cols=cols, **extra)
-        if fmt == 'int4':
-            self._spawn('int4_expert_matvec', packed=tensors[0], scales=tensors[1], **common)
-        elif fmt == 'fp8':
-            self._spawn('fp8_expert_matvec', weight=tensors[0], scales=tensors[1], **common)
-        elif fmt == 'bf16':
-            self._spawn('bf16_expert_matvec', weight=tensors[0], **common)
-        else:
-            self._spawn('expert_matvec', weight=tensors[0], **common)
-
-    def _device_expert(self, prefix, slot, x, out):
-        """_expert for the expert in slot `slot` of ascending id order, without reading the ids."""
+    def _device_moe(self, prefix, x, k):
+        """moe_sum = the routed experts' weighted sum in two launches, the ids read on the device:
+        gpu/spawn's moe_gate_up (every expert's gate, up and SwiGLU) then moe_down (each output
+        row sums its k terms in ascending id order). The same arithmetic as the per-expert
+        kernels (*_expert_matvec, swiglu, expert_scaled_add from zeros), to the last bit."""
+        experts = int(self.config['n_routed_experts'])
         if self._fused_experts(f'{prefix}.experts.0'):
-            two_i = self._stacked_experts(prefix, 'gate_up')[2][0]
-            inter = two_i // 2
-            fused = self.fused.view((two_i,))
-            self._expert_project(prefix, 'gate_up', slot, x, fused)
-            gate, up = fused.view((inter,)), fused.view((inter,), offset=inter * 4)
-            act = self.act.view((inter,))
-            self._swiglu(gate, up, act, inter)
-            self._expert_project(prefix, 'down', slot, act, out)
-            return
-        width = self._stacked_experts(prefix, 'gate_proj')[2][0]
-        gate, up, act = (t.view((width,)) for t in (self.gate, self.up, self.act))
-        self._expert_project(prefix, 'gate_proj', slot, x, gate)
-        self._expert_project(prefix, 'up_proj', slot, x, up)
-        self._swiglu(gate, up, act, width)
-        self._expert_project(prefix, 'down_proj', slot, act, out)
+            gate = up = self._stacked_experts(prefix, 'gate_up')
+            down = self._stacked_experts(prefix, 'down')
+            stride = gate[2][0]
+            inter, up_row = stride // 2, stride // 2
+        else:
+            gate, up, down = (self._stacked_experts(prefix, n) for n in ('gate_proj', 'up_proj', 'down_proj'))
+            inter, up_row = gate[2][0], 0
+            stride = inter
+        fmt, hidden = gate[0], gate[2][1]
+        if up[0] != fmt or down[0] != fmt or up[3] != gate[3] or down[3] != gate[3] or tuple(down[2]) != (hidden, inter):
+            raise ValueError(f'{prefix}.experts: gate, up and down need one format and scale kind and matching shapes')
+        kernel = '' if fmt == 'float32' else fmt + '_'
+        common = dict(ids=self.route_ids, k=k, experts=experts, **gate[3])
+        gate_args = dict(gate=gate[1][0], up=up[1][0])
+        down_args = dict(down=down[1][0])
+        if fmt in ('int4', 'fp8'):
+            gate_args.update(gate_scales=gate[1][1], up_scales=up[1][1])
+            down_args.update(scales=down[1][1])
+        act = self.moe_act.view((k * inter,))
+        self._spawn(kernel + 'moe_gate_up', act=act, x=x, inter=inter, up_row=up_row, stride=stride, cols=hidden,
+                    **gate_args, **common)
+        self._spawn(kernel + 'moe_down', out=self.moe_sum, act=act, weights=self.route_weights, rows=hidden,
+                    cols=inter, **down_args, **common)
 
     # ---------------------------------------------------------------- blocks
     def _index(self, layer, prefix, x, position):
@@ -631,13 +630,10 @@ class ResidentGLM:
                       self._weight(prefix + '.gate.e_score_correction_bias'), I(experts), I(k),
                       F(_f32(float(c.get('routed_scaling_factor', 1.0)), 'router scale'))])
         # Reduction order of the pinned official Experts: ascending expert id, whatever the top-k order.
-        self._copy(self.moe_sum, self.zeros, self.hidden)
         if self.device_experts:
-            for slot in range(k):  # slot-th in ascending id order; the kernels find it on the device
-                self._device_expert(prefix, slot, x, self.expert_out)
-                self._spawn('expert_scaled_add', out=self.moe_sum, x=self.expert_out, weights=self.route_weights,
-                            ids=self.route_ids, k=k, slot=slot, n=self.hidden)
+            self._device_moe(prefix, x, k)
         else:
+            self._copy(self.moe_sum, self.zeros, self.hidden)
             self._host_experts(prefix, x, k)
         if int(c.get('n_shared_experts', 1)) > 0:
             self._mlp(prefix + '.shared_experts', x, self.mlp_out)

@@ -303,11 +303,11 @@ def test_device_topk_selects_exactly_what_the_host_argsort_selects(overrides):
 
 
 # --- Routed experts chosen on the device (device_experts=True) -----------------------------
-# The *_expert_matvec spawn kernels run on Vx's host path here (gpu/spawn/host.py), the rest on
-# the SIMT emulator; the host never reads the router's ids.
+# The fused MoE spawn kernels (*moe_gate_up, *moe_down) run on Vx's host path here
+# (gpu/spawn/host.py), the rest on the SIMT emulator; the host never reads the router's ids.
 
 SPAWN = Path(__file__).parent / 'build' / 'spawn'
-EXPERT_KERNELS = ('expert_matvec', 'bf16_expert_matvec', 'int4_expert_matvec', 'fp8_expert_matvec', 'expert_scaled_add')
+EXPERT_KERNELS = tuple(f'{p}moe_{half}' for p in ('', 'bf16_', 'int4_', 'fp8_') for half in ('gate_up', 'down'))
 needs_spawn = pytest.mark.skipif(not all((SPAWN / f'lib{k}.so').exists() for k in EXPERT_KERNELS),
                                  reason='gpu/spawn expert kernels not built (gpu/spawn/build.sh with VX_DISPATCH_LIB)')
 
@@ -343,9 +343,10 @@ def test_device_experts_equal_the_host_loop(kind):
         device.close()
         host.close()
     np.testing.assert_array_equal(got, want)
-    assert device.launches['expert_scaled_add'] > 0 and 'scaled_add' not in device.launches
-    matvec = {'float32': 'expert_matvec', 'fused': 'expert_matvec'}.get(kind, kind + '_expert_matvec')
-    assert device.launches[matvec] > 0
+    prefix = '' if kind in ('float32', 'fused') else kind + '_'
+    sparse = sum(t == 'sparse' for t in model.mlp_types) * len(TOKENS)
+    assert device.launches[prefix + 'moe_gate_up'] == device.launches[prefix + 'moe_down'] == sparse
+    assert 'scaled_add' not in device.launches
 
 
 @needs_spawn

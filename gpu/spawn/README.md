@@ -16,7 +16,7 @@ also cover every pass. A kernel whose rows have a run-time length writes a rank-
 times numbers; `launch.py` passes a rank-2 `DeviceTensor` as its 7-word descriptor. A row's
 index may then be anything, as in topk's `hist[t][digit]`.
 
-All 30 kernels build with one vxc, from Vx PR #2128 (lane-argmax, 2c0aa57b, stacked on #2124 and
+All 38 kernels build with one vxc, from Vx PR #2128 (lane-argmax, 2c0aa57b, stacked on #2124 and
 #2117's `lanes::` reductions), with #2117's 7793b756 and main's #2134 (several libraries in one process
 each run their own kernel) cherry-picked; Vx main once they merge. It no longer parses
 `grid([..]) block(n)`. What the proof takes in a loop shapes them:
@@ -90,16 +90,28 @@ Two launches use the same PTX:
 | `int4_expert_matvec.vx` | new: the same for INT4 experts | 38 |
 | `fp8_expert_matvec.vx` | new: the same for FP8 experts | 47 |
 | `expert_scaled_add.vx` | new: scaled_add with that expert's router weight | 32 |
+| `moe_gate_up.vx` | new: gate, up and SwiGLU of all k routed experts in one launch | 56 |
+| `moe_down.vx` | new: down and the weighted sum over the k experts in one launch | 48 |
+| `bf16_moe_gate_up.vx`, `bf16_moe_down.vx` | new: the same for bf16 experts | 47, 47 |
+| `int4_moe_gate_up.vx`, `int4_moe_down.vx` | new: the same for INT4 experts | 47, 47 |
+| `fp8_moe_gate_up.vx`, `fp8_moe_down.vx` | new: the same for FP8 experts | 69, 56 |
 
 The five expert kernels let a decode step run its MoE without reading the router's ids on the
 host (`gpu/resident.py` downloads them on every MoE layer today, a sync that also keeps a decode
 step out of a CUDA graph). Each takes all experts' weights back to back and the router's `ids`, and
 runs the expert in slot `slot` of ascending id order (`ascending_slot!` in `device.vx`), the order
 the official Experts sums in. Each equals its plain kernel on that expert's weights, bit for bit.
-`ResidentGLM(..., device_experts=True)` (gpu/resident.py) runs its MoE layers through them, with
-each expert projection uploaded once per layer as one tensor; `gpu/test_resident.py` checks the
-logits against the host loop bit for bit on the CPU, and
-`gpu/test_resident_device_experts_hardware.py` does the same on a GPU (not run yet).
+
+The fused MoE kernels do a decode MoE layer's routed experts in two launches instead of five per
+expert. `moe_gate_up` writes every expert's SwiGLU output, in ascending id order, to one buffer;
+`moe_down` has each output row add its k weighted terms itself, in that order, so it needs no
+atomics and equals the per-expert kernels (from zeros) bit for bit, which
+`gpu/test_spawn_vx_host.py` checks for each format and for the fused gate_up layout. Each warp
+finds the ascending order once (`id_rank!`, `slot_of_rank!`); the dot products are `device.vx`'s
+`*_row_dot!` macros, the per-expert kernels' loops. `ResidentGLM(..., device_experts=True)`
+(gpu/resident.py) runs its MoE layers through them, with each expert projection uploaded once per
+layer as one tensor; `gpu/test_resident.py` checks the logits against the host loop bit for bit on
+the CPU, and `gpu/test_resident_device_experts_hardware.py` does the same on a GPU (not run yet).
 
 All assemble with ptxas for sm_80 with no spills; none has run on a GPU yet. The norms, softmax
 and mla_partial launch 1024 lanes; a warp-per-row kernel has four rows per block of 128.

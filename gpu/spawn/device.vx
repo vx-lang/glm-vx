@@ -143,3 +143,139 @@ macro_rules! ascending_slot {
         }
     };
 }
+
+// The rank of router slot `lane` among ids[0..k] (how many ids are smaller), or 0 for a lane at
+// or past k: the fused MoE kernels keep each lane's rank in shared memory, then find the slot
+// whose rank is s with slot_of_rank!, k loads where ascending_slot! takes k * k.
+macro_rules! id_rank {
+    ($ids:ident, $k:expr, $lane:expr) => {
+        unsafe {
+          let dv_k: i32 = $k;
+          let dv_lane: i32 = $lane;
+          let mut dv_rank: i32 = 0;
+          if dv_lane < dv_k {
+            let mut dv_o: i32 = 0;
+            while dv_o < dv_k { if $ids[dv_o] < $ids[dv_lane] { dv_rank = dv_rank + 1; } dv_o = dv_o + 1; }
+          }
+          dv_rank
+        }
+    };
+}
+
+// The router slot j < k with ranks[w][j] == s: ascending_slot!(ids, k, s) from id_rank!'s ranks.
+macro_rules! slot_of_rank {
+    ($ranks:ident, $w:expr, $k:expr, $s:expr) => {
+        unsafe {
+          let dv_k: i32 = $k;
+          let dv_s: i32 = $s;
+          let mut dv_found: i32 = 0;
+          let mut dv_j: i32 = 0;
+          while dv_j < dv_k { if $ranks[$w][dv_j] == dv_s { dv_found = dv_j; } dv_j = dv_j + 1; }
+          dv_found
+        }
+    };
+}
+
+// One lane's share of row `row` of expert `expert`'s [rows, n] matrix dotted with x[xo..xo + n]:
+// columns lane, lane + 32, .., as expert_matvec.vx and its formats, so lanes::sum of the 32
+// shares is the expert kernels' result to the last bit. The fused MoE kernels use these.
+macro_rules! f32_row_dot {
+    ($weight:ident, $x:ident, $xo:expr, $expert:expr, $row:expr, $rows:expr, $n:expr, $lane:expr) => {
+        unsafe {
+          let dv_n: i64 = $n;
+          let dv_xo: i64 = $xo;
+          let dv_base: i64 = (($expert as i64) * ($rows as i64) + $row) * dv_n;
+          let mut dv_sum: f32 = 0.0;
+          let mut dv_c: i64 = $lane as i64;
+          while dv_c < dv_n {
+            dv_sum = dv_sum + $weight[dv_base + dv_c] * $x[dv_xo + dv_c];
+            dv_c = dv_c + 32;
+          }
+          dv_sum
+        }
+    };
+}
+
+macro_rules! bf16_row_dot {
+    ($weight:ident, $x:ident, $xo:expr, $expert:expr, $row:expr, $rows:expr, $n:expr, $lane:expr) => {
+        unsafe {
+          let dv_n: i64 = $n;
+          let dv_xo: i64 = $xo;
+          let dv_base: i64 = (($expert as i64) * ($rows as i64) + $row) * dv_n;
+          let mut dv_sum: f32 = 0.0;
+          let mut dv_c: i64 = $lane as i64;
+          while dv_c < dv_n {
+            dv_sum = dv_sum + bf16_decode!($weight[dv_base + dv_c] as i32) * $x[dv_xo + dv_c];
+            dv_c = dv_c + 32;
+          }
+          dv_sum
+        }
+    };
+}
+
+// 128x128 blocks: the scale of (row, column tile) is scales[(expert * scale_rows + row / 128) *
+// scale_cols + tile].
+macro_rules! fp8_row_dot {
+    ($weight:ident, $scales:ident, $x:ident, $xo:expr, $expert:expr, $row:expr, $rows:expr, $n:expr, $lane:expr) => {
+        unsafe {
+          let dv_n: i64 = $n;
+          let dv_xo: i64 = $xo;
+          let dv_row: i64 = $row;
+          let dv_scale_cols: i64 = (dv_n + 127) / 128;
+          let dv_scale_rows: i64 = (($rows as i64) + 127) / 128;
+          let dv_base: i64 = (($expert as i64) * ($rows as i64) + dv_row) * dv_n;
+          let dv_scale_base: i64 = (($expert as i64) * dv_scale_rows + dv_row / 128) * dv_scale_cols;
+          let mut dv_sum: f32 = 0.0;
+          let mut dv_tile: i64 = 0;
+          while dv_tile < dv_scale_cols {
+            let dv_scale: f32 = $scales[dv_scale_base + dv_tile];
+            let dv_tile_base: i64 = dv_tile * 128 + ($lane as i64);
+            let mut dv_step: i32 = 0;
+            while dv_step < 4 {
+              let dv_col: i64 = dv_tile_base + ((dv_step * 32) as i64);
+              if dv_col < dv_n {
+                let dv_value: f32 = fp8_decode!($weight[dv_base + dv_col] as i32);
+                dv_sum = dv_sum + (dv_value * dv_scale) * $x[dv_xo + dv_col];
+              }
+              dv_step = dv_step + 1;
+            }
+            dv_tile = dv_tile + 1;
+          }
+          dv_sum
+        }
+    };
+}
+
+// Groups of 128 columns, two codes a byte (low nibble first), a 16-bit scale a group.
+macro_rules! int4_row_dot {
+    ($packed:ident, $scales:ident, $kind:expr, $x:ident, $xo:expr, $expert:expr, $row:expr, $rows:expr, $n:expr, $lane:expr) => {
+        unsafe {
+          let dv_n: i64 = $n;
+          let dv_xo: i64 = $xo;
+          let dv_lane: i32 = $lane;
+          let dv_groups: i64 = (dv_n + 127) / 128;
+          let dv_row_bytes: i64 = (dv_n + 1) / 2;
+          let dv_expert_row: i64 = ($expert as i64) * ($rows as i64) + $row;
+          let mut dv_sum: f32 = 0.0;
+          let mut dv_group: i64 = 0;
+          while dv_group < dv_groups {
+            let dv_scale: f32 = group_scale!($scales[dv_expert_row * dv_groups + dv_group] as i32, $kind);
+            let mut dv_part: f32 = 0.0;
+            let mut dv_step: i32 = 0;
+            while dv_step < 2 {
+              let dv_byte_index: i64 = dv_group * 64 + ((dv_step * 32 + dv_lane) as i64);
+              let dv_col: i64 = dv_byte_index * 2;
+              if dv_col < dv_n {
+                let dv_byte: i32 = $packed[dv_expert_row * dv_row_bytes + dv_byte_index] as i32;
+                dv_part = dv_part + int4_code!(dv_byte, 0) * $x[dv_xo + dv_col];
+                if dv_col + 1 < dv_n { dv_part = dv_part + int4_code!(dv_byte, 1) * $x[dv_xo + dv_col + 1]; }
+              }
+              dv_step = dv_step + 1;
+            }
+            dv_sum = dv_sum + dv_part * dv_scale;
+            dv_group = dv_group + 1;
+          }
+          dv_sum
+        }
+    };
+}

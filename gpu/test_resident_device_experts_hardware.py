@@ -1,5 +1,5 @@
-"""ResidentGLM with device_experts on a real GPU: the routed experts through gpu/spawn's
-*_expert_matvec kernels, chosen from the router's ids on the device, against the host loop that
+"""ResidentGLM with device_experts on a real GPU: the routed experts in two launches, gpu/spawn's
+*moe_gate_up and *moe_down, which read the router's ids on the device, against the host loop that
 reads the ids back, for each weight format. Needs a GPU, gpu/build/kernels.ptx (gpu/build.sh)
 and the spawn kernels in gpu/build/spawn (gpu/spawn/build.sh)."""
 import numpy as np
@@ -29,7 +29,8 @@ def test_device_experts_equal_the_host_loop_on_the_gpu(ctx, kind):
     host = ResidentGLM(model, ctx=ctx, max_tokens=32)
     refuse_id_reads(device)
     got, want = device.prefill(TOKENS), host.prefill(TOKENS)
-    # The spawn matvecs follow the hand kernels' order (gpu/test_spawn_hardware.py checks them bit
-    # for bit), so the logits should agree exactly.
+    # The fused kernels' dot products follow the hand matvecs' order (gpu/test_spawn_hardware.py
+    # checks the per-expert kernels bit for bit), so the logits should agree exactly.
     np.testing.assert_array_equal(got, want)
-    assert device.launches['expert_scaled_add'] > 0 and 'scaled_add' not in device.launches
+    prefix = '' if kind in ('float32', 'fused') else kind + '_'
+    assert device.launches[prefix + 'moe_down'] > 0 and 'scaled_add' not in device.launches
