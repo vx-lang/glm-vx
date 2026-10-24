@@ -16,21 +16,20 @@ also cover every pass. A kernel whose rows have a run-time length writes a rank-
 times numbers; `launch.py` passes a rank-2 `DeviceTensor` as its 7-word descriptor. A row's
 index may then be anything, as in topk's `hist[t][digit]`.
 
-All 38 kernels build with one vxc, from Vx PR #2128 (lane-argmax, 2c0aa57b, stacked on #2124 and
-#2117's `lanes::` reductions), with #2117's 7793b756 and main's #2134 (several libraries in one process
-each run their own kernel) cherry-picked; Vx main once they merge. It no longer parses
+All 38 kernels build with Vx main from 9c52374c on (the `lanes::` reductions of #2117, #2124 and
+#2128, and #2134: several libraries in one process each run their own kernel). It no longer parses
 `grid([..]) block(n)`. What the proof takes in a loop shapes them:
 
 - **No calls it cannot read.** A function call (other than the stdlib's pure scalar ones, such
   as `f32::sqrt` and `f32::fast_exp`), an `mlir!` block and `barrier()` are refused in an
   `across` loop. So `device.vx` holds macros, which expand in the loop: the decoders and
   `sigmoid`.
-- **Reductions are Vx's.** `lanes::sum` and `lanes::max` (Vx #260, PR #2117) combine a tensor's
+- **Reductions are Vx's.** `lanes::sum` and `lanes::max` (Vx #260, #2117) combine a tensor's
   elements over the lanes of a block or of a subgroup, in the hand kernels' order (offsets 16, 8,
   4, 2, 1 with shuffles, then a second group over the warps' results), so the results stay the
   same to the last bit. A warp-per-row kernel runs `for w in 0..4 across subgroups`, each
   subgroup's lanes writing its row of a [4, 32] tensor and summing it. router picks each expert
-  with `lanes::argmax(&scores, &ids, 32)` (PR #2128), the hand kernel's combine: an empty lane
+  with `lanes::argmax(&scores, &ids, 32)` (#2128), the hand kernel's combine: an empty lane
   (id -1) never wins, then the larger score, then on a tie the lower id.
 - **Results that do not depend on the launch.** A block reduction follows the hand kernel
   launched with `threads` threads, which the norms, softmax and mla_partial take as a parameter:
@@ -185,7 +184,7 @@ stores to, or whose element types differ from the width of the loads made throug
 
 | Need | Today | Vx issue |
 | --- | --- | --- |
-| Reductions (sum, max) in an `across` loop | `lanes::sum` and `lanes::max`, ordered as the hand kernels; and `lanes::argmax` for router; PRs #2117, #2124 and #2128, not merged: build vxc from #2128 with 7793b756 | #260 |
+| Reductions (sum, max) in an `across` loop | `lanes::sum` and `lanes::max`, ordered as the hand kernels; and `lanes::argmax` for router; #2117, #2124 and #2128, on main | #260 |
 | Device functions in an `across` loop | refused (the proof does not read their bodies); the helpers are macros | #2076 D4 |
 | `mlir!` blocks in an `across` loop (exp as the hand kernels, wgmma, TMA) | refused; exp is libdevice expf, the tensor-core kernels are not built | #2076 D1 to D3 |
 | A stable entry name and documented parameter order | `vxc --emit-ptx` (PR #1964): the entry is the function's name, the parameters its own in declared order | #251 |
