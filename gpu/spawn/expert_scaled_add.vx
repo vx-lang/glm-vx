@@ -1,0 +1,22 @@
+// scaled_add.vx for the expert of slot `slot` in ascending id order: out[i] = out[i] + x[i] *
+// weights[j], j = ascending_slot!(ids, k, slot), the router weight of the expert that
+// expert_matvec.vx ran for the same slot. Two roundings, as scaled_add.vx.
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_expert_scaled_add(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                                      weights: &Tensor<f32, [?], Memory::HBM>, ids: &Tensor<i32, [?], Memory::HBM>,
+                                      k: i32, slot: i32, n: i32) -> void {
+  spawn on(Topology::Device) {
+    for blk in 0..(n - 1) / 256 + 1 across blocks {
+      for t in 0..256 across lanes {
+        let i: i32 = blk * 256 + t;
+        if i < n {
+          let w: f32 = weights[ascending_slot!(ids, k, slot)];
+          let weighted: f32 = x[i] * w;
+          out[i] = out[i] + weighted;
+        }
+      }
+    }
+  }
+  return;
+}

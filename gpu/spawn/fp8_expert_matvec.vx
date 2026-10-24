@@ -1,0 +1,48 @@
+// fp8_matvec.vx for one routed expert chosen on the device, as expert_matvec.vx: weight and
+// scales hold all experts' e4m3fn matrices and 128x128 scale grids back to back. An id outside
+// 0..experts writes zeros.
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_fp8_expert_matvec(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<u8, [?], Memory::HBM>,
+                                      scales: &Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                                      ids: &Tensor<i32, [?], Memory::HBM>, k: i32, slot: i32, experts: i32,
+                                      rows: i32, cols: i32) -> void {
+  spawn on(Topology::Device) {
+    for rb in 0..(rows - 1) / 4 + 1 across blocks {
+      let mut a = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
+      for w in 0..4 across subgroups {
+        for lane in 0..32 across lanes {
+          let expert: i32 = ids[ascending_slot!(ids, k, slot)];
+          let row: i64 = ((rb * 4 + w) as i64);
+          let mut sum: f32 = 0.0;
+          if row < (rows as i64) && expert >= 0 && expert < experts {
+            let n: i64 = cols as i64;
+            let scale_cols: i64 = (n + 127) / 128;
+            let scale_rows: i64 = ((rows as i64) + 127) / 128;
+            let row_base: i64 = ((expert as i64) * (rows as i64) + row) * n;
+            let scale_base: i64 = ((expert as i64) * scale_rows + row / 128) * scale_cols;
+            let mut tile: i64 = 0;
+            while tile < scale_cols {
+              let scale: f32 = scales[scale_base + tile];
+              let tile_base: i64 = tile * 128 + (lane as i64);
+              let mut step: i32 = 0;
+              while step < 4 {
+                let col: i64 = tile_base + ((step * 32) as i64);
+                if col < n {
+                  let value: f32 = fp8_decode!(weight[row_base + col] as i32);
+                  sum = sum + (value * scale) * x[col];
+                }
+                step = step + 1;
+              }
+              tile = tile + 1;
+            }
+          }
+          a[w][lane] = sum;
+        }
+        let total: f32 = lanes::sum(&a[w], 32);
+        if rb * 4 + w < rows && cols >= 0 { out[rb * 4 + w] = total; }
+      }
+    }
+  }
+  return;
+}

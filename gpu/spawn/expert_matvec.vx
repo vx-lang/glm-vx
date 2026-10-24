@@ -1,0 +1,34 @@
+// matvec.vx for one routed expert chosen on the device: weight holds all experts' [rows, cols]
+// matrices back to back, and the expert is ids[ascending_slot!(ids, k, slot)], the slot-th in
+// ascending id order. Same arithmetic as matvec.vx. An id outside 0..experts writes zeros.
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_expert_matvec(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<f32, [?], Memory::HBM>,
+                                  x: &Tensor<f32, [?], Memory::HBM>, ids: &Tensor<i32, [?], Memory::HBM>,
+                                  k: i32, slot: i32, experts: i32, rows: i32, cols: i32) -> void {
+  spawn on(Topology::Device) {
+    for rb in 0..(rows - 1) / 4 + 1 across blocks {
+      let mut a = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
+      for w in 0..4 across subgroups {
+        for lane in 0..32 across lanes {
+          let expert: i32 = ids[ascending_slot!(ids, k, slot)];
+          let row: i64 = ((rb * 4 + w) as i64);
+          let mut sum: f32 = 0.0;
+          if row < (rows as i64) && expert >= 0 && expert < experts {
+            let n: i64 = cols as i64;
+            let row_base: i64 = ((expert as i64) * (rows as i64) + row) * n;
+            let mut c: i64 = lane as i64;
+            while c < n {
+              sum = sum + weight[row_base + c] * x[c];
+              c = c + 32;
+            }
+          }
+          a[w][lane] = sum;
+        }
+        let total: f32 = lanes::sum(&a[w], 32);
+        if rb * 4 + w < rows && cols >= 0 { out[rb * 4 + w] = total; }
+      }
+    }
+  }
+  return;
+}

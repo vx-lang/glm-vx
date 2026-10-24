@@ -121,3 +121,25 @@ macro_rules! sigmoid {
         }
     };
 }
+
+// The router slot that holds the slot-th smallest of the k expert ids in ids[0..k]: the order the
+// official Experts sums in (ascending id, whatever the top-k order), found on the device so the
+// host never reads the ids. The router's ids are distinct.
+macro_rules! ascending_slot {
+    ($ids:ident, $k:expr, $slot:expr) => {
+        unsafe {
+          let dv_k: i32 = $k;
+          let dv_slot: i32 = $slot;
+          let mut dv_found: i32 = 0;
+          let mut dv_c: i32 = 0;
+          while dv_c < dv_k {
+            let mut dv_rank: i32 = 0;
+            let mut dv_o: i32 = 0;
+            while dv_o < dv_k { if $ids[dv_o] < $ids[dv_c] { dv_rank = dv_rank + 1; } dv_o = dv_o + 1; }
+            if dv_rank == dv_slot { dv_found = dv_c; }
+            dv_c = dv_c + 1;
+          }
+          dv_found
+        }
+    };
+}

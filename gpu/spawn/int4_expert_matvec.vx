@@ -1,0 +1,50 @@
+// int4_matvec.vx for one routed expert chosen on the device, as expert_matvec.vx: packed and
+// scales hold all experts' codes and group scales back to back, each expert's laid out as
+// int4_matvec.vx's. An id outside 0..experts writes zeros.
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_int4_expert_matvec(out: &mut Tensor<f32, [?], Memory::HBM>, packed: &Tensor<u8, [?], Memory::HBM>,
+                                       scales: &Tensor<u16, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                                       ids: &Tensor<i32, [?], Memory::HBM>, k: i32, slot: i32, experts: i32,
+                                       rows: i32, cols: i32, scale_kind: i32) -> void {
+  spawn on(Topology::Device) {
+    for rb in 0..(rows - 1) / 4 + 1 across blocks {
+      let mut a = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
+      for w in 0..4 across subgroups {
+        for lane in 0..32 across lanes {
+          let expert: i32 = ids[ascending_slot!(ids, k, slot)];
+          let row: i64 = ((rb * 4 + w) as i64);
+          let mut sum: f32 = 0.0;
+          if row < (rows as i64) && expert >= 0 && expert < experts {
+            let n: i64 = cols as i64;
+            let groups: i64 = (n + 127) / 128;
+            let row_bytes: i64 = (n + 1) / 2;
+            let expert_row: i64 = (expert as i64) * (rows as i64) + row;
+            let mut group: i64 = 0;
+            while group < groups {
+              let scale: f32 = group_scale!(scales[expert_row * groups + group] as i32, scale_kind);
+              let mut part: f32 = 0.0;
+              let mut step: i32 = 0;
+              while step < 2 {
+                let byte_index: i64 = group * 64 + ((step * 32 + lane) as i64);
+                let col: i64 = byte_index * 2;
+                if col < n {
+                  let byte: i32 = packed[expert_row * row_bytes + byte_index] as i32;
+                  part = part + int4_code!(byte, 0) * x[col];
+                  if col + 1 < n { part = part + int4_code!(byte, 1) * x[col + 1]; }
+                }
+                step = step + 1;
+              }
+              sum = sum + part * scale;
+              group = group + 1;
+            }
+          }
+          a[w][lane] = sum;
+        }
+        let total: f32 = lanes::sum(&a[w], 32);
+        if rb * 4 + w < rows && cols >= 0 { out[rb * 4 + w] = total; }
+      }
+    }
+  }
+  return;
+}

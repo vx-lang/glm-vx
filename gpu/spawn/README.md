@@ -16,7 +16,7 @@ also cover every pass. A kernel whose rows have a run-time length writes a rank-
 times numbers; `launch.py` passes a rank-2 `DeviceTensor` as its 7-word descriptor. A row's
 index may then be anything, as in topk's `hist[t][digit]`.
 
-All 25 kernels build with one vxc, from Vx PR #2128 (lane-argmax, 2c0aa57b, stacked on #2124 and
+All 30 kernels build with one vxc, from Vx PR #2128 (lane-argmax, 2c0aa57b, stacked on #2124 and
 #2117's `lanes::` reductions), with #2117's 7793b756 and main's #2134 (several libraries in one process
 each run their own kernel) cherry-picked; Vx main once they merge. It no longer parses
 `grid([..]) block(n)`. What the proof takes in a loop shapes them:
@@ -85,6 +85,17 @@ Two launches use the same PTX:
 | `router.vx` | `glm_vx_gpu_router` | 25 |
 | `mla_partial.vx` | `glm_vx_gpu_mla_partial` (numerator [tasks, rank], stats [tasks, 2]) | 27 |
 | `mla_merge.vx` | `glm_vx_gpu_mla_merge` (out is [heads, rank]) | 32 |
+| `expert_matvec.vx` | new: matvec of the routed expert chosen on the device | 39 |
+| `bf16_expert_matvec.vx` | new: the same for bf16 experts | 32 |
+| `int4_expert_matvec.vx` | new: the same for INT4 experts | 38 |
+| `fp8_expert_matvec.vx` | new: the same for FP8 experts | 47 |
+| `expert_scaled_add.vx` | new: scaled_add with that expert's router weight | 32 |
+
+The five expert kernels let a decode step run its MoE without reading the router's ids on the
+host (`gpu/resident.py` downloads them on every MoE layer today, a sync that also keeps a decode
+step out of a CUDA graph). Each takes all experts' weights back to back and the router's `ids`, and
+runs the expert in slot `slot` of ascending id order (`ascending_slot!` in `device.vx`), the order
+the official Experts sums in. Each equals its plain kernel on that expert's weights, bit for bit.
 
 All assemble with ptxas for sm_80 with no spills; none has run on a GPU yet. The norms, softmax
 and mla_partial launch 1024 lanes; a warp-per-row kernel has four rows per block of 128.
@@ -108,7 +119,7 @@ Vx stops a capture on `VX_CUDA_SYNC=1` or `VX_TIME_KERNEL`; it needs the librari
 
 `gpu/test_spawn_vx_host.py` needs no GPU: with no device visible, Vx runs each region in order
 on the CPU (`gpu/spawn/host.py` calls a library with NumPy arrays, in one worker process
-with no device visible). It checks all 25 against NumPy, bit for bit where the reference follows the hand
+with no device visible). It checks the 25 ports against NumPy, and the expert kernels against the plain ones, bit for bit where the reference follows the hand
 kernel's order (lane-strided partials, the warp tree 16, 8, 4, 2, 1, the block's second stage),
 which is every kernel without exp; the others to 2e-6 (1e-5 for MLA). That pins the order Vx
 #260's ordered reductions must keep. Run it after `build.sh` (with `VX_DISPATCH_LIB`).

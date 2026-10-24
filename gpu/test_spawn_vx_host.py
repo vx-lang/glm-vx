@@ -232,6 +232,100 @@ def test_fp8_matvec(run, rows, cols):
     bits_equal(got, warp_tree(strided_sums((fp8(weight) * per_col) * x, 32)))
 
 
+# --- Routed experts chosen on the device ---------------------------------------------------
+# Each *_expert_matvec reads the router's ids and runs the slot-th expert in ascending id order,
+# so it must equal the plain kernel on that expert's slice, bit for bit.
+
+EXPERT_CASES = [(1, 1, 0), (12, 8, 3), (256, 8, 7)]  # (experts, k, slot)
+
+
+def expert_ids(rng, experts, k):
+    return rng.choice(experts, size=k, replace=False).astype(np.int32)
+
+
+@pytest.mark.parametrize('experts,k,slot', EXPERT_CASES)
+def test_expert_matvec(run, experts, k, slot):
+    rng = np.random.default_rng(experts * 31 + slot)
+    rows, cols = 7, 131
+    w, x, ids = rng.normal(size=(experts, rows, cols)).astype(F), rng.normal(size=cols).astype(F), expert_ids(rng, experts, k)
+    e = int(np.sort(ids)[slot])
+    got = run('expert_matvec', out=np.zeros(rows, F), weight=w, x=x, ids=ids, k=k, slot=slot, experts=experts,
+              rows=rows, cols=cols)['out']
+    bits_equal(got, run('matvec', out=np.zeros(rows, F), weight=w[e], x=x, rows=rows, cols=cols)['out'])
+
+
+@pytest.mark.parametrize('experts,k,slot', EXPERT_CASES)
+def test_bf16_expert_matvec(run, experts, k, slot):
+    rng = np.random.default_rng(experts * 37 + slot)
+    rows, cols = 5, 131
+    w = (rng.normal(size=(experts, rows, cols)).astype(F).view(np.uint32) >> 16).astype(np.uint16)
+    x, ids = rng.normal(size=cols).astype(F), expert_ids(rng, experts, k)
+    e = int(np.sort(ids)[slot])
+    got = run('bf16_expert_matvec', out=np.zeros(rows, F), weight=w, x=x, ids=ids, k=k, slot=slot, experts=experts,
+              rows=rows, cols=cols)['out']
+    bits_equal(got, run('bf16_matvec', out=np.zeros(rows, F), weight=w[e], x=x, rows=rows, cols=cols)['out'])
+
+
+@pytest.mark.parametrize('scale_kind', [0, 1])
+@pytest.mark.parametrize('experts,k,slot', EXPERT_CASES)
+def test_int4_expert_matvec(run, experts, k, slot, scale_kind):
+    rng = np.random.default_rng(experts * 41 + slot)
+    rows, cols = 5, 257
+    groups, row_bytes = -(-cols // 128), -(-cols // 2)
+    packed = rng.integers(0, 256, size=(experts, rows, row_bytes), dtype=np.uint8)
+    packed[..., -1] &= 0x0F
+    magnitudes = rng.uniform(0.001, 0.1, size=(experts, rows, groups)).astype(F)
+    scales = (magnitudes.view(np.uint32) >> 16).astype(np.uint16) if scale_kind else magnitudes.astype(np.float16).view(np.uint16)
+    x, ids = rng.normal(size=cols).astype(F), expert_ids(rng, experts, k)
+    e = int(np.sort(ids)[slot])
+    got = run('int4_expert_matvec', out=np.zeros(rows, F), packed=packed, scales=scales, x=x, ids=ids, k=k, slot=slot,
+              experts=experts, rows=rows, cols=cols, scale_kind=scale_kind)['out']
+    bits_equal(got, run('int4_matvec', out=np.zeros(rows, F), packed=packed[e], scales=scales[e], x=x, rows=rows,
+                        cols=cols, scale_kind=scale_kind)['out'])
+
+
+@pytest.mark.parametrize('experts,k,slot', EXPERT_CASES)
+def test_fp8_expert_matvec(run, experts, k, slot):
+    rng = np.random.default_rng(experts * 43 + slot)
+    rows, cols = 130, 300  # two scale rows and three scale columns per expert
+    weight = rng.integers(0, 256, size=(experts, rows, cols), dtype=np.uint8)
+    weight[(weight & 0x7F) == 0x7F] = 0
+    scales = rng.uniform(0.001, 0.1, size=(experts, -(-rows // 128), -(-cols // 128))).astype(F)
+    x, ids = rng.normal(size=cols).astype(F), expert_ids(rng, experts, k)
+    e = int(np.sort(ids)[slot])
+    got = run('fp8_expert_matvec', out=np.zeros(rows, F), weight=weight, scales=scales, x=x, ids=ids, k=k, slot=slot,
+              experts=experts, rows=rows, cols=cols)['out']
+    bits_equal(got, run('fp8_matvec', out=np.zeros(rows, F), weight=weight[e], scales=scales[e], x=x, rows=rows,
+                        cols=cols)['out'])
+
+
+def test_expert_out_of_range_writes_zeros(run):
+    w = np.ones((2, 3, 4), F)
+    got = run('expert_matvec', out=np.full(3, 7, F), weight=w, x=np.ones(4, F), ids=np.array([5], np.int32), k=1,
+              slot=0, experts=2, rows=3, cols=4)['out']
+    bits_equal(got, np.zeros(3, F))
+
+
+@pytest.mark.parametrize('experts,k', [(1, 1), (256, 8)])
+def test_moe_sum_in_ascending_id_order(run, experts, k):
+    """Every slot through expert_matvec and expert_scaled_add, the host never reading the ids,
+    equals resident.py's loop (argsort the ids on the host, matvec, scaled_add) bit for bit."""
+    rng = np.random.default_rng(experts + k)
+    rows, cols = 9, 64
+    w, x = rng.normal(size=(experts, rows, cols)).astype(F), rng.normal(size=cols).astype(F)
+    ids, weights = expert_ids(rng, experts, k), rng.uniform(0.01, 1, size=k).astype(F)
+    total = np.zeros(rows, F)
+    for slot in range(k):
+        y = run('expert_matvec', out=np.zeros(rows, F), weight=w, x=x, ids=ids, k=k, slot=slot, experts=experts,
+                rows=rows, cols=cols)['out']
+        total = run('expert_scaled_add', out=total, x=y, weights=weights, ids=ids, k=k, slot=slot, n=rows)['out']
+    expected = np.zeros(rows, F)
+    for slot in np.argsort(ids, kind='stable'):
+        y = run('matvec', out=np.zeros(rows, F), weight=w[ids[slot]], x=x, rows=rows, cols=cols)['out']
+        expected = run('scaled_add', out=expected, x=y, weights=weights, slot=int(slot), n=rows)['out']
+    bits_equal(total, expected)
+
+
 @pytest.mark.parametrize('heads,rows,cols,w_stride,x_stride,out_stride', [
     (1, 1, 1, 1, 1, 1), (8, 37, 131, 37 * 131 + 5, 140, 40)])
 def test_matvec_heads(run, heads, rows, cols, w_stride, x_stride, out_stride):
