@@ -3,6 +3,8 @@
 Test-only lanes run the same compiled Vx kernels; this checks the orchestration (buffers, views,
 caches, selection reuse, expert order) and that nothing is silently recomputed on the host. It is
 not GPU validation: validation/resident_compare.py does that on hardware."""
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -61,9 +63,8 @@ def test_prefill_without_logits_matches_the_full_path():
     np.testing.assert_array_equal(a.forward(TOKENS[-1]), b.forward(TOKENS[-1]))
 
 
-def test_fused_expert_layout_matches_per_expert_layout():
-    model = build(seed=9)
-    expected = reference(model, TOKENS[:6])
+def fused_layout(model):
+    """The same model with its routed experts in the fused checkpoint layout."""
     weights = dict(model.weights)
     prefixes = sorted({n.rsplit('.experts.', 1)[0] for n in weights if '.experts.' in n and n.endswith('gate_proj.weight')})
     for prefix in prefixes:
@@ -73,8 +74,13 @@ def test_fused_expert_layout_matches_per_expert_layout():
         down = np.stack([weights.pop(f'{prefix}.experts.{e}.down_proj.weight') for e in range(n_experts)])
         weights[prefix + '.experts.gate_up_proj'] = np.concatenate([gate, up], axis=1)
         weights[prefix + '.experts.down_proj'] = down
-    fused = GlmMoeDsaModel(model.config, weights, NumpyBackend())
-    resident = ResidentGLM(fused, ctx=Context(), max_tokens=32)
+    return GlmMoeDsaModel(model.config, weights, NumpyBackend())
+
+
+def test_fused_expert_layout_matches_per_expert_layout():
+    model = build(seed=9)
+    expected = reference(model, TOKENS[:6])
+    resident = ResidentGLM(fused_layout(model), ctx=Context(), max_tokens=32)
     np.testing.assert_allclose(resident.prefill(TOKENS[:6]), expected, rtol=2e-5, atol=2e-5)
 
 
@@ -294,3 +300,69 @@ def test_device_topk_selects_exactly_what_the_host_argsort_selects(overrides):
                                       host.selected.data[:host.selected_count])
         np.testing.assert_array_equal(a, b)
     assert device.launches['topk_stable'] > 0 and 'topk_stable' not in host.launches
+
+
+# --- Routed experts chosen on the device (device_experts=True) -----------------------------
+# The *_expert_matvec spawn kernels run on Vx's host path here (gpu/spawn/host.py), the rest on
+# the SIMT emulator; the host never reads the router's ids.
+
+SPAWN = Path(__file__).parent / 'build' / 'spawn'
+EXPERT_KERNELS = ('expert_matvec', 'bf16_expert_matvec', 'int4_expert_matvec', 'fp8_expert_matvec', 'expert_scaled_add')
+needs_spawn = pytest.mark.skipif(not all((SPAWN / f'lib{k}.so').exists() for k in EXPERT_KERNELS),
+                                 reason='gpu/spawn expert kernels not built (gpu/spawn/build.sh with VX_DISPATCH_LIB)')
+
+
+def expert_models(kind):
+    if kind == 'float32':
+        return build(seed=41)
+    if kind == 'fused':
+        return fused_layout(build(seed=43))
+    if kind == 'int4':
+        return int4_model(47, GLM_INT4)[0]
+    if kind == 'fp8':
+        return fp8_model(53, hidden_size=136)[0]
+    return bf16_model(59)[0]
+
+
+def refuse_id_reads(resident):
+    def refuse():
+        raise AssertionError('the router ids were read on the host')
+    resident.route_ids.download = refuse
+
+
+@needs_spawn
+@pytest.mark.parametrize('kind', ['float32', 'fused', 'int4', 'fp8', 'bf16'])
+def test_device_experts_equal_the_host_loop(kind):
+    model = expert_models(kind)
+    device = ResidentGLM(model, ctx=Context(), max_tokens=32, device_experts=True)
+    host = ResidentGLM(model, ctx=Context(), max_tokens=32)
+    try:
+        refuse_id_reads(device)
+        got, want = device.prefill(TOKENS), host.prefill(TOKENS)
+    finally:
+        device.close()
+        host.close()
+    np.testing.assert_array_equal(got, want)
+    assert device.launches['expert_scaled_add'] > 0 and 'scaled_add' not in device.launches
+    matvec = {'float32': 'expert_matvec', 'fused': 'expert_matvec'}.get(kind, kind + '_expert_matvec')
+    assert device.launches[matvec] > 0
+
+
+@needs_spawn
+def test_device_experts_preload_uploads_each_projection_once_stacked():
+    model, _ = int4_model(61, GLM_INT4)
+    device = ResidentGLM(model, ctx=Context(), max_tokens=8, device_experts=True)
+    host = ResidentGLM(model, ctx=Context(), max_tokens=8)
+    try:
+        device.preload()
+        host.preload()
+        assert device.weight_bytes == host.weight_bytes  # the same bytes, laid out back to back
+        assert not any('.experts.0.' in key for key in device._weights)
+        stacked = [key for key in device._weights if key.endswith(':stacked')]
+        sparse = sum(t == 'sparse' for t in model.mlp_types)
+        assert len(stacked) == 3 * sparse
+        refuse_id_reads(device)
+        np.testing.assert_array_equal(device.prefill(TOKENS[:4]), host.prefill(TOKENS[:4]))
+    finally:
+        device.close()
+        host.close()

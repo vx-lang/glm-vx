@@ -9,7 +9,10 @@ only host traffic per token is:
   * nothing per indexer layer: the top-k runs on the device (gpu/topk.vx, the model's exact rule,
     np.argsort(-scores, kind='stable')). ``device_topk=False`` restores the host argsort (scores
     down, ids up) for comparison;
-  * per MoE layer, the k routed expert ids down (to pick which expert weights to launch);
+  * per MoE layer, the k routed expert ids down (to pick which expert weights to launch), unless
+    ``device_experts=True``: then the experts run through gpu/spawn's *_expert_matvec kernels,
+    which read the ids on the device (each MoE projection's experts are uploaded back to back,
+    one tensor per projection and layer), and a decode step makes no host read until the logits;
   * the logits down.
 
 Numerics follow `GlmMoeDsaModel` operation for operation (same kernels, same reduction orders,
@@ -39,6 +42,8 @@ same bf16 values bit for bit. Norms, biases, embeddings and ``kv_b_proj`` stay f
 GGUF packed weights, expert placement and tracing are not supported.
 
 Not a performance claim: no timing is made here, and launches are still one per op.
+``device_experts`` needs the gpu/spawn kernels built (gpu/spawn/build.sh into ptx_dir/spawn) with a
+vxc that has Vx's lanes:: reductions (see gpu/spawn/README.md); it has not run on a GPU yet.
 """
 import ctypes as C
 from pathlib import Path
@@ -76,7 +81,7 @@ class ResidentGLM:
     name = 'vx-gpu-resident'
 
     def __init__(self, model, *, max_tokens=4096, ptx_dir=None, device=0, ctx=None, max_weight_bytes=None,
-                 device_topk=True):
+                 device_topk=True, device_experts=False):
         if getattr(model, 'packed_weights', False):
             raise NotImplementedError('ResidentGLM supports expanded float32 weights only')
         if getattr(model, 'expert_placement', None) is not None:
@@ -86,6 +91,7 @@ class ResidentGLM:
         self.model, self.config = model, model.config
         self.max_tokens = max_tokens
         self.device_topk = bool(device_topk)
+        self.device_experts = bool(device_experts)
         self.max_weight_bytes = max_weight_bytes
         self.weight_bytes = 0
         self._room = self._plan = None  # preload's fit check, see preload()
@@ -105,6 +111,7 @@ class ResidentGLM:
             self._check_quantization(model.config.get('quantization_config'))
             self.stream = self.ctx.stream()
             self._kernels = {}
+            self._spawn_kernels = {}
             self.launches = {}
             self._weights = {}
             self._allocate()
@@ -148,6 +155,24 @@ class ResidentGLM:
         self._kernel(name).launch((grid,), (block,), args, stream=self.stream)
         self.launches[name] = self.launches.get(name, 0) + 1
 
+    def _spawn(self, name, **values):
+        """Launch gpu/spawn kernel `name` (ptx_dir/spawn/<name>.ptx) with its manifest's shape;
+        arguments by parameter name. A test context may supply spawn_kernel(path)."""
+        if self._closed:
+            raise RuntimeError('ResidentGLM is closed')
+        kernel = self._spawn_kernels.get(name)
+        if kernel is None:
+            path = self._ptx_dir / 'spawn' / (name + '.ptx')
+            factory = getattr(self.ctx, 'spawn_kernel', None)
+            if factory is None:
+                from .spawn.launch import SpawnKernel
+                kernel = SpawnKernel(self.ctx, path)
+            else:
+                kernel = factory(path)
+            self._spawn_kernels[name] = kernel
+        kernel.launch(stream=self.stream, **values)
+        self.launches[name] = self.launches.get(name, 0) + 1
+
     def _grid(self, n):
         return max(1, min((n + _ELEMENTWISE_BLOCK - 1) // _ELEMENTWISE_BLOCK, _MAX_GRID))
 
@@ -171,6 +196,33 @@ class ResidentGLM:
             self._room -= array.nbytes
         tensor = self._tensor(array.shape, dtype, array.tobytes())
         self.weight_bytes += array.nbytes
+        self._weights[key] = tensor
+        return tensor
+
+    def _upload_stacked(self, key, parts, dtype='float32'):
+        """Upload equal-shape arrays back to back as one [len(parts), ..] tensor, one part at a
+        time (parts is a list of callables returning each array), with _upload_weight's limits."""
+        first = np.ascontiguousarray(parts[0]())
+        shape = (len(parts),) + first.shape
+        nbytes = first.nbytes * len(parts)
+        if self.max_weight_bytes is not None and self.weight_bytes + nbytes > self.max_weight_bytes:
+            raise MemoryError(f'device weights would exceed max_weight_bytes={self.max_weight_bytes} at {key!r}')
+        if self._plan is None and self._room is not None and nbytes > self._room:
+            self._plan = 0
+        if self._plan is not None:
+            self._plan += nbytes
+            self._weights[key] = tensor = _Planned(shape)
+            return tensor
+        if self._room is not None:
+            self._room -= nbytes
+        tensor = self._tensor(shape, dtype)
+        for i, part in enumerate(parts):
+            array = first if i == 0 else np.ascontiguousarray(part())
+            if array.shape != first.shape or array.dtype != first.dtype:
+                tensor.close()
+                raise ValueError(f'{key}: part {i} is {array.dtype}{array.shape}, part 0 {first.dtype}{first.shape}')
+            tensor.view(first.shape, offset=i * first.nbytes).upload(array.tobytes())
+        self.weight_bytes += nbytes
         self._weights[key] = tensor
         return tensor
 
@@ -396,6 +448,93 @@ class ResidentGLM:
             return
         self._mlp(base, x, out)
 
+    def _stacked_experts(self, prefix, name):
+        """All routed experts' Linear `name` ('gate_proj', 'up_proj', 'down_proj', or 'gate_up' /
+        'down' of the fused layout) back to back on the device, uploaded once:
+        (format, tensors, (rows, cols), extra arguments)."""
+        key = f'{prefix}.experts:{name}:stacked'
+        entry = self._weights.get(key)
+        if entry is not None:
+            return entry
+        experts = int(self.config['n_routed_experts'])
+        if name in ('gate_up', 'down'):
+            tensor = self._weight(f'{prefix}.experts.{name}_proj')
+            if _planned(tensor):
+                return tensor
+            entry = ('float32', (tensor,), tuple(tensor.shape[1:]), {})
+            self._weights[key] = entry
+            return entry
+        linears = [f'{prefix}.experts.{e}.{name}' for e in range(experts)]
+        fmt = self._format(linears[0])
+        mixed = [p for p in linears if self._format(p) != fmt]
+        if mixed:
+            raise ValueError(f'device_experts needs one format per expert projection: {linears[0]} is {fmt}, '
+                             f'{mixed[0]} is {self._format(mixed[0])}')
+        w = self.model.weights
+        if fmt == 'int4':
+            first = w.compressed_int4(linears[0])
+            kind = {'float16': 0, 'bfloat16': 1}[first[2]]
+            for p in linears[1:]:
+                if w.compressed_int4(p)[2] != first[2]:
+                    raise ValueError(f'device_experts needs one INT4 scale format per projection: {p}')
+            tensors = (self._upload_stacked(key + ':packed', [lambda p=p: np.asarray(w.compressed_int4(p)[0], np.uint8) for p in linears], 'uint8'),
+                       self._upload_stacked(key + ':scales', [lambda p=p: np.asarray(w.compressed_int4(p)[1], np.uint16) for p in linears], 'uint16'))
+            shape, extra = tuple(first[3]), {'scale_kind': kind}
+        elif fmt == 'fp8':
+            first = w.block_fp8(linears[0])
+            if tuple(first[2]) != (128, 128):
+                raise ValueError(f'{linears[0]}: fp8 kernels implement 128x128 blocks, got {tuple(first[2])}')
+            tensors = (self._upload_stacked(key + ':codes', [lambda p=p: np.asarray(w.block_fp8(p)[0], np.uint8) for p in linears], 'uint8'),
+                       self._upload_stacked(key + ':scales', [lambda p=p: np.asarray(w.block_fp8(p)[1], np.float32) for p in linears]))
+            shape, extra = tuple(first[3]), {}
+        elif fmt == 'bf16':
+            first = w.bf16(linears[0])
+            tensors = (self._upload_stacked(key, [lambda p=p: np.asarray(w.bf16(p)[0], np.uint16) for p in linears], 'uint16'),)
+            shape, extra = tuple(first[1]), {}
+        else:
+            tensors = (self._upload_stacked(key, [lambda p=p: np.asarray(self.model._weight(p + '.weight'), np.float32) for p in linears]),)
+            shape, extra = tuple(tensors[0].shape[1:]), {}
+        if any(_planned(t) for t in tensors):
+            return tensors[0]
+        entry = (fmt, tensors, shape, extra)
+        self._weights[key] = entry
+        return entry
+
+    def _expert_project(self, prefix, name, slot, x, out):
+        """out = W x for the expert in router slot `slot` of ascending id order, chosen on the device."""
+        fmt, tensors, (rows, cols), extra = self._stacked_experts(prefix, name)
+        if out.shape != (rows,) or x.shape != (cols,):
+            raise ValueError(f'{prefix}.experts {name}: weight is {rows}x{cols}, got x {x.shape} -> out {out.shape}')
+        common = dict(out=out, x=x, ids=self.route_ids, k=int(self.config['num_experts_per_tok']), slot=int(slot),
+                      experts=int(self.config['n_routed_experts']), rows=rows, cols=cols, **extra)
+        if fmt == 'int4':
+            self._spawn('int4_expert_matvec', packed=tensors[0], scales=tensors[1], **common)
+        elif fmt == 'fp8':
+            self._spawn('fp8_expert_matvec', weight=tensors[0], scales=tensors[1], **common)
+        elif fmt == 'bf16':
+            self._spawn('bf16_expert_matvec', weight=tensors[0], **common)
+        else:
+            self._spawn('expert_matvec', weight=tensors[0], **common)
+
+    def _device_expert(self, prefix, slot, x, out):
+        """_expert for the expert in slot `slot` of ascending id order, without reading the ids."""
+        if self._fused_experts(f'{prefix}.experts.0'):
+            two_i = self._stacked_experts(prefix, 'gate_up')[2][0]
+            inter = two_i // 2
+            fused = self.fused.view((two_i,))
+            self._expert_project(prefix, 'gate_up', slot, x, fused)
+            gate, up = fused.view((inter,)), fused.view((inter,), offset=inter * 4)
+            act = self.act.view((inter,))
+            self._swiglu(gate, up, act, inter)
+            self._expert_project(prefix, 'down', slot, act, out)
+            return
+        width = self._stacked_experts(prefix, 'gate_proj')[2][0]
+        gate, up, act = (t.view((width,)) for t in (self.gate, self.up, self.act))
+        self._expert_project(prefix, 'gate_proj', slot, x, gate)
+        self._expert_project(prefix, 'up_proj', slot, x, up)
+        self._swiglu(gate, up, act, width)
+        self._expert_project(prefix, 'down_proj', slot, act, out)
+
     # ---------------------------------------------------------------- blocks
     def _index(self, layer, prefix, x, position):
         """DSA indexer for one layer: refresh its keys, score all causal keys, choose the top-k."""
@@ -491,17 +630,27 @@ class ResidentGLM:
                      [self.route_ids, self.route_weights, self.router_logits,
                       self._weight(prefix + '.gate.e_score_correction_bias'), I(experts), I(k),
                       F(_f32(float(c.get('routed_scaling_factor', 1.0)), 'router scale'))])
-        ids = np.frombuffer(self.route_ids.download(), dtype=np.int32)
         # Reduction order of the pinned official Experts: ascending expert id, whatever the top-k order.
         self._copy(self.moe_sum, self.zeros, self.hidden)
-        for slot in np.argsort(ids, kind='stable'):
-            self._expert(prefix, int(ids[slot]), x, self.expert_out)
-            self._launch('scaled_add', self._grid(self.hidden), _ELEMENTWISE_BLOCK,
-                         [self.moe_sum, self.expert_out, self.route_weights, I(int(slot)), I(self.hidden)])
+        if self.device_experts:
+            for slot in range(k):  # slot-th in ascending id order; the kernels find it on the device
+                self._device_expert(prefix, slot, x, self.expert_out)
+                self._spawn('expert_scaled_add', out=self.moe_sum, x=self.expert_out, weights=self.route_weights,
+                            ids=self.route_ids, k=k, slot=slot, n=self.hidden)
+        else:
+            self._host_experts(prefix, x, k)
         if int(c.get('n_shared_experts', 1)) > 0:
             self._mlp(prefix + '.shared_experts', x, self.mlp_out)
             self._add(self.moe_sum, self.moe_sum, self.mlp_out, self.hidden)
         self._copy(self.ffn_out, self.moe_sum, self.hidden)
+
+    def _host_experts(self, prefix, x, k):
+        """The routed experts with the ids read back to the host to pick each expert's weights."""
+        ids = np.frombuffer(self.route_ids.download(), dtype=np.int32)
+        for slot in np.argsort(ids, kind='stable'):
+            self._expert(prefix, int(ids[slot]), x, self.expert_out)
+            self._launch('scaled_add', self._grid(self.hidden), _ELEMENTWISE_BLOCK,
+                         [self.moe_sum, self.expert_out, self.route_weights, I(int(slot)), I(self.hidden)])
 
     # ---------------------------------------------------------------- public
     def forward(self, token_id, *, logits=True):
@@ -605,7 +754,11 @@ class ResidentGLM:
                 continue
             linear(f + '.gate')
             self._weight(f + '.gate.e_score_correction_bias')
-            for e in range(int(c['n_routed_experts'])):
+            if self.device_experts:
+                fused = self._fused_experts(f + '.experts.0')
+                for n in (('gate_up', 'down') if fused else ('gate_proj', 'up_proj', 'down_proj')):
+                    self._stacked_experts(f, n)
+            for e in range(0 if self.device_experts else int(c['n_routed_experts'])):
                 if self._fused_experts(f'{f}.experts.{e}'):
                     self._weight(f + '.experts.gate_up_proj')
                     self._weight(f + '.experts.down_proj')

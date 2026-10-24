@@ -44,12 +44,34 @@ class Module:
     def kernel(self,name):
         getattr(self.ctx.simt.lib,name)
         return Kernel(self.ctx,name)
+class SpawnKernel:
+    """A gpu/spawn kernel library run by Vx's host path (gpu/spawn/host.py), on these tensors."""
+    def __init__(self,ctx,path):
+        import json
+        from pathlib import Path
+        self.ctx,self.path=ctx,str(path)
+        manifest=json.loads(Path(path).with_suffix('.json').read_text())
+        self.mutable=[p['name'] for p in manifest['params'] if p.get('mut')]
+    def launch(self,grid=None,block=None,*,stream=None,**values):
+        arrays={}
+        for name,v in values.items():
+            if isinstance(v,Tensor):assert not v.closed;arrays[name]=v.data
+            else:arrays[name]=v
+        outs=self.ctx.host()(self.path,**arrays)
+        for name in self.mutable:values[name].data[...]=outs[name].reshape(values[name].data.shape)
 class Context:
     name='cpu-simt-test-only'
-    def __init__(self,*args,**kwargs):self.simt=Simt();self.tensors=[]
+    def __init__(self,*args,**kwargs):self.simt=Simt();self.tensors=[];self._host=None
+    def host(self):
+        if self._host is None:
+            from gpu.spawn.host import Host
+            self._host=Host()
+        return self._host
+    def spawn_kernel(self,path):return SpawnKernel(self,path)
     def load_ptx(self,path):return Module(self)
     def stream(self):return Stream()
     def tensor(self,shape,dtype='float32',data=None):
         t=Tensor(shape,dtype,data);self.tensors.append(t);return t
     def close(self):
         for t in self.tensors:t.close()
+        if self._host is not None:self._host.close();self._host=None

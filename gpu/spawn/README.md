@@ -96,6 +96,10 @@ host (`gpu/resident.py` downloads them on every MoE layer today, a sync that als
 step out of a CUDA graph). Each takes all experts' weights back to back and the router's `ids`, and
 runs the expert in slot `slot` of ascending id order (`ascending_slot!` in `device.vx`), the order
 the official Experts sums in. Each equals its plain kernel on that expert's weights, bit for bit.
+`ResidentGLM(..., device_experts=True)` (gpu/resident.py) runs its MoE layers through them, with
+each expert projection uploaded once per layer as one tensor; `gpu/test_resident.py` checks the
+logits against the host loop bit for bit on the CPU, and
+`gpu/test_resident_device_experts_hardware.py` does the same on a GPU (not run yet).
 
 All assemble with ptxas for sm_80 with no spills; none has run on a GPU yet. The norms, softmax
 and mla_partial launch 1024 lanes; a warp-per-row kernel has four rows per block of 128.

@@ -94,6 +94,9 @@ step test-spawn-vx-graph hw -s gpu/test_spawn_vx_graph.py
 # `mlir!` blocks cannot be in an `across` loop until Vx #2076 (declared writes) lands, and Vx main
 # no longer takes `grid([..]) block(n)`. Its step comes back with that.
 step test-hardware-stress hw gpu/test_hardware_stress.py
+# Resident decode with the routed experts chosen on the device (no host read of the router ids)
+# against the host loop, bit for bit, for each weight format.
+step test-resident-device-experts hw gpu/test_resident_device_experts_hardware.py
 
 for mode in f32 int4 fp8 bf16; do
   flag=$([[ $mode == f32 ]] && echo "" || echo "--$mode")
