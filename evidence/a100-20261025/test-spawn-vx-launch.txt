@@ -1,0 +1,741 @@
+[Vx CUDA] FATAL: a kernel faulted on GPU 0: an illegal memory access was encountered.
+          The last kernel started there is vx_npu_kernel_0. Set VX_CUDA_SYNC=1 to name the kernel that faulted.
+scripts/pod_validate.sh: line 80: 35796 Aborted                 (core dumped) $PYTHON -m pytest -q -rs "$@"
+     35797 Done                    | tee /dev/stderr
+     35798 Done                    | grep -qE '[0-9]+ passed'
+as e:
+            pytest.skip('real GPU unavailable: ' + str(e))
+        try:
+            yield ctx
+        finally:
+>           ctx.close()
+
+gpu/test_spawn_vx_launch.py:27: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+gpu/runtime.py:399: in close
+    self._synchronize_current()
+gpu/runtime.py:334: in _synchronize_current
+    self.driver.call("cuCtxSynchronize")
+gpu/runtime.py:164: in call
+    self.check(getattr(self, name)(*args), name)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.runtime.CUDADriver object at 0x7ed61bdba060>, code = 700
+operation = 'cuCtxSynchronize'
+
+    def check(self, code, operation):
+        if code != 0:
+            parts = []
+            for name in ("cuGetErrorName", "cuGetErrorString"):
+                value = C.c_char_p()
+                if getattr(self, name)(code, C.byref(value)) == 0 and value.value:
+                    parts.append(value.value.decode("utf8", "replace"))
+>           raise CUDAError(operation, int(code), ": ".join(parts))
+E           gpu.runtime.CUDAError: cuCtxSynchronize failed (CUDA 700): CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+
+gpu/runtime.py:161: CUDAError
+=================================== FAILURES ===================================
+_______________ test_vx_launch_matches_python_launch[mla_decode] _______________
+
+context = <gpu.runtime.CUDAContext object at 0x7ed61bdb9f70>
+name = 'mla_decode'
+
+    @pytest.mark.parametrize('name', sorted(CASES))
+    def test_vx_launch_matches_python_launch(context, name):
+        ptx = SPAWN / f'{name}.ptx'
+        if not ptx.exists():
+            pytest.skip(f'{ptx} not built')
+        try:
+            vx = VxKernel(ptx)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(str(e))
+        python = SpawnKernel(context, ptx)
+        mutable = [p['name'] for p in python.params if p.get('mut')]
+        ours, theirs = (on_device(context, CASES[name](np.random.default_rng(len(name)))) for _ in range(2))
+        python.launch(**ours)  # the manifest's shape, which is Vx's
+        vx(**theirs)
+>       context.synchronize()
+
+gpu/test_spawn_vx_launch.py:228: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+gpu/runtime.py:339: in synchronize
+    self._synchronize_current()
+gpu/runtime.py:334: in _synchronize_current
+    self.driver.call("cuCtxSynchronize")
+gpu/runtime.py:164: in call
+    self.check(getattr(self, name)(*args), name)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.runtime.CUDADriver object at 0x7ed61bdba060>, code = 700
+operation = 'cuCtxSynchronize'
+
+    def check(self, code, operation):
+        if code != 0:
+            parts = []
+            for name in ("cuGetErrorName", "cuGetErrorString"):
+                value = C.c_char_p()
+                if getattr(self, name)(code, C.byref(value)) == 0 and value.value:
+                    parts.append(value.value.decode("utf8", "replace"))
+>           raise CUDAError(operation, int(code), ": ".join(parts))
+E           gpu.runtime.CUDAError: cuCtxSynchronize failed (CUDA 700): CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+
+gpu/runtime.py:161: CUDAError
+_______________ test_vx_launch_matches_python_launch[mla_merge] ________________
+
+context = <gpu.runtime.CUDAContext object at 0x7ed61bdb9f70>, name = 'mla_merge'
+
+    @pytest.mark.parametrize('name', sorted(CASES))
+    def test_vx_launch_matches_python_launch(context, name):
+        ptx = SPAWN / f'{name}.ptx'
+        if not ptx.exists():
+            pytest.skip(f'{ptx} not built')
+        try:
+            vx = VxKernel(ptx)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(str(e))
+>       python = SpawnKernel(context, ptx)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+gpu/test_spawn_vx_launch.py:223: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+gpu/spawn/launch.py:73: in __init__
+    self.module = context.load_ptx(ptx_path)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:366: in load_ptx
+    return Module(self, Path(path).read_bytes())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:596: in __init__
+    context.driver.call("cuModuleLoadDataEx", C.byref(self.handle), image, 0, None, None)
+gpu/runtime.py:164: in call
+    self.check(getattr(self, name)(*args), name)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.runtime.CUDADriver object at 0x7ed61bdba060>, code = 700
+operation = 'cuModuleLoadDataEx'
+
+    def check(self, code, operation):
+        if code != 0:
+            parts = []
+            for name in ("cuGetErrorName", "cuGetErrorString"):
+                value = C.c_char_p()
+                if getattr(self, name)(code, C.byref(value)) == 0 and value.value:
+                    parts.append(value.value.decode("utf8", "replace"))
+>           raise CUDAError(operation, int(code), ": ".join(parts))
+E           gpu.runtime.CUDAError: cuModuleLoadDataEx failed (CUDA 700): CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+
+gpu/runtime.py:161: CUDAError
+______________ test_vx_launch_matches_python_launch[mla_partial] _______________
+
+context = <gpu.runtime.CUDAContext object at 0x7ed61bdb9f70>
+name = 'mla_partial'
+
+    @pytest.mark.parametrize('name', sorted(CASES))
+    def test_vx_launch_matches_python_launch(context, name):
+        ptx = SPAWN / f'{name}.ptx'
+        if not ptx.exists():
+            pytest.skip(f'{ptx} not built')
+        try:
+            vx = VxKernel(ptx)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(str(e))
+>       python = SpawnKernel(context, ptx)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+gpu/test_spawn_vx_launch.py:223: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+gpu/spawn/launch.py:73: in __init__
+    self.module = context.load_ptx(ptx_path)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:366: in load_ptx
+    return Module(self, Path(path).read_bytes())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:596: in __init__
+    context.driver.call("cuModuleLoadDataEx", C.byref(self.handle), image, 0, None, None)
+gpu/runtime.py:164: in call
+    self.check(getattr(self, name)(*args), name)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.runtime.CUDADriver object at 0x7ed61bdba060>, code = 700
+operation = 'cuModuleLoadDataEx'
+
+    def check(self, code, operation):
+        if code != 0:
+            parts = []
+            for name in ("cuGetErrorName", "cuGetErrorString"):
+                value = C.c_char_p()
+                if getattr(self, name)(code, C.byref(value)) == 0 and value.value:
+                    parts.append(value.value.decode("utf8", "replace"))
+>           raise CUDAError(operation, int(code), ": ".join(parts))
+E           gpu.runtime.CUDAError: cuModuleLoadDataEx failed (CUDA 700): CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+
+gpu/runtime.py:161: CUDAError
+________________ test_vx_launch_matches_python_launch[moe_down] ________________
+
+context = <gpu.runtime.CUDAContext object at 0x7ed61bdb9f70>, name = 'moe_down'
+
+    @pytest.mark.parametrize('name', sorted(CASES))
+    def test_vx_launch_matches_python_launch(context, name):
+        ptx = SPAWN / f'{name}.ptx'
+        if not ptx.exists():
+            pytest.skip(f'{ptx} not built')
+        try:
+            vx = VxKernel(ptx)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(str(e))
+>       python = SpawnKernel(context, ptx)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+gpu/test_spawn_vx_launch.py:223: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+gpu/spawn/launch.py:73: in __init__
+    self.module = context.load_ptx(ptx_path)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:366: in load_ptx
+    return Module(self, Path(path).read_bytes())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:596: in __init__
+    context.driver.call("cuModuleLoadDataEx", C.byref(self.handle), image, 0, None, None)
+gpu/runtime.py:164: in call
+    self.check(getattr(self, name)(*args), name)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.runtime.CUDADriver object at 0x7ed61bdba060>, code = 700
+operation = 'cuModuleLoadDataEx'
+
+    def check(self, code, operation):
+        if code != 0:
+            parts = []
+            for name in ("cuGetErrorName", "cuGetErrorString"):
+                value = C.c_char_p()
+                if getattr(self, name)(code, C.byref(value)) == 0 and value.value:
+                    parts.append(value.value.decode("utf8", "replace"))
+>           raise CUDAError(operation, int(code), ": ".join(parts))
+E           gpu.runtime.CUDAError: cuModuleLoadDataEx failed (CUDA 700): CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+
+gpu/runtime.py:161: CUDAError
+______________ test_vx_launch_matches_python_launch[moe_gate_up] _______________
+
+context = <gpu.runtime.CUDAContext object at 0x7ed61bdb9f70>
+name = 'moe_gate_up'
+
+    @pytest.mark.parametrize('name', sorted(CASES))
+    def test_vx_launch_matches_python_launch(context, name):
+        ptx = SPAWN / f'{name}.ptx'
+        if not ptx.exists():
+            pytest.skip(f'{ptx} not built')
+        try:
+            vx = VxKernel(ptx)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(str(e))
+>       python = SpawnKernel(context, ptx)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+gpu/test_spawn_vx_launch.py:223: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+gpu/spawn/launch.py:73: in __init__
+    self.module = context.load_ptx(ptx_path)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:366: in load_ptx
+    return Module(self, Path(path).read_bytes())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:596: in __init__
+    context.driver.call("cuModuleLoadDataEx", C.byref(self.handle), image, 0, None, None)
+gpu/runtime.py:164: in call
+    self.check(getattr(self, name)(*args), name)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.runtime.CUDADriver object at 0x7ed61bdba060>, code = 700
+operation = 'cuModuleLoadDataEx'
+
+    def check(self, code, operation):
+        if code != 0:
+            parts = []
+            for name in ("cuGetErrorName", "cuGetErrorString"):
+                value = C.c_char_p()
+                if getattr(self, name)(code, C.byref(value)) == 0 and value.value:
+                    parts.append(value.value.decode("utf8", "replace"))
+>           raise CUDAError(operation, int(code), ": ".join(parts))
+E           gpu.runtime.CUDAError: cuModuleLoadDataEx failed (CUDA 700): CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+
+gpu/runtime.py:161: CUDAError
+____________ test_vx_launch_matches_python_launch[residual_rmsnorm] ____________
+
+context = <gpu.runtime.CUDAContext object at 0x7ed61bdb9f70>
+name = 'residual_rmsnorm'
+
+    @pytest.mark.parametrize('name', sorted(CASES))
+    def test_vx_launch_matches_python_launch(context, name):
+        ptx = SPAWN / f'{name}.ptx'
+        if not ptx.exists():
+            pytest.skip(f'{ptx} not built')
+        try:
+            vx = VxKernel(ptx)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(str(e))
+>       python = SpawnKernel(context, ptx)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+gpu/test_spawn_vx_launch.py:223: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+gpu/spawn/launch.py:73: in __init__
+    self.module = context.load_ptx(ptx_path)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:366: in load_ptx
+    return Module(self, Path(path).read_bytes())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:596: in __init__
+    context.driver.call("cuModuleLoadDataEx", C.byref(self.handle), image, 0, None, None)
+gpu/runtime.py:164: in call
+    self.check(getattr(self, name)(*args), name)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.runtime.CUDADriver object at 0x7ed61bdba060>, code = 700
+operation = 'cuModuleLoadDataEx'
+
+    def check(self, code, operation):
+        if code != 0:
+            parts = []
+            for name in ("cuGetErrorName", "cuGetErrorString"):
+                value = C.c_char_p()
+                if getattr(self, name)(code, C.byref(value)) == 0 and value.value:
+                    parts.append(value.value.decode("utf8", "replace"))
+>           raise CUDAError(operation, int(code), ": ".join(parts))
+E           gpu.runtime.CUDAError: cuModuleLoadDataEx failed (CUDA 700): CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+
+gpu/runtime.py:161: CUDAError
+______________ test_vx_launch_matches_python_launch[rmsnorm_rows] ______________
+
+context = <gpu.runtime.CUDAContext object at 0x7ed61bdb9f70>
+name = 'rmsnorm_rows'
+
+    @pytest.mark.parametrize('name', sorted(CASES))
+    def test_vx_launch_matches_python_launch(context, name):
+        ptx = SPAWN / f'{name}.ptx'
+        if not ptx.exists():
+            pytest.skip(f'{ptx} not built')
+        try:
+            vx = VxKernel(ptx)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(str(e))
+>       python = SpawnKernel(context, ptx)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+gpu/test_spawn_vx_launch.py:223: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+gpu/spawn/launch.py:73: in __init__
+    self.module = context.load_ptx(ptx_path)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:366: in load_ptx
+    return Module(self, Path(path).read_bytes())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:596: in __init__
+    context.driver.call("cuModuleLoadDataEx", C.byref(self.handle), image, 0, None, None)
+gpu/runtime.py:164: in call
+    self.check(getattr(self, name)(*args), name)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.runtime.CUDADriver object at 0x7ed61bdba060>, code = 700
+operation = 'cuModuleLoadDataEx'
+
+    def check(self, code, operation):
+        if code != 0:
+            parts = []
+            for name in ("cuGetErrorName", "cuGetErrorString"):
+                value = C.c_char_p()
+                if getattr(self, name)(code, C.byref(value)) == 0 and value.value:
+                    parts.append(value.value.decode("utf8", "replace"))
+>           raise CUDAError(operation, int(code), ": ".join(parts))
+E           gpu.runtime.CUDAError: cuModuleLoadDataEx failed (CUDA 700): CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+
+gpu/runtime.py:161: CUDAError
+________________ test_vx_launch_matches_python_launch[rope_glm] ________________
+
+context = <gpu.runtime.CUDAContext object at 0x7ed61bdb9f70>, name = 'rope_glm'
+
+    @pytest.mark.parametrize('name', sorted(CASES))
+    def test_vx_launch_matches_python_launch(context, name):
+        ptx = SPAWN / f'{name}.ptx'
+        if not ptx.exists():
+            pytest.skip(f'{ptx} not built')
+        try:
+            vx = VxKernel(ptx)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(str(e))
+>       python = SpawnKernel(context, ptx)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+gpu/test_spawn_vx_launch.py:223: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+gpu/spawn/launch.py:73: in __init__
+    self.module = context.load_ptx(ptx_path)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:366: in load_ptx
+    return Module(self, Path(path).read_bytes())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:596: in __init__
+    context.driver.call("cuModuleLoadDataEx", C.byref(self.handle), image, 0, None, None)
+gpu/runtime.py:164: in call
+    self.check(getattr(self, name)(*args), name)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.runtime.CUDADriver object at 0x7ed61bdba060>, code = 700
+operation = 'cuModuleLoadDataEx'
+
+    def check(self, code, operation):
+        if code != 0:
+            parts = []
+            for name in ("cuGetErrorName", "cuGetErrorString"):
+                value = C.c_char_p()
+                if getattr(self, name)(code, C.byref(value)) == 0 and value.value:
+                    parts.append(value.value.decode("utf8", "replace"))
+>           raise CUDAError(operation, int(code), ": ".join(parts))
+E           gpu.runtime.CUDAError: cuModuleLoadDataEx failed (CUDA 700): CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+
+gpu/runtime.py:161: CUDAError
+______________ test_vx_launch_matches_python_launch[rope_strided] ______________
+
+context = <gpu.runtime.CUDAContext object at 0x7ed61bdb9f70>
+name = 'rope_strided'
+
+    @pytest.mark.parametrize('name', sorted(CASES))
+    def test_vx_launch_matches_python_launch(context, name):
+        ptx = SPAWN / f'{name}.ptx'
+        if not ptx.exists():
+            pytest.skip(f'{ptx} not built')
+        try:
+            vx = VxKernel(ptx)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(str(e))
+>       python = SpawnKernel(context, ptx)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+gpu/test_spawn_vx_launch.py:223: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+gpu/spawn/launch.py:73: in __init__
+    self.module = context.load_ptx(ptx_path)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:366: in load_ptx
+    return Module(self, Path(path).read_bytes())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:596: in __init__
+    context.driver.call("cuModuleLoadDataEx", C.byref(self.handle), image, 0, None, None)
+gpu/runtime.py:164: in call
+    self.check(getattr(self, name)(*args), name)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.runtime.CUDADriver object at 0x7ed61bdba060>, code = 700
+operation = 'cuModuleLoadDataEx'
+
+    def check(self, code, operation):
+        if code != 0:
+            parts = []
+            for name in ("cuGetErrorName", "cuGetErrorString"):
+                value = C.c_char_p()
+                if getattr(self, name)(code, C.byref(value)) == 0 and value.value:
+                    parts.append(value.value.decode("utf8", "replace"))
+>           raise CUDAError(operation, int(code), ": ".join(parts))
+E           gpu.runtime.CUDAError: cuModuleLoadDataEx failed (CUDA 700): CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+
+gpu/runtime.py:161: CUDAError
+_________________ test_vx_launch_matches_python_launch[router] _________________
+
+context = <gpu.runtime.CUDAContext object at 0x7ed61bdb9f70>, name = 'router'
+
+    @pytest.mark.parametrize('name', sorted(CASES))
+    def test_vx_launch_matches_python_launch(context, name):
+        ptx = SPAWN / f'{name}.ptx'
+        if not ptx.exists():
+            pytest.skip(f'{ptx} not built')
+        try:
+            vx = VxKernel(ptx)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(str(e))
+>       python = SpawnKernel(context, ptx)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+gpu/test_spawn_vx_launch.py:223: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+gpu/spawn/launch.py:73: in __init__
+    self.module = context.load_ptx(ptx_path)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:366: in load_ptx
+    return Module(self, Path(path).read_bytes())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:596: in __init__
+    context.driver.call("cuModuleLoadDataEx", C.byref(self.handle), image, 0, None, None)
+gpu/runtime.py:164: in call
+    self.check(getattr(self, name)(*args), name)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.runtime.CUDADriver object at 0x7ed61bdba060>, code = 700
+operation = 'cuModuleLoadDataEx'
+
+    def check(self, code, operation):
+        if code != 0:
+            parts = []
+            for name in ("cuGetErrorName", "cuGetErrorString"):
+                value = C.c_char_p()
+                if getattr(self, name)(code, C.byref(value)) == 0 and value.value:
+                    parts.append(value.value.decode("utf8", "replace"))
+>           raise CUDAError(operation, int(code), ": ".join(parts))
+E           gpu.runtime.CUDAError: cuModuleLoadDataEx failed (CUDA 700): CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+
+gpu/runtime.py:161: CUDAError
+_________________ test_vx_launch_matches_python_launch[scale] __________________
+
+context = <gpu.runtime.CUDAContext object at 0x7ed61bdb9f70>, name = 'scale'
+
+    @pytest.mark.parametrize('name', sorted(CASES))
+    def test_vx_launch_matches_python_launch(context, name):
+        ptx = SPAWN / f'{name}.ptx'
+        if not ptx.exists():
+            pytest.skip(f'{ptx} not built')
+        try:
+            vx = VxKernel(ptx)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(str(e))
+>       python = SpawnKernel(context, ptx)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+gpu/test_spawn_vx_launch.py:223: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+gpu/spawn/launch.py:73: in __init__
+    self.module = context.load_ptx(ptx_path)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:366: in load_ptx
+    return Module(self, Path(path).read_bytes())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:596: in __init__
+    context.driver.call("cuModuleLoadDataEx", C.byref(self.handle), image, 0, None, None)
+gpu/runtime.py:164: in call
+    self.check(getattr(self, name)(*args), name)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.runtime.CUDADriver object at 0x7ed61bdba060>, code = 700
+operation = 'cuModuleLoadDataEx'
+
+    def check(self, code, operation):
+        if code != 0:
+            parts = []
+            for name in ("cuGetErrorName", "cuGetErrorString"):
+                value = C.c_char_p()
+                if getattr(self, name)(code, C.byref(value)) == 0 and value.value:
+                    parts.append(value.value.decode("utf8", "replace"))
+>           raise CUDAError(operation, int(code), ": ".join(parts))
+E           gpu.runtime.CUDAError: cuModuleLoadDataEx failed (CUDA 700): CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+
+gpu/runtime.py:161: CUDAError
+_______________ test_vx_launch_matches_python_launch[scaled_add] _______________
+
+context = <gpu.runtime.CUDAContext object at 0x7ed61bdb9f70>
+name = 'scaled_add'
+
+    @pytest.mark.parametrize('name', sorted(CASES))
+    def test_vx_launch_matches_python_launch(context, name):
+        ptx = SPAWN / f'{name}.ptx'
+        if not ptx.exists():
+            pytest.skip(f'{ptx} not built')
+        try:
+            vx = VxKernel(ptx)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(str(e))
+>       python = SpawnKernel(context, ptx)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+gpu/test_spawn_vx_launch.py:223: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+gpu/spawn/launch.py:73: in __init__
+    self.module = context.load_ptx(ptx_path)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:366: in load_ptx
+    return Module(self, Path(path).read_bytes())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:596: in __init__
+    context.driver.call("cuModuleLoadDataEx", C.byref(self.handle), image, 0, None, None)
+gpu/runtime.py:164: in call
+    self.check(getattr(self, name)(*args), name)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.runtime.CUDADriver object at 0x7ed61bdba060>, code = 700
+operation = 'cuModuleLoadDataEx'
+
+    def check(self, code, operation):
+        if code != 0:
+            parts = []
+            for name in ("cuGetErrorName", "cuGetErrorString"):
+                value = C.c_char_p()
+                if getattr(self, name)(code, C.byref(value)) == 0 and value.value:
+                    parts.append(value.value.decode("utf8", "replace"))
+>           raise CUDAError(operation, int(code), ": ".join(parts))
+E           gpu.runtime.CUDAError: cuModuleLoadDataEx failed (CUDA 700): CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+
+gpu/runtime.py:161: CUDAError
+______________ test_vx_launch_matches_python_launch[softmax_rows] ______________
+
+context = <gpu.runtime.CUDAContext object at 0x7ed61bdb9f70>
+name = 'softmax_rows'
+
+    @pytest.mark.parametrize('name', sorted(CASES))
+    def test_vx_launch_matches_python_launch(context, name):
+        ptx = SPAWN / f'{name}.ptx'
+        if not ptx.exists():
+            pytest.skip(f'{ptx} not built')
+        try:
+            vx = VxKernel(ptx)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(str(e))
+>       python = SpawnKernel(context, ptx)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+gpu/test_spawn_vx_launch.py:223: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+gpu/spawn/launch.py:73: in __init__
+    self.module = context.load_ptx(ptx_path)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:366: in load_ptx
+    return Module(self, Path(path).read_bytes())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:596: in __init__
+    context.driver.call("cuModuleLoadDataEx", C.byref(self.handle), image, 0, None, None)
+gpu/runtime.py:164: in call
+    self.check(getattr(self, name)(*args), name)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.runtime.CUDADriver object at 0x7ed61bdba060>, code = 700
+operation = 'cuModuleLoadDataEx'
+
+    def check(self, code, operation):
+        if code != 0:
+            parts = []
+            for name in ("cuGetErrorName", "cuGetErrorString"):
+                value = C.c_char_p()
+                if getattr(self, name)(code, C.byref(value)) == 0 and value.value:
+                    parts.append(value.value.decode("utf8", "replace"))
+>           raise CUDAError(operation, int(code), ": ".join(parts))
+E           gpu.runtime.CUDAError: cuModuleLoadDataEx failed (CUDA 700): CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+
+gpu/runtime.py:161: CUDAError
+_________________ test_vx_launch_matches_python_launch[swiglu] _________________
+
+context = <gpu.runtime.CUDAContext object at 0x7ed61bdb9f70>, name = 'swiglu'
+
+    @pytest.mark.parametrize('name', sorted(CASES))
+    def test_vx_launch_matches_python_launch(context, name):
+        ptx = SPAWN / f'{name}.ptx'
+        if not ptx.exists():
+            pytest.skip(f'{ptx} not built')
+        try:
+            vx = VxKernel(ptx)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(str(e))
+>       python = SpawnKernel(context, ptx)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+gpu/test_spawn_vx_launch.py:223: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+gpu/spawn/launch.py:73: in __init__
+    self.module = context.load_ptx(ptx_path)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:366: in load_ptx
+    return Module(self, Path(path).read_bytes())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:596: in __init__
+    context.driver.call("cuModuleLoadDataEx", C.byref(self.handle), image, 0, None, None)
+gpu/runtime.py:164: in call
+    self.check(getattr(self, name)(*args), name)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.runtime.CUDADriver object at 0x7ed61bdba060>, code = 700
+operation = 'cuModuleLoadDataEx'
+
+    def check(self, code, operation):
+        if code != 0:
+            parts = []
+            for name in ("cuGetErrorName", "cuGetErrorString"):
+                value = C.c_char_p()
+                if getattr(self, name)(code, C.byref(value)) == 0 and value.value:
+                    parts.append(value.value.decode("utf8", "replace"))
+>           raise CUDAError(operation, int(code), ": ".join(parts))
+E           gpu.runtime.CUDAError: cuModuleLoadDataEx failed (CUDA 700): CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+
+gpu/runtime.py:161: CUDAError
+__________________ test_vx_launch_matches_python_launch[topk] __________________
+
+context = <gpu.runtime.CUDAContext object at 0x7ed61bdb9f70>, name = 'topk'
+
+    @pytest.mark.parametrize('name', sorted(CASES))
+    def test_vx_launch_matches_python_launch(context, name):
+        ptx = SPAWN / f'{name}.ptx'
+        if not ptx.exists():
+            pytest.skip(f'{ptx} not built')
+        try:
+            vx = VxKernel(ptx)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(str(e))
+>       python = SpawnKernel(context, ptx)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+gpu/test_spawn_vx_launch.py:223: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+gpu/spawn/launch.py:73: in __init__
+    self.module = context.load_ptx(ptx_path)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:366: in load_ptx
+    return Module(self, Path(path).read_bytes())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:596: in __init__
+    context.driver.call("cuModuleLoadDataEx", C.byref(self.handle), image, 0, None, None)
+gpu/runtime.py:164: in call
+    self.check(getattr(self, name)(*args), name)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.runtime.CUDADriver object at 0x7ed61bdba060>, code = 700
+operation = 'cuModuleLoadDataEx'
+
+    def check(self, code, operation):
+        if code != 0:
+            parts = []
+            for name in ("cuGetErrorName", "cuGetErrorString"):
+                value = C.c_char_p()
+                if getattr(self, name)(code, C.byref(value)) == 0 and value.value:
+                    parts.append(value.value.decode("utf8", "replace"))
+>           raise CUDAError(operation, int(code), ": ".join(parts))
+E           gpu.runtime.CUDAError: cuModuleLoadDataEx failed (CUDA 700): CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+
+gpu/runtime.py:161: CUDAError
+_____________ test_vx_launch_refuses_a_tensor_from_another_context _____________
+
+context = <gpu.runtime.CUDAContext object at 0x7ed61bdb9f70>
+
+    def test_vx_launch_refuses_a_tensor_from_another_context(context):
+        ptx = SPAWN / 'add.ptx'
+        try:
+            vx = VxKernel(ptx)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(str(e))
+>       with CUDAContext() as own:
+             ^^^^^^^^^^^^^
+
+gpu/test_spawn_vx_launch.py:241: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+gpu/runtime.py:298: in __init__
+    d.call("cuCtxCreate_v2", C.byref(self.handle), 0, self.device)
+gpu/runtime.py:164: in call
+    self.check(getattr(self, name)(*args), name)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.runtime.CUDADriver object at 0x7ed6140f9e50>, code = 700
+operation = 'cuCtxCreate_v2'
+
+    def check(self, code, operation):
+        if code != 0:
+            parts = []
+            for name in ("cuGetErrorName", "cuGetErrorString"):
+                value = C.c_char_p()
+                if getattr(self, name)(code, C.byref(value)) == 0 and value.value:
+                    parts.append(value.value.decode("utf8", "replace"))
+>           raise CUDAError(operation, int(code), ": ".join(parts))
+E           gpu.runtime.CUDAError: cuCtxCreate_v2 failed (CUDA 700): CUDA_ERROR_ILLEGAL_ADDRESS: an illegal memory access was encountered
+
+gpu/runtime.py:161: CUDAError
+16 failed, 25 passed, 1 error in 2.90s

@@ -1,0 +1,24 @@
+pod_validate 2026-10-25T17:09:46Z, NVIDIA A100 80GB PCIe
+build-ptx                    ok       4s
+build-spawn                  ok      42s
+build-cpu-lib                ok       3s
+test-hardware                ok      10s
+test-quant-hardware          ok      13s
+test-spawn-hardware          FAIL     2s
+test-spawn-vx-host           ok       8s
+test-spawn-vx-launch         FAIL     3s
+test-spawn-vx-launch-sync    FAIL     1s
+test-spawn-vx-graph          ok       5s
+test-hardware-stress         ok      10s
+test-resident-device-experts FAIL     2s
+test-resident-fused-attention FAIL     5s
+resident-f32-small           ok       5s
+resident-f32-full4           ok    1861s
+resident-int4-small          ok       3s
+resident-int4-full4          ok     345s
+resident-fp8-small           ok       3s
+resident-fp8-full4           ok    1050s
+resident-bf16-small          ok       3s
+resident-bf16-full4          ok     420s
+stress                       ok      20s
+failed steps: 5

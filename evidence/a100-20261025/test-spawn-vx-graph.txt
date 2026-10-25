@@ -1,0 +1,97 @@
+........
+8 passed in 4.88s
+dout
+device NVIDIA A100 80GB PCIe, driver 13020
+  legacy stream: scale
+  legacy stream: add
+  legacy stream: rmsnorm_rows
+  legacy stream: softmax_rows
+  our stream, run 0: scale
+  our stream, run 0: add
+  our stream, run 0: rmsnorm_rows
+  our stream, run 0: softmax_rows
+  our stream, run 1: scale
+  our stream, run 1: add
+  our stream, run 1: rmsnorm_rows
+  our stream, run 1: softmax_rows
+OK eager chain on our stream matches the legacy stream bitwise
+--- stderr (Vx messages)
+===== end eager
+===== eager {'VX_CUDA_SYNC': '1'}: exit 0
+--- stdout
+device NVIDIA A100 80GB PCIe, driver 13020
+  legacy stream: scale
+  legacy stream: add
+  legacy stream: rmsnorm_rows
+  legacy stream: softmax_rows
+  our stream, run 0: scale
+  our stream, run 0: add
+  our stream, run 0: rmsnorm_rows
+  our stream, run 0: softmax_rows
+  our stream, run 1: scale
+  our stream, run 1: add
+  our stream, run 1: rmsnorm_rows
+  our stream, run 1: softmax_rows
+OK eager chain on our stream matches the legacy stream bitwise
+--- stderr (Vx messages)
+===== end eager
+===== capture : exit 0
+--- stdout
+device NVIDIA A100 80GB PCIe, driver 13020
+  warm-up: scale
+  warm-up: add
+  warm-up: rmsnorm_rows
+  warm-up: softmax_rows
+  capturing (vx graph): scale
+  capturing (vx graph): add
+  capturing (vx graph): rmsnorm_rows
+  capturing (vx graph): softmax_rows
+captured; replaying
+timing eager chain: 104.0 us to enqueue, 104.2 us each with the GPU (50 in a row)
+timing graph replay: 7.3 us to enqueue, 15.7 us each with the GPU (50 in a row)
+OK 5 replays of the captured Vx chain match eager bitwise
+--- stderr (Vx messages)
+===== end capture
+===== mixed : exit 0
+--- stdout
+device NVIDIA A100 80GB PCIe, driver 13020
+  warm-up: scale
+  warm-up: add
+  warm-up: rmsnorm_rows
+  warm-up: softmax_rows
+  capturing (mixed graph): scale
+  capturing (mixed graph): add
+  capturing (mixed graph): rmsnorm_rows
+  capturing (mixed graph): softmax_rows
+captured; replaying
+timing eager chain: 276.8 us to enqueue, 277.0 us each with the GPU (50 in a row)
+timing graph replay: 7.5 us to enqueue, 15.7 us each with the GPU (50 in a row)
+OK 5 replays of a graph of Python and Vx launches match the all-Vx eager chain bitwise
+--- stderr (Vx messages)
+===== end mixed
+===== refused {'VX_CUDA_SYNC': '1'}: exit -6
+--- stdout
+device NVIDIA A100 80GB PCIe, driver 13020
+warm-up done; capturing
+--- stderr (Vx messages)
+[Vx CUDA] FATAL: VX_CUDA_SYNC=1 waits after each launch, while the stream from vx_cuda_set_stream records a CUDA graph.
+          A graph cannot hold this. Unset VX_CUDA_SYNC for a recording.
+===== end refused
+===== refused {'VX_TIME_KERNEL': '1'}: exit -6
+--- stdout
+device NVIDIA A100 80GB PCIe, driver 13020
+warm-up done; capturing
+--- stderr (Vx messages)
+[Vx CUDA] vx_npu_kernel_0 occupancy: 8 block(s) of 256 threads per SM
+[Vx CUDA] vx_npu_kernel_0 device time 0.024 ms (32x256 threads)
+[Vx CUDA] FATAL: VX_TIME_KERNEL waits for each kernel, while the stream from vx_cuda_set_stream records a CUDA graph.
+          A graph cannot hold this. Unset VX_TIME_KERNEL for a recording.
+===== end refused
+===== first-call : exit -6
+--- stdout
+device NVIDIA A100 80GB PCIe, driver 13020
+capturing the first call of add
+--- stderr (Vx messages)
+[Vx CUDA] FATAL: The first call of vx_npu_kernel_0 loaded its kernel image, while the stream from vx_cuda_set_stream records a CUDA graph.
+          A graph cannot hold this. Call the function once before the recording.
+===== end first-call

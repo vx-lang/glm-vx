@@ -1,0 +1,147 @@
+......F...............................................................x. [ 80%]
+...........FF.....                                                       [100%]
+=================================== FAILURES ===================================
+_______________ test_spawn_matvec_matches_hand_kernel[7-131-64] ________________
+
+context = <gpu.runtime.CUDAContext object at 0x706722c03ad0>, rows = 7
+cols = 131, block = 64
+
+    @pytest.mark.parametrize('rows,cols,block', [(7, 131, 64), (64, 6144, 256), (1, 1, 32)])
+    def test_spawn_matvec_matches_hand_kernel(context, rows, cols, block):
+        rng = np.random.default_rng(rows * cols)
+        w, x = rng.normal(size=(rows, cols)).astype('f4'), rng.normal(size=cols).astype('f4')
+        dw, dx = upload(context, w.reshape(-1)), upload(context, x)
+        spawn_out, hand_out = context.tensor((rows,)), context.tensor((rows,))
+        grid = -(-rows // (block // 32))
+        SpawnKernel(context, BUILD / 'spawn/matvec.ptx').launch(grid, block, rows=rows, cols=cols, weight=dw, x=dx, out=spawn_out)
+        hand = context.load_ptx(BUILD / 'kernels.ptx').kernel('glm_vx_gpu_matvec')
+        hand.launch(grid, block, [hand_out, dw, dx, C.c_int32(rows), C.c_int32(cols)])
+        context.synchronize()
+>       np.testing.assert_array_equal(download(spawn_out), download(hand_out))
+E       AssertionError: 
+E       Arrays are not equal
+E       
+E       Mismatched elements: 3 / 7 (42.9%)
+E       Mismatch at indices:
+E        [2]: 0.0 (ACTUAL), -4.685879707336426 (DESIRED)
+E        [3]: 0.0 (ACTUAL), 6.998652935028076 (DESIRED)
+E        [6]: 0.0 (ACTUAL), 34.428184509277344 (DESIRED)
+E       Max absolute difference among violations: 34.428185
+E       Max relative difference among violations: 1.
+E        ACTUAL: array([-11.832632,   9.101619,   0.      ,   0.      ,  15.247387,
+E                4.424604,   0.      ], dtype=float32)
+E        DESIRED: array([-11.832632,   9.101619,  -4.68588 ,   6.998653,  15.247387,
+E                4.424604,  34.428185], dtype=float32)
+
+gpu/test_spawn_hardware.py:86: AssertionError
+______ test_spawn_mla_matches_hand_kernels[64-512-64-4096-2048-16-0-512] _______
+
+context = <gpu.runtime.CUDAContext object at 0x706722c03ad0>, heads = 64
+rank = 512, rope = 64, tokens = 4096, count = 2048, splits = 16, stride = 0
+block = 512
+
+    @pytest.mark.parametrize('heads,rank,rope,tokens,count,splits,stride,block', [
+        (2, 48, 4, 7, 5, 3, 0, 64), (2, 48, 4, 7, 5, 8, 0, 64), (2, 48, 4, 7, 0, 3, 0, 64),
+        (64, 512, 64, 4096, 2048, 16, 0, 512), (4, 64, 64, 300, 37, 4, 37, 64)])
+    def test_spawn_mla_matches_hand_kernels(context, heads, rank, rope, tokens, count, splits, stride, block):
+        rng = np.random.default_rng(heads + rank + count + splits)
+        q, qr = rng.normal(size=heads * rank).astype('f4'), rng.normal(size=heads * rope).astype('f4')
+        kv, kr = rng.normal(size=tokens * rank).astype('f4'), rng.normal(size=tokens * rope).astype('f4')
+        lists = heads if stride else 1
+        selected = rng.integers(0, tokens, size=max(1, lists * max(count, 1))).astype('i4')
+        if count:
+            selected[1 % selected.size] = -1
+            selected[-1] = tokens + 5
+        dq, dqr, dkv, dkr, dsel = (upload(context, a) for a in (q, qr, kv, kr, selected))
+        scale = rank ** -0.5
+        num = [context.tensor((heads * splits * rank,)) for _ in range(2)]
+        stats = [context.tensor((heads * splits * 2,)) for _ in range(2)]
+        out = [context.tensor((heads * rank,)) for _ in range(2)]
+        SpawnKernel(context, BUILD / 'spawn/mla_partial.ptx').launch(
+            heads * splits, block, heads=heads, rank=rank, rope_dim=rope, tokens=tokens, count=count,
+            selection_stride=stride, splits=splits, selected=dsel, cache_latent=dkv, q_latent=dq, q_rope=dqr,
+            cache_rope=dkr, scale=scale, threads=block, numerator=num[0].view((heads * splits, rank)),
+            stats=stats[0].view((heads * splits, 2)))
+        SpawnKernel(context, BUILD / 'spawn/mla_merge.ptx').launch(
+            heads, 256, heads=heads, rank=rank, splits=splits, stats=stats[0], numerator=num[0], out=out[0].view((heads, rank)))
+        hand = context.load_ptx(BUILD / 'kernels.ptx')
+        I = C.c_int32
+        hand.kernel('glm_vx_gpu_mla_partial').launch(heads * splits, block, [
+            num[1], stats[1], dq, dqr, dkv, dkr, dsel, I(heads), I(rank), I(rope), I(tokens), I(count), I(stride),
+            I(splits), C.c_float(scale)])
+        hand.kernel('glm_vx_gpu_mla_merge').launch(heads, 256, [out[1], num[1], stats[1], I(heads), I(rank), I(splits)])
+        context.synchronize()
+        np.testing.assert_allclose(download(stats[0]), download(stats[1]), **EXP)
+>       np.testing.assert_allclose(download(num[0]), download(num[1]), **EXP)
+E       AssertionError: 
+E       Not equal to tolerance rtol=1e-05, atol=1e-37
+E       
+E       Mismatched elements: 3012 / 524288 (0.574%)
+E       First 5 mismatches are at indices:
+E        [372]: 0.0002054646611213684 (ACTUAL), 0.00020540505647659302 (DESIRED)
+E        [615]: -0.008891478180885315 (ACTUAL), -0.008891165256500244 (DESIRED)
+E        [935]: 0.0038882968947291374 (ACTUAL), 0.003888140432536602 (DESIRED)
+E        [1139]: 0.005093377083539963 (ACTUAL), 0.005093630403280258 (DESIRED)
+E        [1199]: -0.01624106988310814 (ACTUAL), -0.016240905970335007 (DESIRED)
+E       Max absolute difference among violations: 1.6391277e-06
+E       Max relative difference among violations: 0.0404449
+E        ACTUAL: array([ 4.552588, -0.940626, -1.296092, ..., -3.338569, -0.581404,
+E              -0.225566], shape=(524288,), dtype=float32)
+E        DESIRED: array([ 4.552588, -0.940626, -1.296092, ..., -3.338569, -0.581403,
+E              -0.225566], shape=(524288,), dtype=float32)
+
+gpu/test_spawn_hardware.py:510: AssertionError
+_________ test_spawn_mla_matches_hand_kernels[4-64-64-300-37-4-37-64] __________
+
+context = <gpu.runtime.CUDAContext object at 0x706722c03ad0>, heads = 4
+rank = 64, rope = 64, tokens = 300, count = 37, splits = 4, stride = 37
+block = 64
+
+    @pytest.mark.parametrize('heads,rank,rope,tokens,count,splits,stride,block', [
+        (2, 48, 4, 7, 5, 3, 0, 64), (2, 48, 4, 7, 5, 8, 0, 64), (2, 48, 4, 7, 0, 3, 0, 64),
+        (64, 512, 64, 4096, 2048, 16, 0, 512), (4, 64, 64, 300, 37, 4, 37, 64)])
+    def test_spawn_mla_matches_hand_kernels(context, heads, rank, rope, tokens, count, splits, stride, block):
+        rng = np.random.default_rng(heads + rank + count + splits)
+        q, qr = rng.normal(size=heads * rank).astype('f4'), rng.normal(size=heads * rope).astype('f4')
+        kv, kr = rng.normal(size=tokens * rank).astype('f4'), rng.normal(size=tokens * rope).astype('f4')
+        lists = heads if stride else 1
+        selected = rng.integers(0, tokens, size=max(1, lists * max(count, 1))).astype('i4')
+        if count:
+            selected[1 % selected.size] = -1
+            selected[-1] = tokens + 5
+        dq, dqr, dkv, dkr, dsel = (upload(context, a) for a in (q, qr, kv, kr, selected))
+        scale = rank ** -0.5
+        num = [context.tensor((heads * splits * rank,)) for _ in range(2)]
+        stats = [context.tensor((heads * splits * 2,)) for _ in range(2)]
+        out = [context.tensor((heads * rank,)) for _ in range(2)]
+        SpawnKernel(context, BUILD / 'spawn/mla_partial.ptx').launch(
+            heads * splits, block, heads=heads, rank=rank, rope_dim=rope, tokens=tokens, count=count,
+            selection_stride=stride, splits=splits, selected=dsel, cache_latent=dkv, q_latent=dq, q_rope=dqr,
+            cache_rope=dkr, scale=scale, threads=block, numerator=num[0].view((heads * splits, rank)),
+            stats=stats[0].view((heads * splits, 2)))
+        SpawnKernel(context, BUILD / 'spawn/mla_merge.ptx').launch(
+            heads, 256, heads=heads, rank=rank, splits=splits, stats=stats[0], numerator=num[0], out=out[0].view((heads, rank)))
+        hand = context.load_ptx(BUILD / 'kernels.ptx')
+        I = C.c_int32
+        hand.kernel('glm_vx_gpu_mla_partial').launch(heads * splits, block, [
+            num[1], stats[1], dq, dqr, dkv, dkr, dsel, I(heads), I(rank), I(rope), I(tokens), I(count), I(stride),
+            I(splits), C.c_float(scale)])
+        hand.kernel('glm_vx_gpu_mla_merge').launch(heads, 256, [out[1], num[1], stats[1], I(heads), I(rank), I(splits)])
+        context.synchronize()
+        np.testing.assert_allclose(download(stats[0]), download(stats[1]), **EXP)
+>       np.testing.assert_allclose(download(num[0]), download(num[1]), **EXP)
+E       AssertionError: 
+E       Not equal to tolerance rtol=1e-05, atol=1e-37
+E       
+E       Mismatched elements: 1 / 1024 (0.0977%)
+E       Mismatch at index:
+E        [294]: 0.004009705502539873 (ACTUAL), 0.00400958675891161 (DESIRED)
+E       Max absolute difference among violations: 1.1874363e-07
+E       Max relative difference among violations: 2.961493e-05
+E        ACTUAL: array([-1.382607, -0.157513, -0.296686, ..., -1.944753,  0.087501,
+E               1.202839], shape=(1024,), dtype=float32)
+E        DESIRED: array([-1.382607, -0.157513, -0.296686, ..., -1.944753,  0.087501,
+E               1.202839], shape=(1024,), dtype=float32)
+
+gpu/test_spawn_hardware.py:510: AssertionError
+3 failed, 86 passed, 1 xfailed in 1.56s

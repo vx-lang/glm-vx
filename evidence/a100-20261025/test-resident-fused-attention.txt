@@ -1,0 +1,40 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+__________ test_fused_attention_matches_partial_then_merge_on_the_gpu __________
+
+ctx = <gpu.runtime.CUDAContext object at 0x7a8237bf0320>
+
+    def test_fused_attention_matches_partial_then_merge_on_the_gpu(ctx):
+        model = build(seed=71, index_topk=1024)
+        tokens = np.random.default_rng(71).integers(0, model.config['vocab_size'], size=STEPS).tolist()
+        fused = ResidentGLM(model, ctx=ctx, max_tokens=STEPS + 8, fused_attention=True)
+        plain = ResidentGLM(model, ctx=ctx, max_tokens=STEPS + 8)
+>       got, want = fused.prefill(tokens), plain.prefill(tokens)
+                    ^^^^^^^^^^^^^^^^^^^^^
+
+gpu/test_resident_fused_attention_hardware.py:33: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+gpu/resident.py:787: in prefill
+    return np.stack([self.forward(t) for t in token_ids]) if len(token_ids) else np.empty((0, int(self.config['vocab_size'])), np.float32)
+                     ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.resident.ResidentGLM object at 0x7a823a1c6fc0>, token_id = 20
+logits = True
+
+    def forward(self, token_id, *, logits=True):
+        """Append one token and return next-token logits (None with logits=False)."""
+        m, c = self.model, self.config
+        if self._closed:
+            raise RuntimeError('ResidentGLM is closed')
+        if not isinstance(token_id, (int, np.integer)) or not 0 <= int(token_id) < int(c['vocab_size']):
+            raise ValueError('token_id must be an integer in the vocabulary')
+        position = self.position
+        if position >= self.max_tokens:
+            raise ValueError(f'sequence exceeds max_tokens={self.max_tokens}')
+        if position >= int(c.get('max_position_embeddings', 2 ** 31 - 1)):
+>           raise ValueError('Request exceeds max_position_embeddings')
+E           ValueError: Request exceeds max_position_embeddings
+
+gpu/resident.py:678: ValueError
+1 failed in 4.57s

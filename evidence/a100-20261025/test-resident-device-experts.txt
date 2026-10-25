@@ -1,0 +1,173 @@
+FFFFF                                                                    [100%]
+=================================== FAILURES ===================================
+_________ test_device_experts_equal_the_host_loop_on_the_gpu[float32] __________
+
+ctx = <gpu.runtime.CUDAContext object at 0x7fed21a47b60>, kind = 'float32'
+
+    @pytest.mark.parametrize('kind', ['float32', 'fused', 'int4', 'fp8', 'bf16'])
+    def test_device_experts_equal_the_host_loop_on_the_gpu(ctx, kind):
+        model = expert_models(kind)
+        device = ResidentGLM(model, ctx=ctx, max_tokens=32, device_experts=True)
+        host = ResidentGLM(model, ctx=ctx, max_tokens=32)
+        refuse_id_reads(device)
+        got, want = device.prefill(TOKENS), host.prefill(TOKENS)
+        # The fused kernels' dot products follow the hand matvecs' order (gpu/test_spawn_hardware.py
+        # checks the per-expert kernels bit for bit), so the logits should agree exactly.
+>       np.testing.assert_array_equal(got, want)
+E       AssertionError: 
+E       Arrays are not equal
+E       
+E       Mismatched elements: 1488 / 3072 (48.4%)
+E       First 5 mismatches are at indices:
+E        [0, 1]: 0.10702814161777496 (ACTUAL), 0.10702813416719437 (DESIRED)
+E        [0, 2]: 0.057338301092386246 (ACTUAL), 0.05733830854296684 (DESIRED)
+E        [0, 4]: -0.0644807517528534 (ACTUAL), -0.06448075920343399 (DESIRED)
+E        [0, 6]: 0.09065696597099304 (ACTUAL), 0.09065695106983185 (DESIRED)
+E        [0, 7]: -0.03546779602766037 (ACTUAL), -0.03546779230237007 (DESIRED)
+E       Max absolute difference among violations: 5.9604645e-08
+E       Max relative difference among violations: 3.9227994e-05
+E        ACTUAL: array([[ 0.136256,  0.107028,  0.057338, ...,  0.163555, -0.082361,
+E                0.10369 ],
+E              [ 0.132543,  0.127681, -0.092427, ...,  0.005451, -0.058361,...
+E        DESIRED: array([[ 0.136256,  0.107028,  0.057338, ...,  0.163555, -0.082361,
+E                0.10369 ],
+E              [ 0.132543,  0.127681, -0.092427, ...,  0.005451, -0.058361,...
+
+gpu/test_resident_device_experts_hardware.py:34: AssertionError
+__________ test_device_experts_equal_the_host_loop_on_the_gpu[fused] ___________
+
+ctx = <gpu.runtime.CUDAContext object at 0x7fed21a47b60>, kind = 'fused'
+
+    @pytest.mark.parametrize('kind', ['float32', 'fused', 'int4', 'fp8', 'bf16'])
+    def test_device_experts_equal_the_host_loop_on_the_gpu(ctx, kind):
+        model = expert_models(kind)
+        device = ResidentGLM(model, ctx=ctx, max_tokens=32, device_experts=True)
+        host = ResidentGLM(model, ctx=ctx, max_tokens=32)
+        refuse_id_reads(device)
+        got, want = device.prefill(TOKENS), host.prefill(TOKENS)
+        # The fused kernels' dot products follow the hand matvecs' order (gpu/test_spawn_hardware.py
+        # checks the per-expert kernels bit for bit), so the logits should agree exactly.
+>       np.testing.assert_array_equal(got, want)
+E       AssertionError: 
+E       Arrays are not equal
+E       
+E       Mismatched elements: 1535 / 3072 (50%)
+E       First 5 mismatches are at indices:
+E        [0, 3]: 0.06472738087177277 (ACTUAL), 0.06472736597061157 (DESIRED)
+E        [0, 5]: -0.11444564908742905 (ACTUAL), -0.11444564163684845 (DESIRED)
+E        [0, 8]: 0.09664780646562576 (ACTUAL), 0.09664781391620636 (DESIRED)
+E        [0, 11]: -0.06565845757722855 (ACTUAL), -0.06565846502780914 (DESIRED)
+E        [0, 13]: -0.009383011609315872 (ACTUAL), -0.009383004158735275 (DESIRED)
+E       Max absolute difference among violations: 3.3527613e-08
+E       Max relative difference among violations: 0.00010193
+E        ACTUAL: array([[-0.237759,  0.013388, -0.121394, ..., -0.113353,  0.052977,
+E               -0.022808],
+E              [ 0.028956,  0.008918, -0.084282, ..., -0.064508,  0.044628,...
+E        DESIRED: array([[-0.237759,  0.013388, -0.121394, ..., -0.113353,  0.052977,
+E               -0.022808],
+E              [ 0.028956,  0.008918, -0.084282, ..., -0.064508,  0.044628,...
+
+gpu/test_resident_device_experts_hardware.py:34: AssertionError
+___________ test_device_experts_equal_the_host_loop_on_the_gpu[int4] ___________
+
+ctx = <gpu.runtime.CUDAContext object at 0x7fed21a47b60>, kind = 'int4'
+
+    @pytest.mark.parametrize('kind', ['float32', 'fused', 'int4', 'fp8', 'bf16'])
+    def test_device_experts_equal_the_host_loop_on_the_gpu(ctx, kind):
+        model = expert_models(kind)
+        device = ResidentGLM(model, ctx=ctx, max_tokens=32, device_experts=True)
+        host = ResidentGLM(model, ctx=ctx, max_tokens=32)
+        refuse_id_reads(device)
+        got, want = device.prefill(TOKENS), host.prefill(TOKENS)
+        # The fused kernels' dot products follow the hand matvecs' order (gpu/test_spawn_hardware.py
+        # checks the per-expert kernels bit for bit), so the logits should agree exactly.
+>       np.testing.assert_array_equal(got, want)
+E       AssertionError: 
+E       Arrays are not equal
+E       
+E       Mismatched elements: 1810 / 3072 (58.9%)
+E       First 5 mismatches are at indices:
+E        [0, 0]: -0.08459142595529556 (ACTUAL), -0.08459143340587616 (DESIRED)
+E        [0, 1]: 0.10129985213279724 (ACTUAL), 0.10129985958337784 (DESIRED)
+E        [0, 2]: 0.013920258730649948 (ACTUAL), 0.013920256868004799 (DESIRED)
+E        [0, 3]: -0.2213200479745865 (ACTUAL), -0.22132006287574768 (DESIRED)
+E        [0, 4]: -0.011116236448287964 (ACTUAL), -0.011116234585642815 (DESIRED)
+E       Max absolute difference among violations: 5.9604645e-08
+E       Max relative difference among violations: 0.00015977
+E        ACTUAL: array([[-0.084591,  0.1013  ,  0.01392 , ...,  0.026808,  0.026429,
+E               -0.05122 ],
+E              [-0.088585, -0.124136, -0.106962, ...,  0.018869, -0.021896,...
+E        DESIRED: array([[-0.084591,  0.1013  ,  0.01392 , ...,  0.026808,  0.026429,
+E               -0.05122 ],
+E              [-0.088585, -0.124136, -0.106962, ...,  0.018869, -0.021896,...
+
+gpu/test_resident_device_experts_hardware.py:34: AssertionError
+___________ test_device_experts_equal_the_host_loop_on_the_gpu[fp8] ____________
+
+ctx = <gpu.runtime.CUDAContext object at 0x7fed21a47b60>, kind = 'fp8'
+
+    @pytest.mark.parametrize('kind', ['float32', 'fused', 'int4', 'fp8', 'bf16'])
+    def test_device_experts_equal_the_host_loop_on_the_gpu(ctx, kind):
+        model = expert_models(kind)
+        device = ResidentGLM(model, ctx=ctx, max_tokens=32, device_experts=True)
+        host = ResidentGLM(model, ctx=ctx, max_tokens=32)
+        refuse_id_reads(device)
+        got, want = device.prefill(TOKENS), host.prefill(TOKENS)
+        # The fused kernels' dot products follow the hand matvecs' order (gpu/test_spawn_hardware.py
+        # checks the per-expert kernels bit for bit), so the logits should agree exactly.
+>       np.testing.assert_array_equal(got, want)
+E       AssertionError: 
+E       Arrays are not equal
+E       
+E       Mismatched elements: 2335 / 3072 (76%)
+E       First 5 mismatches are at indices:
+E        [0, 0]: -0.07356445491313934 (ACTUAL), -0.07356447726488113 (DESIRED)
+E        [0, 1]: -0.06249340996146202 (ACTUAL), -0.06249343231320381 (DESIRED)
+E        [0, 2]: 0.23471549153327942 (ACTUAL), 0.2347155064344406 (DESIRED)
+E        [0, 3]: 0.1970190554857254 (ACTUAL), 0.19701910018920898 (DESIRED)
+E        [0, 4]: -0.13327717781066895 (ACTUAL), -0.13327719271183014 (DESIRED)
+E       Max absolute difference among violations: 1.1920929e-07
+E       Max relative difference among violations: 0.00078309
+E        ACTUAL: array([[-0.073564, -0.062493,  0.234715, ...,  0.000718, -0.255856,
+E               -0.356045],
+E              [ 0.272261, -0.123124, -0.391197, ..., -0.107457,  0.077677,...
+E        DESIRED: array([[-0.073564, -0.062493,  0.234716, ...,  0.000718, -0.255856,
+E               -0.356045],
+E              [ 0.272261, -0.123124, -0.391197, ..., -0.107457,  0.077677,...
+
+gpu/test_resident_device_experts_hardware.py:34: AssertionError
+___________ test_device_experts_equal_the_host_loop_on_the_gpu[bf16] ___________
+
+ctx = <gpu.runtime.CUDAContext object at 0x7fed21a47b60>, kind = 'bf16'
+
+    @pytest.mark.parametrize('kind', ['float32', 'fused', 'int4', 'fp8', 'bf16'])
+    def test_device_experts_equal_the_host_loop_on_the_gpu(ctx, kind):
+        model = expert_models(kind)
+        device = ResidentGLM(model, ctx=ctx, max_tokens=32, device_experts=True)
+        host = ResidentGLM(model, ctx=ctx, max_tokens=32)
+        refuse_id_reads(device)
+        got, want = device.prefill(TOKENS), host.prefill(TOKENS)
+        # The fused kernels' dot products follow the hand matvecs' order (gpu/test_spawn_hardware.py
+        # checks the per-expert kernels bit for bit), so the logits should agree exactly.
+>       np.testing.assert_array_equal(got, want)
+E       AssertionError: 
+E       Arrays are not equal
+E       
+E       Mismatched elements: 971 / 3072 (31.6%)
+E       First 5 mismatches are at indices:
+E        [0, 49]: 0.042403653264045715 (ACTUAL), 0.04240366071462631 (DESIRED)
+E        [0, 77]: -0.21945661306381226 (ACTUAL), -0.21945659816265106 (DESIRED)
+E        [0, 103]: -0.03169146925210953 (ACTUAL), -0.03169146552681923 (DESIRED)
+E        [0, 165]: 0.010771671310067177 (ACTUAL), 0.010771673172712326 (DESIRED)
+E        [0, 171]: 0.03669915348291397 (ACTUAL), 0.036699146032333374 (DESIRED)
+E       Max absolute difference among violations: 5.9604645e-08
+E       Max relative difference among violations: 0.00013233
+E        ACTUAL: array([[ 0.050266,  0.164498,  0.144617, ..., -0.171442, -0.000327,
+E                0.163288],
+E              [-0.092604, -0.042307,  0.055333, ..., -0.057417, -0.047314,...
+E        DESIRED: array([[ 0.050266,  0.164498,  0.144617, ..., -0.171442, -0.000327,
+E                0.163288],
+E              [-0.092604, -0.042307,  0.055333, ..., -0.057417, -0.047314,...
+
+gpu/test_resident_device_experts_hardware.py:34: AssertionError
+5 failed in 1.62s

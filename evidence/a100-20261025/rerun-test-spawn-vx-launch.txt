@@ -1,0 +1,4 @@
+.........................s...............                                [100%]
+=========================== short test summary info ============================
+SKIPPED [1] gpu/test_spawn_vx_launch.py:229: Vx's library launch passes a host arrival count (Vx #2231, fixed by PR #2232)
+40 passed, 1 skipped in 0.90s
