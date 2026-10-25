@@ -166,7 +166,7 @@ pub fn glm_vx_gpu_matvec(out: *mut f32, weight: *const f32, x: *const f32, rows:
 // DSA index scores, one warp per token and all heads in one launch.
 // Caller supplies causal keys and head weights already scaled by heads**-0.5.
 // No head-by-token score matrix; signed weights apply AFTER the ReLU.
-pub fn glm_vx_gpu_index_scores(out: *mut f32, q: *const f32, keys: *const f32, weights: *const f32, tokens: i32, heads: i32, dim: i32, scale: f32) -> void {
+fn vxk_index_scores(out: *mut f32, q: *const f32, keys: *const f32, weights: *const f32, tokens: i32, heads: i32, dim: i32, scale: f32) -> void {
   if tokens <= 0 { return; }
   if heads <= 0 { return; }
   if dim <= 0 { return; }
@@ -200,10 +200,27 @@ pub fn glm_vx_gpu_index_scores(out: *mut f32, q: *const f32, keys: *const f32, w
   }
 }
 
+pub fn glm_vx_gpu_index_scores(out: *mut f32, q: *const f32, keys: *const f32, weights: *const f32, tokens: i32, heads: i32, dim: i32, scale: f32) -> void {
+  vxk_index_scores(out, q, keys, weights, tokens, heads, dim, scale);
+  return;
+}
+
+// A graph-captured decode step's arguments that change every token: step[0] the position,
+// step[1] the causal tokens, step[2] the selected count, step[3] the MLA splits. The `_at`
+// entries read them on the device and run the same code as their plain entries; launch them
+// with the grid for the most tokens (or splits), and the blocks past the step's value exit.
+pub fn glm_vx_gpu_index_scores_at(out: *mut f32, q: *const f32, keys: *const f32, weights: *const f32, step: *const i32, heads: i32, dim: i32, scale: f32) -> void {
+  unsafe {
+    let tokens: i32 = step[1];
+    vxk_index_scores(out, q, keys, weights, tokens, heads, dim, scale);
+    return;
+  }
+}
+
 // Absorbed MLA: dot(q_latent,cache_latent) + dot(q_rope,cache_rope).
 // Cache latent is also the value. One CTA per (head, split), one value/thread.
 // Online softmax keeps O(rank) state without materializing scores/probabilities.
-pub fn glm_vx_gpu_mla_partial(numerator: *mut f32, stats: *mut f32, q_latent: *const f32, q_rope: *const f32, cache_latent: *const f32, cache_rope: *const f32, selected: *const i32, heads: i32, rank: i32, rope_dim: i32, tokens: i32, count: i32, selection_stride: i32, splits: i32, scale: f32) -> void {
+fn vxk_mla_partial(numerator: *mut f32, stats: *mut f32, q_latent: *const f32, q_rope: *const f32, cache_latent: *const f32, cache_rope: *const f32, selected: *const i32, heads: i32, rank: i32, rope_dim: i32, tokens: i32, count: i32, selection_stride: i32, splits: i32, scale: f32) -> void {
   if heads <= 0 { return; }
   if rank <= 0 { return; }
   if rope_dim < 0 { return; }
@@ -268,8 +285,24 @@ pub fn glm_vx_gpu_mla_partial(numerator: *mut f32, stats: *mut f32, q_latent: *c
   }
 }
 
+pub fn glm_vx_gpu_mla_partial(numerator: *mut f32, stats: *mut f32, q_latent: *const f32, q_rope: *const f32, cache_latent: *const f32, cache_rope: *const f32, selected: *const i32, heads: i32, rank: i32, rope_dim: i32, tokens: i32, count: i32, selection_stride: i32, splits: i32, scale: f32) -> void {
+  vxk_mla_partial(numerator, stats, q_latent, q_rope, cache_latent, cache_rope, selected, heads, rank, rope_dim, tokens, count, selection_stride, splits, scale);
+  return;
+}
+
+// mla_partial with tokens, count and splits from step (see index_scores_at); grid heads * the most splits.
+pub fn glm_vx_gpu_mla_partial_at(numerator: *mut f32, stats: *mut f32, q_latent: *const f32, q_rope: *const f32, cache_latent: *const f32, cache_rope: *const f32, selected: *const i32, step: *const i32, heads: i32, rank: i32, rope_dim: i32, selection_stride: i32, scale: f32) -> void {
+  unsafe {
+    let tokens: i32 = step[1];
+    let count: i32 = step[2];
+    let splits: i32 = step[3];
+    vxk_mla_partial(numerator, stats, q_latent, q_rope, cache_latent, cache_rope, selected, heads, rank, rope_dim, tokens, count, selection_stride, splits, scale);
+    return;
+  }
+}
+
 // Stable merge of independent online-softmax partitions, one CTA/head.
-pub fn glm_vx_gpu_mla_merge(out: *mut f32, numerator: *const f32, stats: *const f32, heads: i32, rank: i32, splits: i32) -> void {
+fn vxk_mla_merge(out: *mut f32, numerator: *const f32, stats: *const f32, heads: i32, rank: i32, splits: i32) -> void {
   if heads <= 0 { return; }
   if rank <= 0 { return; }
   if splits <= 0 { return; }
@@ -308,6 +341,20 @@ pub fn glm_vx_gpu_mla_merge(out: *mut f32, numerator: *const f32, stats: *const 
         out[h * rank + d] = result;
       }
     }
+    return;
+  }
+}
+
+pub fn glm_vx_gpu_mla_merge(out: *mut f32, numerator: *const f32, stats: *const f32, heads: i32, rank: i32, splits: i32) -> void {
+  vxk_mla_merge(out, numerator, stats, heads, rank, splits);
+  return;
+}
+
+// mla_merge with splits from step (see index_scores_at).
+pub fn glm_vx_gpu_mla_merge_at(out: *mut f32, numerator: *const f32, stats: *const f32, step: *const i32, heads: i32, rank: i32) -> void {
+  unsafe {
+    let splits: i32 = step[3];
+    vxk_mla_merge(out, numerator, stats, heads, rank, splits);
     return;
   }
 }
@@ -531,6 +578,20 @@ pub fn glm_vx_gpu_copy(out: *mut f32, x: *const f32, n: i32) -> void {
     let stride: i32 = vx_gpu_grid_dim_x() * vx_gpu_block_dim_x();
     for iteration in 0..((n + stride - 1) / stride) {
       if i < n { out[i] = x[i]; }
+      i = i + stride;
+    }
+    return;
+  }
+}
+
+// cache[step[0] * width + i] = row[i]: a cache row at the step's position (see index_scores_at).
+pub fn glm_vx_gpu_store_row(cache: *mut f32, row: *const f32, step: *const i32, width: i32) -> void {
+  unsafe {
+    let base: i32 = step[0] * width;
+    let mut i: i32 = vx_gpu_block_idx_x() * vx_gpu_block_dim_x() + vx_gpu_thread_idx_x();
+    let stride: i32 = vx_gpu_grid_dim_x() * vx_gpu_block_dim_x();
+    for iteration in 0..((width + stride - 1) / stride) {
+      if i < width { cache[base + i] = row[i]; }
       i = i + stride;
     }
     return;

@@ -111,6 +111,7 @@ class ContractTests(unittest.TestCase):
             ptx = output.read_text()
             for name in ('rmsnorm', 'softmax', 'router', 'residual_rmsnorm',
                          'swiglu', 'rope_glm', 'matvec', 'index_scores', 'mla_partial', 'mla_merge',
+                         'index_scores_at', 'mla_partial_at', 'mla_merge_at', 'store_row',
                          'rmsnorm_rows', 'softmax_rows'):
                 self.assertIn('.visible .entry glm_vx_gpu_' + name + '(', ptx)
             for token in ('shfl.sync.idx', 'shfl.sync.down', 'bar.sync', '.shared'):

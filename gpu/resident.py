@@ -47,7 +47,17 @@ block of each head's last split merges that head), in place of mla_partial then 
 is libdevice's expf, not the hand kernels' ex2.approx, so logits differ from the default in the last
 bits. It needs Vx's code of a group of blocks (#2185 to #2188, on Vx main from c3716538).
 
-Not a performance claim: no timing is made here, and launches are still one per op.
+``graph=True`` captures the decode step's layers into a CUDA graph (#26) and replays it every token:
+one upload of the step's inputs (the embedding row, cos, sin and the step buffer), one graph launch,
+then the final norm, lm_head and the logits down. What changes per token comes from the step buffer
+``[position, tokens, count, splits]`` (#25): the ``*_at`` kernels read it on the device, launch with
+the grid for ``max_tokens`` (or ``splits_max``), and new cache rows go through fixed rows and
+``store_row``. The first step runs the same launches eagerly, so every weight is uploaded and every
+kernel loaded before the capture at the second; the arithmetic is the per-launch path's, so the
+logits are equal bit for bit. It needs ``device_topk`` and ``device_experts`` (no host read inside a
+step); ``fused_attention`` is #27.
+
+Not a performance claim: no timing is made here.
 ``device_experts`` needs the gpu/spawn kernels built (gpu/spawn/build.sh into ptx_dir/spawn) with a
 vxc that has Vx's lanes:: reductions (see gpu/spawn/README.md); it has not run on a GPU yet.
 """
@@ -87,7 +97,7 @@ class ResidentGLM:
     name = 'vx-gpu-resident'
 
     def __init__(self, model, *, max_tokens=4096, ptx_dir=None, device=0, ctx=None, max_weight_bytes=None,
-                 device_topk=True, device_experts=False, fused_attention=False):
+                 device_topk=True, device_experts=False, fused_attention=False, graph=False):
         if getattr(model, 'packed_weights', False):
             raise NotImplementedError('ResidentGLM supports expanded float32 weights only')
         if getattr(model, 'expert_placement', None) is not None:
@@ -99,6 +109,13 @@ class ResidentGLM:
         self.device_topk = bool(device_topk)
         self.device_experts = bool(device_experts)
         self.fused_attention = bool(fused_attention)
+        self.graph = bool(graph)
+        if self.graph and not (self.device_topk and self.device_experts):
+            raise ValueError('graph=True needs device_topk and device_experts: a captured step cannot read device memory')
+        if self.graph and self.fused_attention:
+            raise NotImplementedError('graph=True with fused_attention needs mla_decode to read splits on the device (#27)')
+        self._step_graph, self._warm = None, False
+        self.replays = 0
         self.max_weight_bytes = max_weight_bytes
         self.weight_bytes = 0
         self._room = self._plan = None  # preload's fit check, see preload()
@@ -309,7 +326,20 @@ class ResidentGLM:
         width = max(widths)
         t = self._tensor
         # Residual stream ping-pong and per-block scratch.
-        self.x, self.x_next, self.norm = t((self.hidden,)), t((self.hidden,)), t((self.hidden,))
+        half = self.rot // 2
+        if self.graph:
+            # The step's inputs back to back, one upload per token: x (the embedding row; the
+            # ping-pong returns to it after every layer's two swaps), cos, sin, then the int32 step
+            # buffer [position, tokens, count, splits] the *_at kernels read.
+            self.step_inputs = t((self.hidden + 2 * half + 4,))
+            self.x = self.step_inputs.view((self.hidden,))
+            self.cos = self.step_inputs.view((half,), offset=self.hidden * 4)
+            self.sin = self.step_inputs.view((half,), offset=(self.hidden + half) * 4)
+            self.step = self.step_inputs.view((4,), 'int32', offset=(self.hidden + 2 * half) * 4)
+        else:
+            self.x = t((self.hidden,))
+            self.cos, self.sin = t((half,)), t((half,))
+        self.x_next, self.norm = t((self.hidden,)), t((self.hidden,))
         self.attn_out, self.ffn_out = t((self.hidden,)), t((self.hidden,))
         self.q_a, self.q_res = t((q_rank,)), t((q_rank,))
         self.query = t((self.heads * qk,))
@@ -336,7 +366,10 @@ class ResidentGLM:
         self.mlp_out, self.expert_out = t((self.hidden,)), t((self.hidden,))
         self.moe_sum = t((self.hidden,))
         self.zeros = t((self.hidden,))
-        self.cos, self.sin = t((self.rot // 2,)), t((self.rot // 2,))
+        # With graph=True, this step's cache rows before store_row puts them at the position.
+        self.latent_new = self.rope_new = self.index_key_new = None
+        if self.graph:
+            self.latent_new, self.rope_new, self.index_key_new = t((self.rank,)), t((self.rot,)), t((self.index_dim,))
         if 'sparse' in m.mlp_types:
             experts = int(c['n_routed_experts'])
             k = int(c['num_experts_per_tok'])
@@ -392,10 +425,13 @@ class ResidentGLM:
         return name
 
     def _topk_kernel(self):
-        if 'topk_stable' not in self._kernels:
-            module = self._modules['topk'] = self.ctx.load_ptx(self._ptx_dir / 'topk.ptx')
-            self._kernels['topk_stable'] = module.kernel('glm_vx_gpu_topk_stable')
-        return 'topk_stable'
+        name = 'topk_stable_at' if self.graph else 'topk_stable'
+        if name not in self._kernels:
+            module = self._modules.get('topk')
+            if module is None:
+                module = self._modules['topk'] = self.ctx.load_ptx(self._ptx_dir / 'topk.ptx')
+            self._kernels[name] = module.kernel('glm_vx_gpu_' + name)
+        return name
 
     def _linear(self, name, x, out, bias=False):
         self._project(name, x, out)
@@ -423,6 +459,15 @@ class ResidentGLM:
 
     def _row(self, tensor, position, width):
         return tensor.view((width,), offset=position * width * 4)
+
+    def _new_row(self, cache, position, width, scratch):
+        """Where this step's row of `cache` is written: the row itself, or with graph=True a
+        fixed scratch row that _store_row then puts at the position the step buffer holds."""
+        return scratch.view((width,)) if self.graph else self._row(cache, position, width)
+
+    def _store_row(self, cache, scratch, width):
+        if self.graph:
+            self._launch('store_row', self._grid(width), _ELEMENTWISE_BLOCK, [cache, scratch, self.step, I(width)])
 
     def _mlp(self, prefix, x, out):
         """down(SwiGLU(gate(x), up(x))) with both projections and the activation resident."""
@@ -551,19 +596,29 @@ class ResidentGLM:
         self._linear(prefix + '.wk', x, self.ik)
         self._launch('layernorm', 1, 256, [self.ik_norm, self.ik, self._weight(prefix + '.k_norm.weight'),
                                            self._weight(prefix + '.k_norm.bias'), I(1), I(self.index_dim), F(1e-6)])
-        row = self._row(self.index_keys[layer], position, self.index_dim)
+        row = self._new_row(self.index_keys[layer], position, self.index_dim, self.index_key_new)
         self._copy(row, self.ik_norm, self.index_dim)
         self._rope(row, self.ik_norm, 1, self.rot, self.rot, self.rot)
+        self._store_row(self.index_keys[layer], row, self.index_dim)
         self._copy(self.iq_rot, self.iq, self.index_heads * self.index_dim)
         self._rope(self.iq_rot, self.iq, self.index_heads, self.rot, self.index_dim, self.index_dim)
         self._linear(prefix + '.weights_proj', x, self.head_weights_raw)
         self._launch('scale', self._grid(self.index_heads), _ELEMENTWISE_BLOCK,
                      [self.head_weights, self.head_weights_raw, F(_f32(self.index_heads ** -0.5, 'scale')), I(self.index_heads)])
-        self._launch('index_scores', (tokens + 3) // 4, 128,
-                     [self.scores, self.iq_rot, self.index_keys[layer], self.head_weights, I(tokens), I(self.index_heads),
-                      I(self.index_dim), F(_f32(self.index_dim ** -0.5, 'scale'))])
+        scale = F(_f32(self.index_dim ** -0.5, 'scale'))
+        if self.graph:
+            self._launch('index_scores_at', (self.max_tokens + 3) // 4, 128,
+                         [self.scores, self.iq_rot, self.index_keys[layer], self.head_weights, self.step,
+                          I(self.index_heads), I(self.index_dim), scale])
+        else:
+            self._launch('index_scores', (tokens + 3) // 4, 128,
+                         [self.scores, self.iq_rot, self.index_keys[layer], self.head_weights, I(tokens), I(self.index_heads),
+                          I(self.index_dim), scale])
         count = min(self.index_topk, tokens)
-        if self.device_topk:
+        if self.graph:
+            self._launch(self._topk_kernel(), 1, 256, [self.selected, self.scores, self.topk_scratch, self.step,
+                                                 I(self.index_topk)])
+        elif self.device_topk:
             # Stable by position, exactly as GlmMoeDsaModel._index (TOPK.md); writes ids[:count].
             self._launch(self._topk_kernel(), 1, 256, [self.selected, self.scores.view((tokens,)), self.topk_scratch,
                                                  I(tokens), I(self.index_topk)])
@@ -590,10 +645,12 @@ class ResidentGLM:
         self._rmsnorm(self.q_a, self._weight(prefix + '.q_a_layernorm.weight'), self.q_res, 1e-6)
         self._linear(prefix + '.q_b_proj', self.q_res, self.query)
         self._linear(prefix + '.kv_a_proj_with_mqa', x, self.compressed, bias)
-        latent_row = self._row(self.latents[layer], position, self.rank)
+        latent_row = self._new_row(self.latents[layer], position, self.rank, self.latent_new)
         self._rmsnorm(self.compressed.view((self.rank,)), self._weight(prefix + '.kv_a_layernorm.weight'), latent_row, 1e-6)
-        rope_row = self._row(self.rope_keys[layer], position, self.rot)
+        self._store_row(self.latents[layer], latent_row, self.rank)
+        rope_row = self._new_row(self.rope_keys[layer], position, self.rot, self.rope_new)
         self._rope(rope_row, self.compressed.view((self.rot,), offset=self.rank * 4), 1, self.rot, self.rot, self.rot)
+        self._store_row(self.rope_keys[layer], rope_row, self.rot)
         if m.indexer_types[layer] == 'full':
             self._index(layer, prefix + '.indexer', x, position)
         elif not shared_ok:
@@ -619,6 +676,12 @@ class ResidentGLM:
                         cache_rope=self.rope_keys[layer], selected=self.selected, heads=self.heads, rank=self.rank,
                         rope_dim=self.rot, tokens=tokens, count=count, selection_stride=0, splits=splits,
                         scale=scale.value, threads=block, arrivals=self.arrivals)
+        elif self.graph:
+            self._launch('mla_partial_at', self.heads * self.splits_max, block,
+                         [self.numerator, self.stats, self.latent_q, self.rot_q, self.latents[layer], self.rope_keys[layer],
+                          self.selected, self.step, I(self.heads), I(self.rank), I(self.rot), I(0), scale])
+            self._launch('mla_merge_at', self.heads, 256,
+                         [self.attended, self.numerator, self.stats, self.step, I(self.heads), I(self.rank)])
         else:
             self._launch('mla_partial', self.heads * splits, block,
                          [self.numerator, self.stats, self.latent_q, self.rot_q, self.latents[layer], self.rope_keys[layer],
@@ -676,10 +739,45 @@ class ResidentGLM:
             raise ValueError(f'sequence exceeds max_tokens={self.max_tokens}')
         if position >= int(c.get('max_position_embeddings', 2 ** 31 - 1)):
             raise ValueError('Request exceeds max_position_embeddings')
-        self.x.upload(np.ascontiguousarray(m._embedding(int(token_id)), dtype=np.float32))
+        embedding = np.ascontiguousarray(m._embedding(int(token_id)), dtype=np.float32)
         cosine, sine = _cached_rope_coefficients(self.rot, float(position), float(m.theta))
-        self.cos.upload(np.ascontiguousarray(cosine, dtype=np.float32))
-        self.sin.upload(np.ascontiguousarray(sine, dtype=np.float32))
+        cosine, sine = (np.ascontiguousarray(v, dtype=np.float32) for v in (cosine, sine))
+        if self.graph:
+            tokens = position + 1
+            count = min(self.index_topk, tokens)
+            splits = min(self.splits_max, max(1, (count + 255) // 256))
+            step = np.array([position, tokens, count, splits], np.int32).view(np.float32)
+            self.step_inputs.upload(np.concatenate([embedding, cosine, sine, step]))
+            if self._step_graph is not None:
+                self._step_graph.launch(self.stream)
+                self.replays += 1
+                self.selected_count = count
+            elif not self._warm:
+                self._layers(position)  # uploads every weight and loads every kernel the capture needs
+                self._warm = True
+            else:
+                with self.stream.capture() as graph:
+                    self._layers(position)
+                self._step_graph = graph
+                graph.launch(self.stream)
+                self.replays += 1
+        else:
+            self.x.upload(embedding)
+            self.cos.upload(cosine)
+            self.sin.upload(sine)
+            self._layers(position)
+        self.position += 1
+        if not logits:
+            return None
+        self._rmsnorm(self.x, self._weight('model.norm.weight'), self.norm, m.eps)
+        head = 'model.embed_tokens' if c.get('tie_word_embeddings', False) else 'lm_head'
+        self._project(head, self.norm, self.logits)
+        return np.frombuffer(self.logits.download(), dtype=np.float32).copy()
+
+    def _layers(self, position):
+        """Every layer of one decode step, from self.x (the embedding row) to the final residual
+        in self.x; with graph=True, what the step graph holds."""
+        m = self.model
         have_selection = False
         for layer in range(m.n_layers):
             prefix = f'model.layers.{layer}'
@@ -692,13 +790,6 @@ class ResidentGLM:
             self._feed_forward(layer, self.norm)
             self._add(self.x_next, self.x, self.ffn_out, self.hidden)
             self.x, self.x_next = self.x_next, self.x
-        self.position += 1
-        if not logits:
-            return None
-        self._rmsnorm(self.x, self._weight('model.norm.weight'), self.norm, m.eps)
-        head = 'model.embed_tokens' if c.get('tie_word_embeddings', False) else 'lm_head'
-        self._project(head, self.norm, self.logits)
-        return np.frombuffer(self.logits.download(), dtype=np.float32).copy()
 
     def preload(self, reserve_bytes=256 * 1024 ** 2):
         """Upload every weight decode can use (all layers, every routed expert, the final norm and

@@ -130,6 +130,20 @@ void glm_vx_gpu_rope_strided(float *out, const float *x, const float *cosine,
 void glm_vx_gpu_matvec_heads(float *out, const float *weight, const float *x,
     int32_t heads, int32_t rows, int32_t cols, int32_t w_stride, int32_t x_stride,
     int32_t out_stride);
+/* A graph-captured decode step (gpu/resident.py graph=True): what changes per token is read
+ * from the int32 step buffer {position, tokens, count, splits}. Each _at entry is its plain
+ * entry with those arguments from step; launch it with the grid for the most tokens (splits),
+ * and the blocks past the step's value exit. glm_vx_gpu_topk_stable_at is in topk.ptx. */
+void glm_vx_gpu_index_scores_at(float *out, const float *q, const float *keys,
+    const float *weights, const int32_t *step, int32_t heads, int32_t dim, float scale);
+void glm_vx_gpu_mla_partial_at(float *numerator, float *stats, const float *q_latent,
+    const float *q_rope, const float *cache_latent, const float *cache_rope,
+    const int32_t *selected, const int32_t *step, int32_t heads, int32_t rank,
+    int32_t rope_dim, int32_t selection_stride, float scale);
+void glm_vx_gpu_mla_merge_at(float *out, const float *numerator, const float *stats,
+    const int32_t *step, int32_t heads, int32_t rank);
+/* cache[step[0]*width + i] = row[i]; grid-stride. */
+void glm_vx_gpu_store_row(float *cache, const float *row, const int32_t *step, int32_t width);
 #ifdef __cplusplus
 }
 #endif

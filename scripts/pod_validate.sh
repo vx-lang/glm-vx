@@ -101,12 +101,23 @@ step test-resident-device-experts hw gpu/test_resident_device_experts_hardware.p
 # Resident decode with each layer's attention in one launch (mla_decode) against mla_partial then
 # mla_merge, over 700 steps: up to 3 splits per head, one arrival-count buffer throughout.
 step test-resident-fused-attention hw gpu/test_resident_fused_attention_hardware.py
+# The decode step captured once as a CUDA graph and replayed every token (#25, #26) against the
+# per-launch path, bit for bit, 5 weight layouts and 700 steps through 1 to 3 MLA splits.
+step test-resident-graph hw gpu/test_resident_graph_hardware.py
 
 for mode in f32 int4 fp8 bf16; do
   flag=$([[ $mode == f32 ]] && echo "" || echo "--$mode")
   step resident-$mode-small $PYTHON -m validation.resident_compare $flag --tokens "$TOKENS" --output "$out/resident-$mode-small.json"
   step resident-$mode-full$LAYERS $PYTHON -m validation.resident_compare $flag --geometry full --layers "$LAYERS" \
     --tokens "$TOKENS" --output "$out/resident-$mode-full$LAYERS.json"
+done
+# Graph replay against the per-launch path (#28): bitwise, ms per token, the host time to enqueue
+# a step and the GPU time of a replay. Every routed expert is resident here (device_experts): at
+# full width with 4 layers that is one sparse layer's 256 experts, 39 GB in float32.
+for mode in f32 int4 fp8 bf16; do
+  step graph-$mode-small $PYTHON -m validation.resident_graph --format $mode --tokens "$TOKENS" --output "$out/graph-$mode-small.json"
+  step graph-$mode-full$LAYERS $PYTHON -m validation.resident_graph --format $mode --geometry full --layers "$LAYERS" \
+    --tokens "$TOKENS" --output "$out/graph-$mode-full$LAYERS.json"
 done
 
 # Sharing: the upload race (docs/GPU-BRINGUP.md) only showed with several processes on one GPU.
