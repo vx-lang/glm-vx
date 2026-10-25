@@ -201,15 +201,6 @@ CASES = {
 }
 
 
-# A fault stops the process (Vx aborts) and leaves the context unusable for the cases after it.
-VX_FAULTS = {
-    # A100, 2026-10-25: through the library's pub fn, Vx's runtime gives the kernel a host address as
-    # its arrival count (compute-sanitizer: an atomic at 0x127ee290 in every block). Our own launch,
-    # with the `arrivals` buffer, is checked in gpu/test_spawn_hardware.py.
-    'mla_decode': "Vx's library launch passes a host arrival count (Vx #2231, fixed by PR #2232)",
-}
-
-
 def on_device(context, values):
     return {k: context.tensor(v.shape, str(v.dtype), v.tobytes()) if isinstance(v, np.ndarray) else v
             for k, v in values.items()}
@@ -225,8 +216,6 @@ def test_vx_launch_matches_python_launch(context, name):
     ptx = SPAWN / f'{name}.ptx'
     if not ptx.exists():
         pytest.skip(f'{ptx} not built')
-    if name in VX_FAULTS:
-        pytest.skip(VX_FAULTS[name])
     try:
         vx = VxKernel(ptx)
     except (FileNotFoundError, OSError) as e:

@@ -13,10 +13,11 @@
 # layers, default 4), TOKENS (default 48), STRESS (concurrent stress processes, default 8).
 # Use OMP_NUM_THREADS well below the host's vCPU count (NumPy thrashes on 128-vCPU pods).
 #
-# Toolchain: one vxc bundle from Vx main, c3716538 or later: #2134 (one library per kernel in a
+# Toolchain: one vxc bundle from Vx main, 8e87d147 or later: #2134 (one library per kernel in a
 # process), the `lanes::` reductions of #260 (#2117, #2124, #2128), the `across` loops of #2095 to
 # #2097, `if` values of #2112, the code of a group of blocks and its arrival counts that mla_decode
-# uses (#2185 to #2188), and vx_cuda_set_stream of #2100, which the graph step needs (host.txt
+# uses (#2185 to #2188), a library's pub fn that gives mla_decode a device arrival count (#2232) and
+# loads without vx_stderr_write (#2230), and vx_cuda_set_stream of #2100, which the graph step needs (host.txt
 # says whether the dispatch library exports it). VXC, and VX_DISPATCH_LIB or <bundle>/lib/libvx_cuda_dispatch.so.
 # Do not export VX_CUDA_SYNC or VX_TIME_KERNEL for the whole run: Vx stops a graph capture on either.
 set -uo pipefail

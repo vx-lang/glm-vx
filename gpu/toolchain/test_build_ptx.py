@@ -38,6 +38,15 @@ class ContractTests(unittest.TestCase):
         self.assertIn('call void @llvm.trap()', out)
         self.assertNotIn('declare i64 @vx_stderr_write', out)
 
+    def test_failed_check_message_through_libc_write_is_dropped(self):
+        # Vx #2230: the message goes to libc's write(2, msg, len) instead.
+        ir = VALID.replace('  ret void\n}', '  %4 = call i64 @write(i32 2, ptr %0, i64 5)\n  call void @abort()\n  ret void\n}')
+        ir += 'declare i64 @write(i32, ptr, i64)\ndeclare void @abort()\n'
+        out, _ = builder.adapter_ir(ir, 256)
+        self.assertIn('define internal i64 @write(i32 %fd, ptr %msg, i64 %len)', out)
+        self.assertIn('call void @llvm.trap()', out)
+        self.assertNotIn('declare i64 @write', out)
+
     def test_rejects_index_abi_mismatch(self):
         with self.assertRaisesRegex(ValueError, 'ABI mismatch'):
             builder.adapter_ir(VALID.replace('declare i32', 'declare i64'), 256)

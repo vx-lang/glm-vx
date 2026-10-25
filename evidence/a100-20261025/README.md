@@ -43,3 +43,10 @@ eagerly. Random weights throughout; timings are single runs of the harness, not 
 Not in this folder: a first attempt with the pod's newer Vx (main + #2223) failed to build the hand
 PTX and to load six spawn libraries, because of Vx #2215's vx_stderr_write (Vx #2229, PR #2230; the
 hand-PTX side is fixed in build_ptx.py).
+
+Afterwards, on the same pod with Vx main `8e87d147` (#2230 and #2232 merged) and this tree's next
+commit: mla_decode's case runs through its library's pub fn, and nothing in the toolchain needs
+`c3716538` any longer. test-spawn-vx-launch 41 passed, with and without VX_CUDA_SYNC;
+test-spawn-hardware, test-spawn-vx-host, both resident hardware tests and gpu/toolchain 214 passed,
+1 xfailed; test-spawn-vx-graph 8 passed (15.7 us per replay). No spawn library has an undefined
+vx_stderr_write; #2230's libc `write` is a no-op in the hand PTX, as vx_stderr_write is.
