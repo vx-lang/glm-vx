@@ -26,7 +26,7 @@ INDEX = {
 SIGNATURES = {**{name: ("i32", "") for name in INDEX},
     "vx_gpu_shuffle_down_f32": ("float", "float, i32"),
     "vx_gpu_shuffle_idx_f32": ("float", "float, i32"),
-    "abort": ("void", ""), "puts": ("void", "ptr"), "vx_gpu_barrier": ("void", ""), "vx_gpu_shared_f32": ("ptr", ""),
+    "abort": ("void", ""), "puts": ("void", "ptr"), "vx_stderr_write": ("i64", "ptr, i64"), "vx_gpu_barrier": ("void", ""), "vx_gpu_shared_f32": ("ptr", ""),
     "vx_gpu_mma_tf32_m16n8k8": ("void", "ptr, i32, " + ", ".join(["float"] * 10)),
     "expf": ("float", "float"), "sqrtf": ("float", "float")}
 
@@ -102,6 +102,10 @@ define internal float @{name}(float %value, i32 %lane) alwaysinline convergent {
 }}''')
     if 'puts' in used:
         wrappers.append('define internal void @puts(ptr %msg) alwaysinline {\n  ret void\n}')
+    if 'vx_stderr_write' in used:
+        # A failed check's message (Vx #2215; puts before it): nothing to write to on the device,
+        # and the abort after it traps.
+        wrappers.append('define internal i64 @vx_stderr_write(ptr %msg, i64 %len) alwaysinline {\n  ret i64 %len\n}')
     if 'abort' in used:
         # Newer vxc emits overflow/division checks that call abort; on device
         # that is a trap, which fails the launch rather than continuing.

@@ -29,6 +29,15 @@ class ContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'unsupported external'):
             builder.adapter_ir(VALID+'declare i32 @printf(ptr, ...)\n', 256)
 
+    def test_failed_check_message_is_dropped_and_abort_traps(self):
+        # Vx #2215: a failed check writes its message with vx_stderr_write, then aborts.
+        ir = VALID.replace('  ret void\n}', '  %4 = call i64 @vx_stderr_write(ptr %0, i64 5)\n  call void @abort()\n  ret void\n}')
+        ir += 'declare i64 @vx_stderr_write(ptr, i64)\ndeclare void @abort()\n'
+        out, _ = builder.adapter_ir(ir, 256)
+        self.assertIn('define internal i64 @vx_stderr_write(ptr %msg, i64 %len)', out)
+        self.assertIn('call void @llvm.trap()', out)
+        self.assertNotIn('declare i64 @vx_stderr_write', out)
+
     def test_rejects_index_abi_mismatch(self):
         with self.assertRaisesRegex(ValueError, 'ABI mismatch'):
             builder.adapter_ir(VALID.replace('declare i32', 'declare i64'), 256)

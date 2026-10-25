@@ -108,5 +108,10 @@ class SpawnKernel:
             raise TypeError('pass both grid and block, or neither')
         if grid is None:
             grid, block = self.shape(values)
+        elif 'launch' in self.manifest and block != self.manifest['launch']['block']:
+            # Vx lays a block out as its manifest says (lanes, subgroups per block): another block
+            # size leaves some of a block's work undone, or does it twice.
+            raise ValueError(f'{self.manifest["entry"]}: block {block}, but the kernel is built for '
+                             f'{self.manifest["launch"]["block"]} threads')
         self.kernel.launch(grid, block, self.arguments(values), shared_bytes=self.shared_bytes, stream=stream)
         return self

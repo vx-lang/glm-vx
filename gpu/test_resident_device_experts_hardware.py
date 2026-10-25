@@ -29,8 +29,11 @@ def test_device_experts_equal_the_host_loop_on_the_gpu(ctx, kind):
     host = ResidentGLM(model, ctx=ctx, max_tokens=32)
     refuse_id_reads(device)
     got, want = device.prefill(TOKENS), host.prefill(TOKENS)
-    # The fused kernels' dot products follow the hand matvecs' order (gpu/test_spawn_hardware.py
-    # checks the per-expert kernels bit for bit), so the logits should agree exactly.
-    np.testing.assert_array_equal(got, want)
+    # The fused kernels' dot products follow the hand matvecs' order, but moe_gate_up's sigmoid is
+    # libdevice's expf where the hand swiglu uses ex2.approx (gpu/test_spawn_hardware.py, EXP): on
+    # the A100 (2026-10-25) the logits differ by at most 1.2e-7. On the CPU, where both are libm's
+    # expf, gpu/test_resident.py checks them bit for bit.
+    np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-6)
+    assert np.array_equal(got.argmax(-1), want.argmax(-1))
     prefix = '' if kind in ('float32', 'fused') else kind + '_'
     assert device.launches[prefix + 'moe_down'] > 0 and 'scaled_add' not in device.launches

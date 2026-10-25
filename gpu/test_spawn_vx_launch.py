@@ -82,6 +82,62 @@ def mla_merge(rng, heads=4, rank=64, splits=4):
                 out=np.zeros((heads, rank), 'f4'))
 
 
+def mla_decode(rng, heads=4, rank=64, rope=64, tokens=300, count=37, splits=4, stride=37):
+    values = mla_partial(rng, heads, rank, rope, tokens, count, splits, stride)
+    values.update(numerator=np.zeros((heads, splits, rank), 'f4'), stats=np.zeros((heads, splits, 2), 'f4'),
+                  out=np.full((heads, rank), 7, 'f4'), arrivals=np.zeros(heads, 'i4'))
+    return values
+
+
+def expert_weights(rng, fmt, experts, rows, cols):
+    """One projection for all experts in `fmt`, named as the expert_matvec kernels name them."""
+    if fmt == 'bf16':
+        return dict(weight=bf16(rng, experts * rows * cols))
+    if fmt == 'fp8':
+        return dict(weight=fp8(rng, experts * rows * cols),
+                    scales=rng.uniform(0.001, 0.1, size=experts * -(-rows // 128) * -(-cols // 128)).astype('f4'))
+    if fmt == 'int4':
+        packed = rng.integers(0, 256, size=(experts, rows, -(-cols // 2)), dtype=np.uint8)
+        if cols % 2:
+            packed[..., -1] &= 0x0F
+        return dict(packed=packed.reshape(-1), scales=int4_scales(rng, experts * rows * -(-cols // 128), 1), scale_kind=1)
+    return dict(weight=normal(rng, experts * rows * cols, 0.2))
+
+
+def moe_ids(rng, experts, k):
+    ids = rng.choice(experts, size=k, replace=False).astype('i4')
+    ids[-1] = experts + 3  # out of range: adds nothing
+    return ids
+
+
+def expert_matvec(fmt, rows=130, cols=257, experts=6, k=4, slot=1):
+    def case(rng):
+        return dict(out=np.full(rows, 7, 'f4'), x=normal(rng, cols), ids=moe_ids(rng, experts, k), k=k, slot=slot,
+                    experts=experts, rows=rows, cols=cols, **expert_weights(rng, fmt, experts, rows, cols))
+    return case
+
+
+def moe_gate_up(fmt, inter=130, cols=257, experts=6, k=4):
+    def case(rng):
+        gate, up = (expert_weights(rng, fmt, experts, inter, cols) for _ in range(2))
+        extra = {'scale_kind': gate.pop('scale_kind')} if fmt == 'int4' else {}
+        up.pop('scale_kind', None)
+        named = {('gate' if n in ('weight', 'packed') else 'gate_scales'): v for n, v in gate.items()}
+        named.update({('up' if n in ('weight', 'packed') else 'up_scales'): v for n, v in up.items()})
+        return dict(act=np.full(k * inter, 7, 'f4'), x=normal(rng, cols), ids=moe_ids(rng, experts, k), k=k,
+                    experts=experts, inter=inter, up_row=0, stride=inter, cols=cols, **named, **extra)
+    return case
+
+
+def moe_down(fmt, rows=130, cols=257, experts=6, k=4):
+    def case(rng):
+        down = expert_weights(rng, fmt, experts, rows, cols)
+        named = {('down' if n in ('weight', 'packed') else n): v for n, v in down.items()}
+        return dict(out=np.full(rows, 7, 'f4'), act=normal(rng, k * cols), weights=rng.uniform(0.01, 1, size=k).astype('f4'),
+                    ids=moe_ids(rng, experts, k), k=k, experts=experts, rows=rows, cols=cols, **named)
+    return case
+
+
 def topk(rng, tokens=5000, k=2048):
     from gpu.topk import spawn_buffers
     scores = rng.integers(-4, 4, size=tokens).astype('f4')
@@ -136,6 +192,21 @@ CASES = {
     'topk': topk,
     'mla_partial': mla_partial,
     'mla_merge': mla_merge,
+    'mla_decode': mla_decode,
+    'expert_scaled_add': lambda r: dict(out=normal(r, 333), x=normal(r, 333), weights=normal(r, 8),
+                                        ids=moe_ids(r, 256, 8), k=8, slot=3, n=333),
+    **{f'{p}expert_matvec': expert_matvec(f) for p, f in (('', 'f32'), ('bf16_', 'bf16'), ('fp8_', 'fp8'), ('int4_', 'int4'))},
+    **{f'{p}moe_gate_up': moe_gate_up(f) for p, f in (('', 'f32'), ('bf16_', 'bf16'), ('fp8_', 'fp8'), ('int4_', 'int4'))},
+    **{f'{p}moe_down': moe_down(f) for p, f in (('', 'f32'), ('bf16_', 'bf16'), ('fp8_', 'fp8'), ('int4_', 'int4'))},
+}
+
+
+# A fault stops the process (Vx aborts) and leaves the context unusable for the cases after it.
+VX_FAULTS = {
+    # A100, 2026-10-25: through the library's pub fn, Vx's runtime gives the kernel a host address as
+    # its arrival count (compute-sanitizer: an atomic at 0x127ee290 in every block). Our own launch,
+    # with the `arrivals` buffer, is checked in gpu/test_spawn_hardware.py.
+    'mla_decode': "Vx's library launch passes a host arrival count (Vx #2231, fixed by PR #2232)",
 }
 
 
@@ -154,6 +225,8 @@ def test_vx_launch_matches_python_launch(context, name):
     ptx = SPAWN / f'{name}.ptx'
     if not ptx.exists():
         pytest.skip(f'{ptx} not built')
+    if name in VX_FAULTS:
+        pytest.skip(VX_FAULTS[name])
     try:
         vx = VxKernel(ptx)
     except (FileNotFoundError, OSError) as e:

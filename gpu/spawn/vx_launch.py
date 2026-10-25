@@ -53,7 +53,10 @@ class VxKernel:
         self.manifest = json.loads(ptx_path.with_suffix('.json').read_text())
         if 'library' not in self.manifest:
             raise FileNotFoundError(f'{ptx_path} was built without --library (set VX_DISPATCH_LIB for build.sh)')
-        self.params = self.manifest['params']
+        # The arrival count of a group's code (Vx #2188) is taken, as launch.py takes it, but it is
+        # not an argument of the library's function: Vx's host side keeps its own (Vx #2223).
+        self.names = {p['name'] for p in self.manifest['params']}
+        self.params = [p for p in self.manifest['params'] if p['kind'] != 'arrivals']
         self.library = C.CDLL(str(ptx_path.with_name(self.manifest['library'])))
         self.function = getattr(self.library, self.manifest['entry'])
         self.function.restype = None
@@ -90,7 +93,7 @@ class VxKernel:
         return self._get_stream
 
     def __call__(self, *, stream=None, **values):
-        missing = {p['name'] for p in self.params} ^ set(values)
+        missing = self.names ^ set(values)
         if missing:
             raise TypeError(f'{self.manifest["entry"]}: arguments do not match parameters: {sorted(missing)}')
         args, context = [], None

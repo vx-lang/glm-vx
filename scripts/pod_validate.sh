@@ -97,6 +97,9 @@ step test-hardware-stress hw gpu/test_hardware_stress.py
 # Resident decode with the routed experts chosen on the device (no host read of the router ids)
 # against the host loop, bit for bit, for each weight format.
 step test-resident-device-experts hw gpu/test_resident_device_experts_hardware.py
+# Resident decode with each layer's attention in one launch (mla_decode) against mla_partial then
+# mla_merge, over 700 steps: up to 3 splits per head, one arrival-count buffer throughout.
+step test-resident-fused-attention hw gpu/test_resident_fused_attention_hardware.py
 
 for mode in f32 int4 fp8 bf16; do
   flag=$([[ $mode == f32 ]] && echo "" || echo "--$mode")

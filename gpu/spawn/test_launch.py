@@ -97,3 +97,17 @@ def test_dynamic_shared_bytes_from_the_manifest(tmp_path, nbytes):
     SpawnKernel(FakeContext(fake), tmp_path / 'k.ptx').launch(n=3)
     assert fake.allowed == ([nbytes] if nbytes else [])
     assert fake.launched == [((1,), 128, nbytes)]
+
+
+def test_a_block_other_than_the_manifests_is_refused(tmp_path):
+    """Vx lays out a block as built (subgroups per block): a launch with block 64 for a kernel
+    built for 128 would leave half of each block's rows unwritten."""
+    manifest = {'entry': 'k', 'params': [{'name': 'n', 'kind': 'scalar', 'type': 'i32'}],
+                'launch': {'grid': [1], 'block': 128}}
+    (tmp_path / 'k.json').write_text(json.dumps(manifest))
+    fake = FakeKernel()
+    kernel = SpawnKernel(FakeContext(fake), tmp_path / 'k.ptx')
+    with pytest.raises(ValueError, match='built for 128'):
+        kernel.launch(4, 64, n=3)
+    kernel.launch(4, 128, n=3)  # any grid: the kernels stride over the grid they get
+    assert fake.launched == [(4, 128, 0)]

@@ -37,6 +37,11 @@ def download(tensor):
 # last bits, and below about -87.3 where ftz flushes. Exact parity comes back when an `across`
 # loop takes an `mlir!` block that declares it writes nothing (Vx #2076 D1-D3).
 EXP = dict(rtol=1e-5, atol=1e-37)
+# mla_partial's numerators and mla_merge's output are sums of exp-weighted terms that cancel to near
+# zero in some elements: there the last-bit exp difference is large relative to the value (A100,
+# 2026-10-25: 3e-4 relative on a numerator of 2e-4, 1.6e-6 absolute on outputs of order 1), so
+# those sums also get an absolute floor.
+SUMS = dict(rtol=1e-5, atol=1e-5)
 
 
 # Sizes cover a tail, one element, and more elements than threads (grid-stride loop).
@@ -46,7 +51,7 @@ def test_spawn_add_matches_hand_kernel(context, n, grid, block):
     a, b = rng.normal(size=n).astype('f4'), rng.normal(size=n).astype('f4')
     da, db = upload(context, a), upload(context, b)
     spawn_out, hand_out = context.tensor((n,)), context.tensor((n,))
-    SpawnKernel(context, BUILD / 'spawn/add.ptx').launch(grid, block, n=n, a=da, b=db, out=spawn_out)
+    SpawnKernel(context, BUILD / 'spawn/add.ptx').launch(n=n, a=da, b=db, out=spawn_out)
     hand = context.load_ptx(BUILD / 'kernels.ptx').kernel('glm_vx_gpu_add')
     hand.launch(grid, block, [hand_out, da, db, C.c_int32(n)])
     context.synchronize()
@@ -58,7 +63,7 @@ def test_spawn_add_in_place(context):
     rng = np.random.default_rng(7)
     a, b = rng.normal(size=4097).astype('f4'), rng.normal(size=4097).astype('f4')
     da, db = upload(context, a), upload(context, b)
-    SpawnKernel(context, BUILD / 'spawn/add.ptx').launch(8, 128, n=a.size, a=da, b=db, out=da)
+    SpawnKernel(context, BUILD / 'spawn/add.ptx').launch(n=a.size, a=da, b=db, out=da)
     context.synchronize()
     np.testing.assert_array_equal(download(da), a + b)
 
@@ -67,9 +72,9 @@ def test_spawn_add_rejects_wrong_arguments(context):
     kernel = SpawnKernel(context, BUILD / 'spawn/add.ptx')
     x = context.tensor((4,))
     with pytest.raises(TypeError):
-        kernel.launch(1, 32, n=4, a=x, out=x)
+        kernel.launch(n=4, a=x, out=x)
     with pytest.raises(TypeError):
-        kernel.launch(1, 32, n=4, a=x, b=context.tensor((4,), 'int32'), out=x)
+        kernel.launch(n=4, a=x, b=context.tensor((4,), 'int32'), out=x)
 
 
 @pytest.mark.parametrize('rows,cols,block', [(7, 131, 64), (64, 6144, 256), (1, 1, 32)])
@@ -79,7 +84,7 @@ def test_spawn_matvec_matches_hand_kernel(context, rows, cols, block):
     dw, dx = upload(context, w.reshape(-1)), upload(context, x)
     spawn_out, hand_out = context.tensor((rows,)), context.tensor((rows,))
     grid = -(-rows // (block // 32))
-    SpawnKernel(context, BUILD / 'spawn/matvec.ptx').launch(grid, block, rows=rows, cols=cols, weight=dw, x=dx, out=spawn_out)
+    SpawnKernel(context, BUILD / 'spawn/matvec.ptx').launch(rows=rows, cols=cols, weight=dw, x=dx, out=spawn_out)
     hand = context.load_ptx(BUILD / 'kernels.ptx').kernel('glm_vx_gpu_matvec')
     hand.launch(grid, block, [hand_out, dw, dx, C.c_int32(rows), C.c_int32(cols)])
     context.synchronize()
@@ -91,7 +96,7 @@ def test_spawn_bf16_decode_is_exact_for_every_encoding(context):
     # One column per row: out[r] = decode(r) * 1.0, so every bf16 code passes through the decode.
     codes = np.arange(65536, dtype=np.uint16)
     dw, dx, out = upload(context, codes), upload(context, np.ones(1, 'f4')), context.tensor((65536,))
-    SpawnKernel(context, BUILD / 'spawn/bf16_matvec.ptx').launch(65536 // 8, 256, rows=65536, cols=1, weight=dw, x=dx, out=out)
+    SpawnKernel(context, BUILD / 'spawn/bf16_matvec.ptx').launch(rows=65536, cols=1, weight=dw, x=dx, out=out)
     context.synchronize()
     # The row sum starts at +0.0, so the code of -0.0 comes out as +0.0.
     with np.errstate(invalid='ignore'):
@@ -109,7 +114,7 @@ def test_spawn_bf16_matvec_matches_hand_kernel(context, rows, cols):
     dw, dx = upload(context, w.reshape(-1)), upload(context, x)
     spawn_out, hand_out = context.tensor((rows,)), context.tensor((rows,))
     grid = -(-rows // 8)
-    SpawnKernel(context, BUILD / 'spawn/bf16_matvec.ptx').launch(grid, 256, rows=rows, cols=cols, weight=dw, x=dx, out=spawn_out)
+    SpawnKernel(context, BUILD / 'spawn/bf16_matvec.ptx').launch(rows=rows, cols=cols, weight=dw, x=dx, out=spawn_out)
     hand = context.load_ptx(BUILD / 'bf16.ptx').kernel('glm_vx_gpu_bf16_matvec')
     hand.launch(grid, 256, [hand_out, dw, dx, C.c_int32(rows), C.c_int32(cols)])
     context.synchronize()
@@ -133,7 +138,7 @@ def test_spawn_int4_matvec_matches_hand_kernel(context, rows, cols, scale_kind):
     spawn_out, hand_out = context.tensor((rows,)), context.tensor((rows,))
     grid = -(-rows // 8)
     SpawnKernel(context, BUILD / 'spawn/int4_matvec.ptx').launch(
-        grid, 256, rows=rows, cols=cols, scales=ds, scale_kind=scale_kind, packed=dp, x=dx, out=spawn_out)
+        rows=rows, cols=cols, scales=ds, scale_kind=scale_kind, packed=dp, x=dx, out=spawn_out)
     hand = context.load_ptx(BUILD / 'int4.ptx').kernel('glm_vx_gpu_int4_matvec')
     hand.launch(grid, 256, [hand_out, dp, ds, dx, C.c_int32(rows), C.c_int32(cols), C.c_int32(scale_kind)])
     context.synchronize()
@@ -151,7 +156,7 @@ def test_spawn_fp8_matvec_matches_hand_kernel(context, rows, cols):
     spawn_out, hand_out = context.tensor((rows,)), context.tensor((rows,))
     grid = -(-rows // 8)
     SpawnKernel(context, BUILD / 'spawn/fp8_matvec.ptx').launch(
-        grid, 256, rows=rows, cols=cols, scales=ds, weight=dw, x=dx, out=spawn_out)
+        rows=rows, cols=cols, scales=ds, weight=dw, x=dx, out=spawn_out)
     hand = context.load_ptx(BUILD / 'fp8.ptx').kernel('glm_vx_gpu_fp8_matvec')
     hand.launch(grid, 256, [hand_out, dw, ds, dx, C.c_int32(rows), C.c_int32(cols)])
     context.synchronize()
@@ -170,7 +175,7 @@ def test_spawn_topk_matches_stable_argsort_and_hand_kernel(context, tokens, k, t
     spawn_ids = context.tensor((kk,), 'int32')
     scratch, order_a, order_b = (context.tensor(s, t) for s, t in spawn_buffers(tokens, k))
     SpawnKernel(context, BUILD / 'spawn/topk.ptx').launch(
-        1, 256, tokens=tokens, k=k, scratch=scratch, order_a=order_a, order_b=order_b,
+        tokens=tokens, k=k, scratch=scratch, order_a=order_a, order_b=order_b,
         scores=d_scores.view((tokens,), 'int32'), out_ids=spawn_ids)
     hand_ids = TopK.from_ptx(context, BUILD / 'topk.ptx').topk_stable(d_scores, k)
     context.synchronize()
@@ -183,9 +188,10 @@ def hand_kernel(context, module, name):
 
 
 def compare(context, spawn_name, hand, grid, block, spawn_args, hand_args, outs):
-    """Launch the spawn kernel and the hand kernel on separate outputs, then require bitwise
-    equality. outs maps each spawn output name to its (spawn tensor, hand tensor) pair."""
-    SpawnKernel(context, BUILD / f'spawn/{spawn_name}.ptx').launch(grid, block, **spawn_args)
+    """Launch the spawn kernel (with its manifest's shape) and the hand kernel (with grid, block)
+    on separate outputs, then require bitwise equality. outs maps each spawn output name to its
+    (spawn tensor, hand tensor) pair."""
+    SpawnKernel(context, BUILD / f'spawn/{spawn_name}.ptx').launch(**spawn_args)
     hand.launch(grid, block, hand_args)
     context.synchronize()
     for name, (spawn_out, hand_out) in outs.items():
@@ -361,7 +367,7 @@ def test_spawn_rmsnorm_rows_matches_hand_kernel(context, rows, dim, block):
     x, w = rng.normal(size=rows * dim).astype('f4'), rng.normal(size=dim).astype('f4')
     dx, dw = upload(context, x), upload(context, w)
     spawn_out, hand_out, single_out = (context.tensor((rows * dim,)) for _ in range(3))
-    SpawnKernel(context, BUILD / 'spawn/rmsnorm_rows.ptx').launch(rows, block, rows=rows, dim=dim, eps=1e-5, x=dx, weight=dw, threads=block,
+    SpawnKernel(context, BUILD / 'spawn/rmsnorm_rows.ptx').launch(rows=rows, dim=dim, eps=1e-5, x=dx, weight=dw, threads=block,
                                                                     out=spawn_out.view((rows, dim)))
     hand = context.load_ptx(BUILD / 'kernels.ptx')
     hand.kernel('glm_vx_gpu_rmsnorm_rows').launch(rows, block, [hand_out, dx, dw, C.c_int32(rows), C.c_int32(dim), C.c_float(1e-5)])
@@ -380,7 +386,7 @@ def test_spawn_residual_rmsnorm_matches_hand_kernel(context, rows, dim, block):
     dx, dr, dw = upload(context, x), upload(context, r), upload(context, w)
     outs = [context.tensor((rows * dim,)) for _ in range(4)]
     SpawnKernel(context, BUILD / 'spawn/residual_rmsnorm.ptx').launch(
-        rows, block, rows=rows, dim=dim, eps=1e-5, x=dx, residual=dr, residual_out=outs[1].view((rows, dim)), weight=dw,
+        rows=rows, dim=dim, eps=1e-5, x=dx, residual=dr, residual_out=outs[1].view((rows, dim)), weight=dw,
         threads=block, out=outs[0].view((rows, dim)))
     context.load_ptx(BUILD / 'kernels.ptx').kernel('glm_vx_gpu_residual_rmsnorm').launch(
         rows, block, [outs[2], outs[3], dx, dr, dw, C.c_int32(rows), C.c_int32(dim), C.c_float(1e-5)])
@@ -396,7 +402,7 @@ def test_spawn_layernorm_matches_hand_kernel(context, rows, dim, block):
     x, w, b = (rng.normal(size=n).astype('f4') for n in (rows * dim, dim, dim))
     dx, dw, db = upload(context, x + 3.0), upload(context, w), upload(context, b)
     spawn_out, hand_out = context.tensor((rows * dim,)), context.tensor((rows * dim,))
-    SpawnKernel(context, BUILD / 'spawn/layernorm.ptx').launch(rows, block, rows=rows, dim=dim, eps=1e-6, x=dx, weight=dw, bias=db,
+    SpawnKernel(context, BUILD / 'spawn/layernorm.ptx').launch(rows=rows, dim=dim, eps=1e-6, x=dx, weight=dw, bias=db,
                                                                  threads=block, out=spawn_out.view((rows, dim)))
     context.load_ptx(BUILD / 'kernels.ptx').kernel('glm_vx_gpu_layernorm').launch(
         rows, block, [hand_out, dx, dw, db, C.c_int32(rows), C.c_int32(dim), C.c_float(1e-6)])
@@ -410,7 +416,7 @@ def test_spawn_softmax_rows_matches_hand_kernel(context, rows, dim, block):
     x = (rng.normal(size=rows * dim) * 3).astype('f4')
     dx = upload(context, x)
     spawn_out, hand_out, single_out = (context.tensor((rows * dim,)) for _ in range(3))
-    SpawnKernel(context, BUILD / 'spawn/softmax_rows.ptx').launch(rows, block, rows=rows, dim=dim, x=dx, threads=block,
+    SpawnKernel(context, BUILD / 'spawn/softmax_rows.ptx').launch(rows=rows, dim=dim, x=dx, threads=block,
                                                                     out=spawn_out.view((rows, dim)))
     hand = context.load_ptx(BUILD / 'kernels.ptx')
     hand.kernel('glm_vx_gpu_softmax_rows').launch(rows, block, [hand_out, dx, C.c_int32(rows), C.c_int32(dim)])
@@ -428,7 +434,7 @@ def test_spawn_softmax_flushes_subnormal_exp_like_hand_kernel(context):
     x = np.linspace(-100.0, 0.0, 4096).astype('f4')
     dx = upload(context, x)
     spawn_out, hand_out = context.tensor((4096,)), context.tensor((4096,))
-    SpawnKernel(context, BUILD / 'spawn/softmax_rows.ptx').launch(1, 256, rows=1, dim=4096, x=dx, threads=256,
+    SpawnKernel(context, BUILD / 'spawn/softmax_rows.ptx').launch(rows=1, dim=4096, x=dx, threads=256,
                                                                   out=spawn_out.view((1, 4096)))
     context.load_ptx(BUILD / 'kernels.ptx').kernel('glm_vx_gpu_softmax_rows').launch(1, 256, [hand_out, dx, C.c_int32(1), C.c_int32(4096)])
     context.synchronize()
@@ -443,7 +449,7 @@ def test_spawn_swiglu_matches_hand_kernel(context, n, grid, block):
     gate[:min(n, 4)] = [0.0, -0.0, 20.0, -20.0][:min(n, 4)]
     dg, du = upload(context, gate), upload(context, up)
     spawn_out, hand_out = context.tensor((n,)), context.tensor((n,))
-    SpawnKernel(context, BUILD / 'spawn/swiglu.ptx').launch(grid, block, n=n, gate=dg, up=du, out=spawn_out)
+    SpawnKernel(context, BUILD / 'spawn/swiglu.ptx').launch(n=n, gate=dg, up=du, out=spawn_out)
     context.load_ptx(BUILD / 'kernels.ptx').kernel('glm_vx_gpu_swiglu').launch(grid, block, [hand_out, dg, du, C.c_int32(n)])
     context.synchronize()
     np.testing.assert_allclose(download(spawn_out), download(hand_out), **EXP)
@@ -462,7 +468,7 @@ def test_spawn_router_matches_hand_kernel(context, experts, k, ties):
     ids = [context.tensor((k,), 'int32') for _ in range(2)]
     weights = [context.tensor((k,)) for _ in range(2)]
     SpawnKernel(context, BUILD / 'spawn/router.ptx').launch(
-        1, 32, experts=experts, k=k, indices=ids[0], logits=dl, bias=db, weights=weights[0], scale=2.5)
+        experts=experts, k=k, indices=ids[0], logits=dl, bias=db, weights=weights[0], scale=2.5)
     context.load_ptx(BUILD / 'kernels.ptx').kernel('glm_vx_gpu_router').launch(
         1, 32, [ids[1], weights[1], dl, db, C.c_int32(experts), C.c_int32(k), C.c_float(2.5)])
     context.synchronize()
@@ -493,12 +499,12 @@ def test_spawn_mla_matches_hand_kernels(context, heads, rank, rope, tokens, coun
     stats = [context.tensor((heads * splits * 2,)) for _ in range(2)]
     out = [context.tensor((heads * rank,)) for _ in range(2)]
     SpawnKernel(context, BUILD / 'spawn/mla_partial.ptx').launch(
-        heads * splits, block, heads=heads, rank=rank, rope_dim=rope, tokens=tokens, count=count,
+        heads=heads, rank=rank, rope_dim=rope, tokens=tokens, count=count,
         selection_stride=stride, splits=splits, selected=dsel, cache_latent=dkv, q_latent=dq, q_rope=dqr,
         cache_rope=dkr, scale=scale, threads=block, numerator=num[0].view((heads * splits, rank)),
         stats=stats[0].view((heads * splits, 2)))
     SpawnKernel(context, BUILD / 'spawn/mla_merge.ptx').launch(
-        heads, 256, heads=heads, rank=rank, splits=splits, stats=stats[0], numerator=num[0], out=out[0].view((heads, rank)))
+        heads=heads, rank=rank, splits=splits, stats=stats[0], numerator=num[0], out=out[0].view((heads, rank)))
     hand = context.load_ptx(BUILD / 'kernels.ptx')
     I = C.c_int32
     hand.kernel('glm_vx_gpu_mla_partial').launch(heads * splits, block, [
@@ -507,8 +513,8 @@ def test_spawn_mla_matches_hand_kernels(context, heads, rank, rope, tokens, coun
     hand.kernel('glm_vx_gpu_mla_merge').launch(heads, 256, [out[1], num[1], stats[1], I(heads), I(rank), I(splits)])
     context.synchronize()
     np.testing.assert_allclose(download(stats[0]), download(stats[1]), **EXP)
-    np.testing.assert_allclose(download(num[0]), download(num[1]), **EXP)
-    np.testing.assert_allclose(download(out[0]), download(out[1]), **EXP)
+    np.testing.assert_allclose(download(num[0]), download(num[1]), **SUMS)
+    np.testing.assert_allclose(download(out[0]), download(out[1]), **SUMS)
 
 
 # mla_decode: mla_partial and mla_merge in one launch, the block of each head's last split merging
@@ -532,15 +538,15 @@ def test_spawn_mla_decode_equals_partial_then_merge(context, heads, rank, rope, 
                   scale=rank ** -0.5, threads=block)
     num, stats, out = context.tensor((heads * splits * rank,)), context.tensor((heads * splits * 2,)), context.tensor((heads * rank,))
     SpawnKernel(context, BUILD / 'spawn/mla_partial.ptx').launch(
-        heads * splits, block, numerator=num.view((heads * splits, rank)), stats=stats.view((heads * splits, 2)), **common)
+        numerator=num.view((heads * splits, rank)), stats=stats.view((heads * splits, 2)), **common)
     SpawnKernel(context, BUILD / 'spawn/mla_merge.ptx').launch(
-        heads, 256, heads=heads, rank=rank, splits=splits, stats=stats, numerator=num, out=out.view((heads, rank)))
+        heads=heads, rank=rank, splits=splits, stats=stats, numerator=num, out=out.view((heads, rank)))
     arrivals = upload(context, np.zeros(heads, 'i4'))
     decode = SpawnKernel(context, BUILD / 'spawn/mla_decode.ptx')
     for _ in range(3):
         d_num, d_stats = context.tensor((heads, splits, rank)), context.tensor((heads, splits, 2))
         d_out = upload(context, np.full(heads * rank, 7, 'f4'))
-        decode.launch((heads, splits), block, out=d_out.view((heads, rank)), numerator=d_num, stats=d_stats,
+        decode.launch(out=d_out.view((heads, rank)), numerator=d_num, stats=d_stats,
                       arrivals=arrivals, **common)
         context.synchronize()
         np.testing.assert_array_equal(download(arrivals).view('i4'), 0)
