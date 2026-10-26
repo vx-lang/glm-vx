@@ -123,11 +123,13 @@ for mode in f32 int4 fp8 bf16; do
 done
 # Where one full-width layer spends its GPU time, kernel by kernel, under Nsight Compute: layer 0
 # (dense) and layer 3 (MoE) of one decode step, with DRAM bytes and % of peak bandwidth and compute.
-if command -v "${NCU:-ncu}" >/dev/null || [[ -x /usr/local/cuda/bin/ncu ]]; then
-  for mode in f32 int4 fp8 bf16; do
-    step layer-profile-$mode $PYTHON -m validation.layer_profile --format $mode --output "$out/layer-profile-$mode.json"
-  done
-fi
+# Then the fused MoE expert kernels alone at GLM-5.3's shapes, k = 1 to 8 routed experts, against
+# the bytes they must read. Without ncu or its counters (ERR_NVGPUCTRPERM in a container), both time
+# each launch with CUDA events instead, and their reports say so.
+for mode in f32 int4 fp8 bf16; do
+  step layer-profile-$mode $PYTHON -m validation.layer_profile --format $mode --output "$out/layer-profile-$mode.json"
+done
+step moe-profile $PYTHON -m validation.moe_profile --output "$out/moe-profile.json"
 
 # Sharing: the upload race (docs/GPU-BRINGUP.md) only showed with several processes on one GPU.
 stress() {

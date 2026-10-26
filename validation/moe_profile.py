@@ -12,6 +12,11 @@ bandwidth-bound kernel from a compute-bound one.
 Each kernel runs alone with cold caches (ncu), at the GPU's own clocks: a kernel measurement,
 not a step time. Random weights and ids; timing does not depend on their values.
 
+Where ncu cannot read the GPU's counters (a container without profiling permission,
+ERR_NVGPUCTRPERM) or is missing, or with --timer events, each launch is instead timed with CUDA
+events, the median of 5, each after a 512 MB copy that evicts it from L2. That gives GPU time and
+the bandwidth the expected bytes imply, but no measured DRAM bytes or SM throughput.
+
   python -m validation.moe_profile --output run/moe.json [--formats f32 bf16 fp8 int4] [--k 1 2 4 8]
 """
 import argparse
@@ -69,6 +74,24 @@ def weights(ctx, rng, fmt, rows, cols):
                 scales=ctx.tensor(scales.shape, 'uint16', scales.tobytes()), scale_kind=1)
 
 
+def event_us(ctx, stream, spawn, launch, repeats=5):
+    """Median GPU microseconds of launch() between two events, each after a 512 MB copy that
+    leaves none of its data in L2 (40 MB on an A100, 50 MB on an H100)."""
+    from gpu.spawn.launch import SpawnKernel
+    if not hasattr(event_us, 'flush'):
+        n = 64 << 20
+        event_us.flush = (SpawnKernel(ctx, spawn / 'copy.ptx'), ctx.tensor((n,), 'float32'), ctx.tensor((n,), 'float32'), n)
+    copy, a, b, n = event_us.flush
+    times = []
+    for _ in range(repeats):
+        copy.launch(stream=stream, out=a, x=b, n=n)
+        start, end = ctx.event().record(stream), ctx.event()
+        launch()
+        end.record(stream)
+        times.append(start.elapsed_ms(end) * 1e3)
+    return float(np.median(times))
+
+
 def child(args):
     from gpu.runtime import CUDAContext
     from gpu.spawn.launch import SpawnKernel
@@ -104,13 +127,17 @@ def child(args):
                 plan.append((kernel, values))
                 measured.append(dict(format=fmt, kernel=name, k=k, expected_mb=expected_mb(fmt, name, k)))
         stream.synchronize()
-    with ctx._activate():
-        ctx.driver.call('cuProfilerStart')
-    for kernel, values in plan:
-        kernel.launch(stream=stream, **values)
-    stream.synchronize()
-    with ctx._activate():
-        ctx.driver.call('cuProfilerStop')
+    if args.timer == 'events':
+        for m, (kernel, values) in zip(measured, plan):
+            m['us'] = event_us(ctx, stream, spawn, lambda: kernel.launch(stream=stream, **values))
+    else:
+        with ctx._activate():
+            ctx.driver.call('cuProfilerStart')
+        for kernel, values in plan:
+            kernel.launch(stream=stream, **values)
+        stream.synchronize()
+        with ctx._activate():
+            ctx.driver.call('cuProfilerStop')
     Path(args.launches).write_text(json.dumps(measured))
     ctx.close()
 
@@ -121,6 +148,7 @@ def main():
     p.add_argument('--formats', nargs='+', choices=list(PREFIX), default=['f32', 'bf16', 'fp8', 'int4'])
     p.add_argument('--k', nargs='+', type=int, default=[1, 2, 4, 8])
     p.add_argument('--seed', type=int, default=1)
+    p.add_argument('--timer', choices=['ncu', 'events'], default='ncu', help='events: no ncu (see above)')
     p.add_argument('--launches', help=argparse.SUPPRESS)  # set when running under ncu
     args = p.parse_args()
     if args.launches:
@@ -130,35 +158,72 @@ def main():
     ncu = os.environ.get('NCU') or shutil.which('ncu') or '/usr/local/cuda/bin/ncu'
     args.output.parent.mkdir(parents=True, exist_ok=True)
     launches, raw = args.output.with_suffix('.launches.json'), args.output.with_suffix('.ncu.csv')
-    subprocess.run([ncu, '--profile-from-start', 'off', '--clock-control', 'none', '--csv', '--page', 'raw',
-                    '--metrics', ','.join(METRICS), '--log-file', str(raw),
-                    sys.executable, '-m', 'validation.moe_profile', '--output', str(args.output),
-                    '--formats', *args.formats, '--k', *map(str, args.k), '--seed', str(args.seed),
-                    '--launches', str(launches)], check=True)
+    if args.timer == 'ncu' and not counters(ncu, args, launches, raw):
+        print('ncu gave no counters; timing with CUDA events instead', file=sys.stderr)
+        args.timer = 'events'
+    if args.timer == 'events':
+        return events_report(args, launches)
     plan, rows = json.loads(launches.read_text()), parse(raw.read_text())
     if len(plan) != len(rows):
         raise SystemExit(f'ncu profiled {len(rows)} kernels, the plan launched {len(plan)}')
+    return write(args, [dict(m, timer='ncu', **measure(m, row)) for m, row in zip(plan, rows)])
+
+
+def counters(ncu, args, launches, raw):
+    """Run the plan under ncu; False when ncu is missing or read no counters."""
+    if not (os.path.exists(ncu) or shutil.which(ncu)):
+        return False
+    done = subprocess.run([ncu, '--profile-from-start', 'off', '--clock-control', 'none', '--csv', '--page', 'raw',
+                           '--print-units', 'base', '--metrics', ','.join(METRICS), '--log-file', str(raw),
+                           sys.executable, '-m', 'validation.moe_profile', '--output', str(args.output),
+                           '--formats', *args.formats, '--k', *map(str, args.k), '--seed', str(args.seed),
+                           '--launches', str(launches)])
+    text = raw.read_text() if raw.exists() else ''
+    if done.returncode != 0 or 'ERR_NVGPUCTRPERM' in text or '"ID"' not in text:
+        if raw.exists():
+            raw.rename(raw.with_suffix('.failed.txt'))  # kept: why ncu could not measure
+        return False
+    return True
+
+
+def measure(m, row):
+    us = number(row['gpu__time_duration.sum']) / 1e3  # ns
+    moved = (number(row['dram__bytes_read.sum']) + number(row['dram__bytes_write.sum'])) / 1e6
+    return dict(us=us, dram_mb=moved, gbs=moved / us * 1e3 if us else 0.0,
+                dram_pct=number(row['dram__throughput.avg.pct_of_peak_sustained_elapsed']),
+                sm_pct=number(row['sm__throughput.avg.pct_of_peak_sustained_elapsed']),
+                grid=row['launch__grid_size'], block=row['launch__block_size'],
+                registers=row['launch__registers_per_thread'])
+
+
+def events_report(args, launches):
+    subprocess.run([sys.executable, '-m', 'validation.moe_profile', '--output', str(args.output),
+                    '--formats', *args.formats, '--k', *map(str, args.k), '--seed', str(args.seed),
+                    '--timer', 'events', '--launches', str(launches)], check=True)
+    plan = json.loads(launches.read_text())
+    # Without counters the GB/s is what the expected bytes imply in the measured time.
+    return write(args, [dict(m, timer='events', dram_mb=None, dram_pct=None, sm_pct=None, grid='', block='',
+                             registers='', gbs=m['expected_mb'] / m['us'] * 1e3 if m['us'] else 0.0) for m in plan])
+
+
+def write(args, results):
     peak = peak_bandwidth()
-    results = []
-    for m, row in zip(plan, rows):
-        us = number(row['gpu__time_duration.sum']) / 1e3
-        moved = (number(row['dram__bytes_read.sum']) + number(row['dram__bytes_write.sum'])) / 1e6
-        results.append(dict(m, us=us, dram_mb=moved, gbs=moved / us * 1e3 if us else 0.0,
-                            pct_of_peak_bandwidth=100 * moved / us * 1e3 / peak if us else 0.0,
-                            us_at_peak_bandwidth=m['expected_mb'] / peak * 1e3,
-                            dram_pct=number(row['dram__throughput.avg.pct_of_peak_sustained_elapsed']),
-                            sm_pct=number(row['sm__throughput.avg.pct_of_peak_sustained_elapsed']),
-                            grid=row['launch__grid_size'], block=row['launch__block_size'],
-                            registers=row['launch__registers_per_thread']))
+    for r in results:
+        r['pct_of_peak_bandwidth'] = 100 * r['gbs'] / peak if peak else 0.0
+        r['us_at_peak_bandwidth'] = r['expected_mb'] / peak * 1e3
+    timer = results[0]['timer'] if results else args.timer
     args.output.write_text(json.dumps(dict(hidden=HIDDEN, inter=INTER, experts=EXPERTS, peak_dram_gbs=peak,
                                            results=results), indent=2) + '\n')
     lines = [f'# Fused MoE expert kernels: hidden {HIDDEN}, expert width {INTER}, {EXPERTS} experts', '',
-             f'ncu, each kernel alone with cold caches. Peak DRAM {peak:.0f} GB/s.', '',
+             (f'ncu, each kernel alone with cold caches. Peak DRAM {peak:.0f} GB/s.' if timer == 'ncu' else
+              f'CUDA events (no ncu counters): median of 5, L2 flushed before each; GB/s is expected MB over '
+              f'GPU time. Peak DRAM {peak:.0f} GB/s.'), '',
              '| Format | Kernel | k | Expected MB | DRAM MB | GPU us | us at peak BW | GB/s | % peak BW | SM % | grid x block | regs |',
              '|---|---|---|---|---|---|---|---|---|---|---|---|']
     for r in results:
-        lines.append(f"| {r['format']} | {r['kernel']} | {r['k']} | {r['expected_mb']:.1f} | {r['dram_mb']:.1f} | {r['us']:.1f} | "
-                     f"{r['us_at_peak_bandwidth']:.1f} | {r['gbs']:.0f} | {r['pct_of_peak_bandwidth']:.0f} | {r['sm_pct']:.0f} | "
+        opt = lambda v, f: '-' if v is None else format(v, f)
+        lines.append(f"| {r['format']} | {r['kernel']} | {r['k']} | {r['expected_mb']:.1f} | {opt(r['dram_mb'], '.1f')} | {r['us']:.1f} | "
+                     f"{r['us_at_peak_bandwidth']:.1f} | {r['gbs']:.0f} | {r['pct_of_peak_bandwidth']:.0f} | {opt(r['sm_pct'], '.0f')} | "
                      f"{r['grid']} x {r['block']} | {r['registers']} |")
     text = '\n'.join(lines) + '\n'
     args.output.with_suffix('.md').write_text(text)

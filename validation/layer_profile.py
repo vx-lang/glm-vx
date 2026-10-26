@@ -13,7 +13,10 @@ cold caches, at the GPU's own clocks (--clock-control none), so the sum is not a
   python -m validation.layer_profile --format fp8 --output run/layer-fp8.json
 
 It runs itself under ncu (NCU, default ncu on PATH or /usr/local/cuda/bin/ncu) and writes the
-report as JSON and as a Markdown table beside it (.md).
+report as JSON and as a Markdown table beside it (.md). Where ncu cannot read the GPU's counters
+(a container without profiling permission, ERR_NVGPUCTRPERM) or is missing, or with --timer
+events, each launch of the step is timed between two CUDA events instead: GPU time in a normal,
+warm step, with no DRAM bytes or SM throughput.
 """
 import argparse
 import csv
@@ -76,25 +79,36 @@ def child(args):
     resident.reset()
     for t in tokens[:-1]:
         resident.forward(t, logits=False)
-    launches = []
+    launches, events = [], []
     launch, spawn = resident._launch, resident._spawn
-
-    def record(name):
-        launches.append((name, *label(inspect.stack(0)[2:])))
-
-    resident._launch = lambda name, *a, **k: (record(name), launch(name, *a, **k))[1]
-    resident._spawn = lambda name, **k: (record(name), spawn(name, **k))[1]
     ctx = resident.ctx
+
+    def timed(run, name, *a, **k):
+        launches.append((name, *label(inspect.stack(0)[2:])))
+        if args.timer == 'events':
+            start = ctx.event().record(resident.stream)
+            run(name, *a, **k)
+            events.append((start, ctx.event().record(resident.stream)))
+        else:
+            run(name, *a, **k)
+
+    resident._launch = lambda name, *a, **k: timed(launch, name, *a, **k)
+    resident._spawn = lambda name, **k: timed(spawn, name, **k)
     ctx.synchronize()
-    with ctx._activate():
-        ctx.driver.call('cuProfilerStart')
-    resident.forward(tokens[-1])
-    ctx.synchronize()
-    with ctx._activate():
-        ctx.driver.call('cuProfilerStop')
+    if args.timer == 'events':
+        resident.forward(tokens[-1])
+        ctx.synchronize()
+    else:
+        with ctx._activate():
+            ctx.driver.call('cuProfilerStart')
+        resident.forward(tokens[-1])
+        ctx.synchronize()
+        with ctx._activate():
+            ctx.driver.call('cuProfilerStop')
     Path(args.launches).write_text(json.dumps(dict(
         launches=launches, format=args.format, layers=args.layers, context=args.context, hidden=config['hidden_size'],
-        weights_gib=resident.weight_bytes / 1024 ** 3)))
+        weights_gib=resident.weight_bytes / 1024 ** 3, timer=args.timer,
+        us=[start.elapsed_ms(end) * 1e3 for start, end in events] or None)))
     resident.close()
 
 
@@ -109,47 +123,62 @@ def number(value):
 
 
 def report(info, rows, peak_gbs):
-    launches = info['launches']
+    """rows: ncu's, one per launch; None when info['us'] has event times instead."""
+    launches, counted = info['launches'], rows is not None
+    if not counted:
+        rows = [{'gpu__time_duration.sum': us * 1e3, 'launch__grid_size': '', 'launch__block_size': '',
+                 'launch__registers_per_thread': '', 'Kernel Name': name} for us, (name, *_) in zip(info['us'], launches)]
     if len(rows) != len(launches):
         raise SystemExit(f'ncu profiled {len(rows)} kernels, the step launched {len(launches)}')
     kernels = []
     for (name, layer, what), row in zip(launches, rows):
         us = number(row['gpu__time_duration.sum']) / 1e3  # ns
-        moved = number(row['dram__bytes_read.sum']) + number(row['dram__bytes_write.sum'])
-        kernels.append(dict(kernel=name, layer=layer, what=what, us=us, dram_mb=moved / 1e6,
-                            gbs=moved / (us * 1e3) if us else 0.0,
-                            dram_pct=number(row['dram__throughput.avg.pct_of_peak_sustained_elapsed']),
-                            sm_pct=number(row['sm__throughput.avg.pct_of_peak_sustained_elapsed']),
-                            grid=row['launch__grid_size'], block=row['launch__block_size'],
-                            registers=row['launch__registers_per_thread'], ncu_name=row['Kernel Name']))
+        kernel = dict(kernel=name, layer=layer, what=what, us=us, dram_mb=None, gbs=None, dram_pct=None, sm_pct=None,
+                      grid=row['launch__grid_size'], block=row['launch__block_size'],
+                      registers=row['launch__registers_per_thread'], ncu_name=row['Kernel Name'])
+        if counted:
+            moved = number(row['dram__bytes_read.sum']) + number(row['dram__bytes_write.sum'])
+            kernel.update(dram_mb=moved / 1e6, gbs=moved / (us * 1e3) if us else 0.0,
+                          dram_pct=number(row['dram__throughput.avg.pct_of_peak_sustained_elapsed']),
+                          sm_pct=number(row['sm__throughput.avg.pct_of_peak_sustained_elapsed']))
+        kernels.append(kernel)
     groups = {}
     for k in kernels:
         group = groups.setdefault('head' if k['layer'] is None else f"layer {k['layer']}", dict(us=0.0, dram_mb=0.0, kernels=0))
         group['us'] += k['us']
-        group['dram_mb'] += k['dram_mb']
+        group['dram_mb'] += k['dram_mb'] or 0.0
         group['kernels'] += 1
     for group in groups.values():
+        if not counted:
+            group.update(dram_mb=None, gbs=None, pct_of_peak_bandwidth=None, bandwidth_bound_us=None)
+            continue
         group['gbs'] = group['dram_mb'] / group['us'] * 1e3 if group['us'] else 0.0  # MB/us is TB/s
         group['pct_of_peak_bandwidth'] = 100 * group['gbs'] / peak_gbs if peak_gbs else None
         group['bandwidth_bound_us'] = group['dram_mb'] * 1e6 / (peak_gbs * 1e9) * 1e6 if peak_gbs else None
-    return dict({k: v for k, v in info.items() if k != 'launches'}, kernels=kernels, groups=groups, peak_dram_gbs=peak_gbs)
+    return dict({k: v for k, v in info.items() if k not in ('launches', 'us')}, kernels=kernels, groups=groups,
+                peak_dram_gbs=peak_gbs)
+
+
+def _cell(value, spec):
+    return '-' if value is None else format(value, spec)
 
 
 def markdown(rep):
     lines = [f"# One decode step, kernel by kernel: {rep['format']}, full width, {rep['layers']} layers, "
              f"context {rep['context']}", '',
-             'ncu, each kernel alone with cold caches; not a step time.', '',
+             ('ncu, each kernel alone with cold caches; not a step time.' if rep.get('timer', 'ncu') == 'ncu' else
+              'CUDA events around each launch of a warm step (ncu had no counters): GPU time only, no DRAM bytes.'), '',
              '| Group | Kernels | GPU us | DRAM MB | GB/s | % of peak BW | us at peak BW |', '|---|---|---|---|---|---|---|']
     for name, g in rep['groups'].items():
-        lines.append(f"| {name} | {g['kernels']} | {g['us']:.0f} | {g['dram_mb']:.1f} | {g['gbs']:.0f} | "
-                     f"{g['pct_of_peak_bandwidth'] or 0:.0f} | {g['bandwidth_bound_us'] or 0:.0f} |")
+        lines.append(f"| {name} | {g['kernels']} | {g['us']:.0f} | {_cell(g['dram_mb'], '.1f')} | {_cell(g['gbs'], '.0f')} | "
+                     f"{_cell(g['pct_of_peak_bandwidth'], '.0f')} | {_cell(g['bandwidth_bound_us'], '.0f')} |")
     ids = sorted({k['layer'] for k in rep['kernels'] if k['layer'] is not None})
     for layer in sorted({ids[0], ids[-1]}):  # the first layer (dense) and the last (MoE)
         lines += ['', f'## Layer {layer}: kernels by GPU time', '',
                   '| Kernel | What | GPU us | DRAM MB | GB/s | DRAM % | SM % | grid x block | regs |', '|---|---|---|---|---|---|---|---|---|']
         for k in sorted((k for k in rep['kernels'] if k['layer'] == layer), key=lambda k: -k['us']):
-            lines.append(f"| {k['kernel']} | {k['what']} | {k['us']:.1f} | {k['dram_mb']:.2f} | {k['gbs']:.0f} | "
-                         f"{k['dram_pct']:.0f} | {k['sm_pct']:.0f} | {k['grid']} x {k['block']} | {k['registers']} |")
+            lines.append(f"| {k['kernel']} | {k['what']} | {k['us']:.1f} | {_cell(k['dram_mb'], '.2f')} | {_cell(k['gbs'], '.0f')} | "
+                         f"{_cell(k['dram_pct'], '.0f')} | {_cell(k['sm_pct'], '.0f')} | {k['grid']} x {k['block']} | {k['registers']} |")
     return '\n'.join(lines) + '\n'
 
 
@@ -172,6 +201,7 @@ def main():
     p.add_argument('--layers', type=int, default=4)
     p.add_argument('--context', type=int, default=64, help='tokens before the profiled step (above index_topk=16)')
     p.add_argument('--seed', type=int, default=1)
+    p.add_argument('--timer', choices=['ncu', 'events'], default='ncu', help='events: no ncu (see above)')
     p.add_argument('--launches', help=argparse.SUPPRESS)  # set when running under ncu
     args = p.parse_args()
     if args.launches:
@@ -182,13 +212,24 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     launches = args.output.with_suffix('.launches.json')
     raw = args.output.with_suffix('.ncu.csv')
-    command = [ncu, '--profile-from-start', 'off', '--clock-control', 'none', '--csv', '--page', 'raw',
+    command = [ncu, '--profile-from-start', 'off', '--clock-control', 'none', '--csv', '--page', 'raw', '--print-units', 'base',
                '--metrics', ','.join(METRICS), '--log-file', str(raw),
                sys.executable, '-m', 'validation.layer_profile', '--output', str(args.output), '--format', args.format,
                '--layers', str(args.layers), '--context', str(args.context), '--seed', str(args.seed),
                '--launches', str(launches)]
-    subprocess.run(command, check=True)
-    rep = report(json.loads(launches.read_text()), parse(raw.read_text()), peak_bandwidth())
+    rows = None
+    if args.timer == 'ncu' and (os.path.exists(ncu) or shutil.which(ncu)):
+        done = subprocess.run(command)
+        text = raw.read_text() if raw.exists() else ''
+        if done.returncode == 0 and 'ERR_NVGPUCTRPERM' not in text and '"ID"' in text:
+            rows = parse(text)
+        elif raw.exists():
+            raw.rename(raw.with_suffix('.failed.txt'))  # kept: why ncu could not measure
+    if rows is None:
+        print('timing with CUDA events (no ncu counters)', file=sys.stderr)
+        subprocess.run([sys.executable, *command[command.index('-m'):-2], '--timer', 'events', '--launches', str(launches)],
+                       check=True)
+    rep = report(json.loads(launches.read_text()), rows, peak_bandwidth())
     args.output.write_text(json.dumps(rep, indent=2) + '\n')
     args.output.with_suffix('.md').write_text(markdown(rep))
     print(markdown(rep))
