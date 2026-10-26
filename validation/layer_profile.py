@@ -15,8 +15,9 @@ cold caches, at the GPU's own clocks (--clock-control none), so the sum is not a
 It runs itself under ncu (NCU, default ncu on PATH or /usr/local/cuda/bin/ncu) and writes the
 report as JSON and as a Markdown table beside it (.md). Where ncu cannot read the GPU's counters
 (a container without profiling permission, ERR_NVGPUCTRPERM) or is missing, or with --timer
-events, each launch of the step is timed between two CUDA events instead: GPU time in a normal,
-warm step, with no DRAM bytes or SM throughput.
+events, each launch of the step is timed between two CUDA events instead, after a 512 MB copy
+that evicts L2 and keeps the GPU busy while the launch is queued (so the time is the kernel's, not
+the host's): GPU time with cold caches as under ncu, but no DRAM bytes or SM throughput.
 """
 import argparse
 import csv
@@ -66,6 +67,7 @@ def child(args):
     from glm_vx.model import GlmMoeDsaModel
     from gpu.resident import ResidentGLM
     from validation.gpu_vs_official import full_geometry, random_weights
+    from validation.moe_profile import l2_flush
     from validation.resident_compare import bf16_source, fp8_source, int4_source
     config = full_geometry(args.layers)
     weights = random_weights(config, args.seed)
@@ -86,6 +88,7 @@ def child(args):
     def timed(run, name, *a, **k):
         launches.append((name, *label(inspect.stack(0)[2:])))
         if args.timer == 'events':
+            l2_flush(ctx, resident.stream, resident._ptx_dir / 'spawn')
             start = ctx.event().record(resident.stream)
             run(name, *a, **k)
             events.append((start, ctx.event().record(resident.stream)))
@@ -167,7 +170,8 @@ def markdown(rep):
     lines = [f"# One decode step, kernel by kernel: {rep['format']}, full width, {rep['layers']} layers, "
              f"context {rep['context']}", '',
              ('ncu, each kernel alone with cold caches; not a step time.' if rep.get('timer', 'ncu') == 'ncu' else
-              'CUDA events around each launch of a warm step (ncu had no counters): GPU time only, no DRAM bytes.'), '',
+              'CUDA events around each launch, each after a 512 MB copy (ncu had no counters): GPU time with cold '
+              'caches, no DRAM bytes.'), '',
              '| Group | Kernels | GPU us | DRAM MB | GB/s | % of peak BW | us at peak BW |', '|---|---|---|---|---|---|---|']
     for name, g in rep['groups'].items():
         lines.append(f"| {name} | {g['kernels']} | {g['us']:.0f} | {_cell(g['dram_mb'], '.1f')} | {_cell(g['gbs'], '.0f')} | "

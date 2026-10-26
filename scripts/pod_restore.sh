@@ -47,6 +47,11 @@ export VXC=$prefix/bin/vxc
 export VX_GPU_LLVM_BIN=$prefix/llvm-22/bin
 export LD_LIBRARY_PATH=$prefix/llvm-22/lib:$prefix/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}
 E
+# vxc links a program with a GPU spawn against VX_DISPATCH_LIB. Its built-in default is a path on
+# the machine that built vxc, so without this the link fails on vx_plugin_* symbols.
+if [[ -f $prefix/lib/libvx_cuda_dispatch.so ]]; then
+  echo "export VX_DISPATCH_LIB=$prefix/lib/libvx_cuda_dispatch.so" >> "$prefix/env.sh"
+fi
 . "$prefix/env.sh"
 missing=$(for f in "$prefix/bin/vxc" "$prefix"/llvm-22/bin/{mlir-translate,opt,llc,clang}; do ldd "$f" | grep 'not found' || true; done)
 [[ -z $missing ]] || { echo "missing shared libraries:" >&2; echo "$missing" >&2; exit 3; }

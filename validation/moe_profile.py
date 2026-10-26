@@ -14,7 +14,8 @@ not a step time. Random weights and ids; timing does not depend on their values.
 
 Where ncu cannot read the GPU's counters (a container without profiling permission,
 ERR_NVGPUCTRPERM) or is missing, or with --timer events, each launch is instead timed with CUDA
-events, the median of 5, each after a 512 MB copy that evicts it from L2. That gives GPU time and
+events, the median of 5, each after a 512 MB copy that evicts it from L2 and keeps the GPU busy while
+the launch is queued. That gives GPU time and
 the bandwidth the expected bytes imply, but no measured DRAM bytes or SM throughput.
 
   python -m validation.moe_profile --output run/moe.json [--formats f32 bf16 fp8 int4] [--k 1 2 4 8]
@@ -74,17 +75,25 @@ def weights(ctx, rng, fmt, rows, cols):
                 scales=ctx.tensor(scales.shape, 'uint16', scales.tobytes()), scale_kind=1)
 
 
-def event_us(ctx, stream, spawn, launch, repeats=5):
-    """Median GPU microseconds of launch() between two events, each after a 512 MB copy that
-    leaves none of its data in L2 (40 MB on an A100, 50 MB on an H100)."""
+def l2_flush(ctx, stream, spawn):
+    """Copy 512 MB to 512 MB on stream: none of the next kernel's data is left in L2 (40 MB on an
+    A100, 50 MB on an H100), and the GPU is busy for about 0.3 ms (H100) to 0.7 ms (A100), longer
+    than the host takes to queue the events and the launch that follow. Without it, a start event
+    on an idle GPU also times the host preparing the launch."""
     from gpu.spawn.launch import SpawnKernel
-    if not hasattr(event_us, 'flush'):
-        n = 64 << 20
-        event_us.flush = (SpawnKernel(ctx, spawn / 'copy.ptx'), ctx.tensor((n,), 'float32'), ctx.tensor((n,), 'float32'), n)
-    copy, a, b, n = event_us.flush
+    if getattr(l2_flush, 'ctx', None) is not ctx:
+        n = 128 << 20
+        l2_flush.ctx = ctx
+        l2_flush.state = (SpawnKernel(ctx, spawn / 'copy.ptx'), ctx.tensor((n,), 'float32'), ctx.tensor((n,), 'float32'), n)
+    copy, a, b, n = l2_flush.state
+    copy.launch(stream=stream, out=a, x=b, n=n)
+
+
+def event_us(ctx, stream, spawn, launch, repeats=5):
+    """Median GPU microseconds of launch() between two events, each after l2_flush."""
     times = []
     for _ in range(repeats):
-        copy.launch(stream=stream, out=a, x=b, n=n)
+        l2_flush(ctx, stream, spawn)
         start, end = ctx.event().record(stream), ctx.event()
         launch()
         end.record(stream)
