@@ -24,6 +24,22 @@ if command -v apt-get >/dev/null; then
   apt-get update -qq
   apt-get install -y -qq libz3-4 libzstd1 zlib1g libstdc++6 libxml2 libedit2 libtinfo6 build-essential
 fi
+# Bundles packed from apt's LLVM keep libLLVM.so.22.1 and libclang-cpp.so.22.1 as symlinks into
+# /usr/lib/x86_64-linux-gnu (371c2bae's does). They resolve only where apt.llvm.org's LLVM 22 is
+# installed, so install its two runtime libraries and point the links there.
+lib=$prefix/llvm-22/lib
+if [[ ! -e $lib/libLLVM.so.22.1 || ! -e $lib/libclang-cpp.so.22.1 ]]; then
+  if [[ ! -e /usr/lib/x86_64-linux-gnu/libLLVM.so.22.1 ]] && command -v apt-get >/dev/null; then
+    apt-get install -y -qq wget gnupg ca-certificates
+    wget -qO /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key
+    echo "deb http://apt.llvm.org/$(. /etc/os-release; echo "$VERSION_CODENAME")/ llvm-toolchain-$(. /etc/os-release; echo "$VERSION_CODENAME")-22 main" \
+      > /etc/apt/sources.list.d/llvm22.list
+    apt-get update -qq
+    apt-get install -y -qq libllvm22 libclang-cpp22
+  fi
+  ln -sf /usr/lib/x86_64-linux-gnu/libLLVM.so.22.1 "$lib/libLLVM.so.22.1"
+  ln -sf /usr/lib/x86_64-linux-gnu/libclang-cpp.so.22.1 "$lib/libclang-cpp.so.22.1"
+fi
 cat > "$prefix/env.sh" <<E
 export VX_TOOLCHAIN=$prefix
 export PATH=$prefix/llvm-22/bin:$prefix/bin:\$PATH
