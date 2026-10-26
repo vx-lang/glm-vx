@@ -1,0 +1,1 @@
+done seed=7 ops=['matvec', 'matvec_96x64', 'matvec_64x96', 'matvec_128x128', 'matvec_33x32', 'matvec_257x512', 'rmsnorm', 'softmax', 'swiglu', 'rope', 'route', 'mlp', 'index_scores', 'compressed_attention'] mismatches=0

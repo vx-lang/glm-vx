@@ -16,11 +16,12 @@ also cover every pass. A kernel whose rows have a run-time length writes a rank-
 times numbers; `launch.py` passes a rank-2 `DeviceTensor` as its 7-word descriptor. A row's
 index may then be anything, as in topk's `hist[t][digit]`.
 
-All 40 kernels build with Vx main from e6722f78 on (the `lanes::` reductions of #2117, #2124 and
-#2128; #2134: several libraries in one process each run their own kernel; for mla_decode, the
-code of a group of blocks and its arrival counts, #2185 to #2188; and for mla_decode_at, #2240's
-uniform reads of a `&` tensor parameter, so the step buffer can bound its blocks' work). The other
-39 build with Vx main from c3716538 on. It no longer parses
+All 40 kernels build and launch with Vx main from 371c2bae on. They use the `lanes::` reductions
+(#2117, #2124, #2128) and #2134 (several libraries in one process each run their own kernel).
+mla_decode uses the code of a group of blocks and its arrival counts (#2185 to #2188). mla_decode_at
+uses #2240's uniform reads of a `&` tensor parameter, so the step buffer can bound its blocks' work,
+and #2247, which declares a block of more than 256 threads to ptxas so its 1024 threads fit in
+registers. The other 39 build with Vx main from c3716538 on. Vx main no longer parses
 `grid([..]) block(n)`. What the proof takes in a loop shapes them:
 
 - **No calls it cannot read.** A function call (other than the stdlib's pure scalar ones, such

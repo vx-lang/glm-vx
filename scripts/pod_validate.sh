@@ -10,19 +10,22 @@
 #
 # Optional: GLM_VX_INT4_CHECKPOINT=<dir from validation/fetch_tensors.py> adds the real
 # compressed-tensors Linears to the INT4 device test. PYTHON (default python3), LAYERS (full-width
-# layers, default 4), TOKENS (default 48), STRESS (concurrent stress processes, default 8).
+# layers, default 4), TOKENS (default 48), REFERENCE_TOKENS (tokens of the full-width hybrid
+# reference, default 20), STRESS (concurrent stress processes, default 8).
 # Use OMP_NUM_THREADS well below the host's vCPU count (NumPy thrashes on 128-vCPU pods).
 #
-# Toolchain: one vxc bundle from Vx main, e6722f78 or later (#2240: mla_decode_at reads its step buffer): #2134 (one library per kernel in a
-# process), the `lanes::` reductions of #260 (#2117, #2124, #2128), the `across` loops of #2095 to
-# #2097, `if` values of #2112, the code of a group of blocks and its arrival counts that mla_decode
-# uses (#2185 to #2188), a library's pub fn that gives mla_decode a device arrival count (#2232) and
-# loads without vx_stderr_write (#2230), and vx_cuda_set_stream of #2100, which the graph step needs (host.txt
-# says whether the dispatch library exports it). VXC, and VX_DISPATCH_LIB or <bundle>/lib/libvx_cuda_dispatch.so.
+# Toolchain: one vxc bundle from Vx main, 371c2bae or later (#2240: mla_decode_at reads its step
+# buffer; #2247: its 1024-thread block is declared to ptxas, or the launch is refused). It also has
+# #2134 (one library per kernel in a process), the `lanes::` reductions of #260 (#2117, #2124,
+# #2128), the `across` loops of #2095 to #2097, `if` values of #2112, the code of a group of blocks
+# and its arrival counts that mla_decode uses (#2185 to #2188), a library's pub fn that gives
+# mla_decode a device arrival count (#2232) and loads without vx_stderr_write (#2230), and
+# vx_cuda_set_stream of #2100, which the graph step needs (host.txt says whether the dispatch
+# library exports it). VXC, and VX_DISPATCH_LIB or <bundle>/lib/libvx_cuda_dispatch.so.
 # Do not export VX_CUDA_SYNC or VX_TIME_KERNEL for the whole run: Vx stops a graph capture on either.
 set -uo pipefail
 cd "$(dirname "$0")/.."
-: "${PYTHON:=python3}" "${LAYERS:=4}" "${TOKENS:=48}" "${STRESS:=8}" "${OMP_NUM_THREADS:=16}"
+: "${PYTHON:=python3}" "${LAYERS:=4}" "${TOKENS:=48}" "${REFERENCE_TOKENS:=20}" "${STRESS:=8}" "${OMP_NUM_THREADS:=16}"
 export OMP_NUM_THREADS
 # The PTX target stays sm_80 (gpu/build.sh), which the driver JITs on newer GPUs; ptxas checks it for
 # the device's own arch (PTXAS_ARCH, e.g. sm_90 on an H100) and runs whenever a CUDA ptxas is found.
@@ -105,20 +108,26 @@ step test-resident-fused-attention hw gpu/test_resident_fused_attention_hardware
 # per-launch path, bit for bit, 5 weight layouts and 700 steps through 1 to 3 MLA splits.
 step test-resident-graph hw gpu/test_resident_graph_hardware.py
 
+# Full-width float32 checks resident against the hybrid path, which reads every result back (about
+# 33 s per token): REFERENCE_TOKENS of them (default 20, above the full config's index_topk of 16).
 for mode in f32 int4 fp8 bf16; do
   flag=$([[ $mode == f32 ]] && echo "" || echo "--$mode")
   step resident-$mode-small $PYTHON -m validation.resident_compare $flag --tokens "$TOKENS" --output "$out/resident-$mode-small.json"
-  step resident-$mode-full$LAYERS $PYTHON -m validation.resident_compare $flag --geometry full --layers "$LAYERS" \
+  reference=$([[ $mode == f32 ]] && echo "--reference-tokens $REFERENCE_TOKENS" || echo "")
+  step resident-$mode-full$LAYERS $PYTHON -m validation.resident_compare $flag $reference --geometry full --layers "$LAYERS" \
     --tokens "$TOKENS" --output "$out/resident-$mode-full$LAYERS.json"
 done
-# Graph replay against the per-launch path (#28): bitwise, ms per token, the host time to enqueue
-# a step and the GPU time of a replay. Every routed expert is resident here (device_experts): at
-# full width with 4 layers that is one sparse layer's 256 experts, 39 GB in float32.
+# Graph replay against the per-launch path (#26), bit for bit, every routed expert resident.
 for mode in f32 int4 fp8 bf16; do
   step graph-$mode-small $PYTHON -m validation.resident_graph --format $mode --tokens "$TOKENS" --output "$out/graph-$mode-small.json"
-  step graph-$mode-full$LAYERS $PYTHON -m validation.resident_graph --format $mode --geometry full --layers "$LAYERS" \
-    --tokens "$TOKENS" --output "$out/graph-$mode-full$LAYERS.json"
 done
+# Where one full-width layer spends its GPU time, kernel by kernel, under Nsight Compute: layer 0
+# (dense) and layer 3 (MoE) of one decode step, with DRAM bytes and % of peak bandwidth and compute.
+if command -v "${NCU:-ncu}" >/dev/null || [[ -x /usr/local/cuda/bin/ncu ]]; then
+  for mode in f32 int4 fp8 bf16; do
+    step layer-profile-$mode $PYTHON -m validation.layer_profile --format $mode --output "$out/layer-profile-$mode.json"
+  done
+fi
 
 # Sharing: the upload race (docs/GPU-BRINGUP.md) only showed with several processes on one GPU.
 stress() {

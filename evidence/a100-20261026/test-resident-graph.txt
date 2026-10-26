@@ -1,0 +1,51 @@
+......F                                                                  [100%]
+=================================== FAILURES ===================================
+________ test_graph_replay_with_fused_attention_through_several_splits _________
+
+ctx = <gpu.runtime.CUDAContext object at 0x79e70ecd6b10>
+
+    @pytest.mark.skipif(not (SPAWN / 'mla_decode_at.ptx').exists(), reason='gpu/spawn mla_decode_at not built')
+    def test_graph_replay_with_fused_attention_through_several_splits(ctx):
+        """mla_decode_at in the graph (#27) against mla_decode per step, 700 steps through 1 to 3 splits
+        of splits_max 16, and the arrival counts back at zero after the last replay."""
+        steps = 700
+        model = build(seed=89, index_topk=1024, max_position_embeddings=1024)
+        tokens = np.random.default_rng(89).integers(0, model.config['vocab_size'], size=steps).tolist()
+>       got, want, graph = both(ctx, model, tokens, steps + 8, fused_attention=True)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+gpu/test_resident_graph_hardware.py:54: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+gpu/test_resident_graph_hardware.py:28: in both
+    return graph.prefill(tokens), plain.prefill(tokens), graph
+           ^^^^^^^^^^^^^^^^^^^^^
+gpu/resident.py:883: in prefill
+    return np.stack([self.forward(t) for t in token_ids]) if len(token_ids) else np.empty((0, int(self.config['vocab_size'])), np.float32)
+                     ^^^^^^^^^^^^^^^
+gpu/resident.py:761: in forward
+    self._layers(position)  # uploads every weight and loads every kernel the capture needs
+    ^^^^^^^^^^^^^^^^^^^^^^
+gpu/resident.py:790: in _layers
+    self._attention(layer, self.norm, position, have_selection)
+gpu/resident.py:673: in _attention
+    self._spawn('mla_decode_at', out=self.attended, numerator=self.numerator, stats=self.stats,
+gpu/resident.py:196: in _spawn
+    kernel.launch(stream=self.stream, **values)
+gpu/spawn/launch.py:116: in launch
+    self.kernel.launch(grid, block, self.arguments(values), shared_bytes=self.shared_bytes, stream=stream)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.runtime.Kernel object at 0x79e6fc39cfb0>, grid = (2, 16, 1)
+block = (1024, 1, 1)
+args = [<gpu.runtime.DeviceTensor object at 0x79e6fc462d20>, <gpu.runtime.DeviceTensor object at 0x79e6fc462d20>, c_ulong(0), c_ulong(2), c_ulong(8), c_ulong(8), ...]
+shared_bytes = 0, stream = <gpu.runtime.Stream object at 0x79e70ebbe1e0>
+
+    def launch(self, grid, block, args=(), *, shared_bytes=0, stream=None):
+        grid = _dimensions(grid, "grid", self.context.max_grid)
+        block = _dimensions(block, "block", self.context.max_block)
+        if math.prod(block) > min(self.max_threads, self.context.max_threads_per_block):
+>           raise ValueError("block exceeds kernel/device thread limit")
+E           ValueError: block exceeds kernel/device thread limit
+
+gpu/runtime.py:681: ValueError
+1 failed, 6 passed in 8.82s

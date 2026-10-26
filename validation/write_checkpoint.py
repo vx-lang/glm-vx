@@ -43,25 +43,43 @@ def from_bf16_bits(bits):
     return (np.asarray(bits, dtype=np.uint16).astype(np.uint32) << 16).view(np.float32)
 
 
+def _fp8_rows(w, codes, scales, r0, r1, br, bc):
+    """Encode rows r0:r1 (whole row blocks) of w into codes and scales: every 128x128 tile scaled by
+    its own amax / FP8_MAX (1 for an all-zero tile), then the nearest E4M3FN value, ties to the
+    lower one. The same operations as tile by tile, on many tiles at once."""
+    chunk = w[r0:r1]
+    rows, cols = chunk.shape
+    nr, nc = -(-rows // br), -(-cols // bc)
+    padded = np.zeros((nr * br, nc * bc), np.float32)
+    padded[:rows, :cols] = np.abs(chunk)
+    amax = padded.reshape(nr, br, nc, bc).max(axis=(1, 3))
+    scale = np.where(amax > 0, (amax.astype(np.float64) / FP8_MAX).astype(np.float32), np.float32(1.0))
+    scales[r0 // br:r0 // br + nr] = scale
+    normalized = np.clip(chunk / np.repeat(np.repeat(scale, br, 0), bc, 1)[:rows, :cols], -FP8_MAX, FP8_MAX)
+    pos = np.clip(np.searchsorted(_sorted_values, normalized), 1, len(_sorted_values) - 1)
+    lo, hi = _sorted_values[pos - 1], _sorted_values[pos]
+    pick = np.where(np.abs(normalized - lo) <= np.abs(hi - normalized), pos - 1, pos)
+    codes[r0:r1] = _sorted_codes[pick]
+
+
 def fp8_quantize(w, block=(128, 128)):
-    """(codes uint8 [r,c], scales f32 [ceil(r/br), ceil(c/bc)])."""
+    """(codes uint8 [r,c], scales f32 [ceil(r/br), ceil(c/bc)]). Large matrices are encoded in
+    chunks of row blocks on a thread pool (NumPy releases the GIL in these operations)."""
     w = np.asarray(w, dtype=np.float32)
     br, bc = block
     rows, cols = w.shape
-    grid = (math.ceil(rows / br), math.ceil(cols / bc))
-    scales = np.ones(grid, dtype=np.float32)
+    scales = np.ones((math.ceil(rows / br), math.ceil(cols / bc)), dtype=np.float32)
     codes = np.zeros(w.shape, dtype=np.uint8)
-    for i in range(grid[0]):
-        for j in range(grid[1]):
-            tile = w[i * br:(i + 1) * br, j * bc:(j + 1) * bc]
-            amax = float(np.abs(tile).max())
-            scale = np.float32(amax / FP8_MAX) if amax > 0 else np.float32(1.0)
-            scales[i, j] = scale
-            normalized = np.clip(tile / scale, -FP8_MAX, FP8_MAX)
-            pos = np.clip(np.searchsorted(_sorted_values, normalized), 1, len(_sorted_values) - 1)
-            lo, hi = _sorted_values[pos - 1], _sorted_values[pos]
-            pick = np.where(np.abs(normalized - lo) <= np.abs(hi - normalized), pos - 1, pos)
-            codes[i * br:(i + 1) * br, j * bc:(j + 1) * bc] = _sorted_codes[pick]
+    step = br * max(1, (1 << 22) // (br * max(cols, 1)))  # about 4M elements per chunk
+    starts = range(0, rows, step)
+    if len(starts) == 1:
+        _fp8_rows(w, codes, scales, 0, rows, br, bc)
+        return codes, scales
+    import concurrent.futures
+    import os
+    with concurrent.futures.ThreadPoolExecutor(min(len(starts), os.cpu_count() or 1, 64)) as pool:
+        for f in [pool.submit(_fp8_rows, w, codes, scales, r, min(r + step, rows), br, bc) for r in starts]:
+            f.result()
     return codes, scales
 
 

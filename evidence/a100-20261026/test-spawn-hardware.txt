@@ -1,0 +1,98 @@
+......................................................................x. [ 78%]
+..................FF                                                     [100%]
+=================================== FAILURES ===================================
+_ test_spawn_mla_decode_at_equals_mla_decode_for_each_splits[2-48-4-700-64-3] __
+
+context = <gpu.runtime.CUDAContext object at 0x7c152d904800>, heads = 2
+rank = 48, rope = 4, tokens = 700, block = 64, splits_max = 3
+
+    @pytest.mark.skipif(not (BUILD / 'spawn/mla_decode_at.ptx').exists(), reason='mla_decode_at not built (gpu/spawn/build.sh)')
+    @pytest.mark.parametrize('heads,rank,rope,tokens,block,splits_max', [(2, 48, 4, 700, 64, 3), (64, 512, 64, 4096, 512, 16)])
+    def test_spawn_mla_decode_at_equals_mla_decode_for_each_splits(context, heads, rank, rope, tokens, block, splits_max):
+        rng = np.random.default_rng(heads + rank + splits_max)
+        q, qr = rng.normal(size=heads * rank).astype('f4'), rng.normal(size=heads * rope).astype('f4')
+        kv, kr = rng.normal(size=tokens * rank).astype('f4'), rng.normal(size=tokens * rope).astype('f4')
+        dq, dqr, dkv, dkr = (upload(context, a) for a in (q, qr, kv, kr))
+        common = dict(heads=heads, rank=rank, rope_dim=rope, selection_stride=0, cache_latent=dkv, q_latent=dq,
+                      q_rope=dqr, cache_rope=dkr, scale=rank ** -0.5, threads=block)
+        decode = SpawnKernel(context, BUILD / 'spawn/mla_decode.ptx')
+        at = SpawnKernel(context, BUILD / 'spawn/mla_decode_at.ptx')
+        arrivals = upload(context, np.zeros(heads, 'i4'))
+        for count, splits in ((5, 1), (300, 2), (640, 3)):
+            dsel = upload(context, rng.permutation(tokens)[:count].astype('i4'))
+            num, stats = context.tensor((heads, splits, rank)), context.tensor((heads, splits, 2))
+            out = upload(context, np.full(heads * rank, 7, 'f4'))
+            decode.launch(out=out.view((heads, rank)), numerator=num, stats=stats, selected=dsel, tokens=tokens,
+                          count=count, splits=splits, arrivals=upload(context, np.zeros(heads, 'i4')), **common)
+            a_num, a_stats = context.tensor((heads, splits_max, rank)), context.tensor((heads, splits_max, 2))
+            a_out = upload(context, np.full(heads * rank, 7, 'f4'))
+>           at.launch(out=a_out.view((heads, rank)), numerator=a_num, stats=a_stats, selected=dsel, splits_max=splits_max,
+                      step=upload(context, np.array([tokens - 1, tokens, count, splits], 'i4')), arrivals=arrivals, **common)
+
+gpu/test_spawn_hardware.py:582: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+gpu/spawn/launch.py:116: in launch
+    self.kernel.launch(grid, block, self.arguments(values), shared_bytes=self.shared_bytes, stream=stream)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.runtime.Kernel object at 0x7c14cfe6e030>, grid = (2, 3, 1)
+block = (1024, 1, 1)
+args = [<gpu.runtime.DeviceTensor object at 0x7c14cfe6e690>, <gpu.runtime.DeviceTensor object at 0x7c14cfe6e690>, c_ulong(0), c_ulong(2), c_ulong(48), c_ulong(48), ...]
+shared_bytes = 0, stream = None
+
+    def launch(self, grid, block, args=(), *, shared_bytes=0, stream=None):
+        grid = _dimensions(grid, "grid", self.context.max_grid)
+        block = _dimensions(block, "block", self.context.max_block)
+        if math.prod(block) > min(self.max_threads, self.context.max_threads_per_block):
+>           raise ValueError("block exceeds kernel/device thread limit")
+E           ValueError: block exceeds kernel/device thread limit
+
+gpu/runtime.py:681: ValueError
+_ test_spawn_mla_decode_at_equals_mla_decode_for_each_splits[64-512-64-4096-512-16] _
+
+context = <gpu.runtime.CUDAContext object at 0x7c152d904800>, heads = 64
+rank = 512, rope = 64, tokens = 4096, block = 512, splits_max = 16
+
+    @pytest.mark.skipif(not (BUILD / 'spawn/mla_decode_at.ptx').exists(), reason='mla_decode_at not built (gpu/spawn/build.sh)')
+    @pytest.mark.parametrize('heads,rank,rope,tokens,block,splits_max', [(2, 48, 4, 700, 64, 3), (64, 512, 64, 4096, 512, 16)])
+    def test_spawn_mla_decode_at_equals_mla_decode_for_each_splits(context, heads, rank, rope, tokens, block, splits_max):
+        rng = np.random.default_rng(heads + rank + splits_max)
+        q, qr = rng.normal(size=heads * rank).astype('f4'), rng.normal(size=heads * rope).astype('f4')
+        kv, kr = rng.normal(size=tokens * rank).astype('f4'), rng.normal(size=tokens * rope).astype('f4')
+        dq, dqr, dkv, dkr = (upload(context, a) for a in (q, qr, kv, kr))
+        common = dict(heads=heads, rank=rank, rope_dim=rope, selection_stride=0, cache_latent=dkv, q_latent=dq,
+                      q_rope=dqr, cache_rope=dkr, scale=rank ** -0.5, threads=block)
+        decode = SpawnKernel(context, BUILD / 'spawn/mla_decode.ptx')
+        at = SpawnKernel(context, BUILD / 'spawn/mla_decode_at.ptx')
+        arrivals = upload(context, np.zeros(heads, 'i4'))
+        for count, splits in ((5, 1), (300, 2), (640, 3)):
+            dsel = upload(context, rng.permutation(tokens)[:count].astype('i4'))
+            num, stats = context.tensor((heads, splits, rank)), context.tensor((heads, splits, 2))
+            out = upload(context, np.full(heads * rank, 7, 'f4'))
+            decode.launch(out=out.view((heads, rank)), numerator=num, stats=stats, selected=dsel, tokens=tokens,
+                          count=count, splits=splits, arrivals=upload(context, np.zeros(heads, 'i4')), **common)
+            a_num, a_stats = context.tensor((heads, splits_max, rank)), context.tensor((heads, splits_max, 2))
+            a_out = upload(context, np.full(heads * rank, 7, 'f4'))
+>           at.launch(out=a_out.view((heads, rank)), numerator=a_num, stats=a_stats, selected=dsel, splits_max=splits_max,
+                      step=upload(context, np.array([tokens - 1, tokens, count, splits], 'i4')), arrivals=arrivals, **common)
+
+gpu/test_spawn_hardware.py:582: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+gpu/spawn/launch.py:116: in launch
+    self.kernel.launch(grid, block, self.arguments(values), shared_bytes=self.shared_bytes, stream=stream)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.runtime.Kernel object at 0x7c14cfe31a60>, grid = (64, 16, 1)
+block = (1024, 1, 1)
+args = [<gpu.runtime.DeviceTensor object at 0x7c14cfe321e0>, <gpu.runtime.DeviceTensor object at 0x7c14cfe321e0>, c_ulong(0), c_ulong(64), c_ulong(512), c_ulong(512), ...]
+shared_bytes = 0, stream = None
+
+    def launch(self, grid, block, args=(), *, shared_bytes=0, stream=None):
+        grid = _dimensions(grid, "grid", self.context.max_grid)
+        block = _dimensions(block, "block", self.context.max_block)
+        if math.prod(block) > min(self.max_threads, self.context.max_threads_per_block):
+>           raise ValueError("block exceeds kernel/device thread limit")
+E           ValueError: block exceeds kernel/device thread limit
+
+gpu/runtime.py:681: ValueError
+2 failed, 89 passed, 1 xfailed in 2.43s

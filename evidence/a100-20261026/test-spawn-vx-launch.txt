@@ -1,0 +1,42 @@
+..........................F...............                               [100%]
+=================================== FAILURES ===================================
+_____________ test_vx_launch_matches_python_launch[mla_decode_at] ______________
+
+context = <gpu.runtime.CUDAContext object at 0x72628e0faed0>
+name = 'mla_decode_at'
+
+    @pytest.mark.parametrize('name', sorted(CASES))
+    def test_vx_launch_matches_python_launch(context, name):
+        ptx = SPAWN / f'{name}.ptx'
+        if not ptx.exists():
+            pytest.skip(f'{ptx} not built')
+        try:
+            vx = VxKernel(ptx)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(str(e))
+        python = SpawnKernel(context, ptx)
+        mutable = [p['name'] for p in python.params if p.get('mut')]
+        ours, theirs = (on_device(context, CASES[name](np.random.default_rng(len(name)))) for _ in range(2))
+>       python.launch(**ours)  # the manifest's shape, which is Vx's
+        ^^^^^^^^^^^^^^^^^^^^^
+
+gpu/test_spawn_vx_launch.py:237: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+gpu/spawn/launch.py:116: in launch
+    self.kernel.launch(grid, block, self.arguments(values), shared_bytes=self.shared_bytes, stream=stream)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.runtime.Kernel object at 0x72625c0db500>, grid = (4, 4, 1)
+block = (1024, 1, 1)
+args = [<gpu.runtime.DeviceTensor object at 0x72625c0dadb0>, <gpu.runtime.DeviceTensor object at 0x72625c0dadb0>, c_ulong(0), c_ulong(4), c_ulong(64), c_ulong(64), ...]
+shared_bytes = 0, stream = None
+
+    def launch(self, grid, block, args=(), *, shared_bytes=0, stream=None):
+        grid = _dimensions(grid, "grid", self.context.max_grid)
+        block = _dimensions(block, "block", self.context.max_block)
+        if math.prod(block) > min(self.max_threads, self.context.max_threads_per_block):
+>           raise ValueError("block exceeds kernel/device thread limit")
+E           ValueError: block exceeds kernel/device thread limit
+
+gpu/runtime.py:681: ValueError
+1 failed, 41 passed in 3.50s

@@ -1,0 +1,9 @@
+name, driver_version, memory.total [MiB], compute_cap
+NVIDIA A100 80GB PCIe, 595.91.07, 81920 MiB, 8.0
+ptx target sm_80, ptxas /usr/local/cuda/bin/ptxas for sm_80
+repo f687b4f (no .git; set REPO_REV)
+vxc vxc 0.0.3
+llvm LLVM version 22.1.8
+Python 3.12.3
+dispatch lib /root/vx-e672-target/release/build/vxc-43354e157efef559/out/libvx_cuda_dispatch.so
+vx_cuda_set_stream (Vx #2100): exported

@@ -1,0 +1,18 @@
+{
+  "mode": "int4-vs-f32-dequantized",
+  "geometry": "full",
+  "layers": 4,
+  "hidden": 6144,
+  "tokens": 48,
+  "int4_linears": 800,
+  "bitwise_equal": false,
+  "max_abs_diff": 9.059906005859375e-06,
+  "max_abs_logit": 5.546490669250488,
+  "top1_equal": true,
+  "int4_seconds_per_token": 0.012009455560473725,
+  "f32_seconds_per_token": 0.011298736140209561,
+  "int4_weights_gib_uploaded": 6.033535003662109,
+  "f32_weights_gib_uploaded": 19.989749908447266,
+  "int4_matvec_launches": 4992,
+  "note": "single run, synthetic INT4 encoding of random weights; kv_b_proj is dequantized to float32 in both; lazy uploads; not a benchmark"
+}

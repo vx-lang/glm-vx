@@ -144,6 +144,8 @@ class CUDADriver:
             #   l2Promotion, oobFill)
             "cuTensorMapEncodeTiled": [_P, _I32, _U32, _P, C.POINTER(_U64), C.POINTER(_U64),
                                        C.POINTER(_U32), C.POINTER(_U32), _I32, _I32, _I32, _I32],
+            # Bound what a profiler (ncu --profile-from-start off) measures: validation/layer_profile.py.
+            "cuProfilerStart": [], "cuProfilerStop": [],
         }
         for name, argtypes in optional.items():
             fn = getattr(self.library, name, None)

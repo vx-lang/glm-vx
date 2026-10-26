@@ -1,0 +1,18 @@
+{
+  "mode": "fp8-vs-f32-dequantized",
+  "geometry": "small",
+  "layers": 6,
+  "hidden": 256,
+  "tokens": 48,
+  "fp8_linears": 174,
+  "bitwise_equal": true,
+  "max_abs_diff": 0.0,
+  "max_abs_logit": 4.087644577026367,
+  "top1_equal": true,
+  "fp8_seconds_per_token": 0.011899998838392397,
+  "f32_seconds_per_token": 0.011266980378422886,
+  "fp8_weights_gib_uploaded": 0.00606141984462738,
+  "f32_weights_gib_uploaded": 0.019174963235855103,
+  "fp8_matvec_launches": 7488,
+  "note": "single run, synthetic FP8 encoding of random weights; kv_b_proj is dequantized to float32 in both; lazy uploads; not a benchmark"
+}

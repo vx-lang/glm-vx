@@ -17,6 +17,10 @@ With --fp8 the Linears the official GLM FP8 checkpoint quantizes are encoded as 
 E4M3FN (128x128 float32 scales) and compared the same way (FP8 kernel vs float32 on the exact
 dequantization, same gate). Weight-only: activations stay float32 in both.
 
+--reference-tokens N compares only the first N tokens against the hybrid path, which reads every
+result back to the host (about 33 s per token at full width); the resident timing still runs all
+--tokens. Keep N above index_topk so the comparison covers sparse selection.
+
 With --bf16 every Linear except the embedding is rounded to bfloat16 and stored as bits; the BF16
 kernel decodes exactly and sums in the float32 matvec's order, so bitwise_equal is the expectation
 (the gate is the same as above; a non-bitwise result is reported, not hidden).
@@ -112,6 +116,7 @@ def main():
     p.add_argument('--layers', type=int, default=4, help='layers for --geometry full')
     p.add_argument('--tokens', type=int, default=48)
     p.add_argument('--seed', type=int, default=1)
+    p.add_argument('--reference-tokens', type=int, help='hybrid reference over the first N tokens (default all)')
     quant = p.add_mutually_exclusive_group()
     quant.add_argument('--int4', action='store_true', help='INT4 resident vs float32 resident on the dequantized weights')
     quant.add_argument('--fp8', action='store_true', help='block-FP8 resident vs float32 resident on the dequantized weights')
@@ -135,26 +140,30 @@ def main():
         print(json.dumps(report, indent=2))
         return 0 if ok else 1
 
+    reference = tokens[:args.reference_tokens] if args.reference_tokens else tokens
+    if len(reference) <= int(config['index_topk']):
+        print(f'note: {len(reference)} reference tokens do not exceed index_topk={config["index_topk"]}: no sparse selection')
     hybrid_backend = GPUBackend(weight_cache_bytes=8 * 1024 ** 3)
     hybrid = GlmMoeDsaModel(config, weights, hybrid_backend)
     cache = hybrid.new_cache()
     hybrid.forward(tokens[0], cache)  # warm the weight cache and kernels
     cache = hybrid.new_cache()
     start = time.perf_counter()
-    expected = np.stack([hybrid.forward(t, cache) for t in tokens])
+    expected = np.stack([hybrid.forward(t, cache) for t in reference])
     hybrid_s = time.perf_counter() - start
     hybrid_backend.close()
 
     got, resident_per_token, warmup_s, weight_gib, _ = timed_resident(GlmMoeDsaModel(config, weights, NumpyBackend()), tokens)
-    resident_s = resident_per_token * len(tokens)
+    got = got[:len(reference)]
 
     diff = np.abs(got - expected)
     report = dict(
         geometry=args.geometry, layers=config['num_hidden_layers'], hidden=config['hidden_size'], tokens=len(tokens),
+        reference_tokens=len(reference),
         bitwise_equal=bool(np.array_equal(got, expected)), max_abs_diff=float(diff.max()),
         max_rel_diff=float((diff / np.maximum(np.abs(expected), 1e-6)).max()),
         top1_equal=bool(np.array_equal(got.argmax(-1), expected.argmax(-1))),
-        hybrid_seconds_per_token=hybrid_s / len(tokens), resident_seconds_per_token=resident_s / len(tokens),
+        hybrid_seconds_per_token=hybrid_s / len(reference), resident_seconds_per_token=resident_per_token,
         resident_warmup_pass_with_lazy_weight_upload_s=warmup_s, resident_weights_gib_uploaded=weight_gib,
         note='single run, F32, random weights; weights upload lazily so only experts routed in this sequence are resident; timings include host work and are not a benchmark')
     args.output.parent.mkdir(parents=True, exist_ok=True)

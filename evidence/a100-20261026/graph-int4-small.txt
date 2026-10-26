@@ -1,0 +1,27 @@
+{
+  "format": "int4",
+  "geometry": "small",
+  "layers": 6,
+  "hidden": 256,
+  "tokens": 48,
+  "bitwise_equal": true,
+  "max_abs_diff": 0.0,
+  "top1_equal": true,
+  "per_launch": {
+    "ms_per_token": 10.845596979682645,
+    "warm_pass_s": 0.5882555181160569,
+    "weights_gib": 0.005136281251907349,
+    "launches_per_step": 183,
+    "step_enqueue_host_ms": 10.205188998952508,
+    "step_gpu_ms": 10.21724796295166
+  },
+  "graph": {
+    "ms_per_token": 2.0216524329346917,
+    "warm_pass_s": 0.15477340994402766,
+    "weights_gib": 0.005136281251907349,
+    "replay_host_ms": 0.009499145671725273,
+    "replay_gpu_ms": 1.9214189147949219
+  },
+  "speedup": 5.364718881938994,
+  "note": "single run, random weights, every routed expert resident (device_experts); ms_per_token includes the step-input upload, the final norm and lm_head and the logits download; not a benchmark"
+}
