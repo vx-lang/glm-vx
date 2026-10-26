@@ -130,6 +130,9 @@ for mode in f32 int4 fp8 bf16; do
   step layer-profile-$mode $PYTHON -m validation.layer_profile --format $mode --output "$out/layer-profile-$mode.json"
 done
 step moe-profile $PYTHON -m validation.moe_profile --output "$out/moe-profile.json"
+# For Vx: mla_decode_at as built (ptxas caps it at 32 registers on sm_90, an 8 B spill) against
+# its PTX with `.minnctapersm 1` (64 registers, 1 block per SM), bit for bit and timed.
+step mla-hint $PYTHON -m validation.mla_hint --output "$out/mla-hint.json"
 
 # Sharing: the upload race (docs/GPU-BRINGUP.md) only showed with several processes on one GPU.
 stress() {
