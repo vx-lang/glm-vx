@@ -713,3 +713,28 @@ def test_mla_decode_equals_partial_then_merge(run, heads, rank, rope, tokens, co
     bits_equal(got['numerator'].reshape(heads * splits, rank), part['numerator'])
     bits_equal(got['stats'].reshape(heads * splits, 2), part['stats'])
     bits_equal(got['out'], want)
+
+
+@pytest.mark.parametrize('heads,rank,rope,tokens,stride,threads,splits_max', [
+    (2, 48, 4, 700, 0, 64, 3), (4, 64, 64, 900, 0, 64, 16)])
+def test_mla_decode_at_equals_mla_decode_for_each_splits(run, heads, rank, rope, tokens, stride, threads, splits_max):
+    """mla_decode_at (glm-vx #27) reads tokens, count and splits from the step buffer and runs
+    splits_max splits per head, the ones past splits idle; for splits 1 to
+    3 as a replayed graph would, it equals mla_decode with those values bit for bit. (The host
+    path keeps its own counts; gpu/test_spawn_hardware.py checks the arrivals buffer.)"""
+    rng = np.random.default_rng(heads + rank + splits_max)
+    q, qr = rng.normal(size=(heads, rank)).astype(F), rng.normal(size=(heads, rope)).astype(F)
+    kv, kr = rng.normal(size=(tokens, rank)).astype(F), rng.normal(size=(tokens, rope)).astype(F)
+    common = dict(q_latent=q, q_rope=qr, cache_latent=kv, cache_rope=kr, heads=heads, rank=rank, rope_dim=rope,
+                  selection_stride=stride, scale=rank ** -0.5, threads=threads)
+    for count, splits in ((5, 1), (300, 2), (640, 3)):
+        selected = rng.permutation(tokens)[:count].astype(np.int32)
+        want = run('mla_decode', out=np.full((heads, rank), 7, F), numerator=np.zeros((heads, splits, rank), F),
+                   stats=np.zeros((heads, splits, 2), F), arrivals=np.zeros(heads, np.int32), selected=selected,
+                   tokens=tokens, count=count, splits=splits, **common)
+        got = run('mla_decode_at', out=np.full((heads, rank), 7, F), numerator=np.zeros((heads, splits_max, rank), F),
+                  stats=np.zeros((heads, splits_max, 2), F), arrivals=np.zeros(heads, np.int32), selected=selected,
+                  step=np.array([tokens - 1, tokens, count, splits], np.int32), splits_max=splits_max, **common)
+        bits_equal(got['numerator'][:, :splits], want['numerator'])
+        bits_equal(got['stats'][:, :splits], want['stats'])
+        bits_equal(got['out'], want['out'])

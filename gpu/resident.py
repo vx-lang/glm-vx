@@ -55,7 +55,8 @@ the grid for ``max_tokens`` (or ``splits_max``), and new cache rows go through f
 ``store_row``. The first step runs the same launches eagerly, so every weight is uploaded and every
 kernel loaded before the capture at the second; the arithmetic is the per-launch path's, so the
 logits are equal bit for bit. It needs ``device_topk`` and ``device_experts`` (no host read inside a
-step); ``fused_attention`` is #27.
+step). With ``fused_attention`` the graph holds gpu/spawn's mla_decode_at (#27): splits_max splits
+per head, those past the step's splits idle but arriving, so the arrival counts still return to zero.
 
 Not a performance claim: no timing is made here.
 ``device_experts`` needs the gpu/spawn kernels built (gpu/spawn/build.sh into ptx_dir/spawn) with a
@@ -112,8 +113,6 @@ class ResidentGLM:
         self.graph = bool(graph)
         if self.graph and not (self.device_topk and self.device_experts):
             raise ValueError('graph=True needs device_topk and device_experts: a captured step cannot read device memory')
-        if self.graph and self.fused_attention:
-            raise NotImplementedError('graph=True with fused_attention needs mla_decode to read splits on the device (#27)')
         self._step_graph, self._warm = None, False
         self.replays = 0
         self.max_weight_bytes = max_weight_bytes
@@ -670,7 +669,13 @@ class ResidentGLM:
         block = ((self.rank + 31) // 32) * 32
         scale = F(_f32(qk ** -0.5, 'MLA scale', True))
         tokens = position + 1
-        if self.fused_attention:
+        if self.fused_attention and self.graph:
+            self._spawn('mla_decode_at', out=self.attended, numerator=self.numerator, stats=self.stats,
+                        q_latent=self.latent_q, q_rope=self.rot_q, cache_latent=self.latents[layer],
+                        cache_rope=self.rope_keys[layer], selected=self.selected, step=self.step, heads=self.heads,
+                        rank=self.rank, rope_dim=self.rot, selection_stride=0, splits_max=self.splits_max,
+                        scale=scale.value, threads=block, arrivals=self.arrivals)
+        elif self.fused_attention:
             self._spawn('mla_decode', out=self.attended, numerator=self.numerator, stats=self.stats,
                         q_latent=self.latent_q, q_rope=self.rot_q, cache_latent=self.latents[layer],
                         cache_rope=self.rope_keys[layer], selected=self.selected, heads=self.heads, rank=self.rank,

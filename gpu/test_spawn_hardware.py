@@ -553,3 +553,38 @@ def test_spawn_mla_decode_equals_partial_then_merge(context, heads, rank, rope, 
         np.testing.assert_array_equal(download(d_num).view('u4').ravel(), download(num).view('u4'))
         np.testing.assert_array_equal(download(d_stats).view('u4').ravel(), download(stats).view('u4'))
         np.testing.assert_array_equal(download(d_out).view('u4'), download(out).view('u4'))
+
+
+# mla_decode_at (glm-vx #27): tokens, count and splits from the step buffer, splits_max splits per
+# head with the ones past splits idle but arriving. Launched as a replayed graph would be: splits
+# 1, 2, 3 on one arrivals buffer, each equal to mla_decode with those values bit for bit, the counts
+# back at zero after each.
+@pytest.mark.skipif(not (BUILD / 'spawn/mla_decode_at.ptx').exists(), reason='mla_decode_at not built (gpu/spawn/build.sh)')
+@pytest.mark.parametrize('heads,rank,rope,tokens,block,splits_max', [(2, 48, 4, 700, 64, 3), (64, 512, 64, 4096, 512, 16)])
+def test_spawn_mla_decode_at_equals_mla_decode_for_each_splits(context, heads, rank, rope, tokens, block, splits_max):
+    rng = np.random.default_rng(heads + rank + splits_max)
+    q, qr = rng.normal(size=heads * rank).astype('f4'), rng.normal(size=heads * rope).astype('f4')
+    kv, kr = rng.normal(size=tokens * rank).astype('f4'), rng.normal(size=tokens * rope).astype('f4')
+    dq, dqr, dkv, dkr = (upload(context, a) for a in (q, qr, kv, kr))
+    common = dict(heads=heads, rank=rank, rope_dim=rope, selection_stride=0, cache_latent=dkv, q_latent=dq,
+                  q_rope=dqr, cache_rope=dkr, scale=rank ** -0.5, threads=block)
+    decode = SpawnKernel(context, BUILD / 'spawn/mla_decode.ptx')
+    at = SpawnKernel(context, BUILD / 'spawn/mla_decode_at.ptx')
+    arrivals = upload(context, np.zeros(heads, 'i4'))
+    for count, splits in ((5, 1), (300, 2), (640, 3)):
+        dsel = upload(context, rng.permutation(tokens)[:count].astype('i4'))
+        num, stats = context.tensor((heads, splits, rank)), context.tensor((heads, splits, 2))
+        out = upload(context, np.full(heads * rank, 7, 'f4'))
+        decode.launch(out=out.view((heads, rank)), numerator=num, stats=stats, selected=dsel, tokens=tokens,
+                      count=count, splits=splits, arrivals=upload(context, np.zeros(heads, 'i4')), **common)
+        a_num, a_stats = context.tensor((heads, splits_max, rank)), context.tensor((heads, splits_max, 2))
+        a_out = upload(context, np.full(heads * rank, 7, 'f4'))
+        at.launch(out=a_out.view((heads, rank)), numerator=a_num, stats=a_stats, selected=dsel, splits_max=splits_max,
+                  step=upload(context, np.array([tokens - 1, tokens, count, splits], 'i4')), arrivals=arrivals, **common)
+        context.synchronize()
+        np.testing.assert_array_equal(download(arrivals).view('i4'), 0)
+        got_num = np.frombuffer(download(a_num), 'u4').reshape(heads, splits_max, rank)[:, :splits]
+        got_stats = np.frombuffer(download(a_stats), 'u4').reshape(heads, splits_max, 2)[:, :splits]
+        np.testing.assert_array_equal(got_num.ravel(), np.frombuffer(download(num), 'u4'))
+        np.testing.assert_array_equal(got_stats.ravel(), np.frombuffer(download(stats), 'u4'))
+        np.testing.assert_array_equal(np.frombuffer(download(a_out), 'u4'), np.frombuffer(download(out), 'u4'))

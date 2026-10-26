@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from gpu.resident import ResidentGLM
-from gpu.test_resident import TOKENS, build, expert_models, needs_spawn, refuse_id_reads
+from gpu.test_resident import SPAWN, TOKENS, build, expert_models, needs_spawn, refuse_id_reads
 from gpu.test_simt import Simt
 from gpu.testing.context import Context
 
@@ -124,14 +124,24 @@ def test_graph_steps_without_logits_and_after_reset_replay_the_same_graph():
         plain.close()
 
 
+@needs_spawn
+@pytest.mark.skipif(not (SPAWN / 'libmla_decode_at.so').exists(), reason='gpu/spawn mla_decode_at not built')
+def test_graph_replay_with_fused_attention_equals_fused_per_launch():
+    """With fused_attention the graph holds mla_decode_at (#27), which reads splits from the step
+    buffer; against mla_decode launched per step, bit for bit."""
+    model = build(seed=83)
+    got, graph = run(model, TOKENS, graph=True, fused_attention=True)
+    want, _ = run(model, TOKENS, fused_attention=True)
+    np.testing.assert_array_equal(got, want)
+    assert graph.launches['mla_decode_at'] == 2 * model.n_layers and 'mla_decode' not in graph.launches
+
+
 def test_graph_needs_device_reads_only():
     model = build()
     with pytest.raises(ValueError, match='device_topk and device_experts'):
         ResidentGLM(model, ctx=Context(), graph=True)
     with pytest.raises(ValueError, match='device_topk and device_experts'):
         ResidentGLM(model, ctx=Context(), graph=True, device_experts=True, device_topk=False)
-    with pytest.raises(NotImplementedError, match='#27'):
-        ResidentGLM(model, ctx=Context(), graph=True, device_experts=True, fused_attention=True)
 
 
 def test_the_test_context_refuses_copies_and_allocations_during_a_capture():

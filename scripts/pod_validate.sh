@@ -13,7 +13,7 @@
 # layers, default 4), TOKENS (default 48), STRESS (concurrent stress processes, default 8).
 # Use OMP_NUM_THREADS well below the host's vCPU count (NumPy thrashes on 128-vCPU pods).
 #
-# Toolchain: one vxc bundle from Vx main, 8e87d147 or later: #2134 (one library per kernel in a
+# Toolchain: one vxc bundle from Vx main, e6722f78 or later (#2240: mla_decode_at reads its step buffer): #2134 (one library per kernel in a
 # process), the `lanes::` reductions of #260 (#2117, #2124, #2128), the `across` loops of #2095 to
 # #2097, `if` values of #2112, the code of a group of blocks and its arrival counts that mla_decode
 # uses (#2185 to #2188), a library's pub fn that gives mla_decode a device arrival count (#2232) and

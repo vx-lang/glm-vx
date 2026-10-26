@@ -89,6 +89,16 @@ def mla_decode(rng, heads=4, rank=64, rope=64, tokens=300, count=37, splits=4, s
     return values
 
 
+def mla_decode_at(rng, heads=4, rank=64, rope=64, tokens=300, count=37, splits=2, splits_max=4, stride=37):
+    values = mla_partial(rng, heads, rank, rope, tokens, count, splits, stride)
+    for name in ('tokens', 'count', 'splits'):
+        del values[name]
+    values.update(numerator=np.zeros((heads, splits_max, rank), 'f4'), stats=np.zeros((heads, splits_max, 2), 'f4'),
+                  out=np.full((heads, rank), 7, 'f4'), arrivals=np.zeros(heads, 'i4'), splits_max=splits_max,
+                  step=np.array([tokens - 1, tokens, count, splits], 'i4'))
+    return values
+
+
 def expert_weights(rng, fmt, experts, rows, cols):
     """One projection for all experts in `fmt`, named as the expert_matvec kernels name them."""
     if fmt == 'bf16':
@@ -193,6 +203,7 @@ CASES = {
     'mla_partial': mla_partial,
     'mla_merge': mla_merge,
     'mla_decode': mla_decode,
+    'mla_decode_at': mla_decode_at,
     'expert_scaled_add': lambda r: dict(out=normal(r, 333), x=normal(r, 333), weights=normal(r, 8),
                                         ids=moe_ids(r, 256, 8), k=8, slot=3, n=333),
     **{f'{p}expert_matvec': expert_matvec(f) for p, f in (('', 'f32'), ('bf16_', 'bf16'), ('fp8_', 'fp8'), ('int4_', 'int4'))},
