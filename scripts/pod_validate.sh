@@ -130,6 +130,8 @@ for mode in f32 int4 fp8 bf16; do
   step layer-profile-$mode $PYTHON -m validation.layer_profile --format $mode --output "$out/layer-profile-$mode.json"
 done
 step moe-profile $PYTHON -m validation.moe_profile --output "$out/moe-profile.json"
+# The FP8 dense matvec kernels (hand, spawn, and fp8_matvec4 of #30) at GLM-5.3's projection shapes.
+step matvec-profile $PYTHON -m validation.matvec_profile --output "$out/matvec-profile.json"
 # For Vx: mla_decode_at as built (ptxas caps it at 32 registers on sm_90, an 8 B spill) against
 # its PTX with `.minnctapersm 1` (64 registers, 1 block per SM), bit for bit and timed.
 step mla-hint $PYTHON -m validation.mla_hint --output "$out/mla-hint.json"

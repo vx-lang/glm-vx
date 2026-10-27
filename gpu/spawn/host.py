@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 
 _SCALAR = {'i32': C.c_int32, 'i64': C.c_int64, 'f32': C.c_float}
-_ELEMENT = {'f32': 'float32', 'u16': 'uint16', 'u8': 'uint8', 'i32': 'int32', 'i64': 'int64'}
+_ELEMENT = {'f32': 'float32', 'u32': 'uint32', 'u16': 'uint16', 'u8': 'uint8', 'i32': 'int32', 'i64': 'int64'}
 _libraries = {}
 
 

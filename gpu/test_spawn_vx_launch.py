@@ -180,6 +180,8 @@ CASES = {
                                   packed=int4(r, 3, 257), x=normal(r, 257), out=np.zeros(3, 'f4')),
     'fp8_matvec': lambda r: dict(rows=300, cols=6144, scales=r.uniform(0.001, 0.1, size=3 * 48).astype('f4'),
                                  weight=fp8(r, 300 * 6144), x=normal(r, 6144), out=np.zeros(300, 'f4')),
+    'fp8_matvec4': lambda r: dict(rows=300, cols=6144, scales=r.uniform(0.001, 0.1, size=3 * 48).astype('f4'),
+                                  weight=fp8(r, 300 * 6144).view('u4'), x=normal(r, 6144), out=np.zeros(300, 'f4')),
     'bf16_matmul': lambda r: dict(rows_m=6, rows_n=300, cols=257, experts=3, expert_ids=routing(r, 6, 3),
                                   weight=bf16(r, 3 * 300 * 257), x=normal(r, 6 * 257), out=np.zeros((6, 300), 'f4')),
     'int4_matmul': lambda r: dict(rows_m=6, rows_n=300, cols=257, experts=3, expert_ids=routing(r, 6, 3),

@@ -16,7 +16,7 @@ also cover every pass. A kernel whose rows have a run-time length writes a rank-
 times numbers; `launch.py` passes a rank-2 `DeviceTensor` as its 7-word descriptor. A row's
 index may then be anything, as in topk's `hist[t][digit]`.
 
-All 40 kernels build and launch with Vx main from 371c2bae on. They use the `lanes::` reductions
+All 41 kernels build and launch with Vx main from 371c2bae on. They use the `lanes::` reductions
 (#2117, #2124, #2128) and #2134 (several libraries in one process each run their own kernel).
 mla_decode uses the code of a group of blocks and its arrival counts (#2185 to #2188). mla_decode_at
 uses #2240's uniform reads of a `&` tensor parameter, so the step buffer can bound its blocks' work,
@@ -77,6 +77,7 @@ Two launches use the same PTX:
 | `int4_matvec.vx` | `glm_vx_gpu_int4_matvec` | 33 |
 | `int4_matmul.vx` | `glm_vx_gpu_int4_matmul` (out is [M, N]) | 40 |
 | `fp8_matvec.vx` | `glm_vx_gpu_fp8_matvec` | 45 |
+| `fp8_matvec4.vx` | new: `fp8_matvec` reading four codes a load (weight viewed as u32), decoded through a shared-memory table (#30) | 56 |
 | `fp8_matmul.vx` | `glm_vx_gpu_fp8_matmul` (out is [M, N]) | 46 |
 | `gemm_f32.vx` | `glm_vx_gpu_gemm_f32` | 32 |
 | `topk.vx` | `glm_vx_gpu_topk_stable` (its own scratch: `gpu.topk.spawn_buffers`) | 32 |

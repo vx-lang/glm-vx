@@ -163,6 +163,21 @@ def test_spawn_fp8_matvec_matches_hand_kernel(context, rows, cols):
     np.testing.assert_array_equal(download(spawn_out), download(hand_out))
 
 
+# fp8_matvec4 (four codes a load, table decode, #30) against the NumPy model of its order, bit for
+# bit: the kernel has no fused multiply-adds, so the device rounds as NumPy does.
+@pytest.mark.skipif(not (BUILD / 'spawn/fp8_matvec4.ptx').exists(), reason='fp8_matvec4 not built (gpu/spawn/build.sh)')
+@pytest.mark.parametrize('rows,cols', [(5, 132), (300, 1000), (6144, 16384), (2048, 6144)])
+def test_spawn_fp8_matvec4_matches_its_order(context, rows, cols):
+    from gpu.test_spawn_vx_host import fp8_matvec4_case
+    weight, scales, x, expected = fp8_matvec4_case(rows, cols, rows * 13 + cols)
+    out = context.tensor((rows,))
+    SpawnKernel(context, BUILD / 'spawn/fp8_matvec4.ptx').launch(
+        rows=rows, cols=cols, weight=upload(context, weight.view(np.uint32).reshape(-1)),
+        scales=upload(context, scales.reshape(-1)), x=upload(context, x), out=out)
+    context.synchronize()
+    np.testing.assert_array_equal(download(out).view(np.uint32), np.asarray(expected, 'f4').view(np.uint32))
+
+
 @pytest.mark.parametrize('tokens,k,ties', [(1, 1, False), (300, 64, True), (5000, 2048, True), (70000, 2048, False)])
 def test_spawn_topk_matches_stable_argsort_and_hand_kernel(context, tokens, k, ties):
     from gpu.topk import TopK, spawn_buffers

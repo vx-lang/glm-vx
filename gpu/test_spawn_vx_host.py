@@ -232,6 +232,52 @@ def test_fp8_matvec(run, rows, cols):
     bits_equal(got, warp_tree(strided_sums((fp8(weight) * per_col) * x, 32)))
 
 
+def fp8_word_order(terms):
+    """fp8_matvec4's per-lane order: lane l takes columns tile * 128 + 4l .. + 3 of each tile in
+    turn. Reorder the columns so that strided_sums(.., 32) adds them in that order (zeros pad the
+    last tile, in lanes that add nothing there)."""
+    rows, cols = terms.shape
+    tiles = -(-cols // 128)
+    padded = np.zeros((rows, tiles * 128), F)
+    padded[:, :cols] = terms
+    return padded.reshape(rows, tiles, 32, 4).transpose(0, 1, 3, 2).reshape(rows, tiles * 128)
+
+
+def fp8_matvec4_case(rows, cols, seed):
+    rng = np.random.default_rng(seed)
+    weight = rng.integers(0, 256, size=(rows, cols), dtype=np.uint8)
+    weight[(weight & 0x7F) == 0x7F] = 0
+    scales = rng.uniform(0.001, 0.1, size=(-(-rows // 128), -(-cols // 128))).astype(F)
+    x = rng.normal(size=cols).astype(F)
+    per_col = scales[np.arange(rows)[:, None] // 128, np.arange(cols)[None, :] // 128]
+    expected = warp_tree(strided_sums(fp8_word_order((fp8(weight) * per_col) * x), 32))
+    return weight, scales, x, expected
+
+
+# Four codes a load (a u32 view of the bytes), decoded through a shared-memory table: (5, 132) has
+# a partial last tile, (300, 1000) one with a word past the end of some lanes, and 6144 and 16384
+# are GLM-5.3's q_a/MLP and o_proj widths (tile counts that are and are not multiples of 4).
+@pytest.mark.parametrize('rows,cols', [(5, 132), (300, 1000), (130, 6144), (4, 16384), (3, 640)])
+def test_fp8_matvec4(run, rows, cols):
+    weight, scales, x, expected = fp8_matvec4_case(rows, cols, rows * 13 + cols)
+    got = run('fp8_matvec4', out=np.zeros(rows, F), weight=weight.view(np.uint32).reshape(-1), scales=scales.reshape(-1),
+              x=x, rows=rows, cols=cols)['out']
+    bits_equal(got, expected)
+
+
+def test_fp8_matvec4_decodes_every_code(run):
+    # Row r holds the r-th code at column r (each code but NaN, then two zeros), scale 1, x 1:
+    # every row's sum is its code's decoded value.
+    codes = np.array([c for c in range(256) if c & 0x7F != 0x7F] + [0, 0], np.uint8)  # 256 columns
+    rows, cols = 256, 256
+    weight = np.zeros((rows, cols), np.uint8)
+    weight[np.arange(rows), np.arange(cols)] = codes
+    x = np.ones(cols, F)
+    got = run('fp8_matvec4', out=np.zeros(rows, F), weight=weight.view(np.uint32).reshape(-1),
+              scales=np.ones(4, F), x=x, rows=rows, cols=cols)['out']
+    bits_equal(got, F(0) + fp8(codes))  # a sum starts at +0, so code 0x80 (-0) comes out +0
+
+
 # --- Routed experts chosen on the device ---------------------------------------------------
 # Each *_expert_matvec reads the router's ids and runs the slot-th expert in ascending id order,
 # so it must equal the plain kernel on that expert's slice, bit for bit.
