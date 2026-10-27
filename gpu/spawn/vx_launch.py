@@ -28,6 +28,7 @@ old stack's #2068) lacks it, which is an error only when a stream is asked for.
 
 VX_CUDA_SYNC=1 makes Vx wait after each launch (on our stream when one is set).
 """
+import contextlib
 import ctypes as C
 import json
 from pathlib import Path
@@ -124,12 +125,19 @@ class VxKernel:
             if stream is None:
                 self.function(*args)
                 return self
-            stream._ensure_open()
-            get_stream = self.get_stream
-            previous = get_stream() if get_stream is not None else None
-            set_stream(stream.handle)
-            try:
+            with on_stream(set_stream, self.get_stream, stream):
                 self.function(*args)
-            finally:
-                set_stream(previous)
         return self
+
+
+@contextlib.contextmanager
+def on_stream(set_stream, get_stream, stream):
+    """Sets stream for this thread with vx_cuda_set_stream and puts back the one set before
+    (null when get_stream is None), even on an error. The stream's context must be current."""
+    stream._ensure_open()
+    previous = get_stream() if get_stream is not None else None
+    set_stream(stream.handle)
+    try:
+        yield
+    finally:
+        set_stream(previous)
