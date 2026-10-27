@@ -1,0 +1,18 @@
+{
+  "mode": "bf16-vs-f32-dequantized",
+  "geometry": "small",
+  "layers": 6,
+  "hidden": 256,
+  "tokens": 48,
+  "bf16_linears": 183,
+  "bitwise_equal": true,
+  "max_abs_diff": 0.0,
+  "max_abs_logit": 4.181788921356201,
+  "top1_equal": true,
+  "bf16_seconds_per_token": 0.007170166854242173,
+  "f32_seconds_per_token": 0.006882290416494167,
+  "bf16_weights_gib_uploaded": 0.010008245706558228,
+  "f32_weights_gib_uploaded": 0.018900305032730103,
+  "bf16_matvec_launches": 8352,
+  "note": "single run, synthetic BF16 encoding of random weights; kv_b_proj is dequantized to float32 in both; lazy uploads; not a benchmark"
+}

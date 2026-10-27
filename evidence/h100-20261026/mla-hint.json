@@ -1,0 +1,44 @@
+{
+  "heads": 64,
+  "rank": 512,
+  "rope": 64,
+  "tokens": 4096,
+  "results": [
+    {
+      "variant": "as built",
+      "count": 256,
+      "splits": 1,
+      "us": 451.4719992876053
+    },
+    {
+      "variant": "minnctapersm 1",
+      "count": 256,
+      "splits": 1,
+      "us": 454.0639966726303
+    },
+    {
+      "variant": "as built",
+      "count": 1024,
+      "splits": 4,
+      "us": 501.8720030784607
+    },
+    {
+      "variant": "minnctapersm 1",
+      "count": 1024,
+      "splits": 4,
+      "us": 906.8320095539093
+    },
+    {
+      "variant": "as built",
+      "count": 2048,
+      "splits": 8,
+      "us": 997.2639977931976
+    },
+    {
+      "variant": "minnctapersm 1",
+      "count": 2048,
+      "splits": 8,
+      "us": 1675.5840182304382
+    }
+  ]
+}

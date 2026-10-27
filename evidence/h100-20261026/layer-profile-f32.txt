@@ -1,0 +1,80 @@
+timing with CUDA events (no ncu counters)
+# One decode step, kernel by kernel: f32, full width, 4 layers, context 64
+
+CUDA events around each launch of a warm step (ncu had no counters): GPU time only, no DRAM bytes.
+
+| Group | Kernels | GPU us | DRAM MB | GB/s | % of peak BW | us at peak BW |
+|---|---|---|---|---|---|---|
+| layer 0 | 31 | 2176 | - | - | - | - |
+| layer 1 | 31 | 2093 | - | - | - | - |
+| layer 2 | 31 | 2248 | - | - | - | - |
+| layer 3 | 26 | 2167 | - | - | - | - |
+| head | 2 | 1265 | - | - | - | - |
+
+## Layer 0: kernels by GPU time
+
+| Kernel | What | GPU us | DRAM MB | GB/s | DRAM % | SM % | grid x block | regs |
+|---|---|---|---|---|---|---|---|---|
+| topk_stable | index | 354.6 | - | - | - | - |  x  |  |
+| matvec | self_attn.o_proj | 165.0 | - | - | - | - |  x  |  |
+| matvec | mlp.down_proj | 138.8 | - | - | - | - |  x  |  |
+| matvec | mlp.gate_proj | 129.9 | - | - | - | - |  x  |  |
+| matvec | mlp.up_proj | 128.0 | - | - | - | - |  x  |  |
+| matvec | self_attn.q_b_proj | 75.6 | - | - | - | - |  x  |  |
+| rmsnorm | layers.rmsnorm | 70.0 | - | - | - | - |  x  |  |
+| copy | index.copy | 64.8 | - | - | - | - |  x  |  |
+| mla_partial | attention | 63.6 | - | - | - | - |  x  |  |
+| matvec | self_attn.q_a_proj | 60.6 | - | - | - | - |  x  |  |
+| index_scores | index | 55.7 | - | - | - | - |  x  |  |
+| matvec_heads | attention | 52.5 | - | - | - | - |  x  |  |
+| rope_strided | index.rope | 47.8 | - | - | - | - |  x  |  |
+| matvec | self_attn.indexer.wk | 47.6 | - | - | - | - |  x  |  |
+| matvec_heads | attention | 47.4 | - | - | - | - |  x  |  |
+| matvec | self_attn.kv_a_proj_with_mqa | 47.4 | - | - | - | - |  x  |  |
+| rope_strided | attention.rope | 47.2 | - | - | - | - |  x  |  |
+| matvec | self_attn.indexer.weights_proj | 47.1 | - | - | - | - |  x  |  |
+| rope_strided | index.rope | 45.6 | - | - | - | - |  x  |  |
+| rmsnorm | attention.rmsnorm | 44.4 | - | - | - | - |  x  |  |
+| rmsnorm | attention.rmsnorm | 42.7 | - | - | - | - |  x  |  |
+| rope_strided | attention.rope | 42.1 | - | - | - | - |  x  |  |
+| rmsnorm | layers.rmsnorm | 42.0 | - | - | - | - |  x  |  |
+| matvec | self_attn.indexer.wq_b | 41.8 | - | - | - | - |  x  |  |
+| layernorm | index | 41.6 | - | - | - | - |  x  |  |
+| mla_merge | attention | 40.1 | - | - | - | - |  x  |  |
+| add | layers.add | 39.6 | - | - | - | - |  x  |  |
+| copy | index.copy | 39.4 | - | - | - | - |  x  |  |
+| swiglu | mlp.swiglu | 38.6 | - | - | - | - |  x  |  |
+| scale | index | 37.8 | - | - | - | - |  x  |  |
+| add | layers.add | 36.8 | - | - | - | - |  x  |  |
+
+## Layer 3: kernels by GPU time
+
+| Kernel | What | GPU us | DRAM MB | GB/s | DRAM % | SM % | grid x block | regs |
+|---|---|---|---|---|---|---|---|---|
+| moe_gate_up | mlp.experts | 508.3 | - | - | - | - |  x  |  |
+| moe_down | mlp.experts | 342.3 | - | - | - | - |  x  |  |
+| matvec | self_attn.o_proj | 164.1 | - | - | - | - |  x  |  |
+| matvec | self_attn.q_b_proj | 78.1 | - | - | - | - |  x  |  |
+| mla_partial | attention | 66.8 | - | - | - | - |  x  |  |
+| copy | feed_forward.copy | 59.6 | - | - | - | - |  x  |  |
+| rmsnorm | layers.rmsnorm | 58.5 | - | - | - | - |  x  |  |
+| matvec | mlp.shared_experts.gate_proj | 56.0 | - | - | - | - |  x  |  |
+| matvec | self_attn.q_a_proj | 55.6 | - | - | - | - |  x  |  |
+| matvec_heads | attention | 54.3 | - | - | - | - |  x  |  |
+| router | feed_forward | 51.7 | - | - | - | - |  x  |  |
+| matvec | mlp.shared_experts.up_proj | 51.6 | - | - | - | - |  x  |  |
+| swiglu | mlp.swiglu | 51.6 | - | - | - | - |  x  |  |
+| matvec_heads | attention | 49.6 | - | - | - | - |  x  |  |
+| matvec | mlp.shared_experts.down_proj | 49.2 | - | - | - | - |  x  |  |
+| matvec | mlp.gate | 47.0 | - | - | - | - |  x  |  |
+| matvec | self_attn.kv_a_proj_with_mqa | 45.2 | - | - | - | - |  x  |  |
+| rope_strided | attention.rope | 44.7 | - | - | - | - |  x  |  |
+| rope_strided | attention.rope | 44.2 | - | - | - | - |  x  |  |
+| add | layers.add | 43.7 | - | - | - | - |  x  |  |
+| rmsnorm | layers.rmsnorm | 42.6 | - | - | - | - |  x  |  |
+| rmsnorm | attention.rmsnorm | 42.1 | - | - | - | - |  x  |  |
+| mla_merge | attention | 41.7 | - | - | - | - |  x  |  |
+| rmsnorm | attention.rmsnorm | 40.6 | - | - | - | - |  x  |  |
+| add | feed_forward.add | 39.7 | - | - | - | - |  x  |  |
+| add | layers.add | 38.0 | - | - | - | - |  x  |  |
+

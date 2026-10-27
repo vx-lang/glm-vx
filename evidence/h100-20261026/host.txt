@@ -1,0 +1,9 @@
+name, driver_version, memory.total [MiB], compute_cap
+NVIDIA H100 80GB HBM3, 595.91.07, 81559 MiB, 9.0
+ptx target sm_80, ptxas /usr/local/cuda/bin/ptxas for sm_90
+repo e69ef71 (no .git; set REPO_REV)
+vxc vxc 0.0.3
+llvm LLVM version 22.1.8
+Python 3.12.3
+dispatch lib /root/glm-h100/vxtc/bin/../lib/libvx_cuda_dispatch.so
+vx_cuda_set_stream (Vx #2100): exported

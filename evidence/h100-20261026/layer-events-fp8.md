@@ -1,0 +1,78 @@
+# One decode step, kernel by kernel: fp8, full width, 4 layers, context 64
+
+CUDA events around each launch, each after a 512 MB copy (ncu had no counters): GPU time with cold caches, no DRAM bytes.
+
+| Group | Kernels | GPU us | DRAM MB | GB/s | % of peak BW | us at peak BW |
+|---|---|---|---|---|---|---|
+| layer 0 | 31 | 1642 | - | - | - | - |
+| layer 1 | 31 | 1639 | - | - | - | - |
+| layer 2 | 31 | 1633 | - | - | - | - |
+| layer 3 | 26 | 1837 | - | - | - | - |
+| head | 2 | 1218 | - | - | - | - |
+
+## Layer 0: kernels by GPU time
+
+| Kernel | What | GPU us | DRAM MB | GB/s | DRAM % | SM % | grid x block | regs |
+|---|---|---|---|---|---|---|---|---|
+| topk_stable | index | 331.0 | - | - | - | - |  x  |  |
+| fp8_matvec | self_attn.o_proj | 224.3 | - | - | - | - |  x  |  |
+| fp8_matvec | mlp.down_proj | 176.0 | - | - | - | - |  x  |  |
+| fp8_matvec | mlp.gate_proj | 161.9 | - | - | - | - |  x  |  |
+| fp8_matvec | mlp.up_proj | 160.4 | - | - | - | - |  x  |  |
+| fp8_matvec | self_attn.q_a_proj | 80.1 | - | - | - | - |  x  |  |
+| fp8_matvec | self_attn.kv_a_proj_with_mqa | 78.3 | - | - | - | - |  x  |  |
+| fp8_matvec | self_attn.indexer.wk | 77.4 | - | - | - | - |  x  |  |
+| fp8_matvec | self_attn.q_b_proj | 73.0 | - | - | - | - |  x  |  |
+| fp8_matvec | self_attn.indexer.wq_b | 33.3 | - | - | - | - |  x  |  |
+| index_scores | index | 31.6 | - | - | - | - |  x  |  |
+| mla_partial | attention | 24.8 | - | - | - | - |  x  |  |
+| matvec_heads | attention | 22.3 | - | - | - | - |  x  |  |
+| matvec | self_attn.indexer.weights_proj | 22.2 | - | - | - | - |  x  |  |
+| matvec_heads | attention | 20.5 | - | - | - | - |  x  |  |
+| rmsnorm | layers.rmsnorm | 19.6 | - | - | - | - |  x  |  |
+| rmsnorm | layers.rmsnorm | 17.4 | - | - | - | - |  x  |  |
+| rmsnorm | attention.rmsnorm | 9.2 | - | - | - | - |  x  |  |
+| mla_merge | attention | 7.4 | - | - | - | - |  x  |  |
+| rmsnorm | attention.rmsnorm | 6.9 | - | - | - | - |  x  |  |
+| layernorm | index | 6.8 | - | - | - | - |  x  |  |
+| swiglu | mlp.swiglu | 6.2 | - | - | - | - |  x  |  |
+| add | layers.add | 6.0 | - | - | - | - |  x  |  |
+| rope_strided | index.rope | 5.9 | - | - | - | - |  x  |  |
+| rope_strided | attention.rope | 5.9 | - | - | - | - |  x  |  |
+| add | layers.add | 5.8 | - | - | - | - |  x  |  |
+| rope_strided | attention.rope | 5.6 | - | - | - | - |  x  |  |
+| copy | index.copy | 5.6 | - | - | - | - |  x  |  |
+| copy | index.copy | 5.6 | - | - | - | - |  x  |  |
+| rope_strided | index.rope | 5.4 | - | - | - | - |  x  |  |
+| scale | index | 5.4 | - | - | - | - |  x  |  |
+
+## Layer 3: kernels by GPU time
+
+| Kernel | What | GPU us | DRAM MB | GB/s | DRAM % | SM % | grid x block | regs |
+|---|---|---|---|---|---|---|---|---|
+| fp8_moe_gate_up | mlp.experts | 553.2 | - | - | - | - |  x  |  |
+| fp8_moe_down | mlp.experts | 410.5 | - | - | - | - |  x  |  |
+| fp8_matvec | self_attn.o_proj | 223.8 | - | - | - | - |  x  |  |
+| fp8_matvec | mlp.shared_experts.gate_proj | 80.6 | - | - | - | - |  x  |  |
+| fp8_matvec | self_attn.q_a_proj | 80.5 | - | - | - | - |  x  |  |
+| fp8_matvec | mlp.shared_experts.up_proj | 80.2 | - | - | - | - |  x  |  |
+| fp8_matvec | self_attn.kv_a_proj_with_mqa | 77.8 | - | - | - | - |  x  |  |
+| fp8_matvec | self_attn.q_b_proj | 73.5 | - | - | - | - |  x  |  |
+| fp8_matvec | mlp.shared_experts.down_proj | 36.3 | - | - | - | - |  x  |  |
+| router | feed_forward | 31.4 | - | - | - | - |  x  |  |
+| mla_partial | attention | 23.9 | - | - | - | - |  x  |  |
+| matvec | mlp.gate | 23.4 | - | - | - | - |  x  |  |
+| matvec_heads | attention | 22.1 | - | - | - | - |  x  |  |
+| matvec_heads | attention | 20.5 | - | - | - | - |  x  |  |
+| rmsnorm | layers.rmsnorm | 17.2 | - | - | - | - |  x  |  |
+| rmsnorm | layers.rmsnorm | 17.1 | - | - | - | - |  x  |  |
+| rmsnorm | attention.rmsnorm | 9.3 | - | - | - | - |  x  |  |
+| mla_merge | attention | 7.2 | - | - | - | - |  x  |  |
+| rmsnorm | attention.rmsnorm | 7.1 | - | - | - | - |  x  |  |
+| add | layers.add | 6.6 | - | - | - | - |  x  |  |
+| rope_strided | attention.rope | 6.1 | - | - | - | - |  x  |  |
+| swiglu | mlp.swiglu | 6.0 | - | - | - | - |  x  |  |
+| add | feed_forward.add | 6.0 | - | - | - | - |  x  |  |
+| copy | feed_forward.copy | 5.6 | - | - | - | - |  x  |  |
+| add | layers.add | 5.6 | - | - | - | - |  x  |  |
+| rope_strided | attention.rope | 5.4 | - | - | - | - |  x  |  |

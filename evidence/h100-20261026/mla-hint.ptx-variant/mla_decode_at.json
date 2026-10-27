@@ -1,0 +1,294 @@
+{
+  "schema": "glm-vx-spawn-v2",
+  "entry": "glm_vx_spawn_mla_decode_at",
+  "params": [
+    {
+      "name": "out",
+      "kind": "memref",
+      "element": "f32",
+      "rank": 2,
+      "mut": true
+    },
+    {
+      "name": "numerator",
+      "kind": "memref",
+      "element": "f32",
+      "rank": 3,
+      "mut": true
+    },
+    {
+      "name": "stats",
+      "kind": "memref",
+      "element": "f32",
+      "rank": 3,
+      "mut": true
+    },
+    {
+      "name": "q_latent",
+      "kind": "memref",
+      "element": "f32",
+      "rank": 1,
+      "mut": false
+    },
+    {
+      "name": "q_rope",
+      "kind": "memref",
+      "element": "f32",
+      "rank": 1,
+      "mut": false
+    },
+    {
+      "name": "cache_latent",
+      "kind": "memref",
+      "element": "f32",
+      "rank": 1,
+      "mut": false
+    },
+    {
+      "name": "cache_rope",
+      "kind": "memref",
+      "element": "f32",
+      "rank": 1,
+      "mut": false
+    },
+    {
+      "name": "selected",
+      "kind": "memref",
+      "element": "i32",
+      "rank": 1,
+      "mut": false
+    },
+    {
+      "name": "step",
+      "kind": "memref",
+      "element": "i32",
+      "rank": 1,
+      "mut": false
+    },
+    {
+      "name": "heads",
+      "kind": "scalar",
+      "type": "i32"
+    },
+    {
+      "name": "rank",
+      "kind": "scalar",
+      "type": "i32"
+    },
+    {
+      "name": "rope_dim",
+      "kind": "scalar",
+      "type": "i32"
+    },
+    {
+      "name": "selection_stride",
+      "kind": "scalar",
+      "type": "i32"
+    },
+    {
+      "name": "splits_max",
+      "kind": "scalar",
+      "type": "i32"
+    },
+    {
+      "name": "scale",
+      "kind": "scalar",
+      "type": "f32"
+    },
+    {
+      "name": "threads",
+      "kind": "scalar",
+      "type": "i32"
+    },
+    {
+      "name": "arrivals",
+      "kind": "arrivals",
+      "element": "i32",
+      "rank": 1,
+      "elements": {
+        "param": "heads"
+      }
+    }
+  ],
+  "vx_params": [
+    {
+      "element": "f32",
+      "kind": "tensor",
+      "mutable": true,
+      "name": "out",
+      "rank": 2,
+      "type": "&mut Tensor<f32, [?, ?], Memory::HBM>",
+      "words": 7
+    },
+    {
+      "element": "f32",
+      "kind": "tensor",
+      "mutable": true,
+      "name": "numerator",
+      "rank": 3,
+      "type": "&mut Tensor<f32, [?, ?, ?], Memory::HBM>",
+      "words": 9
+    },
+    {
+      "element": "f32",
+      "kind": "tensor",
+      "mutable": true,
+      "name": "stats",
+      "rank": 3,
+      "type": "&mut Tensor<f32, [?, ?, ?], Memory::HBM>",
+      "words": 9
+    },
+    {
+      "element": "f32",
+      "kind": "tensor",
+      "mutable": false,
+      "name": "q_latent",
+      "rank": 1,
+      "type": "&Tensor<f32, [?], Memory::HBM>",
+      "words": 5
+    },
+    {
+      "element": "f32",
+      "kind": "tensor",
+      "mutable": false,
+      "name": "q_rope",
+      "rank": 1,
+      "type": "&Tensor<f32, [?], Memory::HBM>",
+      "words": 5
+    },
+    {
+      "element": "f32",
+      "kind": "tensor",
+      "mutable": false,
+      "name": "cache_latent",
+      "rank": 1,
+      "type": "&Tensor<f32, [?], Memory::HBM>",
+      "words": 5
+    },
+    {
+      "element": "f32",
+      "kind": "tensor",
+      "mutable": false,
+      "name": "cache_rope",
+      "rank": 1,
+      "type": "&Tensor<f32, [?], Memory::HBM>",
+      "words": 5
+    },
+    {
+      "element": "i32",
+      "kind": "tensor",
+      "mutable": false,
+      "name": "selected",
+      "rank": 1,
+      "type": "&Tensor<i32, [?], Memory::HBM>",
+      "words": 5
+    },
+    {
+      "element": "i32",
+      "kind": "tensor",
+      "mutable": false,
+      "name": "step",
+      "rank": 1,
+      "type": "&Tensor<i32, [?], Memory::HBM>",
+      "words": 5
+    },
+    {
+      "element": "i32",
+      "kind": "scalar",
+      "mutable": false,
+      "name": "heads",
+      "type": "i32",
+      "words": 1
+    },
+    {
+      "element": "i32",
+      "kind": "scalar",
+      "mutable": false,
+      "name": "rank",
+      "type": "i32",
+      "words": 1
+    },
+    {
+      "element": "i32",
+      "kind": "scalar",
+      "mutable": false,
+      "name": "rope_dim",
+      "type": "i32",
+      "words": 1
+    },
+    {
+      "element": "i32",
+      "kind": "scalar",
+      "mutable": false,
+      "name": "selection_stride",
+      "type": "i32",
+      "words": 1
+    },
+    {
+      "element": "i32",
+      "kind": "scalar",
+      "mutable": false,
+      "name": "splits_max",
+      "type": "i32",
+      "words": 1
+    },
+    {
+      "element": "f32",
+      "kind": "scalar",
+      "mutable": false,
+      "name": "scale",
+      "type": "f32",
+      "words": 1
+    },
+    {
+      "element": "i32",
+      "kind": "scalar",
+      "mutable": false,
+      "name": "threads",
+      "type": "i32",
+      "words": 1
+    },
+    {
+      "element": "i32",
+      "elements": {
+        "param": "heads"
+      },
+      "kind": "arrivals",
+      "name": "arrivals",
+      "rank": 1,
+      "words": 5,
+      "zero_before_first_launch": true
+    }
+  ],
+  "launch": {
+    "block": 1024,
+    "grid": [
+      {
+        "param": "heads"
+      },
+      {
+        "param": "splits_max"
+      }
+    ],
+    "grid_loops": true
+  },
+  "dynamic_shared_bytes": 0,
+  "arch": "sm_80",
+  "source_sha256": "2b056b57e8170769d289cadaacda180d4f1ee31f6fe631c5eef8ef73fa091fbe",
+  "ptx_sha256": "132c3bda2f80c2c1cd83a26f661e5fe38e4d44a50c7493f56596cef172096023",
+  "vxc": "vxc 0.0.3",
+  "assembly_validated": true,
+  "gpu_execution_validated": false,
+  "ptxas_arch": "sm_90",
+  "ptxas_log": [
+    "ptxas info    : 0 bytes gmem",
+    "ptxas info    : Compiling entry function 'glm_vx_spawn_mla_decode_at' for 'sm_90'",
+    "ptxas info    : Function properties for glm_vx_spawn_mla_decode_at",
+    "    8 bytes stack frame, 8 bytes spill stores, 8 bytes spill loads",
+    "ptxas info    : Used 32 registers, used 1 barriers, 8 bytes cumulative stack size, 8352 bytes smem",
+    "ptxas info    : Compile time = 71.041 ms"
+  ],
+  "library": "libmla_decode_at.so",
+  "library_sha256": "88643a29d0f40a5cffb7ef5a907fdce9d25254406e9bfe73163f883ffb5ae1be",
+  "dispatch_lib": "/root/glm-h100/vxtc/lib/libvx_cuda_dispatch.so"
+}

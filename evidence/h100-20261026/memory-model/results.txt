@@ -1,0 +1,102 @@
+NVIDIA H100 80GB HBM3, 595.91.07
+mp_rel_acq_blocks: 0 of 100000 reads saw 0
+mp_rel_acq_blocks: 0 of 100000 reads saw 0
+mp_rel_acq_blocks: 0 of 100000 reads saw 0
+mp_rel_acq_blocks: 0 of 100000 reads saw 0
+mp_rel_acq_blocks: 0 of 100000 reads saw 0
+mp_rel_acq_blocks: 0 of 100000 reads saw 0
+mp_rel_acq_blocks: 0 of 100000 reads saw 0
+mp_rel_acq_blocks: 0 of 100000 reads saw 0
+mp_rel_acq_blocks: 0 of 100000 reads saw 0
+mp_rel_acq_blocks: 0 of 100000 reads saw 0
+sb_seq_cst_blocks: 0 of 100000 rounds read 0 in both blocks
+sb_seq_cst_blocks: 0 of 100000 rounds read 0 in both blocks
+sb_seq_cst_blocks: 0 of 100000 rounds read 0 in both blocks
+sb_seq_cst_blocks: 0 of 100000 rounds read 0 in both blocks
+sb_seq_cst_blocks: 0 of 100000 rounds read 0 in both blocks
+sb_seq_cst_blocks: 0 of 100000 rounds read 0 in both blocks
+sb_seq_cst_blocks: 0 of 100000 rounds read 0 in both blocks
+sb_seq_cst_blocks: 0 of 100000 rounds read 0 in both blocks
+sb_seq_cst_blocks: 0 of 100000 rounds read 0 in both blocks
+sb_seq_cst_blocks: 0 of 100000 rounds read 0 in both blocks
+lb_relaxed_blocks: 0 of 100000 rounds read 1 in both blocks
+lb_relaxed_blocks: 0 of 100000 rounds read 1 in both blocks
+lb_relaxed_blocks: 0 of 100000 rounds read 1 in both blocks
+lb_relaxed_blocks: 0 of 100000 rounds read 1 in both blocks
+lb_relaxed_blocks: 0 of 100000 rounds read 1 in both blocks
+lb_relaxed_blocks: 0 of 100000 rounds read 1 in both blocks
+lb_relaxed_blocks: 0 of 100000 rounds read 1 in both blocks
+lb_relaxed_blocks: 0 of 100000 rounds read 1 in both blocks
+lb_relaxed_blocks: 0 of 100000 rounds read 1 in both blocks
+lb_relaxed_blocks: 0 of 100000 rounds read 1 in both blocks
+mp_relaxed_blocks: 0 of 100000 reads saw 0
+mp_relaxed_blocks: 0 of 100000 reads saw 0
+mp_relaxed_blocks: 0 of 100000 reads saw 0
+mp_relaxed_blocks: 0 of 100000 reads saw 0
+mp_relaxed_blocks: 0 of 100000 reads saw 0
+mp_relaxed_blocks: 0 of 100000 reads saw 0
+mp_relaxed_blocks: 0 of 100000 reads saw 0
+mp_relaxed_blocks: 0 of 100000 reads saw 0
+mp_relaxed_blocks: 0 of 100000 reads saw 0
+mp_relaxed_blocks: 0 of 100000 reads saw 0
+sb_rel_acq_blocks: 0 of 100000 rounds read 0 in both blocks
+sb_rel_acq_blocks: 0 of 100000 rounds read 0 in both blocks
+sb_rel_acq_blocks: 0 of 100000 rounds read 0 in both blocks
+sb_rel_acq_blocks: 0 of 100000 rounds read 0 in both blocks
+sb_rel_acq_blocks: 0 of 100000 rounds read 0 in both blocks
+sb_rel_acq_blocks: 0 of 100000 rounds read 0 in both blocks
+sb_rel_acq_blocks: 0 of 100000 rounds read 0 in both blocks
+sb_rel_acq_blocks: 0 of 100000 rounds read 0 in both blocks
+sb_rel_acq_blocks: 0 of 100000 rounds read 0 in both blocks
+sb_rel_acq_blocks: 0 of 100000 rounds read 0 in both blocks
+mp_rel_acq_blocks_stress: 0 of 100000 reads saw 0
+mp_rel_acq_blocks_stress: 0 of 100000 reads saw 0
+mp_rel_acq_blocks_stress: 0 of 100000 reads saw 0
+mp_rel_acq_blocks_stress: 0 of 100000 reads saw 0
+mp_rel_acq_blocks_stress: 0 of 100000 reads saw 0
+mp_rel_acq_blocks_stress: 0 of 100000 reads saw 0
+mp_rel_acq_blocks_stress: 0 of 100000 reads saw 0
+mp_rel_acq_blocks_stress: 0 of 100000 reads saw 0
+mp_rel_acq_blocks_stress: 0 of 100000 reads saw 0
+mp_rel_acq_blocks_stress: 0 of 100000 reads saw 0
+sb_seq_cst_blocks_stress: 0 of 100000 rounds read 0 in both blocks
+sb_seq_cst_blocks_stress: 0 of 100000 rounds read 0 in both blocks
+sb_seq_cst_blocks_stress: 0 of 100000 rounds read 0 in both blocks
+sb_seq_cst_blocks_stress: 0 of 100000 rounds read 0 in both blocks
+sb_seq_cst_blocks_stress: 0 of 100000 rounds read 0 in both blocks
+sb_seq_cst_blocks_stress: 0 of 100000 rounds read 0 in both blocks
+sb_seq_cst_blocks_stress: 0 of 100000 rounds read 0 in both blocks
+sb_seq_cst_blocks_stress: 0 of 100000 rounds read 0 in both blocks
+sb_seq_cst_blocks_stress: 0 of 100000 rounds read 0 in both blocks
+sb_seq_cst_blocks_stress: 0 of 100000 rounds read 0 in both blocks
+lb_relaxed_blocks_stress: 0 of 100000 rounds read 1 in both blocks
+lb_relaxed_blocks_stress: 0 of 100000 rounds read 1 in both blocks
+lb_relaxed_blocks_stress: 0 of 100000 rounds read 1 in both blocks
+lb_relaxed_blocks_stress: 0 of 100000 rounds read 1 in both blocks
+lb_relaxed_blocks_stress: 0 of 100000 rounds read 1 in both blocks
+lb_relaxed_blocks_stress: 0 of 100000 rounds read 1 in both blocks
+lb_relaxed_blocks_stress: 0 of 100000 rounds read 1 in both blocks
+lb_relaxed_blocks_stress: 0 of 100000 rounds read 1 in both blocks
+lb_relaxed_blocks_stress: 0 of 100000 rounds read 1 in both blocks
+lb_relaxed_blocks_stress: 0 of 100000 rounds read 1 in both blocks
+mp_relaxed_blocks_stress: 0 of 100000 reads saw 0
+mp_relaxed_blocks_stress: 0 of 100000 reads saw 0
+mp_relaxed_blocks_stress: 0 of 100000 reads saw 0
+mp_relaxed_blocks_stress: 0 of 100000 reads saw 0
+mp_relaxed_blocks_stress: 0 of 100000 reads saw 0
+mp_relaxed_blocks_stress: 0 of 100000 reads saw 0
+mp_relaxed_blocks_stress: 0 of 100000 reads saw 0
+mp_relaxed_blocks_stress: 0 of 100000 reads saw 0
+mp_relaxed_blocks_stress: 0 of 100000 reads saw 0
+mp_relaxed_blocks_stress: 0 of 100000 reads saw 0
+sb_rel_acq_blocks_stress: 0 of 100000 rounds read 0 in both blocks
+sb_rel_acq_blocks_stress: 0 of 100000 rounds read 0 in both blocks
+sb_rel_acq_blocks_stress: 0 of 100000 rounds read 0 in both blocks
+sb_rel_acq_blocks_stress: 0 of 100000 rounds read 0 in both blocks
+sb_rel_acq_blocks_stress: 0 of 100000 rounds read 0 in both blocks
+sb_rel_acq_blocks_stress: 0 of 100000 rounds read 0 in both blocks
+sb_rel_acq_blocks_stress: 0 of 100000 rounds read 0 in both blocks
+sb_rel_acq_blocks_stress: 0 of 100000 rounds read 0 in both blocks
+sb_rel_acq_blocks_stress: 0 of 100000 rounds read 0 in both blocks
+sb_rel_acq_blocks_stress: 0 of 100000 rounds read 0 in both blocks
+litmus-done
