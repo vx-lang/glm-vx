@@ -52,6 +52,16 @@ E
 if [[ -f $prefix/lib/libvx_cuda_dispatch.so ]]; then
   echo "export VX_DISPATCH_LIB=$prefix/lib/libvx_cuda_dispatch.so" >> "$prefix/env.sh"
 fi
+# Vx's collectives (gpu/collective.py) dlopen libnccl.so.2. When only the pip wheel
+# (nvidia-nccl-cu12) has it, the loader cannot find it, so point VX_NCCL_LIB at the wheel's copy.
+if ! ldconfig -p 2>/dev/null | grep -q 'libnccl\.so\.2 '; then
+  nccl=$(python3 -c 'import nvidia.nccl, pathlib; print(pathlib.Path(nvidia.nccl.__path__[0]) / "lib" / "libnccl.so.2")' 2>/dev/null || true)
+  if [[ -n $nccl && -f $nccl ]]; then
+    echo "export VX_NCCL_LIB=$nccl" >> "$prefix/env.sh"
+  else
+    echo "note: no libnccl.so.2 found; Vx's collectives need it (pip install nvidia-nccl-cu12)" >&2
+  fi
+fi
 . "$prefix/env.sh"
 missing=$(for f in "$prefix/bin/vxc" "$prefix"/llvm-22/bin/{mlir-translate,opt,llc,clang}; do ldd "$f" | grep 'not found' || true; done)
 [[ -z $missing ]] || { echo "missing shared libraries:" >&2; echo "$missing" >&2; exit 3; }
