@@ -5,43 +5,9 @@
 // tile * 128 + 4l .. + 3, so one load per lane covers a scale tile per warp, and it issues the
 // loads of four tiles before it adds any of them. Codes are decoded through a 256-entry table ([8, 32]) in
 // shared memory that each subgroup builds from fp8_decode!, exact for every code.
-// Lane l's order is tile by tile, its four columns in order; then lanes::sum's tree.
+// Lane l's order is tile by tile, its four columns in order (device.vx's fp8_row_dot4!); then
+// lanes::sum's tree.
 // spawn-include: device.vx
-
-// Word `lane` of tile `tile + t` of a row, or 0 past the row.
-macro_rules! word_at {
-    ($weight:ident, $row_words:expr, $words:expr, $tiles:expr, $tile:expr, $t:expr, $lane:expr) => {
-        unsafe {
-          let dv_at: i64 = ($tile + $t) * 32 + ($lane as i64);
-          let mut dv_word: i32 = 0;
-          if $tile + $t < $tiles && dv_at < $words { dv_word = $weight[$row_words + dv_at] as i32; }
-          dv_word
-        }
-    };
-}
-
-// sum plus the word's four terms in column order, (decode(code) * scale) * x[col].
-macro_rules! fp8_word_terms {
-    ($sum:expr, $word:expr, $table:ident, $w:expr, $scales:ident, $scale_base:expr, $x:ident, $tiles:expr, $tile:expr,
-     $t:expr, $lane:expr, $k:expr) => {
-        unsafe {
-          let mut dv_sum: f32 = $sum;
-          if $tile + $t < $tiles {
-            let dv_scale: f32 = $scales[$scale_base + $tile + $t];
-            let dv_col: i64 = ($tile + $t) * 128 + (($lane * 4) as i64);
-            let mut dv_j: i32 = 0;
-            while dv_j < 4 {
-              if dv_col + (dv_j as i64) < $k {
-                let dv_code: i32 = ($word >> (dv_j * 8)) & 255;
-                dv_sum = dv_sum + ($table[$w][dv_code >> 5][dv_code & 31] * dv_scale) * $x[dv_col + (dv_j as i64)];
-              }
-              dv_j = dv_j + 1;
-            }
-          }
-          dv_sum
-        }
-    };
-}
 
 pub fn glm_vx_spawn_fp8_matvec4(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<u32, [?], Memory::HBM>,
                                 scales: &Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
@@ -60,24 +26,7 @@ pub fn glm_vx_spawn_fp8_matvec4(out: &mut Tensor<f32, [?], Memory::HBM>, weight:
           let row: i64 = (rb * 4 + w) as i64;
           let mut sum: f32 = 0.0;
           if row < (rows as i64) && cols % 4 == 0 {
-            let k: i64 = cols as i64;
-            let tiles: i64 = (k + 127) / 128;
-            let words: i64 = k / 4;
-            let row_words: i64 = row * words;
-            let scale_base: i64 = (row / 128) * tiles;
-            let mut tile: i64 = 0;
-            while tile < tiles {
-              // Four tiles' words first (zero past the row), then their sums in order.
-              let w0: i32 = word_at!(weight, row_words, words, tiles, tile, 0, lane);
-              let w1: i32 = word_at!(weight, row_words, words, tiles, tile, 1, lane);
-              let w2: i32 = word_at!(weight, row_words, words, tiles, tile, 2, lane);
-              let w3: i32 = word_at!(weight, row_words, words, tiles, tile, 3, lane);
-              sum = fp8_word_terms!(sum, w0, table, w, scales, scale_base, x, tiles, tile, 0, lane, k);
-              sum = fp8_word_terms!(sum, w1, table, w, scales, scale_base, x, tiles, tile, 1, lane, k);
-              sum = fp8_word_terms!(sum, w2, table, w, scales, scale_base, x, tiles, tile, 2, lane, k);
-              sum = fp8_word_terms!(sum, w3, table, w, scales, scale_base, x, tiles, tile, 3, lane, k);
-              tile = tile + 4;
-            }
+            sum = fp8_row_dot4!(weight, scales, table, w, x, 0, 0, row, rows, cols as i64, lane);
           }
           a[w][lane] = sum;
         }

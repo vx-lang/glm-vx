@@ -103,8 +103,9 @@ def expert_weights(rng, fmt, experts, rows, cols):
     """One projection for all experts in `fmt`, named as the expert_matvec kernels name them."""
     if fmt == 'bf16':
         return dict(weight=bf16(rng, experts * rows * cols))
-    if fmt == 'fp8':
-        return dict(weight=fp8(rng, experts * rows * cols),
+    if fmt in ('fp8', 'fp8x4'):  # fp8x4: the codes viewed as u32 (fp8_moe4_*), cols % 4 == 0
+        codes = fp8(rng, experts * rows * cols)
+        return dict(weight=codes.view('u4') if fmt == 'fp8x4' else codes,
                     scales=rng.uniform(0.001, 0.1, size=experts * -(-rows // 128) * -(-cols // 128)).astype('f4'))
     if fmt == 'int4':
         packed = rng.integers(0, 256, size=(experts, rows, -(-cols // 2)), dtype=np.uint8)
@@ -202,15 +203,22 @@ CASES = {
     'router': lambda r: dict(experts=256, k=8, indices=np.zeros(8, 'i4'), logits=normal(r, 256),
                              bias=normal(r, 256, 0.1), weights=np.zeros(8, 'f4'), scale=2.5),
     'topk': topk,
+    'topk_sort': lambda r: dict(tokens=1500, k=2048, scores=r.integers(-4, 4, size=1500).astype('f4').view('i4'),
+                                out_ids=np.zeros(1500, 'i4')),
+    'topk_sort_at': lambda r: dict(k=64, step=np.array([0, 700, 0, 0], 'i4'),
+                                   scores=r.normal(size=1024).astype('f4').view('i4'), out_ids=np.zeros(64, 'i4')),
     'mla_partial': mla_partial,
     'mla_merge': mla_merge,
     'mla_decode': mla_decode,
     'mla_decode_at': mla_decode_at,
+    'mla_chunks_at': mla_decode_at,
     'expert_scaled_add': lambda r: dict(out=normal(r, 333), x=normal(r, 333), weights=normal(r, 8),
                                         ids=moe_ids(r, 256, 8), k=8, slot=3, n=333),
     **{f'{p}expert_matvec': expert_matvec(f) for p, f in (('', 'f32'), ('bf16_', 'bf16'), ('fp8_', 'fp8'), ('int4_', 'int4'))},
     **{f'{p}moe_gate_up': moe_gate_up(f) for p, f in (('', 'f32'), ('bf16_', 'bf16'), ('fp8_', 'fp8'), ('int4_', 'int4'))},
     **{f'{p}moe_down': moe_down(f) for p, f in (('', 'f32'), ('bf16_', 'bf16'), ('fp8_', 'fp8'), ('int4_', 'int4'))},
+    'fp8_moe4_gate_up': moe_gate_up('fp8x4', cols=260),
+    'fp8_moe4_down': moe_down('fp8x4', cols=132),
 }
 
 

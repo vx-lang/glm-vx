@@ -163,6 +163,31 @@ def test_spawn_fp8_matvec_matches_hand_kernel(context, rows, cols):
     np.testing.assert_array_equal(download(spawn_out), download(hand_out))
 
 
+# mla_chunks_at (#33) against mla_decode_at on the device, at a full-width layer's shape.
+@pytest.mark.skipif(not (BUILD / 'spawn/mla_chunks_at.ptx').exists(), reason='mla_chunks_at not built (gpu/spawn/build.sh)')
+@pytest.mark.parametrize('count,splits', [(5, 1), (256, 1), (2048, 8), (700, 3)])
+def test_spawn_mla_chunks_at_matches_mla_decode_at(context, count, splits):
+    heads, rank, rope, tokens, splits_max = 64, 512, 64, 4096, 16
+    rng = np.random.default_rng(count + splits)
+    q, qr = rng.normal(size=heads * rank).astype('f4'), rng.normal(size=heads * rope).astype('f4')
+    kv, kr = rng.normal(size=tokens * rank).astype('f4'), rng.normal(size=tokens * rope).astype('f4')
+    common = dict(heads=heads, rank=rank, rope_dim=rope, selection_stride=0, cache_latent=upload(context, kv),
+                  q_latent=upload(context, q), q_rope=upload(context, qr), cache_rope=upload(context, kr),
+                  scale=float(np.float32(rank ** -0.5)), threads=512, splits_max=splits_max,
+                  selected=upload(context, rng.permutation(tokens)[:count].astype('i4')),
+                  step=upload(context, np.array([tokens - 1, tokens, count, splits], 'i4')))
+    outs = {}
+    for name in ('mla_decode_at', 'mla_chunks_at'):
+        out, arrivals = context.tensor((heads, rank)), upload(context, np.zeros(heads, 'i4'))
+        SpawnKernel(context, BUILD / f'spawn/{name}.ptx').launch(
+            out=out, numerator=context.tensor((heads, splits_max, rank)), stats=context.tensor((heads, splits_max, 2)),
+            arrivals=arrivals, **common)
+        context.synchronize()
+        np.testing.assert_array_equal(download(arrivals), 0)
+        outs[name] = download(out)
+    np.testing.assert_allclose(outs['mla_chunks_at'], outs['mla_decode_at'], rtol=1e-4, atol=1e-5)
+
+
 # fp8_matvec4 (four codes a load, table decode, #30) against the NumPy model of its order, bit for
 # bit: the kernel has no fused multiply-adds, so the device rounds as NumPy does.
 @pytest.mark.skipif(not (BUILD / 'spawn/fp8_matvec4.ptx').exists(), reason='fp8_matvec4 not built (gpu/spawn/build.sh)')
@@ -176,6 +201,23 @@ def test_spawn_fp8_matvec4_matches_its_order(context, rows, cols):
         scales=upload(context, scales.reshape(-1)), x=upload(context, x), out=out)
     context.synchronize()
     np.testing.assert_array_equal(download(out).view(np.uint32), np.asarray(expected, 'f4').view(np.uint32))
+
+
+# topk_sort (#32): one shared-memory bitonic sort for up to 2048 tokens, against the host's rule.
+@pytest.mark.skipif(not (BUILD / 'spawn/topk_sort.ptx').exists(), reason='topk_sort not built (gpu/spawn/build.sh)')
+@pytest.mark.parametrize('tokens,k,ties', [(1, 1, False), (64, 2048, False), (300, 64, True), (2048, 2048, True),
+                                           (2048, 16, False)])
+def test_spawn_topk_sort_matches_stable_argsort(context, tokens, k, ties):
+    rng = np.random.default_rng(tokens * 5 + k)
+    scores = rng.integers(-4, 4, size=tokens).astype('f4') if ties else rng.normal(size=tokens).astype('f4')
+    if tokens > 10:
+        scores[3], scores[7] = np.nan, -0.0
+    kk = min(k, tokens)
+    out = upload(context, np.full(kk, -7, 'i4'))
+    SpawnKernel(context, BUILD / 'spawn/topk_sort.ptx').launch(out_ids=out, scores=upload(context, scores.view('i4')),
+                                                               tokens=tokens, k=k)
+    context.synchronize()
+    np.testing.assert_array_equal(download(out), np.argsort(-scores, kind='stable')[:kk])
 
 
 @pytest.mark.parametrize('tokens,k,ties', [(1, 1, False), (300, 64, True), (5000, 2048, True), (70000, 2048, False)])

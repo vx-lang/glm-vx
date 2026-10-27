@@ -77,6 +77,32 @@ def test_topk_stable_at_reads_tokens(simt):
     np.testing.assert_array_equal(ids, np.argsort(-scores[:tokens], kind='stable')[:k])
 
 
+@needs_spawn
+def test_mla_chunks_matches_mla_decode_under_replay():
+    # mla_kernel='chunks' (#33): another order of the attention sums, so close, with the same argmax.
+    model = expert_models('float32')
+    got, chunks = run(model, TOKENS, graph=True, fused_attention=True, mla_kernel='chunks')
+    want, _ = run(model, TOKENS, graph=True, fused_attention=True)
+    np.testing.assert_allclose(got, want, rtol=1e-4, atol=1e-4)
+    assert (got.argmax(-1) == want.argmax(-1)).all()
+    assert chunks.launches.get('mla_chunks_at', 0) > 0 and 'mla_decode_at' not in chunks.launches
+    with pytest.raises(ValueError, match='mla_kernel'):
+        ResidentGLM(model, ctx=Context(), mla_kernel='chunks')
+
+
+def test_topk_stable_long_at_selects_only_past_short_tokens(simt):
+    from gpu.topk import scratch_ints
+    rng = np.random.default_rng(4)
+    cap, k = 300, 32
+    scores = rng.normal(size=cap).astype('f4')
+    for tokens, short in ((211, 210), (211, 211)):
+        ids = np.full(k, -1, np.int32)
+        simt.run('glm_vx_gpu_topk_stable_long_at', ids, scores.view(np.int32), np.zeros(scratch_ints(cap, k), np.int32),
+                 step(0, tokens, 0, 0), k, short, grid=1, block=256)
+        want = np.argsort(-scores[:tokens], kind='stable')[:k] if tokens > short else np.full(k, -1, np.int32)
+        np.testing.assert_array_equal(ids, want)
+
+
 # --- ResidentGLM graph=True --------------------------------------------------------------------
 
 def run(model, tokens, **kwargs):
@@ -98,7 +124,9 @@ def test_graph_replay_equals_the_per_launch_path(kind):
     # The first step eagerly, the second captured, then every step a replay of that graph.
     assert graph.replays == len(TOKENS) - 1
     full = sum(t == 'full' for t in model.indexer_types)
-    assert graph.launches['index_scores_at'] == graph.launches['topk_stable_at'] == 2 * full
+    # topk_sort_at (#32) and the radix select past its 2048 tokens are both captured.
+    assert graph.launches['index_scores_at'] == graph.launches['topk_sort_at'] == 2 * full
+    assert graph.launches['topk_stable_long_at'] == 2 * full and 'topk_stable_at' not in graph.launches
     assert graph.launches['mla_partial_at'] == graph.launches['mla_merge_at'] == 2 * model.n_layers
     assert graph.launches['store_row'] == 2 * (2 * model.n_layers + full)
     assert not {'index_scores', 'topk_stable', 'mla_partial', 'mla_merge'} & set(graph.launches)

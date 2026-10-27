@@ -433,6 +433,36 @@ def test_fused_moe_equals_the_per_expert_kernels(run, fmt, experts, k, inter, hi
     bits_equal(fused_moe(run, fmt, *args), per_expert_moe(run, fmt, *args))
 
 
+# fp8_moe4_gate_up and fp8_moe4_down (#31): the u32 view of the codes, each term fp8_matvec4's.
+# They must leave what fp8_matvec4 on each expert's slice, swiglu, fp8_matvec4 of the down rows and
+# scaled_add in ascending id order leave, bit for bit. Widths are multiples of 4.
+@pytest.mark.parametrize('experts,k,inter,hidden', [(1, 1, 4, 8), (12, 8, 12, 132), (256, 8, 132, 300)])
+def test_fp8_moe4_equals_fp8_matvec4_per_expert(run, experts, k, inter, hidden):
+    rng = np.random.default_rng(experts * 5 + inter)
+    (gate, _), (up, _), (down, _) = (moe_weights(rng, 'fp8', experts, r, c) for r, c in
+                                     ((inter, hidden), (inter, hidden), (hidden, inter)))
+    x, ids = rng.normal(size=hidden).astype(F), expert_ids(rng, experts, k)
+    weights = rng.uniform(0.01, 1, size=k).astype(F)
+    words = lambda w: w['weight'].view(np.uint32).reshape(-1)
+    act = run('fp8_moe4_gate_up', act=np.full(k * inter, 7, F), gate=words(gate), gate_scales=gate['scales'].reshape(-1),
+              up=words(up), up_scales=up['scales'].reshape(-1), x=x, ids=ids, k=k, experts=experts, inter=inter,
+              up_row=0, stride=inter, cols=hidden)['act']
+    got = run('fp8_moe4_down', out=np.full(hidden, 7, F), down=words(down), scales=down['scales'].reshape(-1), act=act,
+              weights=weights, ids=ids, k=k, experts=experts, rows=hidden, cols=inter)['out']
+    matvec4 = lambda w, e, vec, rows, cols: run('fp8_matvec4', out=np.zeros(rows, F), weight=w['weight'][e].view(np.uint32).reshape(-1),
+                                                scales=w['scales'][e].reshape(-1), x=vec, rows=rows, cols=cols)['out']
+    expected, want_act = np.zeros(hidden, F), np.zeros(k * inter, F)
+    for s, slot in enumerate(np.argsort(ids, kind='stable')):
+        e = int(ids[slot])
+        a = run('swiglu', out=np.zeros(inter, F), gate=matvec4(gate, e, x, inter, hidden), up=matvec4(up, e, x, inter, hidden),
+                n=inter)['out']
+        want_act[s * inter:(s + 1) * inter] = a
+        expected = run('scaled_add', out=expected, x=matvec4(down, e, a, hidden, inter), weights=weights, slot=int(slot),
+                       n=hidden)['out']
+    bits_equal(act, want_act)
+    bits_equal(got, expected)
+
+
 def test_fused_moe_gate_up_reads_the_fused_layout(run):
     """gate_up as one [E, 2 * inter, cols] tensor (stride 2 * inter, up rows from inter) equals
     separate gate and up projections cut from it."""
@@ -650,6 +680,25 @@ def test_topk_matches_stable_argsort(run, tokens, k, ties):
     np.testing.assert_array_equal(got, np.argsort(-scores, kind='stable')[:kk])
 
 
+# topk_sort (#32): the same selection for tokens <= 2048 by one shared-memory bitonic sort.
+@pytest.mark.parametrize('tokens,k,ties', [(1, 1, False), (2, 2048, True), (64, 2048, False), (300, 64, True),
+                                           (1000, 2048, True), (2048, 2048, False), (2048, 16, True), (1500, 1500, False)])
+def test_topk_sort_matches_stable_argsort(run, tokens, k, ties):
+    rng = np.random.default_rng(tokens * 3 + k)
+    scores = rng.integers(-4, 4, size=tokens).astype(F) if ties else rng.normal(size=tokens).astype(F)
+    if tokens > 10:
+        scores[3], scores[7], scores[9] = np.nan, -0.0, np.inf  # NaN sorts last; -0.0 ties +0.0
+        scores[5] = -np.inf
+    kk = min(k, tokens)
+    got = run('topk_sort', out_ids=np.full(kk, -7, np.int32), scores=scores.view(np.int32), tokens=tokens, k=k)['out_ids']
+    np.testing.assert_array_equal(got, np.argsort(-scores, kind='stable')[:kk])
+
+
+def test_topk_sort_leaves_longer_contexts_to_topk(run):
+    got = run('topk_sort', out_ids=np.full(4, -7, np.int32), scores=np.zeros(2049, F).view(np.int32), tokens=2049, k=4)
+    np.testing.assert_array_equal(got['out_ids'], -7)
+
+
 @pytest.mark.parametrize('experts,k,ties', [(256, 8, False), (256, 8, True), (7, 3, True), (1, 1, False), (33, 8, True)])
 def test_router(run, experts, k, ties):
     rng = np.random.default_rng(experts * 10 + k)
@@ -759,6 +808,43 @@ def test_mla_decode_equals_partial_then_merge(run, heads, rank, rope, tokens, co
     bits_equal(got['numerator'].reshape(heads * splits, rank), part['numerator'])
     bits_equal(got['stats'].reshape(heads * splits, 2), part['stats'])
     bits_equal(got['out'], want)
+
+
+def mla_float64(q, qr, kv, kr, selected, stride, count, tokens, scale):
+    """Attention of each head over its selected tokens in float64 (invalid ids skipped)."""
+    out = np.zeros(q.shape, np.float64)
+    for h in range(q.shape[0]):
+        ids = [int(selected[h * stride + j]) for j in range(count)]
+        ids = [i for i in ids if 0 <= i < tokens]
+        if not ids:
+            continue
+        s = (kv[ids].astype(np.float64) @ q[h] + kr[ids].astype(np.float64) @ qr[h]) * scale
+        p = np.exp(s - s.max())
+        out[h] = p @ kv[ids].astype(np.float64) / p.sum()
+    return out
+
+
+# mla_chunks_at (#33): mla_decode_at's arguments and merge, 32 tokens a chunk; equal to mla_decode_at
+# to rounding (another order of the sums) and to float64 attention.
+@pytest.mark.parametrize('heads,rank,rope,tokens,stride,splits_max', [(2, 48, 4, 700, 0, 3), (3, 64, 64, 900, 1, 16)])
+def test_mla_chunks_at_matches_mla_decode_at(run, heads, rank, rope, tokens, stride, splits_max):
+    rng = np.random.default_rng(heads * 11 + rank)
+    q, qr = rng.normal(size=(heads, rank)).astype(F), rng.normal(size=(heads, rope)).astype(F)
+    kv, kr = rng.normal(size=(tokens, rank)).astype(F), rng.normal(size=(tokens, rope)).astype(F)
+    scale = rank ** -0.5
+    common = dict(q_latent=q, q_rope=qr, cache_latent=kv, cache_rope=kr, heads=heads, rank=rank, rope_dim=rope,
+                  selection_stride=stride, scale=scale, threads=64, splits_max=splits_max)
+    for count, splits in ((0, 1), (5, 1), (33, 1), (300, 2), (640, 3)):
+        selected = rng.integers(0, tokens, size=max(1, (heads if stride else 1) * max(count, 1))).astype(np.int32)
+        if count > 3:
+            selected[1], selected[-1] = -1, tokens + 5  # skipped
+        values = dict(selected=selected, step=np.array([tokens - 1, tokens, count, splits], np.int32), **common)
+        shapes = dict(out=np.full((heads, rank), 7, F), numerator=np.zeros((heads, splits_max, rank), F),
+                      stats=np.zeros((heads, splits_max, 2), F), arrivals=np.zeros(heads, np.int32))
+        want = run('mla_decode_at', **values, **{k: v.copy() for k, v in shapes.items()})['out']
+        got = run('mla_chunks_at', **values, **{k: v.copy() for k, v in shapes.items()})['out']
+        np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(got, mla_float64(q, qr, kv, kr, selected, stride, count, tokens, scale), rtol=1e-4, atol=1e-5)
 
 
 @pytest.mark.parametrize('heads,rank,rope,tokens,stride,threads,splits_max', [

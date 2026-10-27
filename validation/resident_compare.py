@@ -15,7 +15,8 @@ order differs, so the gate is top-1 equality and max |diff| <= 1e-4 * max |logit
 
 With --fp8 the Linears the official GLM FP8 checkpoint quantizes are encoded as block-scaled
 E4M3FN (128x128 float32 scales) and compared the same way (FP8 kernel vs float32 on the exact
-dequantization, same gate). Weight-only: activations stay float32 in both.
+dequantization, same gate). Weight-only: activations stay float32 in both. --fp8-kernels x4 runs
+the FP8 side through fp8_matvec4 and fp8_moe4_* (#30, #31), the experts chosen on the device in both.
 
 --reference-tokens N compares only the first N tokens against the hybrid path, which reads every
 result back to the host (about 33 s per token at full width); the resident timing still runs all
@@ -68,9 +69,9 @@ def bf16_source(weights):
     return BF16Weights(rest, linears)
 
 
-def timed_resident(model, tokens):
+def timed_resident(model, tokens, **options):
     from gpu.resident import ResidentGLM
-    resident = ResidentGLM(model, max_tokens=len(tokens) + 1)
+    resident = ResidentGLM(model, max_tokens=len(tokens) + 1, **options)
     try:
         # Weights upload lazily on first use (only the experts a token routes to), so run the whole
         # sequence once to make the timed pass steady-state, and report that warmup separately.
@@ -93,8 +94,11 @@ def quantized_main(args, config, weights, tokens, fmt):
     baseline = GlmMoeDsaModel(config, source, NumpyBackend())
     baseline_source = baseline.weights
     baseline.weights = lambda name: baseline_source(name)  # hides the packed formats: float32 path
-    got, got_s, got_warm, got_gib, launches = timed_resident(candidate, tokens)
-    expected, exp_s, exp_warm, exp_gib, _ = timed_resident(baseline, tokens)
+    # --fp8-kernels x4 runs fp8_matvec4 and, with the routed experts chosen on the device in both
+    # runs, fp8_moe4_* (#30, #31).
+    options = dict(fp8_kernels='x4', device_experts=True) if getattr(args, 'fp8_kernels', 'hand') == 'x4' else {}
+    got, got_s, got_warm, got_gib, launches = timed_resident(candidate, tokens, **options)
+    expected, exp_s, exp_warm, exp_gib, _ = timed_resident(baseline, tokens, **{k: v for k, v in options.items() if k == 'device_experts'})
     diff = np.abs(got - expected)
     scale = float(np.abs(expected).max())
     report = dict(
@@ -105,6 +109,8 @@ def quantized_main(args, config, weights, tokens, fmt):
         **{f'{fmt}_seconds_per_token': got_s}, f32_seconds_per_token=exp_s,
         **{f'{fmt}_weights_gib_uploaded': got_gib}, f32_weights_gib_uploaded=exp_gib,
         **{f'{fmt}_matvec_launches': launches.get(f'{fmt}_matvec', 0)},
+        **({'fp8_kernels': 'x4', 'fp8_matvec4_launches': launches.get('fp8_matvec4', 0),
+            'fp8_moe4_launches': launches.get('fp8_moe4_gate_up', 0)} if options else {}),
         note=f'single run, synthetic {fmt.upper()} encoding of random weights; kv_b_proj is dequantized to float32 in both; lazy uploads; not a benchmark')
     return report, report['top1_equal'] and report['max_abs_diff'] <= 1e-4 * max(scale, 1.0)
 
@@ -121,7 +127,11 @@ def main():
     quant.add_argument('--int4', action='store_true', help='INT4 resident vs float32 resident on the dequantized weights')
     quant.add_argument('--fp8', action='store_true', help='block-FP8 resident vs float32 resident on the dequantized weights')
     quant.add_argument('--bf16', action='store_true', help='BF16 resident vs float32 resident on the same bf16 values')
+    p.add_argument('--fp8-kernels', choices=['hand', 'x4'], default='hand',
+                   help="with --fp8: x4 runs gpu/spawn's fp8_matvec4 and fp8_moe4_* (#30, #31)")
     args = p.parse_args()
+    if args.fp8_kernels == 'x4' and not args.fp8:
+        p.error('--fp8-kernels x4 needs --fp8')
     if args.output.exists():
         p.error('output exists; preserve evidence')
     from gpu.backend import GPUBackend

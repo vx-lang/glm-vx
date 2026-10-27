@@ -1,0 +1,172 @@
+// mla_decode_at.vx with the tokens of a split in chunks of 32 (#33): block (h, split) of 32 subgroups
+// scores 32 of its tokens at once, one subgroup a token (lanes::sum over the subgroup), then folds
+// the chunk into the running softmax in one step: every lane of the block adds the chunk's 32
+// weighted latent rows to its accumulator element. mla_decode_at.vx walks one token at a time,
+// with a block reduction and its barriers for each, so a block of 256 tokens takes about 450 us on
+// an H100 whatever the GPU's bandwidth.
+//
+// Same arguments, step buffer and merge as mla_decode_at.vx: tokens, count and splits from step,
+// splits_max splits a head, numerator [heads, splits_max, rank] and stats [heads, splits_max, 2]
+// (m, l); the last split of head h to end merges its splits into out[h]. The chunk's softmax:
+//   chunk_max = max of the chunk's valid scores, next_m = max(m, chunk_max) (chunk_max when l = 0),
+//   alpha = exp(m - next_m) (0 when l = 0), p_w = exp(score_w - next_m) for each valid token w,
+//   acc = acc * alpha + sum over w in order of p_w * latent[token_w], l = l * alpha + sum of p_w.
+// So the result equals mla_decode_at's to rounding, not bit for bit (another order of the sums).
+// Needs rank <= 1024 and rope_dim <= 1024. threads is mla_decode_at's and unused, so the two take the same
+// arguments.
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_mla_chunks_at(out: &mut Tensor<f32, [?, ?], Memory::HBM>, numerator: &mut Tensor<f32, [?, ?, ?], Memory::HBM>,
+                                  stats: &mut Tensor<f32, [?, ?, ?], Memory::HBM>,
+                                  q_latent: &Tensor<f32, [?], Memory::HBM>, q_rope: &Tensor<f32, [?], Memory::HBM>,
+                                  cache_latent: &Tensor<f32, [?], Memory::HBM>, cache_rope: &Tensor<f32, [?], Memory::HBM>,
+                                  selected: &Tensor<i32, [?], Memory::HBM>, step: &Tensor<i32, [?], Memory::HBM>,
+                                  heads: i32, rank: i32, rope_dim: i32, selection_stride: i32, splits_max: i32, scale: f32,
+                                  threads: i32) -> void {
+  spawn on(Topology::Device) {
+    for h in 0..heads across blocks {
+      for split in 0..splits_max across blocks {
+        let tokens: i32 = step[1];
+        let count: i32 = step[2];
+        let splits: i32 = step[3];
+        if split < splits && heads > 0 && rank > 0 && rank <= 1024 && rope_dim >= 0 && rope_dim <= 1024 && tokens >= 0
+           && count >= 0 && selection_stride >= 0 && splits > 0 && threads >= 0 {
+          let mut a = unsafe { Tensor<f32, [32, 32], Memory::SMEM>::uninit() };
+          let mut score = unsafe { Tensor<f32, [32, 32], Memory::SMEM>::uninit() };
+          let mut token_of = unsafe { Tensor<i32, [32, 32], Memory::SMEM>::uninit() };
+          let mut acc = unsafe { Tensor<f32, [1024], Memory::SMEM>::uninit() };
+          let mut state = unsafe { Tensor<f32, [2], Memory::SMEM>::uninit() };
+          for t in 0..1024 across lanes { acc[t] = 0.0; }
+          for t in 0..2 across lanes { state[t] = 0.0; }
+          // This split's tokens are j = split + q * splits for q below n, 32 a chunk.
+          let n: i32 = (count - split + splits - 1) / splits;
+          for chunk in 0..(n + 31) / 32 {
+            for w in 0..32 across subgroups {
+              for lane in 0..32 across lanes {
+                let q: i32 = chunk * 32 + w;
+                let mut dot: f32 = 0.0;
+                if q < n {
+                  let token: i32 = selected[h * selection_stride + split + q * splits];
+                  if token >= 0 && token < tokens {
+                    let mut t: i32 = lane;
+                    while t < rank { dot = dot + q_latent[h * rank + t] * cache_latent[token * rank + t]; t = t + 32; }
+                    let mut d: i32 = lane;
+                    while d < rope_dim { dot = dot + q_rope[h * rope_dim + d] * cache_rope[token * rope_dim + d]; d = d + 32; }
+                  }
+                }
+                a[w][lane] = dot;
+              }
+              let total: f32 = lanes::sum(&a[w], 32);
+              // Each lane keeps a copy (a lane loop in a subgroup has 32 passes); readers take lane 0's.
+              for lane in 0..32 across lanes {
+                let q: i32 = chunk * 32 + w;
+                let mut token: i32 = -1;
+                if q < n {
+                  let candidate: i32 = selected[h * selection_stride + split + q * splits];
+                  if candidate >= 0 && candidate < tokens { token = candidate; }
+                }
+                token_of[w][lane] = token;
+                score[w][lane] = total * scale;
+              }
+            }
+            // Every lane works out the chunk's step from the 32 scores (a broadcast read each).
+            for t in 0..1024 across lanes {
+              let m: f32 = state[0];
+              let l: f32 = state[1];
+              let mut chunk_max: f32 = 0.0;
+              let mut any: i32 = 0;
+              let mut w: i32 = 0;
+              while w < 32 {
+                if token_of[w][0] >= 0 {
+                  if any == 0 || score[w][0] > chunk_max { chunk_max = score[w][0]; }
+                  any = 1;
+                }
+                w = w + 1;
+              }
+              if any != 0 && t < rank {
+                let mut next_m: f32 = chunk_max;
+                let mut alpha: f32 = 0.0;
+                if l > 0.0 {
+                  if m > chunk_max { next_m = m; }
+                  alpha = (m - next_m).fast_exp();
+                }
+                let mut sum: f32 = acc[t] * alpha;
+                w = 0;
+                while w < 32 {
+                  let token: i32 = token_of[w][0];
+                  if token >= 0 { sum = sum + (score[w][0] - next_m).fast_exp() * cache_latent[token * rank + t]; }
+                  w = w + 1;
+                }
+                acc[t] = sum;
+              }
+            }
+            for t in 0..1 across lanes {
+              let m: f32 = state[0];
+              let l: f32 = state[1];
+              let mut chunk_max: f32 = 0.0;
+              let mut any: i32 = 0;
+              let mut w: i32 = 0;
+              while w < 32 {
+                if token_of[w][0] >= 0 {
+                  if any == 0 || score[w][0] > chunk_max { chunk_max = score[w][0]; }
+                  any = 1;
+                }
+                w = w + 1;
+              }
+              if any != 0 {
+                let mut next_m: f32 = chunk_max;
+                let mut alpha: f32 = 0.0;
+                if l > 0.0 {
+                  if m > chunk_max { next_m = m; }
+                  alpha = (m - next_m).fast_exp();
+                }
+                let mut sum: f32 = l * alpha;
+                w = 0;
+                while w < 32 {
+                  if token_of[w][0] >= 0 { sum = sum + (score[w][0] - next_m).fast_exp(); }
+                  w = w + 1;
+                }
+                state[t] = next_m;
+                state[t + 1] = sum;
+              }
+            }
+          }
+          for t in 0..rank across lanes(256) { numerator[h][split][t] = acc[t]; }
+          for t in 0..2 across lanes { stats[h][split][t] = state[t]; }
+        }
+      }
+      for d in 0..rank across lanes(256) {
+        let splits: i32 = step[3];
+        if splits > 0 {
+          let mut m: f32 = 0.0;
+          let mut seen: i32 = 0;
+          let mut s: i32 = 0;
+          while s < splits {
+            if stats[h][s][1] > 0.0 {
+              let v: f32 = stats[h][s][0];
+              if seen == 0 { m = v; seen = 1; }
+              else { if v > m { m = v; } }
+            }
+            s = s + 1;
+          }
+          let mut sum: f32 = 0.0;
+          let mut denominator: f32 = 0.0;
+          let mut t: i32 = 0;
+          while t < splits {
+            let l: f32 = stats[h][t][1];
+            if l > 0.0 {
+              let factor: f32 = (stats[h][t][0] - m).fast_exp();
+              sum = sum + numerator[h][t][d] * factor;
+              denominator = denominator + l * factor;
+            }
+            t = t + 1;
+          }
+          let mut result: f32 = 0.0;
+          if denominator > 0.0 { result = sum / denominator; }
+          out[h][d] = result;
+        }
+      }
+    }
+  }
+  return;
+}

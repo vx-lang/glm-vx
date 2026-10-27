@@ -171,3 +171,14 @@ pub fn glm_vx_gpu_topk_stable_at(out_ids: *mut i32, scores: *const i32, scratch:
     return;
   }
 }
+
+// topk_stable_at for the contexts topk_sort_at (gpu/spawn) leaves to it: selects only when
+// step[1] > short_tokens, so a captured step holds both and each replay runs one (#32).
+pub fn glm_vx_gpu_topk_stable_long_at(out_ids: *mut i32, scores: *const i32, scratch: *mut i32, step: *const i32, k: i32,
+                                      short_tokens: i32) -> void {
+  unsafe {
+    let tokens: i32 = step[1];
+    if tokens > short_tokens { vxk_topk_stable(out_ids, scores, scratch, tokens, k); }
+    return;
+  }
+}

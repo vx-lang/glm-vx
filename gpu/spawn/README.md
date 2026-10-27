@@ -16,7 +16,7 @@ also cover every pass. A kernel whose rows have a run-time length writes a rank-
 times numbers; `launch.py` passes a rank-2 `DeviceTensor` as its 7-word descriptor. A row's
 index may then be anything, as in topk's `hist[t][digit]`.
 
-All 41 kernels build and launch with Vx main from 371c2bae on. They use the `lanes::` reductions
+All 46 kernels build and launch with Vx main from 371c2bae on. They use the `lanes::` reductions
 (#2117, #2124, #2128) and #2134 (several libraries in one process each run their own kernel).
 mla_decode uses the code of a group of blocks and its arrival counts (#2185 to #2188). mla_decode_at
 uses #2240's uniform reads of a `&` tensor parameter, so the step buffer can bound its blocks' work,
@@ -77,10 +77,11 @@ Two launches use the same PTX:
 | `int4_matvec.vx` | `glm_vx_gpu_int4_matvec` | 33 |
 | `int4_matmul.vx` | `glm_vx_gpu_int4_matmul` (out is [M, N]) | 40 |
 | `fp8_matvec.vx` | `glm_vx_gpu_fp8_matvec` | 45 |
-| `fp8_matvec4.vx` | new: `fp8_matvec` reading four codes a load (weight viewed as u32), decoded through a shared-memory table (#30) | 56 |
+| `fp8_matvec4.vx` | new: `fp8_matvec` reading four codes a load (weight viewed as u32), decoded through a shared-memory table (#30) | 56 (sm_80), 48 (sm_90) |
 | `fp8_matmul.vx` | `glm_vx_gpu_fp8_matmul` (out is [M, N]) | 46 |
 | `gemm_f32.vx` | `glm_vx_gpu_gemm_f32` | 32 |
 | `topk.vx` | `glm_vx_gpu_topk_stable` (its own scratch: `gpu.topk.spawn_buffers`) | 32 |
+| `topk_sort.vx`, `topk_sort_at.vx` | new: the same selection for up to 2048 tokens, one shared-memory bitonic sort, no scratch (#32); `_at` reads tokens from the step buffer | 22 (sm_90) |
 | `rmsnorm_rows.vx` | `glm_vx_gpu_rmsnorm_rows`, and `glm_vx_gpu_rmsnorm` as rows = 1 | 23 |
 | `residual_rmsnorm.vx` | `glm_vx_gpu_residual_rmsnorm` | 24 |
 | `layernorm.vx` | `glm_vx_gpu_layernorm` | 26 |
@@ -99,6 +100,8 @@ Two launches use the same PTX:
 | `bf16_moe_gate_up.vx`, `bf16_moe_down.vx` | new: the same for bf16 experts | 47, 47 |
 | `int4_moe_gate_up.vx`, `int4_moe_down.vx` | new: the same for INT4 experts | 47, 47 |
 | `fp8_moe_gate_up.vx`, `fp8_moe_down.vx` | new: the same for FP8 experts | 69, 56 |
+| `fp8_moe4_gate_up.vx`, `fp8_moe4_down.vx` | new: the FP8 pair reading four codes a load through `fp8_row_dot4!` (#31) | 64, 61 (sm_90) |
+| `mla_chunks_at.vx` | new: `mla_decode_at` with 32 tokens a chunk, one subgroup a token (#33); equal to rounding | 32 (sm_90) |
 | `mla_decode.vx` | new: mla_partial and mla_merge in one launch (Vx #2187 code of a group, #2188 arrival counts) | 31 |
 
 The five expert kernels let a decode step run its MoE without reading the router's ids on the

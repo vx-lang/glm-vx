@@ -133,7 +133,9 @@ void glm_vx_gpu_matvec_heads(float *out, const float *weight, const float *x,
 /* A graph-captured decode step (gpu/resident.py graph=True): what changes per token is read
  * from the int32 step buffer {position, tokens, count, splits}. Each _at entry is its plain
  * entry with those arguments from step; launch it with the grid for the most tokens (splits),
- * and the blocks past the step's value exit. glm_vx_gpu_topk_stable_at is in topk.ptx. */
+ * and the blocks past the step's value exit. glm_vx_gpu_topk_stable_at is in topk.ptx, with
+ * glm_vx_gpu_topk_stable_long_at(out_ids, scores, scratch, step, k, short_tokens), which selects
+ * only when step[1] > short_tokens: gpu/spawn's topk_sort_at selects the shorter contexts (#32). */
 void glm_vx_gpu_index_scores_at(float *out, const float *q, const float *keys,
     const float *weights, const int32_t *step, int32_t heads, int32_t dim, float scale);
 void glm_vx_gpu_mla_partial_at(float *numerator, float *stats, const float *q_latent,

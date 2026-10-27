@@ -11,7 +11,8 @@
 # Optional: GLM_VX_INT4_CHECKPOINT=<dir from validation/fetch_tensors.py> adds the real
 # compressed-tensors Linears to the INT4 device test. PYTHON (default python3), LAYERS (full-width
 # layers, default 4), TOKENS (default 48), REFERENCE_TOKENS (tokens of the full-width hybrid
-# reference, default 20), STRESS (concurrent stress processes, default 8).
+# reference, default 20), STRESS (concurrent stress processes, default 8), TIMER (ncu, or events to
+# skip the ncu pass where a container blocks its counters; it falls back to events anyway).
 # Use OMP_NUM_THREADS well below the host's vCPU count (NumPy thrashes on 128-vCPU pods).
 #
 # Toolchain: one vxc bundle from Vx main, 371c2bae or later (#2240: mla_decode_at reads its step
@@ -25,7 +26,7 @@
 # Do not export VX_CUDA_SYNC or VX_TIME_KERNEL for the whole run: Vx stops a graph capture on either.
 set -uo pipefail
 cd "$(dirname "$0")/.."
-: "${PYTHON:=python3}" "${LAYERS:=4}" "${TOKENS:=48}" "${REFERENCE_TOKENS:=20}" "${STRESS:=8}" "${OMP_NUM_THREADS:=16}"
+: "${PYTHON:=python3}" "${LAYERS:=4}" "${TOKENS:=48}" "${REFERENCE_TOKENS:=20}" "${STRESS:=8}" "${OMP_NUM_THREADS:=16}" "${TIMER:=ncu}"
 export OMP_NUM_THREADS
 # The PTX target stays sm_80 (gpu/build.sh), which the driver JITs on newer GPUs; ptxas checks it for
 # the device's own arch (PTXAS_ARCH, e.g. sm_90 on an H100) and runs whenever a CUDA ptxas is found.
@@ -117,6 +118,12 @@ for mode in f32 int4 fp8 bf16; do
   step resident-$mode-full$LAYERS $PYTHON -m validation.resident_compare $flag $reference --geometry full --layers "$LAYERS" \
     --tokens "$TOKENS" --output "$out/resident-$mode-full$LAYERS.json"
 done
+# FP8 through fp8_matvec4 and fp8_moe4_* (#30, #31): another summation order, so the gate is the
+# FP8 one (top-1 equal, |diff| <= 1e-4 * max |logit| against float32 on the dequantized weights).
+step resident-fp8x4-small $PYTHON -m validation.resident_compare --fp8 --fp8-kernels x4 --tokens "$TOKENS" \
+  --output "$out/resident-fp8x4-small.json"
+step resident-fp8x4-full$LAYERS $PYTHON -m validation.resident_compare --fp8 --fp8-kernels x4 --geometry full \
+  --layers "$LAYERS" --tokens "$TOKENS" --output "$out/resident-fp8x4-full$LAYERS.json"
 # Graph replay against the per-launch path (#26), bit for bit, every routed expert resident.
 for mode in f32 int4 fp8 bf16; do
   step graph-$mode-small $PYTHON -m validation.resident_graph --format $mode --tokens "$TOKENS" --output "$out/graph-$mode-small.json"
@@ -127,11 +134,18 @@ done
 # the bytes they must read. Without ncu or its counters (ERR_NVGPUCTRPERM in a container), both time
 # each launch with CUDA events instead, and their reports say so.
 for mode in f32 int4 fp8 bf16; do
-  step layer-profile-$mode $PYTHON -m validation.layer_profile --format $mode --output "$out/layer-profile-$mode.json"
+  step layer-profile-$mode $PYTHON -m validation.layer_profile --format $mode --timer "$TIMER" \
+    --output "$out/layer-profile-$mode.json"
 done
-step moe-profile $PYTHON -m validation.moe_profile --output "$out/moe-profile.json"
+step layer-profile-fp8x4 $PYTHON -m validation.layer_profile --format fp8 --fp8-kernels x4 --timer "$TIMER" \
+  --output "$out/layer-profile-fp8x4.json"
+step moe-profile $PYTHON -m validation.moe_profile --timer "$TIMER" --output "$out/moe-profile.json"
 # The FP8 dense matvec kernels (hand, spawn, and fp8_matvec4 of #30) at GLM-5.3's projection shapes.
 step matvec-profile $PYTHON -m validation.matvec_profile --output "$out/matvec-profile.json"
+# The indexer's top-k (#32): the radix select against topk_sort, 64 to 32k tokens.
+step topk-profile $PYTHON -m validation.topk_profile --output "$out/topk-profile.json"
+# The fused MLA decode (#33): mla_decode_at against mla_chunks_at at a full-width layer's shape.
+step mla-profile $PYTHON -m validation.mla_profile --output "$out/mla-profile.json"
 # For Vx: mla_decode_at as built (ptxas caps it at 32 registers on sm_90, an 8 B spill) against
 # its PTX with `.minnctapersm 1` (64 registers, 1 block per SM), bit for bit and timed.
 step mla-hint $PYTHON -m validation.mla_hint --output "$out/mla-hint.json"

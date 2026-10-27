@@ -210,6 +210,27 @@ def test_fp8_resident_matches_float32_resident_on_the_same_weights():
     assert a.weight_bytes < b.weight_bytes
 
 
+@pytest.mark.parametrize('graph', [False, True])
+def test_fp8_x4_kernels_match_the_hand_kernels(graph):
+    # fp8_kernels='x4' (#30, #31): fp8_matvec4 for the Linears and fp8_moe4_* for the routed experts,
+    # another summation order, so close to the default path rather than equal; the same argmax.
+    model, _ = fp8_model(31, hidden_size=136, moe_intermediate_size=132)
+    runs = {}
+    for kernels in ('hand', 'x4'):
+        resident = ResidentGLM(model, ctx=Context(), max_tokens=32, device_experts=True, graph=graph, fp8_kernels=kernels)
+        try:
+            runs[kernels] = (np.stack([resident.forward(t) for t in TOKENS[:8]]), dict(resident.launches))
+        finally:
+            resident.close()
+    (hand, hand_launches), (x4, x4_launches) = runs['hand'], runs['x4']
+    np.testing.assert_allclose(x4, hand, rtol=1e-4, atol=1e-4)
+    assert (x4.argmax(-1) == hand.argmax(-1)).all()
+    assert x4_launches.get('fp8_matvec4', 0) > 0 and x4_launches.get('fp8_moe4_gate_up', 0) > 0
+    assert 'fp8_matvec4' not in hand_launches and 'fp8_moe4_down' not in hand_launches
+    with pytest.raises(ValueError, match='fp8_kernels'):
+        ResidentGLM(model, ctx=Context(), fp8_kernels='fast')
+
+
 def test_fp8_checkpoint_on_disk_runs_packed(tmp_path):
     # The production path: an official-layout FP8 safetensors directory read by SafetensorsCheckpoint.
     import json
@@ -289,6 +310,31 @@ def test_bf16_checkpoint_on_disk_runs_as_bf16(tmp_path):
         assert resident.launches.get('bf16_matvec', 0) > 0 and resident.launches.get('matvec', 0) == 0
 
 
+@pytest.mark.parametrize('graph', [False, True])
+@pytest.mark.parametrize('short', [2048, 5])  # 5: positions 6 on take the radix select (long_at under replay)
+def test_topk_sort_selects_what_the_radix_select_selects(monkeypatch, graph, short):
+    # gpu/spawn's topk_sort (#32) returns the same ids as topk_stable, so the logits are equal bit
+    # for bit; past TOPK_SORT_TOKENS the radix select takes over (both captured under graph replay).
+    import gpu.resident as resident_module
+    monkeypatch.setattr(resident_module, 'TOPK_SORT_TOKENS', short)
+    model = build(seed=41, index_n_heads=1)  # one indexer head: exact score ties
+    runs = {}
+    for topk in ('sort', 'radix'):
+        resident = ResidentGLM(model, ctx=Context(), max_tokens=32, device_experts=graph, graph=graph, topk=topk)
+        try:
+            runs[topk] = (np.stack([resident.forward(t) for t in TOKENS]), dict(resident.launches))
+        finally:
+            resident.close()
+    np.testing.assert_array_equal(runs['sort'][0], runs['radix'][0])
+    sort, radix = runs['sort'][1], runs['radix'][1]
+    assert sort.get('topk_sort_at' if graph else 'topk_sort', 0) > 0
+    assert 'topk_sort' not in radix and 'topk_sort_at' not in radix
+    if graph:
+        assert sort.get('topk_stable_long_at', 0) > 0 and 'topk_stable_at' not in sort
+    else:
+        assert (sort.get('topk_stable', 0) > 0) == (short < len(TOKENS))
+
+
 @pytest.mark.parametrize('overrides', [{}, {'index_n_heads': 1}])  # one head: exact score ties
 def test_device_topk_selects_exactly_what_the_host_argsort_selects(overrides):
     model = build(seed=37, **overrides)
@@ -299,7 +345,8 @@ def test_device_topk_selects_exactly_what_the_host_argsort_selects(overrides):
         np.testing.assert_array_equal(device.selected.data[:device.selected_count],
                                       host.selected.data[:host.selected_count])
         np.testing.assert_array_equal(a, b)
-    assert device.launches['topk_stable'] > 0 and 'topk_stable' not in host.launches
+    selections = device.launches.get('topk_stable', 0) + device.launches.get('topk_sort', 0)  # topk='auto' (#32)
+    assert selections > 0 and not {'topk_stable', 'topk_sort'} & set(host.launches)
 
 
 # --- Routed experts chosen on the device (device_experts=True) -----------------------------

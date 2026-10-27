@@ -1,0 +1,57 @@
+// fp8_moe_gate_up.vx reading four codes a load (#31): the expert weights viewed as u32 (cols % 4 == 0),
+// decoded through each subgroup's table, in fp8_row_dot4!'s order (device.vx), so each term is
+// fp8_matvec4's. Otherwise as fp8_moe_gate_up.vx:
+// moe_gate_up.vx for e4m3 weights with a float32 scale per 128x128 block. The first half of a decode MoE layer in one launch: for each of the k routed experts and each
+// of its `inter` rows, act[s * inter + i] = silu(gate . x) * (up . x), where s is the expert's
+// place in ascending id order (the order moe_down.vx sums in). The arithmetic is
+// fp8_expert_matvec.vx's twice, then swiglu.vx's, so act is what the per-expert kernels leave.
+//
+// Each expert's gate rows are rows 0..inter of its [stride, cols] matrix in `gate`, its up rows
+// rows up_row..up_row + inter of its matrix in `up`: separate projections pass stride = inter
+// and up_row = 0, the fused [E, 2 * inter, cols] layout passes it as both with stride =
+// 2 * inter and up_row = inter. An id outside 0..experts gives zeros. Needs k <= 32.
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_fp8_moe4_gate_up(act: &mut Tensor<f32, [?], Memory::HBM>, gate: &Tensor<u32, [?], Memory::HBM>, gate_scales: &Tensor<f32, [?], Memory::HBM>,
+                                up: &Tensor<u32, [?], Memory::HBM>, up_scales: &Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                                ids: &Tensor<i32, [?], Memory::HBM>, k: i32, experts: i32, inter: i32,
+                                up_row: i32, stride: i32, cols: i32) -> void {
+  spawn on(Topology::Device) {
+    for rb in 0..(k * inter - 1) / 4 + 1 across blocks {
+      let mut ranks = unsafe { Tensor<i32, [4, 32], Memory::SMEM>::uninit() };
+      let mut g = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
+      let mut u = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
+      let mut table = unsafe { Tensor<f32, [4, 8, 32], Memory::SMEM>::uninit() };
+      for w in 0..4 across subgroups {
+        for i in 0..8 {
+          for lane in 0..32 across lanes {
+            table[w][i][lane] = fp8_decode!(i * 32 + lane);
+          }
+        }
+        for lane in 0..32 across lanes {
+          ranks[w][lane] = id_rank!(ids, k, lane);
+        }
+        for lane in 0..32 across lanes {
+          let at: i32 = rb * 4 + w;
+          let s: i32 = at / inter;
+          let row: i64 = (at - s * inter) as i64;
+          let mut gs: f32 = 0.0;
+          let mut us: f32 = 0.0;
+          if at < k * inter {
+            let expert: i32 = ids[slot_of_rank!(ranks, w, k, s)];
+            if expert >= 0 && expert < experts {
+              gs = fp8_row_dot4!(gate, gate_scales, table, w, x, 0, expert, row, stride, cols as i64, lane);
+              us = fp8_row_dot4!(up, up_scales, table, w, x, 0, expert, (up_row as i64) + row, stride, cols as i64, lane);
+            }
+          }
+          g[w][lane] = gs;
+          u[w][lane] = us;
+        }
+        let gt: f32 = lanes::sum(&g[w], 32);
+        let ut: f32 = lanes::sum(&u[w], 32);
+        if rb * 4 + w < k * inter && cols >= 0 { act[rb * 4 + w] = gt * sigmoid!(gt) * ut; }
+      }
+    }
+  }
+  return;
+}

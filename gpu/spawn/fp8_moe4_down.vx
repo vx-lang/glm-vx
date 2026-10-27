@@ -1,0 +1,55 @@
+// fp8_moe_down.vx reading four codes a load (#31): the expert weights viewed as u32 (cols % 4 == 0),
+// decoded through each subgroup's table, in fp8_row_dot4!'s order (device.vx), so each term is
+// fp8_matvec4's. Otherwise as fp8_moe_down.vx:
+// moe_down.vx for e4m3 weights with a float32 scale per 128x128 block. The second half of a decode MoE layer in one launch: out[r] = sum over the k routed experts,
+// in ascending id order, of weight * (down . act[s * cols ..]), with act from moe_gate_up.vx.
+// Each output row adds its k terms itself, in the order the official Experts sums, so there are
+// no atomics and the result is fp8_expert_matvec.vx then expert_scaled_add.vx for slots 0..k
+// starting from zeros, to the last bit (two roundings a term: x * w, then the add).
+//
+// down holds each expert's [rows, cols] matrix back to back; weights[j] is router slot j's
+// weight. An id outside 0..experts adds a zero term. Needs k <= 32. Every lane of a subgroup keeps
+// the same running sum (a subgroup's lane loop has 32 passes, E6032), and lane 0's is written.
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_fp8_moe4_down(out: &mut Tensor<f32, [?], Memory::HBM>, down: &Tensor<u32, [?], Memory::HBM>, scales: &Tensor<f32, [?], Memory::HBM>,
+                             act: &Tensor<f32, [?], Memory::HBM>, weights: &Tensor<f32, [?], Memory::HBM>,
+                             ids: &Tensor<i32, [?], Memory::HBM>, k: i32, experts: i32, rows: i32, cols: i32) -> void {
+  spawn on(Topology::Device) {
+    for rb in 0..(rows - 1) / 4 + 1 across blocks {
+      let mut ranks = unsafe { Tensor<i32, [4, 32], Memory::SMEM>::uninit() };
+      let mut a = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
+      let mut acc = Tensor<f32, [4, 32], Memory::SMEM>::fill(0.0);
+      let mut table = unsafe { Tensor<f32, [4, 8, 32], Memory::SMEM>::uninit() };
+      for w in 0..4 across subgroups {
+        for i in 0..8 {
+          for lane in 0..32 across lanes {
+            table[w][i][lane] = fp8_decode!(i * 32 + lane);
+          }
+        }
+        for lane in 0..32 across lanes {
+          ranks[w][lane] = id_rank!(ids, k, lane);
+        }
+        for s in 0..k {
+          for lane in 0..32 across lanes {
+            let j: i32 = slot_of_rank!(ranks, w, k, s);
+            let expert: i32 = ids[j];
+            let row: i64 = (rb * 4 + w) as i64;
+            let mut sum: f32 = 0.0;
+            if row < (rows as i64) && expert >= 0 && expert < experts {
+              sum = fp8_row_dot4!(down, scales, table, w, act, (s as i64) * (cols as i64), expert, row, rows, cols as i64, lane);
+            }
+            a[w][lane] = sum;
+          }
+          let total: f32 = lanes::sum(&a[w], 32);
+          for lane in 0..32 across lanes {
+            let weighted: f32 = total * weights[slot_of_rank!(ranks, w, k, s)];
+            acc[w][lane] = acc[w][lane] + weighted;
+          }
+        }
+        if rb * 4 + w < rows && cols >= 0 { out[rb * 4 + w] = acc[w][0]; }
+      }
+    }
+  }
+  return;
+}

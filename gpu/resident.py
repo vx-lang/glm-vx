@@ -58,6 +58,15 @@ logits are equal bit for bit. It needs ``device_topk`` and ``device_experts`` (n
 step). With ``fused_attention`` the graph holds gpu/spawn's mla_decode_at (#27): splits_max splits
 per head, those past the step's splits idle but arriving, so the arrival counts still return to zero.
 
+``mla_kernel='chunks'`` runs the fused attention under graph replay through gpu/spawn's
+mla_chunks_at (#33): 32 tokens a chunk, equal to mla_decode_at to rounding.
+
+``fp8_kernels='x4'`` runs FP8 Linears through gpu/spawn's fp8_matvec4 and, with ``device_experts``,
+the routed experts through fp8_moe4_gate_up/down (#30, #31): four codes a load, decoded through a
+table. Their summation order differs from the hand kernels', so the logits are close to the default
+path's, not equal; each kernel's own order is pinned by gpu/test_spawn_vx_host.py. Widths that are
+not a multiple of 4 keep the default kernels.
+
 Not a performance claim: no timing is made here.
 ``device_experts`` needs the gpu/spawn kernels built (gpu/spawn/build.sh into ptx_dir/spawn) with a
 vxc that has Vx's lanes:: reductions (see gpu/spawn/README.md); it has not run on a GPU yet.
@@ -73,6 +82,7 @@ from .runtime import CUDAContext
 I = C.c_int32
 F = C.c_float
 _ELEMENTWISE_BLOCK = 256
+TOPK_SORT_TOKENS = 2048  # gpu/spawn/topk_sort.vx sorts contexts up to this many tokens (#32)
 _MAX_GRID = 65535
 
 
@@ -98,7 +108,8 @@ class ResidentGLM:
     name = 'vx-gpu-resident'
 
     def __init__(self, model, *, max_tokens=4096, ptx_dir=None, device=0, ctx=None, max_weight_bytes=None,
-                 device_topk=True, device_experts=False, fused_attention=False, graph=False):
+                 device_topk=True, device_experts=False, fused_attention=False, graph=False, fp8_kernels='hand',
+                 topk='auto', mla_kernel='decode'):
         if getattr(model, 'packed_weights', False):
             raise NotImplementedError('ResidentGLM supports expanded float32 weights only')
         if getattr(model, 'expert_placement', None) is not None:
@@ -111,6 +122,17 @@ class ResidentGLM:
         self.device_experts = bool(device_experts)
         self.fused_attention = bool(fused_attention)
         self.graph = bool(graph)
+        if fp8_kernels not in ('hand', 'x4'):
+            raise ValueError("fp8_kernels must be 'hand' or 'x4'")
+        self.fp8_kernels = fp8_kernels
+        if topk not in ('auto', 'sort', 'radix'):
+            raise ValueError("topk must be 'auto', 'sort' or 'radix'")
+        self._topk_choice = topk
+        if mla_kernel not in ('decode', 'chunks'):
+            raise ValueError("mla_kernel must be 'decode' or 'chunks'")
+        self.mla_kernel = mla_kernel
+        if mla_kernel == 'chunks' and not (self.graph and self.fused_attention):
+            raise ValueError("mla_kernel='chunks' needs graph=True and fused_attention=True")
         if self.graph and not (self.device_topk and self.device_experts):
             raise ValueError('graph=True needs device_topk and device_experts: a captured step cannot read device memory')
         self._step_graph, self._warm = None, False
@@ -405,6 +427,12 @@ class ResidentGLM:
             args = [packed, scales, x, I(rows), I(cols), I(kind)]
         elif fmt == 'fp8':
             codes, scales, (rows, cols) = self._fp8_weight(prefix)
+            if self.fp8_kernels == 'x4' and cols % 4 == 0:
+                if out.shape != (rows,) or x.shape != (cols,):
+                    raise ValueError(f'{prefix}: FP8 weight is {rows}x{cols}, got x {x.shape} -> out {out.shape}')
+                self._spawn('fp8_matvec4', out=out, weight=codes.view((rows * cols // 4,), 'uint32'),
+                            scales=scales.view((int(np.prod(scales.shape)),)), x=x, rows=rows, cols=cols)
+                return out
             args = [codes, scales, x, I(rows), I(cols)]
         else:
             bits, (rows, cols) = self._bf16_weight(prefix)
@@ -423,8 +451,16 @@ class ResidentGLM:
             self._kernels[name] = module.kernel('glm_vx_gpu_' + name)
         return name
 
-    def _topk_kernel(self):
-        name = 'topk_stable_at' if self.graph else 'topk_stable'
+    def _topk_sort(self):
+        """Whether contexts up to TOPK_SORT_TOKENS select through gpu/spawn's topk_sort (one
+        shared-memory sort, the same ids as topk_stable): 'sort' always, 'radix' never, 'auto' when
+        it is built."""
+        if self._topk_choice == 'auto':
+            self._topk_choice = 'sort' if (self._ptx_dir / 'spawn' / 'topk_sort.ptx').exists() else 'radix'
+        return self._topk_choice == 'sort'
+
+    def _topk_kernel(self, name=None):
+        name = name or ('topk_stable_at' if self.graph else 'topk_stable')
         if name not in self._kernels:
             module = self._modules.get('topk')
             if module is None:
@@ -573,17 +609,21 @@ class ResidentGLM:
         fmt, hidden = gate[0], gate[2][1]
         if up[0] != fmt or down[0] != fmt or up[3] != gate[3] or down[3] != gate[3] or tuple(down[2]) != (hidden, inter):
             raise ValueError(f'{prefix}.experts: gate, up and down need one format and scale kind and matching shapes')
-        kernel = '' if fmt == 'float32' else fmt + '_'
+        kernel = ('' if fmt == 'float32' else fmt + '_') + 'moe_'
         common = dict(ids=self.route_ids, k=k, experts=experts, **gate[3])
         gate_args = dict(gate=gate[1][0], up=up[1][0])
         down_args = dict(down=down[1][0])
+        if fmt == 'fp8' and self.fp8_kernels == 'x4' and hidden % 4 == 0 and inter % 4 == 0:
+            kernel = 'fp8_moe4_'  # the codes as u32, four a load (#31)
+            words = lambda t: t.view((int(np.prod(t.shape)) // 4,), 'uint32')
+            gate_args, down_args = dict(gate=words(gate[1][0]), up=words(up[1][0])), dict(down=words(down[1][0]))
         if fmt in ('int4', 'fp8'):
             gate_args.update(gate_scales=gate[1][1], up_scales=up[1][1])
             down_args.update(scales=down[1][1])
         act = self.moe_act.view((k * inter,))
-        self._spawn(kernel + 'moe_gate_up', act=act, x=x, inter=inter, up_row=up_row, stride=stride, cols=hidden,
+        self._spawn(kernel + 'gate_up', act=act, x=x, inter=inter, up_row=up_row, stride=stride, cols=hidden,
                     **gate_args, **common)
-        self._spawn(kernel + 'moe_down', out=self.moe_sum, act=act, weights=self.route_weights, rows=hidden,
+        self._spawn(kernel + 'down', out=self.moe_sum, act=act, weights=self.route_weights, rows=hidden,
                     cols=inter, **down_args, **common)
 
     # ---------------------------------------------------------------- blocks
@@ -614,9 +654,19 @@ class ResidentGLM:
                          [self.scores, self.iq_rot, self.index_keys[layer], self.head_weights, I(tokens), I(self.index_heads),
                           I(self.index_dim), scale])
         count = min(self.index_topk, tokens)
-        if self.graph:
+        sort = self.device_topk and self._topk_sort()
+        if self.graph and sort:
+            # Both captured: topk_sort_at selects up to TOPK_SORT_TOKENS, the radix select past it (#32).
+            self._spawn('topk_sort_at', out_ids=self.selected, scores=self.scores.view(self.scores.shape, 'int32'),
+                        step=self.step, k=self.index_topk)
+            self._launch(self._topk_kernel('topk_stable_long_at'), 1, 256,
+                         [self.selected, self.scores, self.topk_scratch, self.step, I(self.index_topk), I(TOPK_SORT_TOKENS)])
+        elif self.graph:
             self._launch(self._topk_kernel(), 1, 256, [self.selected, self.scores, self.topk_scratch, self.step,
                                                  I(self.index_topk)])
+        elif sort and tokens <= TOPK_SORT_TOKENS:
+            self._spawn('topk_sort', out_ids=self.selected, scores=self.scores.view((tokens,), 'int32'), tokens=tokens,
+                        k=self.index_topk)
         elif self.device_topk:
             # Stable by position, exactly as GlmMoeDsaModel._index (TOPK.md); writes ids[:count].
             self._launch(self._topk_kernel(), 1, 256, [self.selected, self.scores.view((tokens,)), self.topk_scratch,
@@ -670,7 +720,7 @@ class ResidentGLM:
         scale = F(_f32(qk ** -0.5, 'MLA scale', True))
         tokens = position + 1
         if self.fused_attention and self.graph:
-            self._spawn('mla_decode_at', out=self.attended, numerator=self.numerator, stats=self.stats,
+            self._spawn('mla_chunks_at' if self.mla_kernel == 'chunks' else 'mla_decode_at', out=self.attended, numerator=self.numerator, stats=self.stats,
                         q_latent=self.latent_q, q_rope=self.rot_q, cache_latent=self.latents[layer],
                         cache_rope=self.rope_keys[layer], selected=self.selected, step=self.step, heads=self.heads,
                         rank=self.rank, rope_dim=self.rot, selection_stride=0, splits_max=self.splits_max,
