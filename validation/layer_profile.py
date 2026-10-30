@@ -208,8 +208,9 @@ def main():
     p.add_argument('--seed', type=int, default=1)
     p.add_argument('--timer', choices=['ncu', 'events'], default='ncu', help='events: no ncu (see above)')
     p.add_argument('--fp8-kernels', choices=['hand', 'x4'], default='hand', help="ResidentGLM's fp8_kernels (#30, #31)")
-    p.add_argument('--matvec-kernels', choices=['hand', 'spawn'], default='hand',
-                   help="ResidentGLM's matvec_kernels: INT4 and BF16 Linears through gpu/spawn")
+    p.add_argument('--matvec-kernels', choices=['hand', 'spawn', 'x4'], default='hand',
+                   help="ResidentGLM's matvec_kernels: INT4 and BF16 Linears through gpu/spawn "
+                        "(x4: int4_matvec4 and bf16_matvec4, four words a lane step)")
     p.add_argument('--launches', help=argparse.SUPPRESS)  # set when running under ncu
     args = p.parse_args()
     if args.launches:

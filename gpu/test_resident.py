@@ -250,6 +250,27 @@ def test_spawn_matvec_kernels_equal_the_hand_kernels(fmt):
         ResidentGLM(model, ctx=Context(), matvec_kernels='fast')
 
 
+@pytest.mark.parametrize('fmt', ['int4', 'bf16'])
+def test_x4_matvec_kernels_match_the_hand_kernels(fmt):
+    # matvec_kernels='x4' (#30): int4_matvec4 and bf16_matvec4, four u32 words a lane step, another
+    # summation order, so close to the hand kernels rather than equal; the same argmax. Hidden and
+    # MLP widths of 256 give INT4 Linears whose width is a multiple of 128 (two groups); narrower
+    # ones keep the hand kernel.
+    sizes = dict(hidden_size=256, intermediate_size=256)
+    model = (int4_model(41, GLM_INT4, **sizes) if fmt == 'int4' else bf16_model(41, **sizes))[0]
+    runs = {}
+    for kernels in ('hand', 'x4'):
+        resident = ResidentGLM(model, ctx=Context(), max_tokens=32, matvec_kernels=kernels)
+        try:
+            runs[kernels] = (np.stack([resident.forward(t) for t in TOKENS[:6]]), set(resident._spawn_kernels))
+        finally:
+            resident.close()
+    (hand, hand_spawned), (x4, spawned) = runs['hand'], runs['x4']
+    np.testing.assert_allclose(x4, hand, rtol=1e-4, atol=1e-4)
+    assert (x4.argmax(-1) == hand.argmax(-1)).all()
+    assert f'{fmt}_matvec4' in spawned and f'{fmt}_matvec4' not in hand_spawned
+
+
 def test_fp8_checkpoint_on_disk_runs_packed(tmp_path):
     # The production path: an official-layout FP8 safetensors directory read by SafetensorsCheckpoint.
     import json

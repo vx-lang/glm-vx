@@ -141,12 +141,17 @@ done
 step layer-profile-fp8x4 $PYTHON -m validation.layer_profile --format fp8 --fp8-kernels x4 --timer "$TIMER" \
   --output "$out/layer-profile-fp8x4.json"
 for mode in int4 bf16; do
-  step layer-profile-$mode-spawn $PYTHON -m validation.layer_profile --format $mode --matvec-kernels spawn \
-    --timer "$TIMER" --output "$out/layer-profile-$mode-spawn.json"
+  for kernels in spawn x4; do
+    step layer-profile-$mode-$kernels $PYTHON -m validation.layer_profile --format $mode --matvec-kernels $kernels \
+      --timer "$TIMER" --output "$out/layer-profile-$mode-$kernels.json"
+  done
 done
 step moe-profile $PYTHON -m validation.moe_profile --timer "$TIMER" --output "$out/moe-profile.json"
-# The FP8 dense matvec kernels (hand, spawn, and fp8_matvec4 of #30) at GLM-5.3's projection shapes.
+# The dense matvec kernels (hand, spawn, and the *_matvec4 of #30) at GLM-5.3's projection shapes.
 step matvec-profile $PYTHON -m validation.matvec_profile --output "$out/matvec-profile.json"
+for mode in bf16 int4; do
+  step matvec-profile-$mode $PYTHON -m validation.matvec_profile --format $mode --output "$out/matvec-profile-$mode.json"
+done
 # The indexer's top-k (#32): the radix select against topk_sort, 64 to 32k tokens.
 step topk-profile $PYTHON -m validation.topk_profile --output "$out/topk-profile.json"
 # The fused MLA decode (#33): mla_decode_at against mla_chunks_at at a full-width layer's shape.

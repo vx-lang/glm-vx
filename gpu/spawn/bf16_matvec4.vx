@@ -1,0 +1,47 @@
+// bf16_matvec reading eight weights a lane step: out[r] = W[r, :] x, W raw bfloat16 bits viewed as
+// u32 (cols % 8 == 0, little-endian: the low half of word i is column 2i). One warp of 32 lanes per
+// row, four rows a block. Lane l reads words 4l .. 4l + 3 of every 128-word tile (columns
+// tile * 256 + 8l .. + 7), four consecutive words, the shape Vx #2362 turns into one 16-byte load.
+// Lane l's order is tile by tile, its eight columns in order; then lanes::sum's tree. Another order
+// than bf16_matvec's, so its results are not bit for bit those of the hand kernel.
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_bf16_matvec4(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<u32, [?], Memory::HBM>,
+                                 x: &Tensor<f32, [?], Memory::HBM>, rows: i32, cols: i32) -> void {
+  spawn on(Topology::Device) {
+    for rb in 0..(rows - 1) / 4 + 1 across blocks {
+      let mut a = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
+      for w in 0..4 across subgroups {
+        for lane in 0..32 across lanes {
+          let row: i64 = (rb * 4 + w) as i64;
+          let mut sum: f32 = 0.0;
+          if row < (rows as i64) && cols % 8 == 0 {
+            let words: i64 = (cols as i64) / 2;
+            let row_words: i64 = row * words;
+            let mut at: i64 = (lane as i64) * 4;
+            while at < words {
+              let w0: i32 = weight[row_words + at] as i32;
+              let w1: i32 = weight[row_words + at + 1] as i32;
+              let w2: i32 = weight[row_words + at + 2] as i32;
+              let w3: i32 = weight[row_words + at + 3] as i32;
+              let col: i64 = at * 2;
+              sum = sum + bf16_decode!(w0) * x[col];
+              sum = sum + bf16_decode!(w0 >> 16) * x[col + 1];
+              sum = sum + bf16_decode!(w1) * x[col + 2];
+              sum = sum + bf16_decode!(w1 >> 16) * x[col + 3];
+              sum = sum + bf16_decode!(w2) * x[col + 4];
+              sum = sum + bf16_decode!(w2 >> 16) * x[col + 5];
+              sum = sum + bf16_decode!(w3) * x[col + 6];
+              sum = sum + bf16_decode!(w3 >> 16) * x[col + 7];
+              at = at + 128;
+            }
+          }
+          a[w][lane] = sum;
+        }
+        let total: f32 = lanes::sum(&a[w], 32);
+        if rb * 4 + w < rows && cols >= 0 { out[rb * 4 + w] = total; }
+      }
+    }
+  }
+  return;
+}

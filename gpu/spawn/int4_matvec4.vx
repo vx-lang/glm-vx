@@ -1,0 +1,65 @@
+// int4_matvec reading 32 codes a lane step: group-128 symmetric INT4 codes, two per byte (element
+// 2i in the low nibble), viewed as u32 (cols % 128 == 0: a group is 16 words, code j of word i is
+// column 8i + j), one raw 16-bit scale per (row, group), binary16 for scale_kind 0, bfloat16 for 1.
+// One warp of 32 lanes per row, four rows a block. Lane l reads words 4l .. 4l + 3 of every
+// 128-word tile (columns tile * 1024 + 32l .. + 31, all in group tile * 8 + l / 4), four
+// consecutive words, the shape Vx #2362 turns into one 16-byte load. Lane l sums its 32 raw-code
+// terms in column order into `part`, then sum += part * scale, tile by tile; then lanes::sum's
+// tree. Another order than int4_matvec's, so its results are not bit for bit the hand kernel's.
+// spawn-include: device.vx
+
+// part plus the word's eight terms in column order, code * x[col + j].
+macro_rules! int4_word_terms {
+    ($part:expr, $word:expr, $x:ident, $col:expr) => {
+        unsafe {
+          let mut dv_part: f32 = $part;
+          let mut dv_j: i32 = 0;
+          while dv_j < 8 {
+            dv_part = dv_part + int4_code!($word >> (dv_j * 4), 0) * $x[$col + (dv_j as i64)];
+            dv_j = dv_j + 1;
+          }
+          dv_part
+        }
+    };
+}
+
+pub fn glm_vx_spawn_int4_matvec4(out: &mut Tensor<f32, [?], Memory::HBM>, packed: &Tensor<u32, [?], Memory::HBM>,
+                                 scales: &Tensor<u16, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                                 rows: i32, cols: i32, scale_kind: i32) -> void {
+  spawn on(Topology::Device) {
+    for rb in 0..(rows - 1) / 4 + 1 across blocks {
+      let mut a = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
+      for w in 0..4 across subgroups {
+        for lane in 0..32 across lanes {
+          let row: i64 = (rb * 4 + w) as i64;
+          let mut sum: f32 = 0.0;
+          if row < (rows as i64) && cols % 128 == 0 {
+            let words: i64 = (cols as i64) / 8;
+            let groups: i64 = (cols as i64) / 128;
+            let row_words: i64 = row * words;
+            let mut at: i64 = (lane as i64) * 4;
+            while at < words {
+              let w0: i32 = packed[row_words + at] as i32;
+              let w1: i32 = packed[row_words + at + 1] as i32;
+              let w2: i32 = packed[row_words + at + 2] as i32;
+              let w3: i32 = packed[row_words + at + 3] as i32;
+              let scale: f32 = group_scale!(scales[row * groups + at / 16] as i32, scale_kind);
+              let col: i64 = at * 8;
+              let mut part: f32 = 0.0;
+              part = int4_word_terms!(part, w0, x, col);
+              part = int4_word_terms!(part, w1, x, col + 8);
+              part = int4_word_terms!(part, w2, x, col + 16);
+              part = int4_word_terms!(part, w3, x, col + 24);
+              sum = sum + part * scale;
+              at = at + 128;
+            }
+          }
+          a[w][lane] = sum;
+        }
+        let total: f32 = lanes::sum(&a[w], 32);
+        if rb * 4 + w < rows && cols >= 0 { out[rb * 4 + w] = total; }
+      }
+    }
+  }
+  return;
+}

@@ -203,6 +203,33 @@ def test_spawn_fp8_matvec4_matches_its_order(context, rows, cols):
     np.testing.assert_array_equal(download(out).view(np.uint32), np.asarray(expected, 'f4').view(np.uint32))
 
 
+# bf16_matvec4 and int4_matvec4 (four u32 words a lane step, #30) against the NumPy model of
+# their order, bit for bit, at small and GLM-5.3 shapes.
+@pytest.mark.skipif(not (BUILD / 'spawn/bf16_matvec4.ptx').exists(), reason='bf16_matvec4 not built (gpu/spawn/build.sh)')
+@pytest.mark.parametrize('rows,cols', [(5, 136), (7, 520), (2048, 6144), (6144, 16384)])
+def test_spawn_bf16_matvec4_matches_its_order(context, rows, cols):
+    from gpu.test_spawn_vx_host import bf16_matvec4_case
+    words, x, expected = bf16_matvec4_case(rows, cols, rows + cols + 4)
+    out = context.tensor((rows,))
+    SpawnKernel(context, BUILD / 'spawn/bf16_matvec4.ptx').launch(
+        rows=rows, cols=cols, weight=upload(context, words), x=upload(context, x), out=out)
+    context.synchronize()
+    np.testing.assert_array_equal(download(out).view(np.uint32), np.asarray(expected, 'f4').view(np.uint32))
+
+
+@pytest.mark.skipif(not (BUILD / 'spawn/int4_matvec4.ptx').exists(), reason='int4_matvec4 not built (gpu/spawn/build.sh)')
+@pytest.mark.parametrize('rows,cols,scale_kind', [(5, 128, 0), (9, 1152, 1), (2048, 6144, 1), (6144, 16384, 0)])
+def test_spawn_int4_matvec4_matches_its_order(context, rows, cols, scale_kind):
+    from gpu.test_spawn_vx_host import int4_matvec4_case
+    packed, scales, x, expected = int4_matvec4_case(rows, cols, scale_kind, rows * 5 + cols)
+    out = context.tensor((rows,))
+    SpawnKernel(context, BUILD / 'spawn/int4_matvec4.ptx').launch(
+        rows=rows, cols=cols, scale_kind=scale_kind, packed=upload(context, packed.view(np.uint32).reshape(-1)),
+        scales=upload(context, scales.reshape(-1)), x=upload(context, x), out=out)
+    context.synchronize()
+    np.testing.assert_array_equal(download(out).view(np.uint32), np.asarray(expected, 'f4').view(np.uint32))
+
+
 # topk_sort (#32): one shared-memory bitonic sort for up to 2048 tokens, against the host's rule.
 @pytest.mark.skipif(not (BUILD / 'spawn/topk_sort.ptx').exists(), reason='topk_sort not built (gpu/spawn/build.sh)')
 @pytest.mark.parametrize('tokens,k,ties', [(1, 1, False), (64, 2048, False), (300, 64, True), (2048, 2048, True),

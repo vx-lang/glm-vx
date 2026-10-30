@@ -70,6 +70,11 @@ not a multiple of 4 keep the default kernels.
 ``matvec_kernels='spawn'`` runs INT4 and BF16 Linears through gpu/spawn's int4_matvec and
 bf16_matvec instead of the hand kernels. gpu/test_spawn_hardware.py checks each against its hand
 kernel bit for bit, so the logits do not change; the spawn kernels share device.vx's decode macros.
+``matvec_kernels='x4'`` runs them through int4_matvec4 and bf16_matvec4 instead (#30): each lane reads
+four consecutive u32 words a step (32 INT4 codes or 8 bfloat16 weights), the shape Vx #2362 makes one
+16-byte load. Their summation order differs from the hand kernels', so the logits are close to the
+default path's, not equal; gpu/test_spawn_vx_host.py pins each order. INT4 widths that are not a
+multiple of 128 and BF16 widths that are not a multiple of 8 keep the hand kernels.
 
 Not a performance claim: no timing is made here.
 ``device_experts`` needs the gpu/spawn kernels built (gpu/spawn/build.sh into ptx_dir/spawn) with a
@@ -134,8 +139,8 @@ class ResidentGLM:
         if fp8_kernels not in ('hand', 'x4'):
             raise ValueError("fp8_kernels must be 'hand' or 'x4'")
         self.fp8_kernels = fp8_kernels
-        if matvec_kernels not in ('hand', 'spawn'):
-            raise ValueError("matvec_kernels must be 'hand' or 'spawn'")
+        if matvec_kernels not in ('hand', 'spawn', 'x4'):
+            raise ValueError("matvec_kernels must be 'hand', 'spawn' or 'x4'")
         self.matvec_kernels = matvec_kernels
         if topk not in ('auto', 'sort', 'radix'):
             raise ValueError("topk must be 'auto', 'sort' or 'radix'")
@@ -436,6 +441,11 @@ class ResidentGLM:
             return self._matvec(self._weight(prefix + '.weight'), x, out)
         if fmt == 'int4':
             packed, scales, kind, (rows, cols) = self._int4_weight(prefix)
+            if self.matvec_kernels == 'x4' and cols % 128 == 0:
+                self._check_shape(prefix, fmt, rows, cols, x, out)
+                self._spawn('int4_matvec4', out=out, packed=packed.view((rows * cols // 8,), 'uint32'),
+                            scales=_flat(scales), x=x, rows=rows, cols=cols, scale_kind=kind)
+                return out
             if self.matvec_kernels == 'spawn':
                 self._check_shape(prefix, fmt, rows, cols, x, out)
                 self._spawn('int4_matvec', out=out, packed=_flat(packed), scales=_flat(scales), x=x, rows=rows,
@@ -453,6 +463,11 @@ class ResidentGLM:
             args = [codes, scales, x, I(rows), I(cols)]
         else:
             bits, (rows, cols) = self._bf16_weight(prefix)
+            if self.matvec_kernels == 'x4' and cols % 8 == 0:
+                self._check_shape(prefix, fmt, rows, cols, x, out)
+                self._spawn('bf16_matvec4', out=out, weight=bits.view((rows * cols // 2,), 'uint32'), x=x, rows=rows,
+                            cols=cols)
+                return out
             if self.matvec_kernels == 'spawn':
                 self._check_shape(prefix, fmt, rows, cols, x, out)
                 self._spawn('bf16_matvec', out=out, weight=_flat(bits), x=x, rows=rows, cols=cols)

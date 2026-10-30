@@ -218,6 +218,75 @@ def test_int4_matvec(run, rows, cols, scale_kind):
     bits_equal(got, warp_tree(int4_lane_sums(packed, scales, np.broadcast_to(x, (rows, cols)), cols, scale_kind)))
 
 
+def lane_run_order(terms, run):
+    """Reorder columns so that strided_sums(.., 32) adds lane l's run of `run` consecutive columns
+    of each 32 * run-column tile, tile by tile (zeros pad the last tile)."""
+    rows, cols = terms.shape
+    tiles = -(-cols // (32 * run))
+    padded = np.zeros((rows, tiles * 32 * run), F)
+    padded[:, :cols] = terms
+    return padded.reshape(rows, tiles, 32, run).transpose(0, 1, 3, 2).reshape(rows, -1)
+
+
+def bf16_matvec4_case(rows, cols, seed):
+    """(weight words, x, expected) for bf16_matvec4: its order, bit for bit."""
+    rng = np.random.default_rng(seed)
+    w = (rng.normal(size=(rows, cols)).astype(F).view(np.uint32) >> 16).astype(np.uint16)
+    x = rng.normal(size=cols).astype(F)
+    return w.view(np.uint32).reshape(-1), x, warp_tree(strided_sums(lane_run_order(bf16(w) * x, 8), 32))
+
+
+# Eight weights a lane step (a u32 view of the bfloat16 bits, #30): (5, 136) has a partial tile,
+# 6144 and 16384 are GLM-5.3's widths, 520 a tile and a few lanes more.
+@pytest.mark.parametrize('rows,cols', [(5, 136), (96, 6144), (3, 16384), (7, 520)])
+def test_bf16_matvec4(run, rows, cols):
+    words, x, expected = bf16_matvec4_case(rows, cols, rows + cols + 4)
+    bits_equal(run('bf16_matvec4', out=np.zeros(rows, F), weight=words, x=x, rows=rows, cols=cols)['out'], expected)
+
+
+def int4_matvec4_lane_sums(packed, scales, x, kind):
+    """int4_matvec4's lane partials: lane l of tile t takes columns t * 1024 + 32l .. + 31 (one
+    group) into `part` in order, then sum += part * scale."""
+    rows, cols = packed.shape[0], packed.shape[1] * 2
+    codes = np.empty((rows, cols), F)
+    codes[:, 0::2], codes[:, 1::2] = nibbles(packed, 0), nibbles(packed, 1)
+    lane = np.arange(32)
+    total = np.zeros((rows, 32), F)
+    for t in range(-(-cols // 1024)):
+        start = t * 1024 + 32 * lane
+        valid = start < cols
+        part = np.zeros((rows, 32), F)
+        for j in range(32):
+            col = np.minimum(start + j, cols - 1)
+            part = part + codes[:, col] * x[col]
+        scale = scales16(scales[:, np.minimum(start // 128, scales.shape[1] - 1)], kind)
+        total = np.where(valid, total + part * scale, total).astype(F)
+    return total
+
+
+def int4_matvec4_case(rows, cols, kind, seed):
+    """(packed bytes [rows, cols / 2], scale bits [rows, groups], x, expected) for int4_matvec4."""
+    rng = np.random.default_rng(seed)
+    packed = rng.integers(0, 256, size=(rows, cols // 2), dtype=np.uint8)
+    magnitudes = rng.uniform(0.001, 0.1, size=(rows, cols // 128)).astype(F)
+    scales = (magnitudes.view(np.uint32) >> 16).astype(np.uint16) if kind else magnitudes.astype(np.float16).view(np.uint16)
+    x = rng.normal(size=cols).astype(F)
+    return packed, scales, x, warp_tree(int4_matvec4_lane_sums(packed, scales, x, kind))
+
+
+# 32 codes a lane step (a u32 view of the packed bytes, #30): 128 and 512 are partial tiles, 1152
+# a tile and a group, 6144 and 16384 GLM-5.3's widths; both scale kinds.
+@pytest.mark.parametrize('rows,cols,scale_kind', [(5, 128, 0), (3, 512, 1), (9, 1152, 1), (64, 6144, 1), (4, 16384, 0)])
+def test_int4_matvec4(run, rows, cols, scale_kind):
+    packed, scales, x, expected = int4_matvec4_case(rows, cols, scale_kind, rows * 5 + cols)
+    got = run('int4_matvec4', out=np.zeros(rows, F), packed=packed.view(np.uint32).reshape(-1), scales=scales.reshape(-1),
+              x=x, rows=rows, cols=cols, scale_kind=scale_kind)['out']
+    bits_equal(got, expected)
+    per_col = scales16(scales, scale_kind).repeat(64, axis=1).astype('f8')
+    reference = (nibbles(packed, 0) * per_col) @ x[0::2].astype('f8') + (nibbles(packed, 1) * per_col) @ x[1::2].astype('f8')
+    np.testing.assert_allclose(got, reference, rtol=1e-3, atol=1e-3)
+
+
 @pytest.mark.parametrize('rows,cols', [(5, 131), (300, 1000)])
 def test_fp8_matvec(run, rows, cols):
     rng = np.random.default_rng(rows * 11 + cols)

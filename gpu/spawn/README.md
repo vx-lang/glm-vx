@@ -16,7 +16,7 @@ also cover every pass. A kernel whose rows have a run-time length writes a rank-
 times numbers; `launch.py` passes a rank-2 `DeviceTensor` as its 7-word descriptor. A row's
 index may then be anything, as in topk's `hist[t][digit]`.
 
-All 46 kernels build with Vx main from c1dc2752 on. That commit (#2363, Vx #2361) lets an
+All 48 kernels build with Vx main from c1dc2752 on. That commit (#2363, Vx #2361) lets an
 `across` loop call `f32::from_bits` many times and in any position, which device.vx's bit-cast
 `bf16_decode!` needs. Everything else they need came by 371c2bae: the `lanes::` reductions
 (#2117, #2124, #2128) and #2134 (several libraries in one process each run their own kernel).
@@ -75,8 +75,10 @@ Two launches use the same PTX:
 | `matvec_heads.vx` | `glm_vx_gpu_matvec_heads` (out is [heads, out_stride]) | 32 |
 | `index_scores.vx` | `glm_vx_gpu_index_scores` | 29 |
 | `bf16_matvec.vx` | `glm_vx_gpu_bf16_matvec` | 31 |
+| `bf16_matvec4.vx` | new: `bf16_matvec` reading four u32 words a lane step, eight weights (#30) | 39 (sm_80), 31 (sm_90) |
 | `bf16_matmul.vx` | `glm_vx_gpu_bf16_matmul` (out is [M, N]) | 37 |
 | `int4_matvec.vx` | `glm_vx_gpu_int4_matvec` | 33 |
+| `int4_matvec4.vx` | new: `int4_matvec` reading four u32 words a lane step, 32 codes in one group (#30) | 48 (sm_80), 40 (sm_90) |
 | `int4_matmul.vx` | `glm_vx_gpu_int4_matmul` (out is [M, N]) | 40 |
 | `fp8_matvec.vx` | `glm_vx_gpu_fp8_matvec` | 45 |
 | `fp8_matvec4.vx` | new: `fp8_matvec` reading four codes a load (weight viewed as u32), decoded through a shared-memory table (#30) | 56 (sm_80), 48 (sm_90) |
