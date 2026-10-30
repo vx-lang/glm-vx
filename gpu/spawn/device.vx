@@ -17,27 +17,18 @@ macro_rules! bf16_decode {
     };
 }
 
-// IEEE binary16 bits to f32, exact for every encoding: gpu/int4.vx's glm_vx_i4_half.
+// IEEE binary16 bits to f32, exact for every encoding: gpu/int4.vx's glm_vx_i4_half. Exponent and
+// mantissa moved to binary32's place give the value times 2^-112 (a subnormal one stays exact: the
+// multiply does not flush); exponent 31 is infinity or NaN, rebuilt with binary32's.
 macro_rules! half_decode {
     ($bits:expr) => {
         unsafe {
           let dv_bits: i32 = $bits;
-          let dv_exponent: i32 = (dv_bits >> 10) & 31;
-          let dv_mantissa: i32 = dv_bits & 1023;
-          let mut dv_magnitude: f32 = (dv_mantissa as f32) / 16777216.0;
-          if dv_exponent > 0 {
-            let mut dv_power: f32 = 1.0;
-            if dv_exponent >= 15 { dv_power = ((1 << (dv_exponent - 15)) as f32); }
-            if dv_exponent < 15 { dv_power = 1.0 / ((1 << (15 - dv_exponent)) as f32); }
-            dv_magnitude = ((1024 + dv_mantissa) as f32) * dv_power / 1024.0;
-          }
-          if dv_exponent == 31 {
-            if dv_mantissa == 0 { dv_magnitude = 1.0 / 0.0; }
-            if dv_mantissa != 0 { dv_magnitude = 0.0 / 0.0; }
-          }
-          let mut dv_sign: f32 = 1.0;
-          if (dv_bits & 32768) != 0 { dv_sign = -1.0; }
-          dv_magnitude * dv_sign
+          let dv_sign: u32 = ((dv_bits & 32768) as u32) << 16u32;
+          let dv_body: u32 = ((dv_bits & 32767) as u32) << 13u32;
+          let mut dv_value: f32 = f32::from_bits(dv_sign | dv_body) * f32::from_bits(2004877312u32);
+          if (dv_bits & 31744) == 31744 { dv_value = f32::from_bits(dv_sign | 2139095040u32 | dv_body); }
+          dv_value
         }
     };
 }
@@ -68,22 +59,16 @@ macro_rules! int4_code {
 }
 
 // e4m3fn byte to f32, exact: gpu/fp8.vx's glm_vx_fp8_decode (= fp8_batched.vx's
-// glm_vx_fp8m_decode). No infinity; S.1111.111 is NaN.
+// glm_vx_fp8m_decode). No infinity; S.1111.111 is NaN. Exponent and mantissa moved to binary32's
+// place give the value times 2^-120 (subnormal codes too: the multiply does not flush).
 macro_rules! fp8_decode {
     ($bits:expr) => {
         unsafe {
           let dv_bits: i32 = $bits;
-          let dv_exponent: i32 = (dv_bits >> 3) & 15;
-          let dv_mantissa: i32 = dv_bits & 7;
-          let mut dv_magnitude: f32 = (dv_mantissa as f32) / 512.0;
-          if dv_exponent > 0 {
-            let dv_power: i32 = 1 << (dv_exponent - 1);
-            dv_magnitude = ((8 + dv_mantissa) as f32) * (dv_power as f32) / 512.0;
-          }
-          if dv_exponent == 15 { if dv_mantissa == 7 { dv_magnitude = 0.0 / 0.0; } }
-          let mut dv_sign: f32 = 1.0;
-          if (dv_bits & 128) != 0 { dv_sign = -1.0; }
-          dv_magnitude * dv_sign
+          let dv_value: u32 = (((dv_bits & 128) as u32) << 24u32) | (((dv_bits & 127) as u32) << 20u32);
+          let mut dv_decoded: f32 = f32::from_bits(dv_value) * f32::from_bits(2071986176u32);
+          if (dv_bits & 127) == 127 { dv_decoded = 0.0 / 0.0; }
+          dv_decoded
         }
     };
 }

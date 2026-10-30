@@ -264,6 +264,25 @@ def int4_matvec4_lane_sums(packed, scales, x, kind):
     return total
 
 
+def test_half_decode_is_exact_for_every_encoding(run):
+    # int4_matvec4 with scale_kind 0: row r has code 1 in column 0, x = 1 and scale bits r, so its
+    # sum is +0 + 1 * half(r), device.vx's half_decode! of every binary16 encoding. Lanes 1 to 3
+    # share the group and add 0 * half(r), NaN for the two infinities, as NaN encodings give NaN.
+    rows, cols = 65536, 128
+    packed = np.zeros((rows, cols // 2), np.uint8)
+    packed[:, 0] = 1
+    scales = np.arange(rows, dtype=np.uint16).reshape(rows, 1)
+    x = np.zeros(cols, F)
+    x[0] = 1
+    got = run('int4_matvec4', out=np.zeros(rows, F), packed=packed.view(np.uint32).reshape(-1), scales=scales.reshape(-1),
+              x=x, rows=rows, cols=cols, scale_kind=0)['out']
+    with np.errstate(invalid='ignore'):
+        expected = scales.reshape(-1).view(np.float16).astype(F) + F(0)
+    finite = np.isfinite(expected)
+    bits_equal(got[finite], expected[finite])
+    assert np.isnan(got[~finite]).all()
+
+
 def int4_matvec4_case(rows, cols, kind, seed):
     """(packed bytes [rows, cols / 2], scale bits [rows, groups], x, expected) for int4_matvec4."""
     rng = np.random.default_rng(seed)
