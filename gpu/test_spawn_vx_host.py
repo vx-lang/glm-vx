@@ -422,7 +422,7 @@ def fused_moe(run, fmt, gate, up, down, x, ids, weights, experts, inter, hidden)
 
 
 @pytest.mark.parametrize('fmt', ['f32', 'bf16', 'fp8', 'int4'])
-@pytest.mark.parametrize('experts,k,inter,hidden', [(1, 1, 3, 5), (12, 8, 9, 131), (256, 8, 130, 300)])
+@pytest.mark.parametrize('experts,k,inter,hidden', [(1, 1, 3, 5), (12, 8, 9, 131), (256, 8, 130, 300), (40, 13, 9, 131), (64, 32, 5, 70)])
 def test_fused_moe_equals_the_per_expert_kernels(run, fmt, experts, k, inter, hidden):
     rng = np.random.default_rng(experts * 7 + inter)
     gate, up = moe_weights(rng, fmt, experts, inter, hidden), moe_weights(rng, fmt, experts, inter, hidden)
@@ -436,7 +436,7 @@ def test_fused_moe_equals_the_per_expert_kernels(run, fmt, experts, k, inter, hi
 # fp8_moe4_gate_up and fp8_moe4_down (#31): the u32 view of the codes, each term fp8_matvec4's.
 # They must leave what fp8_matvec4 on each expert's slice, swiglu, fp8_matvec4 of the down rows and
 # scaled_add in ascending id order leave, bit for bit. Widths are multiples of 4.
-@pytest.mark.parametrize('experts,k,inter,hidden', [(1, 1, 4, 8), (12, 8, 12, 132), (256, 8, 132, 300)])
+@pytest.mark.parametrize('experts,k,inter,hidden', [(1, 1, 4, 8), (12, 8, 12, 132), (256, 8, 132, 300), (40, 13, 8, 132), (64, 32, 4, 68)])
 def test_fp8_moe4_equals_fp8_matvec4_per_expert(run, experts, k, inter, hidden):
     rng = np.random.default_rng(experts * 5 + inter)
     (gate, _), (up, _), (down, _) = (moe_weights(rng, 'fp8', experts, r, c) for r, c in

@@ -5,40 +5,53 @@
 // starting from zeros, to the last bit (two roundings a term: x * w, then the add).
 //
 // down holds each expert's [rows, cols] matrix back to back; weights[j] is router slot j's
-// weight. An id outside 0..experts adds a zero term. Needs k <= 32. Every lane of a subgroup keeps
-// the same running sum (a subgroup's lane loop has 32 passes, E6032), and lane 0's is written.
+// weight. An id outside 0..experts adds a zero term. Needs k <= 32. A block is one output row and
+// its 8 subgroups share the k experts (#31): subgroup w takes ranks w, w + 8, ..., and keeps each
+// weighted term in part (every lane its own copy: a subgroup's lane loop has 32 passes, E6032).
+// Then one lane adds the terms in rank order, so each term and each add is as before.
 // spawn-include: device.vx
 
 pub fn glm_vx_spawn_bf16_moe_down(out: &mut Tensor<f32, [?], Memory::HBM>, down: &Tensor<u16, [?], Memory::HBM>,
                              act: &Tensor<f32, [?], Memory::HBM>, weights: &Tensor<f32, [?], Memory::HBM>,
                              ids: &Tensor<i32, [?], Memory::HBM>, k: i32, experts: i32, rows: i32, cols: i32) -> void {
   spawn on(Topology::Device) {
-    for rb in 0..(rows - 1) / 4 + 1 across blocks {
-      let mut ranks = unsafe { Tensor<i32, [4, 32], Memory::SMEM>::uninit() };
-      let mut a = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
-      let mut acc = Tensor<f32, [4, 32], Memory::SMEM>::fill(0.0);
-      for w in 0..4 across subgroups {
+    for r in 0..rows across blocks {
+      let mut ranks = unsafe { Tensor<i32, [8, 32], Memory::SMEM>::uninit() };
+      let mut a = unsafe { Tensor<f32, [8, 32], Memory::SMEM>::uninit() };
+      let mut part = unsafe { Tensor<f32, [8, 4, 32], Memory::SMEM>::uninit() };
+      for w in 0..8 across subgroups {
         for lane in 0..32 across lanes {
           ranks[w][lane] = id_rank!(ids, k, lane);
         }
-        for s in 0..k {
+        for i in 0..(k + 7) / 8 {
+          let s: i32 = i * 8 + w;
           for lane in 0..32 across lanes {
-            let j: i32 = slot_of_rank!(ranks, w, k, s);
-            let expert: i32 = ids[j];
-            let row: i64 = (rb * 4 + w) as i64;
             let mut sum: f32 = 0.0;
-            if row < (rows as i64) && expert >= 0 && expert < experts {
-              sum = bf16_row_dot!(down, act, (s as i64) * (cols as i64), expert, row, rows, cols as i64, lane);
+            if s < k {
+              let expert: i32 = ids[slot_of_rank!(ranks, w, k, s)];
+              let row: i64 = r as i64;
+              if expert >= 0 && expert < experts {
+                sum = bf16_row_dot!(down, act, (s as i64) * (cols as i64), expert, row, rows, cols as i64, lane);
+              }
             }
             a[w][lane] = sum;
           }
           let total: f32 = lanes::sum(&a[w], 32);
           for lane in 0..32 across lanes {
-            let weighted: f32 = total * weights[slot_of_rank!(ranks, w, k, s)];
-            acc[w][lane] = acc[w][lane] + weighted;
+            let mut weighted: f32 = 0.0;
+            if s < k { weighted = total * weights[slot_of_rank!(ranks, w, k, s)]; }
+            part[w][i][lane] = weighted;
           }
         }
-        if rb * 4 + w < rows && cols >= 0 { out[rb * 4 + w] = acc[w][0]; }
+      }
+      for t in 0..1 across lanes {
+        let mut acc: f32 = 0.0;
+        let mut s: i32 = 0;
+        while s < k {
+          acc = acc + part[s % 8][s / 8][t];
+          s = s + 1;
+        }
+        if cols >= 0 { out[r] = acc; }
       }
     }
   }

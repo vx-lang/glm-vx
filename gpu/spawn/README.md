@@ -113,7 +113,8 @@ the official Experts sums in. Each equals its plain kernel on that expert's weig
 The fused MoE kernels do a decode MoE layer's routed experts in two launches instead of five per
 expert. `moe_gate_up` writes every expert's SwiGLU output, in ascending id order, to one buffer;
 `moe_down` has each output row add its k weighted terms itself, in that order, so it needs no
-atomics and equals the per-expert kernels (from zeros) bit for bit, which
+atomics. A block is one output row: its 8 warps share the k experts' dot products (#31), and one lane
+then adds the weighted terms in order. The arithmetic is unchanged, so the result equals the per-expert kernels (from zeros) bit for bit, which
 `gpu/test_spawn_vx_host.py` checks for each format and for the fused gate_up layout. Each warp
 finds the ascending order once (`id_rank!`, `slot_of_rank!`); the dot products are `device.vx`'s
 `*_row_dot!` macros, the per-expert kernels' loops. `ResidentGLM(..., device_experts=True)`
