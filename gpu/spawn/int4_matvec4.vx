@@ -36,7 +36,8 @@ pub fn glm_vx_spawn_int4_matvec4(out: &mut Tensor<f32, [?], Memory::HBM>, packed
           if row < (rows as i64) && cols % 128 == 0 {
             let words: i64 = (cols as i64) / 8;
             let groups: i64 = (cols as i64) / 128;
-            let row_words: i64 = row * words;
+            // row * words, written with its factor 4 so that LLVM sees a 16-byte-aligned row (Vx #2362).
+            let row_words: i64 = row * ((cols as i64) / 32) * 4;
             let mut at: i64 = (lane as i64) * 4;
             while at < words {
               let w0: i32 = packed[row_words + at] as i32;
