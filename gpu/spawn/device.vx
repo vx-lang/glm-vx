@@ -5,33 +5,14 @@ import core::num;
 // helper expands in the loop. A macro expands to an expression, so a helper with statements is
 // an `unsafe { .. }` block. Names inside start with `dv_`, so they do not hide the caller's.
 
-// bfloat16 bits to f32, exact for all 65,536 encodings: gpu/bf16.vx's glm_vx_bf16_decode
-// unchanged. f32::from_bits is not one of the calls the race proof takes as pure.
+// bfloat16 bits to f32: the bits are the top half of the binary32, so one shift and a bit cast.
+// Equal to gpu/bf16.vx's glm_vx_bf16_decode for every encoding but NaN, whose payload it keeps.
+// Several f32::from_bits calls in one across loop need Vx c1dc2752 or later (#2363, Vx #2361).
 macro_rules! bf16_decode {
     ($bits:expr) => {
         unsafe {
           let dv_bits: i32 = $bits;
-          let dv_exponent: i32 = (dv_bits >> 7) & 255;
-          let dv_mantissa: i32 = dv_bits & 127;
-          let mut dv_magnitude: f32 = (dv_mantissa as f32) / 128.0;
-          let mut dv_shift: i32 = -126;
-          if dv_exponent > 0 {
-            dv_magnitude = ((128 + dv_mantissa) as f32) / 128.0;
-            dv_shift = dv_exponent - 127;
-          }
-          let mut dv_power: f32 = 1.0;
-          while dv_shift > 30 { dv_power = dv_power * 1073741824.0; dv_shift = dv_shift - 30; }
-          while dv_shift < -30 { dv_power = dv_power / 1073741824.0; dv_shift = dv_shift + 30; }
-          if dv_shift >= 0 { dv_power = dv_power * ((1 << dv_shift) as f32); }
-          if dv_shift < 0 { dv_power = dv_power / ((1 << (0 - dv_shift)) as f32); }
-          dv_magnitude = dv_magnitude * dv_power;
-          if dv_exponent == 255 {
-            if dv_mantissa == 0 { dv_magnitude = 1.0 / 0.0; }
-            if dv_mantissa != 0 { dv_magnitude = 0.0 / 0.0; }
-          }
-          let mut dv_sign: f32 = 1.0;
-          if (dv_bits & 32768) != 0 { dv_sign = -1.0; }
-          dv_magnitude * dv_sign
+          f32::from_bits(((dv_bits & 65535) as u32) << 16u32)
         }
     };
 }
