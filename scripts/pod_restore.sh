@@ -9,7 +9,8 @@
 # The bundle holds: bin/vxc (built from Vx at the commit in the file name), stdlib/,
 # lib/, and llvm-22/ (the apt.llvm.org tools without static libraries). It must have been
 # built on a glibc no newer than this box's; build it on the oldest box you rent (Ubuntu
-# 24.04, glibc 2.39). Only distro runtime libraries are installed here, no compilers or Rust.
+# 24.04, glibc 2.39); scripts/pod_build_bundle.sh does that on a pod. Only distro runtime libraries
+# are installed here, no compilers or Rust.
 set -euo pipefail
 bundle=${1:?usage: pod_restore.sh BUNDLE.tar.zst [PREFIX]}
 prefix=${2:-/opt/vx-toolchain}
