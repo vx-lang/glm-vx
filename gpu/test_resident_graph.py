@@ -78,6 +78,19 @@ def test_topk_stable_at_reads_tokens(simt):
 
 
 @needs_spawn
+def test_mla_heads_equals_mla_chunks_under_replay():
+    # mla_kernel='heads' (#33): four heads a block, each head's arithmetic mla_chunks_at's, so equal.
+    model = build(seed=41, num_attention_heads=4, num_key_value_heads=4)
+    got, heads = run(model, TOKENS, graph=True, fused_attention=True, mla_kernel='heads')
+    want, _ = run(model, TOKENS, graph=True, fused_attention=True, mla_kernel='chunks')
+    np.testing.assert_array_equal(got, want)
+    assert heads.launches.get('mla_heads_at', 0) > 0 and 'mla_chunks_at' not in heads.launches
+    with pytest.raises(ValueError, match='multiple of 4'):
+        ResidentGLM(expert_models('float32'), ctx=Context(), graph=True, device_experts=True, fused_attention=True,
+                    mla_kernel='heads')
+
+
+@needs_spawn
 def test_mla_chunks_matches_mla_decode_under_replay():
     # mla_kernel='chunks' (#33): another order of the attention sums, so close, with the same argmax.
     model = expert_models('float32')

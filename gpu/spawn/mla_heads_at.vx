@@ -1,0 +1,213 @@
+// mla_chunks_at.vx with four heads a block (#33): every head attends to the same selected tokens
+// (selection_stride 0, the indexer's one selection a layer), so block (group, split) reads each of
+// its tokens' latent and rope rows once for heads 4 * group .. + 3 instead of once a head. Each head's
+// arithmetic is mla_chunks_at's in the same order (its lane-strided dot, lanes::sum, the chunk's
+// softmax step, the 32 weighted rows added in token order, then the merge), so out, numerator and
+// stats equal mla_chunks_at's bit for bit.
+//
+// out, numerator and stats are mla_chunks_at's buffers viewed per group of four heads: out
+// [heads / 4, 4 * rank], numerator [heads / 4, splits_max, 4 * rank] and stats [heads / 4,
+// splits_max, 8] (m, l of each head), so the race proof sees each block write its own elements.
+// tokens, count and splits come from the step buffer. Needs heads % 4 == 0, rank <= 1024,
+// rope_dim <= 1024 and selection_stride 0; otherwise it writes nothing. threads is unused, as in
+// mla_chunks_at, so the kernels take the same arguments.
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_mla_heads_at(out: &mut Tensor<f32, [?, ?], Memory::HBM>, numerator: &mut Tensor<f32, [?, ?, ?], Memory::HBM>,
+                                 stats: &mut Tensor<f32, [?, ?, ?], Memory::HBM>,
+                                 q_latent: &Tensor<f32, [?], Memory::HBM>, q_rope: &Tensor<f32, [?], Memory::HBM>,
+                                 cache_latent: &Tensor<f32, [?], Memory::HBM>, cache_rope: &Tensor<f32, [?], Memory::HBM>,
+                                 selected: &Tensor<i32, [?], Memory::HBM>, step: &Tensor<i32, [?], Memory::HBM>,
+                                 heads: i32, rank: i32, rope_dim: i32, selection_stride: i32, splits_max: i32, scale: f32,
+                                 threads: i32) -> void {
+  spawn on(Topology::Device) {
+    for hg in 0..(heads + 3) / 4 across blocks {
+      for split in 0..splits_max across blocks {
+        let tokens: i32 = step[1];
+        let count: i32 = step[2];
+        let splits: i32 = step[3];
+        if split < splits && heads > 0 && heads % 4 == 0 && rank > 0 && rank <= 1024 && rope_dim >= 0 && rope_dim <= 1024
+           && tokens >= 0 && count >= 0 && selection_stride == 0 && splits > 0 && threads >= 0 {
+          let mut a = unsafe { Tensor<f32, [32, 4, 32], Memory::SMEM>::uninit() };
+          let mut score = unsafe { Tensor<f32, [32, 4, 32], Memory::SMEM>::uninit() };
+          let mut token_of = unsafe { Tensor<i32, [32, 32], Memory::SMEM>::uninit() };
+          let mut p = unsafe { Tensor<f32, [128], Memory::SMEM>::uninit() };
+          let mut fold = unsafe { Tensor<f32, [4, 3], Memory::SMEM>::uninit() };
+          let mut acc = unsafe { Tensor<f32, [4, 1024], Memory::SMEM>::uninit() };
+          let mut state = unsafe { Tensor<f32, [4, 2], Memory::SMEM>::uninit() };
+          for t in 0..1024 across lanes {
+            acc[0][t] = 0.0;
+            acc[1][t] = 0.0;
+            acc[2][t] = 0.0;
+            acc[3][t] = 0.0;
+          }
+          for g in 0..4 across lanes { state[g][0] = 0.0; state[g][1] = 0.0; }
+          let h0: i32 = hg * 4;
+          // This split's tokens are j = split + q * splits for q below n, 32 a chunk.
+          let n: i32 = (count - split + splits - 1) / splits;
+          for chunk in 0..(n + 31) / 32 {
+            for w in 0..32 across subgroups {
+              for lane in 0..32 across lanes {
+                let q: i32 = chunk * 32 + w;
+                let mut d0: f32 = 0.0;
+                let mut d1: f32 = 0.0;
+                let mut d2: f32 = 0.0;
+                let mut d3: f32 = 0.0;
+                if q < n {
+                  let token: i32 = selected[split + q * splits];
+                  if token >= 0 && token < tokens {
+                    let mut t: i32 = lane;
+                    while t < rank {
+                      let v: f32 = cache_latent[token * rank + t];
+                      d0 = d0 + q_latent[h0 * rank + t] * v;
+                      d1 = d1 + q_latent[(h0 + 1) * rank + t] * v;
+                      d2 = d2 + q_latent[(h0 + 2) * rank + t] * v;
+                      d3 = d3 + q_latent[(h0 + 3) * rank + t] * v;
+                      t = t + 32;
+                    }
+                    let mut d: i32 = lane;
+                    while d < rope_dim {
+                      let r: f32 = cache_rope[token * rope_dim + d];
+                      d0 = d0 + q_rope[h0 * rope_dim + d] * r;
+                      d1 = d1 + q_rope[(h0 + 1) * rope_dim + d] * r;
+                      d2 = d2 + q_rope[(h0 + 2) * rope_dim + d] * r;
+                      d3 = d3 + q_rope[(h0 + 3) * rope_dim + d] * r;
+                      d = d + 32;
+                    }
+                  }
+                }
+                a[w][0][lane] = d0;
+                a[w][1][lane] = d1;
+                a[w][2][lane] = d2;
+                a[w][3][lane] = d3;
+              }
+              let t0: f32 = lanes::sum(&a[w][0], 32);
+              let t1: f32 = lanes::sum(&a[w][1], 32);
+              let t2: f32 = lanes::sum(&a[w][2], 32);
+              let t3: f32 = lanes::sum(&a[w][3], 32);
+              // Each lane keeps a copy (a lane loop in a subgroup has 32 passes); readers take lane 0's.
+              for lane in 0..32 across lanes {
+                let q: i32 = chunk * 32 + w;
+                let mut token: i32 = -1;
+                if q < n {
+                  let candidate: i32 = selected[split + q * splits];
+                  if candidate >= 0 && candidate < tokens { token = candidate; }
+                }
+                token_of[w][lane] = token;
+                score[w][0][lane] = t0 * scale;
+                score[w][1][lane] = t1 * scale;
+                score[w][2][lane] = t2 * scale;
+                score[w][3][lane] = t3 * scale;
+              }
+            }
+            // Each head's step: fold[g] = (next_m, alpha, 1 when the chunk has a valid token).
+            for g in 0..4 across lanes {
+              let m: f32 = state[g][0];
+              let l: f32 = state[g][1];
+              let mut chunk_max: f32 = 0.0;
+              let mut any: i32 = 0;
+              let mut w: i32 = 0;
+              while w < 32 {
+                if token_of[w][0] >= 0 {
+                  if any == 0 || score[w][g][0] > chunk_max { chunk_max = score[w][g][0]; }
+                  any = 1;
+                }
+                w = w + 1;
+              }
+              let mut next_m: f32 = chunk_max;
+              let mut alpha: f32 = 0.0;
+              if l > 0.0 {
+                if m > chunk_max { next_m = m; }
+                alpha = (m - next_m).fast_exp();
+              }
+              fold[g][0] = next_m;
+              fold[g][1] = alpha;
+              fold[g][2] = any as f32;
+            }
+            // p[g * 32 + w] = exp(score_w - next_m) for a valid token w of head g, else 0.
+            for i in 0..128 across lanes {
+              let g: i32 = i / 32;
+              let w: i32 = i % 32;
+              let mut weight: f32 = 0.0;
+              if token_of[w][0] >= 0 { weight = (score[w][g][0] - fold[g][0]).fast_exp(); }
+              p[i] = weight;
+            }
+            for t in 0..1024 across lanes {
+              if t < rank {
+                let mut s0: f32 = acc[0][t] * fold[0][1];
+                let mut s1: f32 = acc[1][t] * fold[1][1];
+                let mut s2: f32 = acc[2][t] * fold[2][1];
+                let mut s3: f32 = acc[3][t] * fold[3][1];
+                let mut w: i32 = 0;
+                while w < 32 {
+                  let token: i32 = token_of[w][0];
+                  if token >= 0 {
+                    let v: f32 = cache_latent[token * rank + t];
+                    s0 = s0 + p[w] * v;
+                    s1 = s1 + p[32 + w] * v;
+                    s2 = s2 + p[64 + w] * v;
+                    s3 = s3 + p[96 + w] * v;
+                  }
+                  w = w + 1;
+                }
+                // A head whose chunk has no valid token keeps its accumulator (mla_chunks_at skips it).
+                if fold[0][2] != 0.0 { acc[0][t] = s0; }
+                if fold[1][2] != 0.0 { acc[1][t] = s1; }
+                if fold[2][2] != 0.0 { acc[2][t] = s2; }
+                if fold[3][2] != 0.0 { acc[3][t] = s3; }
+              }
+            }
+            for g in 0..4 across lanes {
+              if fold[g][2] != 0.0 {
+                let mut sum: f32 = state[g][1] * fold[g][1];
+                let mut w: i32 = 0;
+                while w < 32 {
+                  if token_of[w][0] >= 0 { sum = sum + p[g * 32 + w]; }
+                  w = w + 1;
+                }
+                state[g][0] = fold[g][0];
+                state[g][1] = sum;
+              }
+            }
+          }
+          for i in 0..4 * rank across lanes(256) { numerator[hg][split][i] = acc[i / rank][i % rank]; }
+          for t in 0..8 across lanes { stats[hg][split][t] = state[t / 2][t % 2]; }
+        }
+      }
+      // The group's last split to end merges each head's splits, as mla_chunks_at.
+      for i in 0..4 * rank across lanes(256) {
+        let splits: i32 = step[3];
+        let g: i32 = i / rank;
+        if splits > 0 && heads % 4 == 0 && selection_stride == 0 {
+          let mut m: f32 = 0.0;
+          let mut seen: i32 = 0;
+          let mut s: i32 = 0;
+          while s < splits {
+            if stats[hg][s][g * 2 + 1] > 0.0 {
+              let v: f32 = stats[hg][s][g * 2];
+              if seen == 0 { m = v; seen = 1; }
+              else { if v > m { m = v; } }
+            }
+            s = s + 1;
+          }
+          let mut sum: f32 = 0.0;
+          let mut denominator: f32 = 0.0;
+          let mut t: i32 = 0;
+          while t < splits {
+            let l: f32 = stats[hg][t][g * 2 + 1];
+            if l > 0.0 {
+              let factor: f32 = (stats[hg][t][g * 2] - m).fast_exp();
+              sum = sum + numerator[hg][t][i] * factor;
+              denominator = denominator + l * factor;
+            }
+            t = t + 1;
+          }
+          let mut result: f32 = 0.0;
+          if denominator > 0.0 { result = sum / denominator; }
+          out[hg][i] = result;
+        }
+      }
+    }
+  }
+  return;
+}

@@ -1,10 +1,11 @@
 """The fused MLA decode kernels at GLM-5.3's attention shape (#33).
 
-gpu/spawn's mla_decode_at (one token at a time per block) and mla_chunks_at (32 tokens a chunk),
+gpu/spawn's mla_decode_at (one token at a time per block), mla_chunks_at (32 tokens a chunk) and
+mla_heads_at (mla_chunks_at with four heads a block, each latent row read once for them),
 64 heads, rank 512, rope 64, 4096 cached tokens, for 256, 1024 and 2048 selected tokens with
 splits as ResidentGLM picks them (splits_max 16). Each launch is timed with CUDA events after a
-512 MB copy (moe_profile.l2_flush), the median of --repeats; the two outputs must agree to 1e-4
-and the arrival counts return to zero.
+512 MB copy (moe_profile.l2_flush), the median of --repeats; mla_chunks_at must agree with
+mla_decode_at to 1e-4, mla_heads_at must equal mla_chunks_at, and the arrival counts return to zero.
 
   python -m validation.mla_profile --output run/mla.json
 """
@@ -17,7 +18,7 @@ import numpy as np
 from validation.moe_profile import event_us
 
 HEADS, RANK, ROPE, TOKENS, SPLITS_MAX = 64, 512, 64, 4096, 16
-KERNELS = ('mla_decode_at', 'mla_chunks_at')
+KERNELS = ('mla_decode_at', 'mla_chunks_at', 'mla_heads_at')
 
 
 def main():
@@ -48,9 +49,12 @@ def main():
         step = up(np.array([TOKENS - 1, TOKENS, count, splits], 'i4'))
         outs = {}
         for name, kernel in kernels.items():
-            values = dict(common, out=ctx.tensor((HEADS, RANK)), numerator=ctx.tensor((HEADS, SPLITS_MAX, RANK)),
-                          stats=ctx.tensor((HEADS, SPLITS_MAX, 2)), selected=selected, step=step,
-                          arrivals=up(np.zeros(HEADS, 'i4')))
+            # mla_heads_at takes the buffers per group of four heads.
+            g = 4 if name == 'mla_heads_at' else 1
+            values = dict(common, out=ctx.tensor((HEADS // g, g * RANK)),
+                          numerator=ctx.tensor((HEADS // g, SPLITS_MAX, g * RANK)),
+                          stats=ctx.tensor((HEADS // g, SPLITS_MAX, 2 * g)), selected=selected, step=step,
+                          arrivals=up(np.zeros(HEADS // g, 'i4')))
             kernel.launch(stream=stream, **values)
             stream.synchronize()
             outs[name] = np.frombuffer(values['out'].download(), 'f4')
@@ -60,14 +64,17 @@ def main():
             results.append(dict(kernel=name, count=count, splits=splits, us=us))
         if not np.allclose(outs['mla_chunks_at'], outs['mla_decode_at'], rtol=1e-4, atol=1e-5):
             raise SystemExit(f'count {count}: mla_chunks_at disagrees with mla_decode_at')
+        if not np.array_equal(outs['mla_heads_at'].view('u4'), outs['mla_chunks_at'].view('u4')):
+            raise SystemExit(f'count {count}: mla_heads_at is not mla_chunks_at bit for bit')
     ctx.close()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(dict(heads=HEADS, rank=RANK, rope=ROPE, tokens=TOKENS, results=results), indent=2) + '\n')
     by = {(r['kernel'], r['count']): r for r in results}
     lines = [f'# Fused MLA decode, {HEADS} heads, rank {RANK}, rope {ROPE}. CUDA events, L2 flushed, median of '
-             f'{args.repeats}.', '', '| selected (splits) | mla_decode_at us | mla_chunks_at us |', '|---|---|---|']
+             f'{args.repeats}.', '', '| selected (splits) | mla_decode_at us | mla_chunks_at us | mla_heads_at us |',
+             '|---|---|---|---|']
     lines += [f"| {c} ({by[('mla_decode_at', c)]['splits']}) | {by[('mla_decode_at', c)]['us']:.1f} | "
-              f"{by[('mla_chunks_at', c)]['us']:.1f} |" for c in (256, 1024, 2048)]
+              f"{by[('mla_chunks_at', c)]['us']:.1f} | {by[('mla_heads_at', c)]['us']:.1f} |" for c in (256, 1024, 2048)]
     text = '\n'.join(lines) + '\n'
     args.output.with_suffix('.md').write_text(text)
     print(text)

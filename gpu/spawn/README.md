@@ -16,7 +16,7 @@ also cover every pass. A kernel whose rows have a run-time length writes a rank-
 times numbers; `launch.py` passes a rank-2 `DeviceTensor` as its 7-word descriptor. A row's
 index may then be anything, as in topk's `hist[t][digit]`.
 
-All 52 kernels build with Vx main from c1dc2752 on. That commit (#2363, Vx #2361) lets an
+All 53 kernels build with Vx main from c1dc2752 on. That commit (#2363, Vx #2361) lets an
 `across` loop call `f32::from_bits` many times and in any position, which device.vx's bit-cast
 `bf16_decode!` needs. Everything else they need came by 371c2bae: the `lanes::` reductions
 (#2117, #2124, #2128) and #2134 (several libraries in one process each run their own kernel).
@@ -107,6 +107,7 @@ Two launches use the same PTX:
 | `fp8_moe_gate_up.vx`, `fp8_moe_down.vx` | new: the same for FP8 experts | 69, 56 |
 | `fp8_moe4_gate_up.vx`, `fp8_moe4_down.vx` | new: the FP8 pair reading four codes a load through `fp8_row_dot4!` (#31) | 64, 61 (sm_90) |
 | `mla_chunks_at.vx` | new: `mla_decode_at` with 32 tokens a chunk, one subgroup a token (#33); equal to rounding | 32 (sm_90) |
+| `mla_heads_at.vx` | new: `mla_chunks_at` with four heads a block, each selected latent row read once for them (#33); equal to `mla_chunks_at` bit for bit; buffers per group of four heads | 32 (sm_80), 58 (sm_90) |
 | `mla_decode.vx` | new: mla_partial and mla_merge in one launch (Vx #2187 code of a group, #2188 arrival counts) | 31 |
 
 The five expert kernels let a decode step run its MoE without reading the router's ids on the

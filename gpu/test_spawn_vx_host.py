@@ -981,6 +981,46 @@ def test_mla_chunks_at_matches_mla_decode_at(run, heads, rank, rope, tokens, str
         np.testing.assert_allclose(got, mla_float64(q, qr, kv, kr, selected, stride, count, tokens, scale), rtol=1e-4, atol=1e-5)
 
 
+# mla_heads_at (#33): four heads a block, each latent row read once for them; each head's arithmetic is
+# mla_chunks_at's, so out, and the numerators and stats laid out per head, are equal bit for bit.
+@pytest.mark.parametrize('heads,rank,rope,tokens,splits_max', [(4, 48, 4, 700, 3), (8, 64, 64, 900, 16), (4, 1024, 8, 300, 2)])
+def test_mla_heads_at_equals_mla_chunks_at(run, heads, rank, rope, tokens, splits_max):
+    rng = np.random.default_rng(heads * 13 + rank)
+    q, qr = rng.normal(size=(heads, rank)).astype(F), rng.normal(size=(heads, rope)).astype(F)
+    kv, kr = rng.normal(size=(tokens, rank)).astype(F), rng.normal(size=(tokens, rope)).astype(F)
+    scale = rank ** -0.5
+    common = dict(q_latent=q, q_rope=qr, cache_latent=kv, cache_rope=kr, heads=heads, rank=rank, rope_dim=rope,
+                  selection_stride=0, scale=scale, threads=64, splits_max=splits_max)
+    groups = heads // 4
+    for count, splits in ((0, 1), (5, 1), (33, 1), (300, 2), (min(640, tokens), min(3, splits_max))):
+        selected = rng.integers(0, tokens, size=max(1, count)).astype(np.int32)
+        if count > 3:
+            selected[1], selected[-1] = -1, tokens + 5  # skipped
+        values = dict(selected=selected, step=np.array([tokens - 1, tokens, count, splits], np.int32), **common)
+        want = run('mla_chunks_at', out=np.full((heads, rank), 7, F), numerator=np.zeros((heads, splits_max, rank), F),
+                   stats=np.zeros((heads, splits_max, 2), F), arrivals=np.zeros(heads, np.int32), **values)
+        got = run('mla_heads_at', out=np.full((groups, 4 * rank), 7, F), numerator=np.zeros((groups, splits_max, 4 * rank), F),
+                  stats=np.zeros((groups, splits_max, 8), F), arrivals=np.zeros(groups, np.int32), **values)
+        bits_equal(got['out'].reshape(heads, rank), want['out'])
+        per_head = lambda a, n: a.reshape(groups, splits_max, 4, n).transpose(0, 2, 1, 3).reshape(heads, splits_max, n)[:, :splits]
+        bits_equal(per_head(got['numerator'], rank), want['numerator'][:, :splits])
+        bits_equal(per_head(got['stats'], 2), want['stats'][:, :splits])
+        np.testing.assert_allclose(got['out'].reshape(heads, rank), mla_float64(q, qr, kv, kr, selected, 0, count, tokens, scale),
+                                   rtol=1e-4, atol=1e-5)
+
+
+def test_mla_heads_at_writes_nothing_for_per_head_selections(run):
+    heads, rank, rope, tokens = 4, 32, 4, 50
+    rng = np.random.default_rng(3)
+    got = run('mla_heads_at', out=np.full((1, 4 * rank), 7, F), numerator=np.zeros((1, 2, 4 * rank), F),
+              stats=np.zeros((1, 2, 8), F), arrivals=np.zeros(1, np.int32), q_latent=rng.normal(size=heads * rank).astype(F),
+              q_rope=rng.normal(size=heads * rope).astype(F), cache_latent=rng.normal(size=tokens * rank).astype(F),
+              cache_rope=rng.normal(size=tokens * rope).astype(F), selected=np.arange(heads * 10, dtype=np.int32),
+              step=np.array([tokens - 1, tokens, 10, 1], np.int32), heads=heads, rank=rank, rope_dim=rope,
+              selection_stride=10, splits_max=2, scale=0.1, threads=64)
+    assert (got['numerator'] == 0).all() and (got['stats'] == 0).all() and (got['out'] == 7).all()
+
+
 @pytest.mark.parametrize('heads,rank,rope,tokens,stride,threads,splits_max', [
     (2, 48, 4, 700, 0, 64, 3), (4, 64, 64, 900, 0, 64, 16)])
 def test_mla_decode_at_equals_mla_decode_for_each_splits(run, heads, rank, rope, tokens, stride, threads, splits_max):

@@ -104,6 +104,15 @@ def mla_decode_at(rng, heads=4, rank=64, rope=64, tokens=300, count=37, splits=2
     return values
 
 
+def mla_heads_at(rng, heads=8, rank=64, rope=64, tokens=300, count=37, splits=2, splits_max=4):
+    """mla_decode_at's arguments with the selection shared (stride 0) and the buffers per group of four heads."""
+    values = mla_decode_at(rng, heads, rank, rope, tokens, count, splits, splits_max, stride=0)
+    groups = heads // 4
+    values.update(numerator=np.zeros((groups, splits_max, 4 * rank), 'f4'), stats=np.zeros((groups, splits_max, 8), 'f4'),
+                  out=np.full((groups, 4 * rank), 7, 'f4'), arrivals=np.zeros(groups, 'i4'))
+    return values
+
+
 def expert_weights(rng, fmt, experts, rows, cols):
     """One projection for all experts in `fmt`, named as the expert_matvec kernels name them."""
     if fmt == 'bf16':
@@ -229,6 +238,7 @@ CASES = {
     'mla_decode': mla_decode,
     'mla_decode_at': mla_decode_at,
     'mla_chunks_at': mla_decode_at,
+    'mla_heads_at': mla_heads_at,
     'expert_scaled_add': lambda r: dict(out=normal(r, 333), x=normal(r, 333), weights=normal(r, 8),
                                         ids=moe_ids(r, 256, 8), k=8, slot=3, n=333),
     **{f'{p}expert_matvec': expert_matvec(f) for p, f in (('', 'f32'), ('bf16_', 'bf16'), ('fp8_', 'fp8'), ('int4_', 'int4'))},

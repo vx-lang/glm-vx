@@ -230,6 +230,34 @@ def test_spawn_int4_matvec4_matches_its_order(context, rows, cols, scale_kind):
     np.testing.assert_array_equal(download(out).view(np.uint32), np.asarray(expected, 'f4').view(np.uint32))
 
 
+# mla_heads_at (#33): four heads a block, each head's arithmetic mla_chunks_at's, so equal bit for bit
+# on the device too (their only fused multiply-adds are inside libdevice's expf), at a full layer's shape.
+@pytest.mark.skipif(not (BUILD / 'spawn/mla_heads_at.ptx').exists(), reason='mla_heads_at not built (gpu/spawn/build.sh)')
+@pytest.mark.parametrize('count,splits', [(5, 1), (256, 1), (2048, 8), (700, 3)])
+def test_spawn_mla_heads_at_equals_mla_chunks_at(context, count, splits):
+    heads, rank, rope, tokens, splits_max = 64, 512, 64, 4096, 16
+    groups = heads // 4
+    rng = np.random.default_rng(count * 3 + splits)
+    q, qr = rng.normal(size=heads * rank).astype('f4'), rng.normal(size=heads * rope).astype('f4')
+    kv, kr = rng.normal(size=tokens * rank).astype('f4'), rng.normal(size=tokens * rope).astype('f4')
+    common = dict(heads=heads, rank=rank, rope_dim=rope, selection_stride=0, cache_latent=upload(context, kv),
+                  q_latent=upload(context, q), q_rope=upload(context, qr), cache_rope=upload(context, kr),
+                  scale=float(np.float32(rank ** -0.5)), threads=512, splits_max=splits_max,
+                  selected=upload(context, rng.permutation(tokens)[:count].astype('i4')),
+                  step=upload(context, np.array([tokens - 1, tokens, count, splits], 'i4')))
+    chunks, heads_out = context.tensor((heads, rank)), context.tensor((groups, 4 * rank))
+    arrivals = [upload(context, np.zeros(heads, 'i4')), upload(context, np.zeros(groups, 'i4'))]
+    SpawnKernel(context, BUILD / 'spawn/mla_chunks_at.ptx').launch(
+        out=chunks, numerator=context.tensor((heads, splits_max, rank)), stats=context.tensor((heads, splits_max, 2)),
+        arrivals=arrivals[0], **common)
+    SpawnKernel(context, BUILD / 'spawn/mla_heads_at.ptx').launch(
+        out=heads_out, numerator=context.tensor((groups, splits_max, 4 * rank)), stats=context.tensor((groups, splits_max, 8)),
+        arrivals=arrivals[1], **common)
+    context.synchronize()
+    assert not download(arrivals[0]).any() and not download(arrivals[1]).any()
+    np.testing.assert_array_equal(download(heads_out).reshape(heads, rank).view('u4'), download(chunks).view('u4'))
+
+
 # topk_chunks then topk_merge rounds (#32): the selection past 2048 tokens, against the host's rule.
 @pytest.mark.skipif(not (BUILD / 'spawn/topk_merge.ptx').exists(), reason='topk_merge not built (gpu/spawn/build.sh)')
 @pytest.mark.parametrize('tokens,k,ties', [(2049, 2048, True), (8192, 2048, False), (70000, 2048, True), (1 << 20, 2048, False),

@@ -59,7 +59,10 @@ step). With ``fused_attention`` the graph holds gpu/spawn's mla_decode_at (#27):
 per head, those past the step's splits idle but arriving, so the arrival counts still return to zero.
 
 ``mla_kernel='chunks'`` runs the fused attention under graph replay through gpu/spawn's
-mla_chunks_at (#33): 32 tokens a chunk, equal to mla_decode_at to rounding.
+mla_chunks_at (#33): 32 tokens a chunk, equal to mla_decode_at to rounding. ``mla_kernel='heads'``
+runs mla_heads_at instead: four heads a block, so each selected latent row is read once for four
+heads; each head's arithmetic is mla_chunks_at's, so the logits equal 'chunks' bit for bit. It needs
+a head count that is a multiple of 4.
 
 ``fp8_kernels='x4'`` runs FP8 Linears through gpu/spawn's fp8_matvec4 and, with ``device_experts``,
 the routed experts through fp8_moe4_gate_up/down (#30, #31): four codes a load, decoded through a
@@ -146,11 +149,11 @@ class ResidentGLM:
         if topk not in ('auto', 'sort', 'radix'):
             raise ValueError("topk must be 'auto', 'sort' or 'radix'")
         self._topk_choice = topk
-        if mla_kernel not in ('decode', 'chunks'):
-            raise ValueError("mla_kernel must be 'decode' or 'chunks'")
+        if mla_kernel not in ('decode', 'chunks', 'heads'):
+            raise ValueError("mla_kernel must be 'decode', 'chunks' or 'heads'")
         self.mla_kernel = mla_kernel
-        if mla_kernel == 'chunks' and not (self.graph and self.fused_attention):
-            raise ValueError("mla_kernel='chunks' needs graph=True and fused_attention=True")
+        if mla_kernel != 'decode' and not (self.graph and self.fused_attention):
+            raise ValueError(f"mla_kernel={mla_kernel!r} needs graph=True and fused_attention=True")
         if self.graph and not (self.device_topk and self.device_experts):
             raise ValueError('graph=True needs device_topk and device_experts: a captured step cannot read device memory')
         self._step_graph, self._warm = None, False
@@ -354,6 +357,8 @@ class ResidentGLM:
         m, c = self.model, self.config
         cap = self.max_tokens
         self.hidden, self.heads = m.hidden, m.heads
+        if self.mla_kernel == 'heads' and self.heads % 4:
+            raise ValueError(f"mla_kernel='heads' needs a multiple of 4 heads, the model has {self.heads}")
         self.rank, self.nope, self.rot, self.value_dim = m.rank, m.nope, m.rot, m.value_dim
         self.index_heads, self.index_dim, self.index_topk = m.index_heads, m.index_dim, m.index_topk
         qk = self.nope + self.rot
@@ -802,7 +807,17 @@ class ResidentGLM:
         block = ((self.rank + 31) // 32) * 32
         scale = F(_f32(qk ** -0.5, 'MLA scale', True))
         tokens = position + 1
-        if self.fused_attention and self.graph:
+        if self.fused_attention and self.graph and self.mla_kernel == 'heads':
+            # The per-head buffers viewed per group of four heads (mla_heads_at.vx).
+            groups = self.heads // 4
+            self._spawn('mla_heads_at', out=self.attended.view((groups, 4 * self.rank)),
+                        numerator=self.numerator.view((groups, self.splits_max, 4 * self.rank)),
+                        stats=self.stats.view((groups, self.splits_max, 8)), q_latent=self.latent_q, q_rope=self.rot_q,
+                        cache_latent=self.latents[layer], cache_rope=self.rope_keys[layer], selected=self.selected,
+                        step=self.step, heads=self.heads, rank=self.rank, rope_dim=self.rot, selection_stride=0,
+                        splits_max=self.splits_max, scale=scale.value, threads=block,
+                        arrivals=self.arrivals.view((groups,)))
+        elif self.fused_attention and self.graph:
             self._spawn('mla_chunks_at' if self.mla_kernel == 'chunks' else 'mla_decode_at', out=self.attended, numerator=self.numerator, stats=self.stats,
                         q_latent=self.latent_q, q_rope=self.rot_q, cache_latent=self.latents[layer],
                         cache_rope=self.rope_keys[layer], selected=self.selected, step=self.step, heads=self.heads,
