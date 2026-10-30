@@ -16,7 +16,7 @@ also cover every pass. A kernel whose rows have a run-time length writes a rank-
 times numbers; `launch.py` passes a rank-2 `DeviceTensor` as its 7-word descriptor. A row's
 index may then be anything, as in topk's `hist[t][digit]`.
 
-All 48 kernels build with Vx main from c1dc2752 on. That commit (#2363, Vx #2361) lets an
+All 52 kernels build with Vx main from c1dc2752 on. That commit (#2363, Vx #2361) lets an
 `across` loop call `f32::from_bits` many times and in any position, which device.vx's bit-cast
 `bf16_decode!` needs. Everything else they need came by 371c2bae: the `lanes::` reductions
 (#2117, #2124, #2128) and #2134 (several libraries in one process each run their own kernel).
@@ -86,6 +86,7 @@ Two launches use the same PTX:
 | `gemm_f32.vx` | `glm_vx_gpu_gemm_f32` | 32 |
 | `topk.vx` | `glm_vx_gpu_topk_stable` (its own scratch: `gpu.topk.spawn_buffers`) | 32 |
 | `topk_sort.vx`, `topk_sort_at.vx` | new: the same selection for up to 2048 tokens, one shared-memory bitonic sort, no scratch (#32); `_at` reads tokens from the step buffer | 22 (sm_90) |
+| `topk_chunks.vx`, `topk_merge.vx` (and `_at`) | new: the same selection past 2048 tokens, no histogram (#32): a block sorts each 2048-token chunk, then `ceil(log2(chunks))` launches merge sorted rows pairwise, keeping the first 2048; `_at` reads tokens from the step buffer, captured for `max_tokens` | 24, 26 (sm_80) |
 | `rmsnorm_rows.vx` | `glm_vx_gpu_rmsnorm_rows`, and `glm_vx_gpu_rmsnorm` as rows = 1 | 23 |
 | `residual_rmsnorm.vx` | `glm_vx_gpu_residual_rmsnorm` | 24 |
 | `layernorm.vx` | `glm_vx_gpu_layernorm` | 26 |

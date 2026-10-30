@@ -92,6 +92,7 @@ I = C.c_int32
 F = C.c_float
 _ELEMENTWISE_BLOCK = 256
 TOPK_SORT_TOKENS = 2048  # gpu/spawn/topk_sort.vx sorts contexts up to this many tokens (#32)
+TOPK_CHUNK = 2048  # past it, topk_chunks sorts chunks of this many, topk_merge merges them (#32)
 _MAX_GRID = 65535
 
 
@@ -398,6 +399,10 @@ class ResidentGLM:
         if self.device_topk:
             from .topk import scratch_ints
             self.topk_scratch = t((scratch_ints(cap, self.index_topk),), 'int32')
+            if cap > TOPK_SORT_TOKENS and self.index_topk <= TOPK_CHUNK:
+                # topk_chunks' sorted rows and topk_merge's, swapped each round (#32).
+                chunks = -(-cap // TOPK_CHUNK)
+                self.topk_lists = [t((chunks, TOPK_CHUNK), 'int64') for _ in range(2)]
         self.selected_count = 0
         self.gate, self.up, self.act = t((width,)), t((width,)), t((width,))
         self.fused = t((2 * int(c.get('moe_intermediate_size', 1)),))
@@ -498,6 +503,33 @@ class ResidentGLM:
         if self._topk_choice == 'auto':
             self._topk_choice = 'sort' if (self._ptx_dir / 'spawn' / 'topk_sort.ptx').exists() else 'radix'
         return self._topk_choice == 'sort'
+
+    def _topk_merge(self):
+        """Whether contexts past TOPK_SORT_TOKENS select through gpu/spawn's topk_chunks and topk_merge
+        rounds (the same ids as topk_stable): with 'sort', when they are built and index_topk <= 2048.
+        Their chunk is topk_sort's limit, so past it there are always two chunks or more."""
+        names = ('topk_chunks_at', 'topk_merge_at') if self.graph else ('topk_chunks', 'topk_merge')
+        return (self._topk_sort() and hasattr(self, 'topk_lists') and TOPK_SORT_TOKENS == TOPK_CHUNK
+                and all((self._ptx_dir / 'spawn' / (n + '.ptx')).exists() for n in names))
+
+    def _topk_chunks_and_merge(self, tokens):
+        """topk_chunks, then topk_merge rounds until one row is left; the last writes selected."""
+        lists, out_ids = self.topk_lists, self.selected.view((1, self.index_topk))
+        cap = self.max_tokens
+        if self.graph:
+            # Captured for max_tokens: each launch reads tokens from the step buffer.
+            self._spawn('topk_chunks_at', lists=lists[0], scores=self.scores.view(self.scores.shape, 'int32'),
+                        step=self.step, max_tokens=cap)
+            for r in range((-(-cap // TOPK_CHUNK) - 1).bit_length()):
+                self._spawn('topk_merge_at', dst=lists[(r + 1) % 2], src=lists[r % 2], out_ids=out_ids, step=self.step,
+                            max_tokens=cap, round=r, k=self.index_topk)
+            return
+        self._spawn('topk_chunks', lists=lists[0], scores=self.scores.view((tokens,), 'int32'), tokens=tokens)
+        count, r = -(-tokens // TOPK_CHUNK), 0
+        while count > 1:
+            self._spawn('topk_merge', dst=lists[(r + 1) % 2], src=lists[r % 2], out_ids=out_ids, lists=count,
+                        tokens=tokens, k=self.index_topk)
+            count, r = -(-count // 2), r + 1
 
     def _topk_kernel(self, name=None):
         name = name or ('topk_stable_at' if self.graph else 'topk_stable')
@@ -693,20 +725,31 @@ class ResidentGLM:
             self._launch('index_scores', (tokens + 3) // 4, 128,
                          [self.scores, self.iq_rot, self.index_keys[layer], self.head_weights, I(tokens), I(self.index_heads),
                           I(self.index_dim), scale])
+        self._select(tokens)
+
+    def _select(self, tokens):
+        """selected[:min(index_topk, tokens)] = the indexer's top-k of scores[:tokens], stable by position."""
         count = min(self.index_topk, tokens)
         sort = self.device_topk and self._topk_sort()
         if self.graph and sort:
-            # Both captured: topk_sort_at selects up to TOPK_SORT_TOKENS, the radix select past it (#32).
+            # Both captured: topk_sort_at selects up to TOPK_SORT_TOKENS, the chunk sorts and merges (or
+            # the radix select) past it (#32).
             self._spawn('topk_sort_at', out_ids=self.selected, scores=self.scores.view(self.scores.shape, 'int32'),
                         step=self.step, k=self.index_topk)
-            self._launch(self._topk_kernel('topk_stable_long_at'), 1, 256,
-                         [self.selected, self.scores, self.topk_scratch, self.step, I(self.index_topk), I(TOPK_SORT_TOKENS)])
+            if self._topk_merge():
+                self._topk_chunks_and_merge(tokens)
+            else:
+                self._launch(self._topk_kernel('topk_stable_long_at'), 1, 256,
+                             [self.selected, self.scores, self.topk_scratch, self.step, I(self.index_topk),
+                              I(TOPK_SORT_TOKENS)])
         elif self.graph:
             self._launch(self._topk_kernel(), 1, 256, [self.selected, self.scores, self.topk_scratch, self.step,
                                                  I(self.index_topk)])
         elif sort and tokens <= TOPK_SORT_TOKENS:
             self._spawn('topk_sort', out_ids=self.selected, scores=self.scores.view((tokens,), 'int32'), tokens=tokens,
                         k=self.index_topk)
+        elif sort and self._topk_merge():
+            self._topk_chunks_and_merge(tokens)
         elif self.device_topk:
             # Stable by position, exactly as GlmMoeDsaModel._index (TOPK.md); writes ids[:count].
             self._launch(self._topk_kernel(), 1, 256, [self.selected, self.scores.view((tokens,)), self.topk_scratch,

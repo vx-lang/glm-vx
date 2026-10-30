@@ -375,6 +375,35 @@ def test_topk_sort_selects_what_the_radix_select_selects(monkeypatch, graph, sho
         assert (sort.get('topk_stable', 0) > 0) == (short < len(TOKENS))
 
 
+@pytest.mark.parametrize('index_topk', [4, 2048])
+def test_long_contexts_select_through_chunk_sorts_and_merges(index_topk):
+    # Past TOPK_SORT_TOKENS, topk='sort' selects through topk_chunks and topk_merge rounds (#32): the
+    # radix select's ids and the host argsort's. Scores are written straight into the score buffer,
+    # since a forward pass per position would take minutes here.
+    model = build(seed=43, index_topk=index_topk, max_position_embeddings=8192)
+    rng = np.random.default_rng(index_topk)
+    resident = {topk: ResidentGLM(model, ctx=Context(), max_tokens=7000, topk=topk) for topk in ('sort', 'radix')}
+    # Under graph replay the launches are those captured for max_tokens, reading tokens from the step buffer.
+    resident['graph'] = ResidentGLM(model, ctx=Context(), max_tokens=7000, topk='sort', graph=True, device_experts=True)
+    try:
+        for tokens in (2049, 4096, 7000):
+            scores = rng.integers(-20, 20, size=tokens).astype(np.float32)  # ties
+            scores[[3, 7, 9]] = np.nan, -0.0, np.inf
+            want = np.argsort(-scores, kind='stable')[:min(index_topk, tokens)]
+            resident['graph'].step.upload(np.array([tokens - 1, tokens, min(index_topk, tokens), 1], np.int32))
+            for r in resident.values():
+                r.scores.view((tokens,)).upload(scores)
+                r._select(tokens)
+                np.testing.assert_array_equal(r.selected.data[:r.selected_count], want)
+        sort, radix, graph = resident['sort'].launches, resident['radix'].launches, resident['graph'].launches
+        assert sort['topk_chunks'] == 3 and sort['topk_merge'] == 1 + 1 + 2 and 'topk_stable' not in sort
+        assert radix['topk_stable'] == 3 and 'topk_chunks' not in radix
+        assert graph['topk_chunks_at'] == 3 and graph['topk_merge_at'] == 3 * 2 and 'topk_stable_long_at' not in graph
+    finally:
+        for r in resident.values():
+            r.close()
+
+
 @pytest.mark.parametrize('overrides', [{}, {'index_n_heads': 1}])  # one head: exact score ties
 def test_device_topk_selects_exactly_what_the_host_argsort_selects(overrides):
     model = build(seed=37, **overrides)

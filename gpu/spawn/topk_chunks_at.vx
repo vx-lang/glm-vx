@@ -1,0 +1,83 @@
+// topk_chunks.vx under graph replay (#25, #32): tokens is step[1] of ResidentGLM's step buffer
+// [position, tokens, count, splits], read on the device, so one captured launch, of
+// ceil(max_tokens / 2048) blocks, serves every step; blocks past the step's chunks, and every
+// block when tokens <= 2048 (topk_sort_at selects there), write nothing. The rest is
+// topk_chunks.vx's, unchanged:
+//
+// The stable top-k past 2048 tokens (#32), step 1 of 2: block c sorts positions c * 2048 .. + 2047
+// as topk_sort.vx does (one i64 a position, its key above its position reversed, so a bigger value
+// ranks first; positions past tokens are the smallest i64) and writes them, descending, to row c of
+// lists ([chunks, 2048], chunks = ceil(tokens / 2048)). topk_merge.vx then merges the rows pairwise,
+// keeping the first 2048 of each pair, until one row is left: the first min(k, tokens) of
+// np.argsort(-scores, kind='stable'). One launch of chunks blocks, no atomics, no histogram.
+// Scores arrive as raw float32 bits in an i32 tensor.
+// spawn-include: device.vx
+
+// Order-preserving map from float32 bits to [0, 2^32): bigger key == bigger score; NaN is 0.
+macro_rules! topk_key {
+    ($bits:expr) => {
+        unsafe {
+          let dv_b: i64 = ($bits as i64) & 4294967295;
+          let dv_man: i64 = dv_b & 8388607;
+          let mut dv_key: i64 = dv_b + 2147483648;
+          if dv_b >= 2147483648 { dv_key = 4294967295 - dv_b; }
+          if dv_b == 2147483648 { dv_key = 2147483648; }
+          if ((dv_b >> 23) & 255) == 255 && dv_man != 0 { dv_key = 0; }
+          dv_key
+        }
+    };
+}
+
+// One compare-exchange of stage st of the descending bitonic sort, at position i of src.
+macro_rules! bitonic_stage {
+    ($src:ident, $i:expr, $st:expr, $stages:expr) => {
+        unsafe {
+          let dv_i: i32 = $i;
+          let dv_st: i32 = $st;
+          let dv_x: i64 = $src[dv_i];
+          let mut dv_value: i64 = dv_x;
+          if dv_st < $stages {
+            let mut dv_m: i32 = 1;
+            let mut dv_before: i32 = 0;
+            while dv_before + dv_m <= dv_st { dv_before = dv_before + dv_m; dv_m = dv_m + 1; }
+            let dv_size: i32 = 1 << dv_m;
+            let dv_d: i32 = dv_size >> (dv_st - dv_before + 1);
+            let dv_y: i64 = $src[dv_i ^ dv_d];
+            let mut dv_larger: i64 = dv_x;
+            let mut dv_smaller: i64 = dv_y;
+            if dv_y > dv_x { dv_larger = dv_y; dv_smaller = dv_x; }
+            dv_value = dv_smaller;
+            if ((dv_i & dv_d) == 0) == ((dv_i & dv_size) == 0) { dv_value = dv_larger; }
+          }
+          dv_value
+        }
+    };
+}
+
+pub fn glm_vx_spawn_topk_chunks_at(lists: &mut Tensor<i64, [?, ?], Memory::HBM>, scores: &Tensor<i32, [?], Memory::HBM>,
+                                   step: &Tensor<i32, [?], Memory::HBM>, max_tokens: i32) -> void {
+  spawn on(Topology::Device) {
+    for c in 0..(max_tokens + 2047) / 2048 across blocks {
+      let tokens: i32 = step[1];
+      if tokens > 2048 && tokens <= max_tokens && c * 2048 < tokens {
+        let mut order_a = unsafe { Tensor<i64, [2048], Memory::SMEM>::uninit() };
+        let mut order_b = unsafe { Tensor<i64, [2048], Memory::SMEM>::uninit() };
+        // 2048 = 2^11: 66 stages.
+        for i in 0..2048 across lanes(1024) {
+          let at: i32 = c * 2048 + i;
+          let mut value: i64 = -9223372036854775807 - 1;
+          if at < tokens {
+            value = (topk_key!(scores[at]) - 2147483648) * 4294967296 + (4294967295 - (at as i64));
+          }
+          order_a[i] = value;
+        }
+        for round in 0..33 {
+          for i in 0..2048 across lanes(1024) { order_b[i] = bitonic_stage!(order_a, i, round * 2, 66); }
+          for i in 0..2048 across lanes(1024) { order_a[i] = bitonic_stage!(order_b, i, round * 2 + 1, 66); }
+        }
+        for i in 0..2048 across lanes(1024) { lists[c][i] = order_a[i]; }
+      }
+    }
+  }
+  return;
+}

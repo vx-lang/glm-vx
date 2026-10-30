@@ -230,6 +230,27 @@ def test_spawn_int4_matvec4_matches_its_order(context, rows, cols, scale_kind):
     np.testing.assert_array_equal(download(out).view(np.uint32), np.asarray(expected, 'f4').view(np.uint32))
 
 
+# topk_chunks then topk_merge rounds (#32): the selection past 2048 tokens, against the host's rule.
+@pytest.mark.skipif(not (BUILD / 'spawn/topk_merge.ptx').exists(), reason='topk_merge not built (gpu/spawn/build.sh)')
+@pytest.mark.parametrize('tokens,k,ties', [(2049, 2048, True), (8192, 2048, False), (70000, 2048, True), (1 << 20, 2048, False),
+                                           (9000, 16, True)])
+def test_spawn_topk_chunks_and_merge_match_stable_argsort(context, tokens, k, ties):
+    rng = np.random.default_rng(tokens * 7 + k)
+    scores = rng.integers(-50, 50, size=tokens).astype('f4') if ties else rng.normal(size=tokens).astype('f4')
+    scores[[3, 5, 7, 9]] = np.nan, -np.inf, -0.0, np.inf
+    chunks = -(-tokens // 2048)
+    lists = [context.tensor((chunks, 2048), 'int64') for _ in range(2)]
+    out = context.tensor((1, k), 'int32')
+    d_scores = upload(context, scores.view(np.int32))
+    SpawnKernel(context, BUILD / 'spawn/topk_chunks.ptx').launch(lists=lists[0], scores=d_scores, tokens=tokens)
+    merge, count, r = SpawnKernel(context, BUILD / 'spawn/topk_merge.ptx'), chunks, 0
+    while count > 1:
+        merge.launch(dst=lists[(r + 1) % 2], src=lists[r % 2], out_ids=out, lists=count, tokens=tokens, k=k)
+        count, r = -(-count // 2), r + 1
+    context.synchronize()
+    np.testing.assert_array_equal(download(out)[0], np.argsort(-scores, kind='stable')[:k])
+
+
 # topk_sort (#32): one shared-memory bitonic sort for up to 2048 tokens, against the host's rule.
 @pytest.mark.skipif(not (BUILD / 'spawn/topk_sort.ptx').exists(), reason='topk_sort not built (gpu/spawn/build.sh)')
 @pytest.mark.parametrize('tokens,k,ties', [(1, 1, False), (64, 2048, False), (300, 64, True), (2048, 2048, True),

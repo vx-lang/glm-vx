@@ -48,6 +48,11 @@ def int4(rng, rows, cols):
     return packed.reshape(-1)
 
 
+def sorted_rows(rng, rows):
+    """topk_merge's input: rows of 2048 i64 values, each descending."""
+    return -np.sort(-rng.integers(-2 ** 62, 2 ** 62, size=(rows, 2048)), axis=1)
+
+
 def int4_scales(rng, n, kind):
     magnitudes = rng.uniform(0.001, 0.1, size=n).astype('f4')
     return (magnitudes.view(np.uint32) >> 16).astype(np.uint16) if kind else magnitudes.astype(np.float16).view(np.uint16)
@@ -211,6 +216,14 @@ CASES = {
                                 out_ids=np.zeros(1500, 'i4')),
     'topk_sort_at': lambda r: dict(k=64, step=np.array([0, 700, 0, 0], 'i4'),
                                    scores=r.normal(size=1024).astype('f4').view('i4'), out_ids=np.zeros(64, 'i4')),
+    'topk_chunks': lambda r: dict(tokens=5000, scores=r.integers(-9, 9, size=5000).astype('f4').view('i4'),
+                                  lists=np.zeros((3, 2048), 'i8')),
+    'topk_merge': lambda r: dict(lists=2, tokens=4000, k=64, src=sorted_rows(r, 2), dst=np.zeros((1, 2048), 'i8'),
+                                 out_ids=np.zeros((1, 64), 'i4')),
+    'topk_chunks_at': lambda r: dict(max_tokens=6000, step=np.array([0, 5000, 0, 0], 'i4'),
+                                     scores=r.normal(size=6000).astype('f4').view('i4'), lists=np.zeros((3, 2048), 'i8')),
+    'topk_merge_at': lambda r: dict(max_tokens=6000, round=1, k=64, step=np.array([0, 5000, 0, 0], 'i4'),
+                                    src=sorted_rows(r, 3), dst=np.zeros((3, 2048), 'i8'), out_ids=np.zeros((1, 64), 'i4')),
     'mla_partial': mla_partial,
     'mla_merge': mla_merge,
     'mla_decode': mla_decode,

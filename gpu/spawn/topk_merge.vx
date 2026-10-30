@@ -1,0 +1,60 @@
+// The stable top-k past 2048 tokens (#32), step 2 of 2: one round of merging topk_chunks.vx's
+// sorted rows. Block b takes rows 2b and 2b + 1 of src ([lists, 2048], each descending; a missing
+// row 2b + 1 is the smallest i64 throughout) and writes the first 2048 of their union, descending,
+// to row b of dst. max(a[i], b[2047 - i]) holds those 2048 as a bitonic sequence (the first stage
+// of a bitonic merge of a and b reversed), and eleven stages sort it. When one row is left (lists
+// <= 2), its block, b = 0, also writes out_ids ([1, k], 2D so that the race proof sees block b
+// write row b): the first min(k, tokens) of np.argsort(-scores, kind='stable'). Call it ceil(log2(chunks)) times, swapping src
+// and dst, lists halving (rounded up) each time. k <= 2048.
+// spawn-include: device.vx
+
+// Stage d of the descending bitonic merge, at position i of src: the larger of (i, i ^ d) goes to
+// the lower position.
+macro_rules! merge_stage {
+    ($src:ident, $i:expr, $d:expr) => {
+        unsafe {
+          let dv_i: i32 = $i;
+          let dv_x: i64 = $src[dv_i];
+          let dv_y: i64 = $src[dv_i ^ $d];
+          let mut dv_larger: i64 = dv_x;
+          let mut dv_smaller: i64 = dv_y;
+          if dv_y > dv_x { dv_larger = dv_y; dv_smaller = dv_x; }
+          let mut dv_value: i64 = dv_smaller;
+          if (dv_i & $d) == 0 { dv_value = dv_larger; }
+          dv_value
+        }
+    };
+}
+
+pub fn glm_vx_spawn_topk_merge(dst: &mut Tensor<i64, [?, ?], Memory::HBM>, src: &Tensor<i64, [?, ?], Memory::HBM>,
+                               out_ids: &mut Tensor<i32, [?, ?], Memory::HBM>, lists: i32, tokens: i32, k: i32) -> void {
+  spawn on(Topology::Device) {
+    for b in 0..(lists + 1) / 2 across blocks {
+      if lists > 0 && tokens > 0 && k > 0 && k <= 2048 {
+        let mut order_a = unsafe { Tensor<i64, [2048], Memory::SMEM>::uninit() };
+        let mut order_b = unsafe { Tensor<i64, [2048], Memory::SMEM>::uninit() };
+        for i in 0..2048 across lanes(1024) {
+          let x: i64 = src[2 * b][i];
+          let mut y: i64 = -9223372036854775807 - 1;
+          if 2 * b + 1 < lists { y = src[2 * b + 1][2047 - i]; }
+          let mut larger: i64 = x;
+          if y > x { larger = y; }
+          order_a[i] = larger;
+        }
+        // d = 1024, 512, .. 1, two a round, a to b then b to a.
+        for round in 0..5 {
+          for i in 0..2048 across lanes(1024) { order_b[i] = merge_stage!(order_a, i, 1024 >> (round * 2)); }
+          for i in 0..2048 across lanes(1024) { order_a[i] = merge_stage!(order_b, i, 512 >> (round * 2)); }
+        }
+        for i in 0..2048 across lanes(1024) { order_b[i] = merge_stage!(order_a, i, 1); }
+        for i in 0..2048 across lanes(1024) { dst[b][i] = order_b[i]; }
+        if lists <= 2 {
+          for r in 0..k.min(tokens) across lanes(1024) {
+            out_ids[b][r] = (4294967295 - (order_b[r] & 4294967295)) as i32;
+          }
+        }
+      }
+    }
+  }
+  return;
+}

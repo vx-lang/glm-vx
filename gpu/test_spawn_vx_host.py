@@ -787,6 +787,52 @@ def test_topk_sort_leaves_longer_contexts_to_topk(run):
     np.testing.assert_array_equal(got['out_ids'], -7)
 
 
+# topk_chunks then topk_merge rounds (#32): the same selection past 2048 tokens, each 2048-position
+# chunk sorted by its own block, then sorted rows merged pairwise, the first 2048 kept.
+def topk_long(run, scores, tokens, k):
+    chunks = -(-tokens // 2048)
+    src = run('topk_chunks', lists=np.zeros((chunks, 2048), np.int64), scores=scores.view(np.int32), tokens=tokens)['lists']
+    out_ids, lists = np.full((1, k), -7, np.int32), chunks
+    while True:
+        out = run('topk_merge', dst=np.zeros((chunks, 2048), np.int64), src=src, out_ids=out_ids, lists=lists,
+                  tokens=tokens, k=k)
+        src, out_ids, lists = out['dst'], out['out_ids'], -(-lists // 2)
+        if lists == 1:
+            return out_ids[0, :min(k, tokens)]
+
+
+@pytest.mark.parametrize('tokens,k,ties', [(2049, 2048, True), (4096, 2048, False), (5000, 2048, True), (6145, 64, False),
+                                           (20000, 2048, True), (70000, 2048, False), (9000, 1, True)])
+def test_topk_chunks_and_merge_match_stable_argsort(run, tokens, k, ties):
+    rng = np.random.default_rng(tokens * 5 + k)
+    scores = rng.integers(-4, 4, size=tokens).astype(F) if ties else rng.normal(size=tokens).astype(F)
+    scores[3], scores[7], scores[9], scores[5] = np.nan, -0.0, np.inf, -np.inf  # NaN sorts last; -0.0 ties +0.0
+    scores[-1] = np.inf  # the last position, in the last chunk, ranks second
+    np.testing.assert_array_equal(topk_long(run, scores, tokens, k), np.argsort(-scores, kind='stable')[:min(k, tokens)])
+
+
+# The same under graph replay: tokens from the step buffer, launches sized for max_tokens (one
+# chunks_at, then ceil(log2(chunks)) merge_at rounds), whatever the step's context.
+@pytest.mark.parametrize('tokens', [100, 2048, 2049, 6000, 8192, 9000, 20000])
+def test_topk_chunks_and_merge_at_read_tokens_from_the_step(run, tokens):
+    max_tokens, k = 20000, 2048
+    chunks = -(-max_tokens // 2048)
+    rng = np.random.default_rng(tokens)
+    scores = rng.integers(-50, 50, size=max_tokens).astype(F)
+    step = np.array([tokens - 1, tokens, min(k, tokens), 1], np.int32)
+    out_ids = np.full((1, k), -7, np.int32)
+    lists = run('topk_chunks_at', lists=np.zeros((chunks, 2048), np.int64), scores=scores.view(np.int32), step=step,
+                max_tokens=max_tokens)['lists']
+    for r in range((chunks - 1).bit_length()):
+        out = run('topk_merge_at', dst=np.zeros((chunks, 2048), np.int64), src=lists, out_ids=out_ids, step=step,
+                  max_tokens=max_tokens, round=r, k=k)
+        lists, out_ids = out['dst'], out['out_ids']
+    if tokens <= 2048:
+        np.testing.assert_array_equal(out_ids, -7)  # topk_sort_at's
+    else:
+        np.testing.assert_array_equal(out_ids[0], np.argsort(-scores[:tokens], kind='stable')[:k])
+
+
 @pytest.mark.parametrize('experts,k,ties', [(256, 8, False), (256, 8, True), (7, 3, True), (1, 1, False), (33, 8, True)])
 def test_router(run, experts, k, ties):
     rng = np.random.default_rng(experts * 10 + k)
