@@ -231,6 +231,25 @@ def test_fp8_x4_kernels_match_the_hand_kernels(graph):
         ResidentGLM(model, ctx=Context(), fp8_kernels='fast')
 
 
+@pytest.mark.parametrize('fmt', ['int4', 'bf16'])
+def test_spawn_matvec_kernels_equal_the_hand_kernels(fmt):
+    # matvec_kernels='spawn': gpu/spawn's int4_matvec and bf16_matvec for the Linears, the hand
+    # kernels' arithmetic in the same order, so the logits are equal bit for bit.
+    model = (int4_model(37, GLM_INT4) if fmt == 'int4' else bf16_model(37))[0]
+    runs = {}
+    for kernels in ('hand', 'spawn'):
+        resident = ResidentGLM(model, ctx=Context(), max_tokens=32, matvec_kernels=kernels)
+        try:
+            runs[kernels] = (np.stack([resident.forward(t) for t in TOKENS[:6]]), set(resident._spawn_kernels))
+        finally:
+            resident.close()
+    (hand, hand_spawned), (spawn, spawned) = runs['hand'], runs['spawn']
+    assert hand.tobytes() == spawn.tobytes()
+    assert f'{fmt}_matvec' in spawned and f'{fmt}_matvec' not in hand_spawned
+    with pytest.raises(ValueError, match='matvec_kernels'):
+        ResidentGLM(model, ctx=Context(), matvec_kernels='fast')
+
+
 def test_fp8_checkpoint_on_disk_runs_packed(tmp_path):
     # The production path: an official-layout FP8 safetensors directory read by SafetensorsCheckpoint.
     import json

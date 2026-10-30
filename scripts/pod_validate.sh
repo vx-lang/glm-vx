@@ -139,6 +139,10 @@ for mode in f32 int4 fp8 bf16; do
 done
 step layer-profile-fp8x4 $PYTHON -m validation.layer_profile --format fp8 --fp8-kernels x4 --timer "$TIMER" \
   --output "$out/layer-profile-fp8x4.json"
+for mode in int4 bf16; do
+  step layer-profile-$mode-spawn $PYTHON -m validation.layer_profile --format $mode --matvec-kernels spawn \
+    --timer "$TIMER" --output "$out/layer-profile-$mode-spawn.json"
+done
 step moe-profile $PYTHON -m validation.moe_profile --timer "$TIMER" --output "$out/moe-profile.json"
 # The FP8 dense matvec kernels (hand, spawn, and fp8_matvec4 of #30) at GLM-5.3's projection shapes.
 step matvec-profile $PYTHON -m validation.matvec_profile --output "$out/matvec-profile.json"

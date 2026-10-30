@@ -67,6 +67,10 @@ table. Their summation order differs from the hand kernels', so the logits are c
 path's, not equal; each kernel's own order is pinned by gpu/test_spawn_vx_host.py. Widths that are
 not a multiple of 4 keep the default kernels.
 
+``matvec_kernels='spawn'`` runs INT4 and BF16 Linears through gpu/spawn's int4_matvec and
+bf16_matvec instead of the hand kernels. gpu/test_spawn_hardware.py checks each against its hand
+kernel bit for bit, so the logits do not change; the spawn kernels share device.vx's decode macros.
+
 Not a performance claim: no timing is made here.
 ``device_experts`` needs the gpu/spawn kernels built (gpu/spawn/build.sh into ptx_dir/spawn) with a
 vxc that has Vx's lanes:: reductions (see gpu/spawn/README.md); it has not run on a GPU yet.
@@ -97,6 +101,11 @@ def _planned(entry):
     return isinstance(entry, _Planned) or (isinstance(entry, tuple) and any(isinstance(e, _Planned) for e in entry))
 
 
+def _flat(tensor):
+    """The tensor as one dimension, for gpu/spawn kernels that take [?] weights."""
+    return tensor.view((int(np.prod(tensor.shape)),))
+
+
 def _f32(value, name, positive=False):
     value = C.c_float(float(value)).value
     if not np.isfinite(value) or (value <= 0 if positive else False):
@@ -109,7 +118,7 @@ class ResidentGLM:
 
     def __init__(self, model, *, max_tokens=4096, ptx_dir=None, device=0, ctx=None, max_weight_bytes=None,
                  device_topk=True, device_experts=False, fused_attention=False, graph=False, fp8_kernels='hand',
-                 topk='auto', mla_kernel='decode'):
+                 topk='auto', mla_kernel='decode', matvec_kernels='hand'):
         if getattr(model, 'packed_weights', False):
             raise NotImplementedError('ResidentGLM supports expanded float32 weights only')
         if getattr(model, 'expert_placement', None) is not None:
@@ -125,6 +134,9 @@ class ResidentGLM:
         if fp8_kernels not in ('hand', 'x4'):
             raise ValueError("fp8_kernels must be 'hand' or 'x4'")
         self.fp8_kernels = fp8_kernels
+        if matvec_kernels not in ('hand', 'spawn'):
+            raise ValueError("matvec_kernels must be 'hand' or 'spawn'")
+        self.matvec_kernels = matvec_kernels
         if topk not in ('auto', 'sort', 'radix'):
             raise ValueError("topk must be 'auto', 'sort' or 'radix'")
         self._topk_choice = topk
@@ -424,6 +436,11 @@ class ResidentGLM:
             return self._matvec(self._weight(prefix + '.weight'), x, out)
         if fmt == 'int4':
             packed, scales, kind, (rows, cols) = self._int4_weight(prefix)
+            if self.matvec_kernels == 'spawn':
+                self._check_shape(prefix, fmt, rows, cols, x, out)
+                self._spawn('int4_matvec', out=out, packed=_flat(packed), scales=_flat(scales), x=x, rows=rows,
+                            cols=cols, scale_kind=kind)
+                return out
             args = [packed, scales, x, I(rows), I(cols), I(kind)]
         elif fmt == 'fp8':
             codes, scales, (rows, cols) = self._fp8_weight(prefix)
@@ -436,11 +453,19 @@ class ResidentGLM:
             args = [codes, scales, x, I(rows), I(cols)]
         else:
             bits, (rows, cols) = self._bf16_weight(prefix)
+            if self.matvec_kernels == 'spawn':
+                self._check_shape(prefix, fmt, rows, cols, x, out)
+                self._spawn('bf16_matvec', out=out, weight=_flat(bits), x=x, rows=rows, cols=cols)
+                return out
             args = [bits, x, I(rows), I(cols)]
-        if out.shape != (rows,) or x.shape != (cols,):
-            raise ValueError(f'{prefix}: {fmt.upper()} weight is {rows}x{cols}, got x {x.shape} -> out {out.shape}')
+        self._check_shape(prefix, fmt, rows, cols, x, out)
         self._launch(self._format_kernel(fmt), (rows + 3) // 4, 128, [out] + args)
         return out
+
+    @staticmethod
+    def _check_shape(prefix, fmt, rows, cols, x, out):
+        if out.shape != (rows,) or x.shape != (cols,):
+            raise ValueError(f'{prefix}: {fmt.upper()} weight is {rows}x{cols}, got x {x.shape} -> out {out.shape}')
 
     def _format_kernel(self, fmt):
         name = fmt + '_matvec'

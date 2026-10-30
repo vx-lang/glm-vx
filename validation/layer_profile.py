@@ -74,7 +74,8 @@ def child(args):
     source = weights if args.format == 'f32' else {'int4': int4_source, 'fp8': fp8_source, 'bf16': bf16_source}[args.format](weights)
     model = GlmMoeDsaModel(config, source, NumpyBackend())
     tokens = [int(t) for t in np.random.default_rng(args.seed).integers(0, config['vocab_size'], args.context + 1)]
-    resident = ResidentGLM(model, max_tokens=len(tokens) + 1, device_experts=True, fp8_kernels=args.fp8_kernels)
+    resident = ResidentGLM(model, max_tokens=len(tokens) + 1, device_experts=True, fp8_kernels=args.fp8_kernels,
+                           matvec_kernels=args.matvec_kernels)
     for t in tokens[:-1]:
         resident.forward(t, logits=False)
     resident.forward(tokens[-1])  # every kernel loaded and weight uploaded before the profiled step
@@ -110,7 +111,7 @@ def child(args):
             ctx.driver.call('cuProfilerStop')
     Path(args.launches).write_text(json.dumps(dict(
         launches=launches, format=args.format, layers=args.layers, context=args.context, hidden=config['hidden_size'],
-        weights_gib=resident.weight_bytes / 1024 ** 3, timer=args.timer, fp8_kernels=args.fp8_kernels,
+        weights_gib=resident.weight_bytes / 1024 ** 3, timer=args.timer, fp8_kernels=args.fp8_kernels, matvec_kernels=args.matvec_kernels,
         us=[start.elapsed_ms(end) * 1e3 for start, end in events] or None)))
     resident.close()
 
@@ -207,6 +208,8 @@ def main():
     p.add_argument('--seed', type=int, default=1)
     p.add_argument('--timer', choices=['ncu', 'events'], default='ncu', help='events: no ncu (see above)')
     p.add_argument('--fp8-kernels', choices=['hand', 'x4'], default='hand', help="ResidentGLM's fp8_kernels (#30, #31)")
+    p.add_argument('--matvec-kernels', choices=['hand', 'spawn'], default='hand',
+                   help="ResidentGLM's matvec_kernels: INT4 and BF16 Linears through gpu/spawn")
     p.add_argument('--launches', help=argparse.SUPPRESS)  # set when running under ncu
     args = p.parse_args()
     if args.launches:
@@ -221,7 +224,7 @@ def main():
                '--metrics', ','.join(METRICS), '--log-file', str(raw),
                sys.executable, '-m', 'validation.layer_profile', '--output', str(args.output), '--format', args.format,
                '--layers', str(args.layers), '--context', str(args.context), '--seed', str(args.seed),
-               '--fp8-kernels', args.fp8_kernels,
+               '--fp8-kernels', args.fp8_kernels, '--matvec-kernels', args.matvec_kernels,
                '--launches', str(launches)]
     rows = None
     if args.timer == 'ncu' and (os.path.exists(ncu) or shutil.which(ncu)):
