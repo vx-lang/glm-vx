@@ -6,9 +6,14 @@ orchestration, request scheduling and HTTP. The serving path does not use vLLM, 
 PyTorch. An optional validation environment runs the pinned official model. NumPy supplies storage and an explicit test
 oracle; the `vx` backend never silently falls back to NumPy matrix operations.
 
-**Current status: tested CPU prototype plus an explicit NVIDIA GPU kernel/backend path.**
-The GPU path compiles to PTX; actual GPU execution and optimal performance remain
-unverified. See [GPU implementation and run instructions](gpu/README.md).
+**Current status: tested CPU prototype plus a GPU-resident decode path tested on A100 and H100.**
+Six GPU sessions so far (five on one A100, one on one H100, Oct 15 to 26) ran the kernels against
+NumPy, mostly bit for bit, the GPU-resident engine in f32, INT4, FP8 and BF16 against the hybrid
+path and, with random weights, against the official PyTorch code; the H100 session passed all 33
+steps of `scripts/pod_validate.sh`. The trained model has not run on a GPU, and no GPU throughput
+claim is made: the work is per-layer and per-kernel (#29). Evidence is under [`evidence/`](evidence/),
+summarized in [#36](https://github.com/vx-lang/glm-vx/issues/36). See
+[GPU implementation and run instructions](gpu/README.md).
 The full trained GLM-5.3 mixed-bit GGUF checkpoint has executed on CPU through
 all 78 base-decoder layers, generating **“Let me”** from a six-token abbreviated
 chat prefix. Both tokens match an independent llama.cpp CPU reference. This
@@ -97,7 +102,10 @@ warp/block reductions, split online-softmax compressed MLA, and a CUDA Driver AP
 runtime. Use `--backend vx-gpu` for the explicitly hybrid serving adapter, or
 `--backend vx-gpu-resident --checkpoint DIR` for device-resident decode (weights, activations
 and caches on the GPU; one request at a time, others queue; see [gpu/README.md](gpu/README.md)).
-The [original CPU report](REPORT.md) remains a baseline, not a GPU benchmark.
+The kernels written in Vx's own GPU model (`spawn` and `across` loops) are in
+[gpu/spawn](gpu/spawn/README.md); they need Vx main c1dc2752 or later. Pods restore a prebuilt
+toolchain with `scripts/pod_restore.sh` (built on a pod by `scripts/pod_build_bundle.sh`) and run
+`scripts/pod_validate.sh`. The [original CPU report](REPORT.md) remains a baseline, not a GPU benchmark.
 
 ## Serving performance
 
@@ -156,15 +164,15 @@ validation. Float32 dequantization is not numerically identical to a production
 FP8 activation-quantized GEMM path. Metadata and source revisions are recorded in
 `metadata/sources.json` and `docs/model.md`.
 
-The available machine has no detected NVIDIA GPU, about 93 GiB RAM and roughly
-326 GiB disk free at initial inspection. The original FP8 checkpoint is about
-756 GB and does not fit on this disk. The 216.7 GB mixed-bit GGUF checkpoint was
-downloaded in full and all six shard SHA256 hashes verified. No GPU hardware
-was rented or provisioned.
+The development machine has no NVIDIA GPU, about 93 GiB RAM and roughly 326 GiB
+disk free at initial inspection. The original FP8 checkpoint is about 756 GB and
+does not fit on this disk. The 216.7 GB mixed-bit GGUF checkpoint was downloaded in
+full and all six shard SHA256 hashes verified. GPU work runs on rented single-GPU
+pods (see above).
 
-To deliver an optimized production engine still requires: actual GPU validation
-and tuning, packed/fused GPU prefill, MTP, FP8 GEMM and quantized activation
-parity, paged/distributed KV sharing, tensor/expert parallel collectives,
-GPU topology-specific placement, trained-checkpoint logits/generation parity,
-and throughput/latency benchmarks against established engines on matching
-hardware and workloads. “Optimal” cannot be established from this CPU prototype.
+To deliver an optimized production engine still requires: the trained checkpoint on
+a GPU (#35) and its logits/generation parity, the per-layer bottlenecks of #29 on
+the H100, packed/fused GPU prefill, MTP, FP8 GEMM and quantized activation parity,
+paged/distributed KV sharing, tensor/expert parallel collectives on more than one GPU
+(#34), GPU topology-specific placement, and throughput/latency benchmarks against
+established engines on matching hardware and workloads.

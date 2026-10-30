@@ -1,5 +1,9 @@
 # GLM-Vx validation report
 
+> The October 4 CPU baseline, kept as it was. GPU results came later: see the
+> [`evidence/`](evidence/) folders, summarized in [#36](https://github.com/vx-lang/glm-vx/issues/36),
+> and [gpu/README.md](gpu/README.md).
+
 Built and executed on Linux x86-64 with official Vx v0.0.2 and LLVM 22.1.8. This is a CPU correctness prototype with Vx numerical kernels and Python serving/orchestration. It is not an optimal GPU engine and has not executed the trained full GLM-5.3 checkpoint.
 
 ## Verified
