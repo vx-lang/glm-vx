@@ -178,7 +178,7 @@ def check_params(ptx: str, entry: str, params):
     head = re.search(rf'\.entry {entry}\((.*?)\)', ptx, re.S)
     if not head:
         raise ValueError(f'no .entry {entry} in PTX')
-    actual = [re.match(r'\s*\.param\s+(\.\w+)(\s+\.ptr)?', line) for line in head[1].split(',')]
+    actual = [re.match(r'\s*\.param\s+(\.\w+)(\s+\.ptr(?:\s+\.align\s+(\d+))?)?', line) for line in head[1].split(',')]
     expected, owner = [], []
     for index, p in enumerate(params):
         if p['kind'] == 'scalar':
@@ -197,6 +197,9 @@ def check_params(ptx: str, entry: str, params):
         if p['kind'] != 'memref':
             continue
         slot = owner.index(index) + 1
+        # The machine file's HBM alignment (Vx #2375): a `&` tensor's pointer is `.align 16`, so LLVM
+        # may load four words at once (ld.global.nc.v4), and a launch must pass a pointer that is.
+        p['align'] = int(actual[slot][3] or 1)
         reg = re.search(rf'ld\.param\.b64\s+(%rd\d+), \[{entry}_param_{slot}\];', body)
         if not reg:
             if p['mut']:
@@ -205,13 +208,13 @@ def check_params(ptx: str, entry: str, params):
         global_reg = re.search(rf'cvta\.to\.global\.u64\s+(%rd\d+), {re.escape(reg[1])};', body)
         base = global_reg[1] if global_reg else reg[1]
         addresses = derived(body, base)
-        if any(re.search(rf'st\.global\.\w+\s+\[{re.escape(a)}(\+\d+)?\]', body) for a in addresses):
+        if any(re.search(rf'st\.global(?:\.v[24])?\.\w+\s+\[{re.escape(a)}([+-]\d+)?\]', body) for a in addresses):
             stored.add(p['name'])
         # Element width: loads through this tensor must be as wide as its element in the manifest,
         # which catches a manifest whose read-only tensors of different types are out of place.
         # vxc may load an i64 as two 32-bit halves, or only the half it uses.
         widths = {int(w) for a in addresses
-                  for w in re.findall(rf'ld\.global(?:\.nc)?\.[bsuf](\d+)\s+%\w+, \[{re.escape(a)}(?:\+\d+)?\]', body)}
+                  for w in re.findall(rf'ld\.global(?:\.nc)?(?:\.v[24])?\.[bsuf](\d+)\s+(?:%\w+|\{{[^}}]*\}}), \[{re.escape(a)}(?:[+-]\d+)?\]', body)}
         allowed = {ELEMENT_BITS[p['element']]} | ({32} if p['element'] == 'i64' else set())
         if widths - allowed:
             raise ValueError(f'{p["name"]} is {p["element"]} in the manifest but loaded {sorted(widths)} bits wide')

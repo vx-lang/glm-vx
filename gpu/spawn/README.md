@@ -16,9 +16,13 @@ also cover every pass. A kernel whose rows have a run-time length writes a rank-
 times numbers; `launch.py` passes a rank-2 `DeviceTensor` as its 7-word descriptor. A row's
 index may then be anything, as in topk's `hist[t][digit]`.
 
-All 53 kernels build with Vx main from c1dc2752 on. That commit (#2363, Vx #2361) lets an
-`across` loop call `f32::from_bits` many times and in any position, which device.vx's bit-cast
-`bf16_decode!` needs. Everything else they need came by 371c2bae: the `lanes::` reductions
+All 53 kernels build with Vx main from 4ecbecb9 on. That commit (#2375, Vx #2362) loads a `&`
+tensor through the read-only cache (`ld.global.nc`) and, since the machine files give HBM
+`alignment: 16 B`, four words at a 16-byte boundary as one `ld.global.nc.v4`: bf16_matvec4 and
+int4_matvec4 read their weights and x that way. Every `&` tensor must then start on 16 bytes;
+build.py records each parameter's `align` in the manifest and both launchers check it. c1dc2752
+(#2363, Vx #2361) lets an `across` loop call `f32::from_bits` many times and in any position,
+which device.vx's bit-cast `bf16_decode!` needs. Everything else they need came by 371c2bae: the `lanes::` reductions
 (#2117, #2124, #2128) and #2134 (several libraries in one process each run their own kernel).
 mla_decode uses the code of a group of blocks and its arrival counts (#2185 to #2188). mla_decode_at
 uses #2240's uniform reads of a `&` tensor parameter, so the step buffer can bound its blocks' work,

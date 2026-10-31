@@ -71,6 +71,10 @@ class Module:
     def kernel(self,name):
         getattr(self.ctx.simt.lib,name)
         return Kernel(self.ctx,name)
+def _offset(tensor):
+    root=tensor
+    while root.parent is not None:root=root.parent
+    return tensor.data.ctypes.data-root.data.ctypes.data
 class SpawnKernel:
     """A gpu/spawn kernel library run by Vx's host path (gpu/spawn/host.py), on these tensors."""
     def __init__(self,ctx,path):
@@ -78,8 +82,14 @@ class SpawnKernel:
         from pathlib import Path
         self.ctx,self.path=ctx,str(path)
         manifest=json.loads(Path(path).with_suffix('.json').read_text())
+        self.entry,self.params=manifest['entry'],[p for p in manifest['params'] if p['kind']!='scalar']
         self.mutable=[p['name'] for p in manifest['params'] if p.get('mut')]
     def launch(self,grid=None,block=None,*,stream=None,**values):
+        from gpu.spawn.launch import check_aligned
+        # A view's offset from its root tensor stands in for its device address (allocations align to 256).
+        for p in self.params:
+            v=values.get(p['name'])
+            if isinstance(v,Tensor):check_aligned(self.entry,p,_offset(v))
         arrays={}
         for name,v in values.items():
             if isinstance(v,Tensor):assert not v.closed;arrays[name]=v.data

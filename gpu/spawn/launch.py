@@ -65,6 +65,14 @@ def descriptor_words(param, value):
     return [0, *value.shape, *strides]
 
 
+def check_aligned(entry, param, pointer):
+    """A tensor whose PTX pointer is `.align N` (the machine file's HBM alignment, Vx #2375) may be
+    read N bytes at a time, so a view that starts off that boundary would fault or read wrong."""
+    align = param.get('align', 1)
+    if pointer % align:
+        raise ValueError(f'{entry}: {param["name"]} starts at {pointer:#x}, not on the {align}-byte boundary the kernel loads from')
+
+
 class SpawnKernel:
     def __init__(self, context, ptx_path):
         ptx_path = Path(ptx_path)
@@ -93,6 +101,7 @@ class SpawnKernel:
                 raise TypeError(f'{p["name"]} is {value.dtype}, expected {_ELEMENT[p["element"]]}')
             if p['kind'] == 'arrivals' and value.size < launch_size(p['elements'], values):
                 raise ValueError(f'{p["name"]} needs {launch_size(p["elements"], values)} counts, got {value.size}')
+            check_aligned(self.manifest['entry'], p, value.pointer)
             args += [value, value] + [C.c_uint64(w) for w in descriptor_words(p, value)]
         return args
 

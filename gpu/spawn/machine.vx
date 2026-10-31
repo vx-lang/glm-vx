@@ -2,7 +2,7 @@
 // (blocks of up to 1024 lanes, warps of 32, lanes); Vx needs it from #2102 on.
 // CPU_DRAM is listed as visible only so captured scalars passed by value compile (Vx #1947);
 // kernels here read device memory only.
-Memory HBM { capacity: 40 GiB, bandwidth: 1555 GB/s, managed: explicit, scope: device }
+Memory HBM { capacity: 40 GiB, bandwidth: 1555 GB/s, managed: explicit, alignment: 16 B, scope: device }
 Memory SMEM { within: Memory::HBM, capacity: 164 KiB, bandwidth: 128 B/cyc, granule: 1 KiB, managed: explicit, scope: sm }
 Topology Device {
   arch: nvptx64,

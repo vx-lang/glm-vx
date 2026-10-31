@@ -2,7 +2,7 @@
 // 8.0 (wgmma, TMA, mbarrier expect_tx); Memory::REG (Vx PR #1991) keeps the accumulators in
 // registers; `alignment: 16 B` (Vx PR #1996) is the least alignment of a shared tensor, and the
 // ring buffers ask for aligned(1024). CPU_DRAM is visible only so scalars pass by value (Vx #1947).
-Memory HBM { capacity: 80 GiB, bandwidth: 3.35 TB/s, managed: explicit, scope: device }
+Memory HBM { capacity: 80 GiB, bandwidth: 3.35 TB/s, managed: explicit, alignment: 16 B, scope: device }
 Memory SMEM { within: Memory::HBM, capacity: 228 KiB, bandwidth: 128 B/cyc, granule: 1 KiB, managed: explicit, alignment: 16 B, scope: sm }
 Memory REG { within: Memory::SMEM, capacity: 1020 B, managed: explicit, scope: thread }
 Topology Device {
