@@ -212,68 +212,52 @@ macro_rules! fp8_row_dot {
     };
 }
 
-// Word `lane` of tile `tile + t` of a row, or 0 past the row.
-macro_rules! word_at {
-    ($weight:ident, $row_words:expr, $words:expr, $tiles:expr, $tile:expr, $t:expr, $lane:expr) => {
-        unsafe {
-          let dv_at: i64 = ($tile + $t) * 32 + ($lane as i64);
-          let mut dv_word: i32 = 0;
-          if $tile + $t < $tiles && dv_at < $words { dv_word = $weight[$row_words + dv_at] as i32; }
-          dv_word
-        }
-    };
-}
-
-// sum plus the word's four terms in column order, (decode(code) * scale) * x[xo + col].
+// sum plus the word's four terms in column order, (decode(code) * scale) * x[col + j].
 macro_rules! fp8_word_terms {
-    ($sum:expr, $word:expr, $table:ident, $w:expr, $scales:ident, $scale_base:expr, $x:ident, $xo:expr, $tiles:expr,
-     $tile:expr, $t:expr, $lane:expr, $k:expr) => {
+    ($sum:expr, $word:expr, $scale:expr, $x:ident, $col:expr) => {
         unsafe {
           let mut dv_sum: f32 = $sum;
-          if $tile + $t < $tiles {
-            let dv_scale: f32 = $scales[$scale_base + $tile + $t];
-            let dv_col: i64 = ($tile + $t) * 128 + (($lane * 4) as i64);
-            let mut dv_j: i32 = 0;
-            while dv_j < 4 {
-              if dv_col + (dv_j as i64) < $k {
-                let dv_code: i32 = ($word >> (dv_j * 8)) & 255;
-                dv_sum = dv_sum + ($table[$w][dv_code >> 5][dv_code & 31] * dv_scale) * $x[$xo + dv_col + (dv_j as i64)];
-              }
-              dv_j = dv_j + 1;
-            }
+          let mut dv_j: i32 = 0;
+          while dv_j < 4 {
+            dv_sum = dv_sum + (fp8_decode!($word >> (dv_j * 8)) * $scale) * $x[$col + (dv_j as i64)];
+            dv_j = dv_j + 1;
           }
           dv_sum
         }
     };
 }
 
-// fp8_row_dot! reading four codes a load (#30): the weight bytes viewed as u32, each expert's
-// [rows, n] matrix back to back (n % 4 == 0), decoded through $table[$w], the subgroup's 256-entry
-// table ([8, 32], built from fp8_decode!). Lane l adds columns tile * 128 + 4l .. + 3 of each
-// tile in turn, the words of four tiles loaded before their sums.
+// fp8_row_dot! reading sixteen codes a lane step (#30, #31): the weight bytes viewed as u32, each
+// expert's [rows, n] matrix back to back (n % 16 == 0, so every row starts on 16 bytes). Lane l
+// reads words 4l .. 4l + 3 of every 128-word tile (columns tile * 512 + 16l .. + 15, all in one
+// 128-column scale block), four consecutive words at a multiple of 4: one ld.global.nc.v4 (Vx
+// #2375). It adds them in column order, tile by tile. $xo must be a multiple of 4 too for x's
+// sixteen floats to load four at a time.
 macro_rules! fp8_row_dot4 {
-    ($weight:ident, $scales:ident, $table:ident, $w:expr, $x:ident, $xo:expr, $expert:expr, $row:expr, $rows:expr, $n:expr, $lane:expr) => {
+    ($weight:ident, $scales:ident, $x:ident, $xo:expr, $expert:expr, $row:expr, $rows:expr, $n:expr, $lane:expr) => {
         unsafe {
           let dv4_k: i64 = $n;
           let dv4_xo: i64 = $xo;
-          let dv4_row: i64 = $row;
           let dv4_tiles: i64 = (dv4_k + 127) / 128;
           let dv4_words: i64 = dv4_k / 4;
           let dv4_scale_rows: i64 = (($rows as i64) + 127) / 128;
-          let dv4_row_words: i64 = (($expert as i64) * ($rows as i64) + dv4_row) * dv4_words;
-          let dv4_scale_base: i64 = (($expert as i64) * dv4_scale_rows + dv4_row / 128) * dv4_tiles;
+          // (expert * rows + row) * words, written with its factor 4 (Vx #2362).
+          let dv4_row_words: i64 = (($expert as i64) * ($rows as i64) + $row) * (dv4_k / 16) * 4;
+          let dv4_scale_base: i64 = (($expert as i64) * dv4_scale_rows + $row / 128) * dv4_tiles;
           let mut dv4_sum: f32 = 0.0;
-          let mut dv4_tile: i64 = 0;
-          while dv4_tile < dv4_tiles {
-            let dv4_w0: i32 = word_at!($weight, dv4_row_words, dv4_words, dv4_tiles, dv4_tile, 0, $lane);
-            let dv4_w1: i32 = word_at!($weight, dv4_row_words, dv4_words, dv4_tiles, dv4_tile, 1, $lane);
-            let dv4_w2: i32 = word_at!($weight, dv4_row_words, dv4_words, dv4_tiles, dv4_tile, 2, $lane);
-            let dv4_w3: i32 = word_at!($weight, dv4_row_words, dv4_words, dv4_tiles, dv4_tile, 3, $lane);
-            dv4_sum = fp8_word_terms!(dv4_sum, dv4_w0, $table, $w, $scales, dv4_scale_base, $x, dv4_xo, dv4_tiles, dv4_tile, 0, $lane, dv4_k);
-            dv4_sum = fp8_word_terms!(dv4_sum, dv4_w1, $table, $w, $scales, dv4_scale_base, $x, dv4_xo, dv4_tiles, dv4_tile, 1, $lane, dv4_k);
-            dv4_sum = fp8_word_terms!(dv4_sum, dv4_w2, $table, $w, $scales, dv4_scale_base, $x, dv4_xo, dv4_tiles, dv4_tile, 2, $lane, dv4_k);
-            dv4_sum = fp8_word_terms!(dv4_sum, dv4_w3, $table, $w, $scales, dv4_scale_base, $x, dv4_xo, dv4_tiles, dv4_tile, 3, $lane, dv4_k);
-            dv4_tile = dv4_tile + 4;
+          let mut dv4_at: i64 = ($lane as i64) * 4;
+          while dv4_at < dv4_words {
+            let dv4_w0: i32 = $weight[dv4_row_words + dv4_at] as i32;
+            let dv4_w1: i32 = $weight[dv4_row_words + dv4_at + 1] as i32;
+            let dv4_w2: i32 = $weight[dv4_row_words + dv4_at + 2] as i32;
+            let dv4_w3: i32 = $weight[dv4_row_words + dv4_at + 3] as i32;
+            let dv4_scale: f32 = $scales[dv4_scale_base + dv4_at / 32];
+            let dv4_col: i64 = dv4_xo + dv4_at * 4;
+            dv4_sum = fp8_word_terms!(dv4_sum, dv4_w0, dv4_scale, $x, dv4_col);
+            dv4_sum = fp8_word_terms!(dv4_sum, dv4_w1, dv4_scale, $x, dv4_col + 4);
+            dv4_sum = fp8_word_terms!(dv4_sum, dv4_w2, dv4_scale, $x, dv4_col + 8);
+            dv4_sum = fp8_word_terms!(dv4_sum, dv4_w3, dv4_scale, $x, dv4_col + 12);
+            dv4_at = dv4_at + 128;
           }
           dv4_sum
         }

@@ -1,5 +1,5 @@
-// fp8_moe_down.vx reading four codes a load (#31): the expert weights viewed as u32 (cols % 4 == 0),
-// decoded through each subgroup's table, in fp8_row_dot4!'s order (device.vx), so each term is
+// fp8_moe_down.vx reading sixteen codes a lane step (#31): the expert weights viewed as u32
+// (cols % 16 == 0, else zero terms), in fp8_row_dot4!'s order (device.vx), so each row is
 // fp8_matvec4's. Otherwise as fp8_moe_down.vx:
 // moe_down.vx for e4m3 weights with a float32 scale per 128x128 block. The second half of a decode MoE layer in one launch: out[r] = sum over the k routed experts,
 // in ascending id order, of weight * (down . act[s * cols ..]), with act from moe_gate_up.vx.
@@ -22,13 +22,7 @@ pub fn glm_vx_spawn_fp8_moe4_down(out: &mut Tensor<f32, [?], Memory::HBM>, down:
       let mut ranks = unsafe { Tensor<i32, [8, 32], Memory::SMEM>::uninit() };
       let mut a = unsafe { Tensor<f32, [8, 32], Memory::SMEM>::uninit() };
       let mut part = unsafe { Tensor<f32, [8, 4, 32], Memory::SMEM>::uninit() };
-      let mut table = unsafe { Tensor<f32, [8, 8, 32], Memory::SMEM>::uninit() };
       for w in 0..8 across subgroups {
-        for i in 0..8 {
-          for lane in 0..32 across lanes {
-            table[w][i][lane] = fp8_decode!(i * 32 + lane);
-          }
-        }
         for lane in 0..32 across lanes {
           ranks[w][lane] = id_rank!(ids, k, lane);
         }
@@ -39,8 +33,9 @@ pub fn glm_vx_spawn_fp8_moe4_down(out: &mut Tensor<f32, [?], Memory::HBM>, down:
             if s < k {
               let expert: i32 = ids[slot_of_rank!(ranks, w, k, s)];
               let row: i64 = r as i64;
-              if expert >= 0 && expert < experts {
-                sum = fp8_row_dot4!(down, scales, table, w, act, (s as i64) * (cols as i64), expert, row, rows, cols as i64, lane);
+              if expert >= 0 && expert < experts && cols % 16 == 0 {
+                // act's offset s * cols, written with its factor 4 for x's 16-byte loads.
+                sum = fp8_row_dot4!(down, scales, act, (s as i64) * ((cols as i64) / 4) * 4, expert, row, rows, cols as i64, lane);
               }
             }
             a[w][lane] = sum;

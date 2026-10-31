@@ -65,10 +65,10 @@ heads; each head's arithmetic is mla_chunks_at's, so the logits equal 'chunks' b
 a head count that is a multiple of 4.
 
 ``fp8_kernels='x4'`` runs FP8 Linears through gpu/spawn's fp8_matvec4 and, with ``device_experts``,
-the routed experts through fp8_moe4_gate_up/down (#30, #31): four codes a load, decoded through a
-table. Their summation order differs from the hand kernels', so the logits are close to the default
+the routed experts through fp8_moe4_gate_up/down (#30, #31): sixteen codes a lane step, one 16-byte
+load. Their summation order differs from the hand kernels', so the logits are close to the default
 path's, not equal; each kernel's own order is pinned by gpu/test_spawn_vx_host.py. Widths that are
-not a multiple of 4 keep the default kernels.
+not a multiple of 16 keep the default kernels.
 
 ``matvec_kernels='spawn'`` runs INT4 and BF16 Linears through gpu/spawn's int4_matvec and
 bf16_matvec instead of the hand kernels. gpu/test_spawn_hardware.py checks each against its hand
@@ -464,7 +464,7 @@ class ResidentGLM:
             args = [packed, scales, x, I(rows), I(cols), I(kind)]
         elif fmt == 'fp8':
             codes, scales, (rows, cols) = self._fp8_weight(prefix)
-            if self.fp8_kernels == 'x4' and cols % 4 == 0:
+            if self.fp8_kernels == 'x4' and cols % 16 == 0:
                 if out.shape != (rows,) or x.shape != (cols,):
                     raise ValueError(f'{prefix}: FP8 weight is {rows}x{cols}, got x {x.shape} -> out {out.shape}')
                 self._spawn('fp8_matvec4', out=out, weight=codes.view((rows * cols // 4,), 'uint32'),
@@ -690,8 +690,8 @@ class ResidentGLM:
         common = dict(ids=self.route_ids, k=k, experts=experts, **gate[3])
         gate_args = dict(gate=gate[1][0], up=up[1][0])
         down_args = dict(down=down[1][0])
-        if fmt == 'fp8' and self.fp8_kernels == 'x4' and hidden % 4 == 0 and inter % 4 == 0:
-            kernel = 'fp8_moe4_'  # the codes as u32, four a load (#31)
+        if fmt == 'fp8' and self.fp8_kernels == 'x4' and hidden % 16 == 0 and inter % 16 == 0:
+            kernel = 'fp8_moe4_'  # the codes as u32, sixteen a lane step (#31)
             words = lambda t: t.view((int(np.prod(t.shape)) // 4,), 'uint32')
             gate_args, down_args = dict(gate=words(gate[1][0]), up=words(up[1][0])), dict(down=words(down[1][0]))
         if fmt in ('int4', 'fp8'):

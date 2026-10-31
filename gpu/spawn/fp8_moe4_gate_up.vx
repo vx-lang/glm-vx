@@ -1,6 +1,5 @@
-// fp8_moe_gate_up.vx reading four codes a load (#31): the expert weights viewed as u32 (cols % 4 == 0),
-// decoded through each subgroup's table, in fp8_row_dot4!'s order (device.vx), so each term is
-// fp8_matvec4's. Otherwise as fp8_moe_gate_up.vx:
+// fp8_moe_gate_up.vx reading sixteen codes a lane step (#31): the expert weights viewed as u32
+// (cols % 16 == 0, else zeros), in fp8_row_dot4!'s order (device.vx), so each row is fp8_matvec4's. Otherwise as fp8_moe_gate_up.vx:
 // moe_gate_up.vx for e4m3 weights with a float32 scale per 128x128 block. The first half of a decode MoE layer in one launch: for each of the k routed experts and each
 // of its `inter` rows, act[s * inter + i] = silu(gate . x) * (up . x), where s is the expert's
 // place in ascending id order (the order moe_down.vx sums in). The arithmetic is
@@ -21,13 +20,7 @@ pub fn glm_vx_spawn_fp8_moe4_gate_up(act: &mut Tensor<f32, [?], Memory::HBM>, ga
       let mut ranks = unsafe { Tensor<i32, [4, 32], Memory::SMEM>::uninit() };
       let mut g = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
       let mut u = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
-      let mut table = unsafe { Tensor<f32, [4, 8, 32], Memory::SMEM>::uninit() };
       for w in 0..4 across subgroups {
-        for i in 0..8 {
-          for lane in 0..32 across lanes {
-            table[w][i][lane] = fp8_decode!(i * 32 + lane);
-          }
-        }
         for lane in 0..32 across lanes {
           ranks[w][lane] = id_rank!(ids, k, lane);
         }
@@ -39,9 +32,9 @@ pub fn glm_vx_spawn_fp8_moe4_gate_up(act: &mut Tensor<f32, [?], Memory::HBM>, ga
           let mut us: f32 = 0.0;
           if at < k * inter {
             let expert: i32 = ids[slot_of_rank!(ranks, w, k, s)];
-            if expert >= 0 && expert < experts {
-              gs = fp8_row_dot4!(gate, gate_scales, table, w, x, 0, expert, row, stride, cols as i64, lane);
-              us = fp8_row_dot4!(up, up_scales, table, w, x, 0, expert, (up_row as i64) + row, stride, cols as i64, lane);
+            if expert >= 0 && expert < experts && cols % 16 == 0 {
+              gs = fp8_row_dot4!(gate, gate_scales, x, 0, expert, row, stride, cols as i64, lane);
+              us = fp8_row_dot4!(up, up_scales, x, 0, expert, (up_row as i64) + row, stride, cols as i64, lane);
             }
           }
           g[w][lane] = gs;

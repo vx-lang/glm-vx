@@ -1,12 +1,10 @@
-// FP8 e4m3fn matvec that reads four codes per load: out[r] = sum over columns of
+// FP8 e4m3fn matvec that reads sixteen codes a lane step: out[r] = sum over columns of
 // (decode(w[r, c]) * scale[r / 128, c / 128]) * x[c], one warp of 32 lanes per row, four rows a block.
-// weight is the [rows, cols] code bytes viewed as u32 (cols % 4 == 0, little-endian: byte j of a
-// word is column 4 * word + j). Lane l reads word l of every 128-column tile, columns
-// tile * 128 + 4l .. + 3, so one load per lane covers a scale tile per warp, and it issues the
-// loads of four tiles before it adds any of them. Codes are decoded through a 256-entry table ([8, 32]) in
-// shared memory that each subgroup builds from fp8_decode!, exact for every code.
-// Lane l's order is tile by tile, its four columns in order (device.vx's fp8_row_dot4!); then
-// lanes::sum's tree.
+// weight is the [rows, cols] code bytes viewed as u32 (cols % 16 == 0, little-endian: byte j of a
+// word is column 4 * word + j). Lane l reads words 4l .. 4l + 3 of every 128-word tile, columns
+// tile * 512 + 16l .. + 15, one 16-byte load (Vx #2375), and decodes them with fp8_decode!'s bit
+// cast. Lane l's order is tile by tile, its sixteen columns in order (device.vx's fp8_row_dot4!);
+// then lanes::sum's tree. Other widths write zeros.
 // spawn-include: device.vx
 
 pub fn glm_vx_spawn_fp8_matvec4(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<u32, [?], Memory::HBM>,
@@ -15,18 +13,12 @@ pub fn glm_vx_spawn_fp8_matvec4(out: &mut Tensor<f32, [?], Memory::HBM>, weight:
   spawn on(Topology::Device) {
     for rb in 0..(rows - 1) / 4 + 1 across blocks {
       let mut a = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
-      let mut table = unsafe { Tensor<f32, [4, 8, 32], Memory::SMEM>::uninit() };
       for w in 0..4 across subgroups {
-        for i in 0..8 {
-          for lane in 0..32 across lanes {
-            table[w][i][lane] = fp8_decode!(i * 32 + lane);
-          }
-        }
         for lane in 0..32 across lanes {
           let row: i64 = (rb * 4 + w) as i64;
           let mut sum: f32 = 0.0;
-          if row < (rows as i64) && cols % 4 == 0 {
-            sum = fp8_row_dot4!(weight, scales, table, w, x, 0, 0, row, rows, cols as i64, lane);
+          if row < (rows as i64) && cols % 16 == 0 {
+            sum = fp8_row_dot4!(weight, scales, x, 0, 0, row, rows, cols as i64, lane);
           }
           a[w][lane] = sum;
         }

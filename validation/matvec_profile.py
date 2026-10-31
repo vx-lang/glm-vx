@@ -2,7 +2,7 @@
 
 #30, for --format fp8 (the default), bf16 or int4: the hand kernel (gpu/fp8.vx, bf16.vx, int4.vx),
 gpu/spawn's kernel of the same order through Vx's own path (fp8_matvec, bf16_matvec, int4_matvec), and
-gpu/spawn's kernel that reads four u32 words a lane step (fp8_matvec4 with its table decode,
+gpu/spawn's kernel that reads four u32 words a lane step, one 16-byte load (fp8_matvec4,
 bf16_matvec4, int4_matvec4). Each launch is timed with CUDA events after a 512 MB copy that evicts L2
 and keeps the GPU busy while it is queued (moe_profile.l2_flush), the median of --repeats. The report
 gives GPU time, GB/s for the weight bytes and scales, and the share of the device's peak DRAM

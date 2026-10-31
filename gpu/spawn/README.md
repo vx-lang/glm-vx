@@ -85,7 +85,7 @@ Two launches use the same PTX:
 | `int4_matvec4.vx` | new: `int4_matvec` reading four u32 words a lane step, 32 codes in one group (#30) | 48 (sm_80), 40 (sm_90) |
 | `int4_matmul.vx` | `glm_vx_gpu_int4_matmul` (out is [M, N]) | 40 |
 | `fp8_matvec.vx` | `glm_vx_gpu_fp8_matvec` | 45 |
-| `fp8_matvec4.vx` | new: `fp8_matvec` reading four codes a load (weight viewed as u32), decoded through a shared-memory table (#30) | 56 (sm_80), 48 (sm_90) |
+| `fp8_matvec4.vx` | new: `fp8_matvec` reading sixteen codes a lane step (weight viewed as u32, cols % 16 == 0) as one `ld.global.nc.v4`, decoded by `fp8_decode!`'s bit cast (#30) | 56 (sm_80), 48 (sm_90) |
 | `fp8_matmul.vx` | `glm_vx_gpu_fp8_matmul` (out is [M, N]) | 46 |
 | `gemm_f32.vx` | `glm_vx_gpu_gemm_f32` | 32 |
 | `topk.vx` | `glm_vx_gpu_topk_stable` (its own scratch: `gpu.topk.spawn_buffers`) | 32 |
@@ -109,7 +109,7 @@ Two launches use the same PTX:
 | `bf16_moe_gate_up.vx`, `bf16_moe_down.vx` | new: the same for bf16 experts | 47, 47 |
 | `int4_moe_gate_up.vx`, `int4_moe_down.vx` | new: the same for INT4 experts | 47, 47 |
 | `fp8_moe_gate_up.vx`, `fp8_moe_down.vx` | new: the same for FP8 experts | 69, 56 |
-| `fp8_moe4_gate_up.vx`, `fp8_moe4_down.vx` | new: the FP8 pair reading four codes a load through `fp8_row_dot4!` (#31) | 64, 61 (sm_90) |
+| `fp8_moe4_gate_up.vx`, `fp8_moe4_down.vx` | new: the FP8 pair reading sixteen codes a lane step through `fp8_row_dot4!` (#31) | 80, 64 (sm_80); 72, 56 (sm_90) |
 | `mla_chunks_at.vx` | new: `mla_decode_at` with 32 tokens a chunk, one subgroup a token (#33); equal to rounding | 32 (sm_90) |
 | `mla_heads_at.vx` | new: `mla_chunks_at` with four heads a block, each selected latent row read once for them (#33); equal to `mla_chunks_at` bit for bit; buffers per group of four heads | 32 (sm_80), 58 (sm_90) |
 | `mla_decode.vx` | new: mla_partial and mla_merge in one launch (Vx #2187 code of a group, #2188 arrival counts) | 31 |

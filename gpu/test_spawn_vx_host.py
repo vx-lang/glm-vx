@@ -320,17 +320,6 @@ def test_fp8_matvec(run, rows, cols):
     bits_equal(got, warp_tree(strided_sums((fp8(weight) * per_col) * x, 32)))
 
 
-def fp8_word_order(terms):
-    """fp8_matvec4's per-lane order: lane l takes columns tile * 128 + 4l .. + 3 of each tile in
-    turn. Reorder the columns so that strided_sums(.., 32) adds them in that order (zeros pad the
-    last tile, in lanes that add nothing there)."""
-    rows, cols = terms.shape
-    tiles = -(-cols // 128)
-    padded = np.zeros((rows, tiles * 128), F)
-    padded[:, :cols] = terms
-    return padded.reshape(rows, tiles, 32, 4).transpose(0, 1, 3, 2).reshape(rows, tiles * 128)
-
-
 def fp8_matvec4_case(rows, cols, seed):
     rng = np.random.default_rng(seed)
     weight = rng.integers(0, 256, size=(rows, cols), dtype=np.uint8)
@@ -338,14 +327,15 @@ def fp8_matvec4_case(rows, cols, seed):
     scales = rng.uniform(0.001, 0.1, size=(-(-rows // 128), -(-cols // 128))).astype(F)
     x = rng.normal(size=cols).astype(F)
     per_col = scales[np.arange(rows)[:, None] // 128, np.arange(cols)[None, :] // 128]
-    expected = warp_tree(strided_sums(fp8_word_order((fp8(weight) * per_col) * x), 32))
+    # Lane l takes columns tile * 512 + 16l .. + 15 of each tile in turn.
+    expected = warp_tree(strided_sums(lane_run_order((fp8(weight) * per_col) * x, 16), 32))
     return weight, scales, x, expected
 
 
-# Four codes a load (a u32 view of the bytes), decoded through a shared-memory table: (5, 132) has
-# a partial last tile, (300, 1000) one with a word past the end of some lanes, and 6144 and 16384
-# are GLM-5.3's q_a/MLP and o_proj widths (tile counts that are and are not multiples of 4).
-@pytest.mark.parametrize('rows,cols', [(5, 132), (300, 1000), (130, 6144), (4, 16384), (3, 640)])
+# Sixteen codes a lane step (a u32 view of the bytes, cols % 16 == 0): (5, 144) has a partial
+# tile, (300, 1008) one that ends inside a scale block, 576 is kv_a's width, and 6144 and 16384
+# are GLM-5.3's q_a/MLP and o_proj widths.
+@pytest.mark.parametrize('rows,cols', [(5, 144), (300, 1008), (130, 6144), (4, 16384), (3, 640), (2, 576)])
 def test_fp8_matvec4(run, rows, cols):
     weight, scales, x, expected = fp8_matvec4_case(rows, cols, rows * 13 + cols)
     got = run('fp8_matvec4', out=np.zeros(rows, F), weight=weight.view(np.uint32).reshape(-1), scales=scales.reshape(-1),
@@ -523,8 +513,8 @@ def test_fused_moe_equals_the_per_expert_kernels(run, fmt, experts, k, inter, hi
 
 # fp8_moe4_gate_up and fp8_moe4_down (#31): the u32 view of the codes, each term fp8_matvec4's.
 # They must leave what fp8_matvec4 on each expert's slice, swiglu, fp8_matvec4 of the down rows and
-# scaled_add in ascending id order leave, bit for bit. Widths are multiples of 4.
-@pytest.mark.parametrize('experts,k,inter,hidden', [(1, 1, 4, 8), (12, 8, 12, 132), (256, 8, 132, 300), (40, 13, 8, 132), (64, 32, 4, 68)])
+# scaled_add in ascending id order leave, bit for bit. Widths are multiples of 16.
+@pytest.mark.parametrize('experts,k,inter,hidden', [(1, 1, 16, 16), (12, 8, 16, 144), (256, 8, 144, 304), (40, 13, 16, 144), (64, 32, 16, 80)])
 def test_fp8_moe4_equals_fp8_matvec4_per_expert(run, experts, k, inter, hidden):
     rng = np.random.default_rng(experts * 5 + inter)
     (gate, _), (up, _), (down, _) = (moe_weights(rng, 'fp8', experts, r, c) for r, c in

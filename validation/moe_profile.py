@@ -33,7 +33,7 @@ import numpy as np
 from validation.layer_profile import METRICS, number, parse, peak_bandwidth
 
 HIDDEN, INTER, EXPERTS = 6144, 2048, 256
-# fp8x4: the same FP8 weights through fp8_moe4_* (four codes a load, #31).
+# fp8x4: the same FP8 weights through fp8_moe4_* (sixteen codes a lane step, #31).
 KERNELS = {'f32': ('moe_gate_up', 'moe_down'), 'bf16': ('bf16_moe_gate_up', 'bf16_moe_down'),
            'fp8': ('fp8_moe_gate_up', 'fp8_moe_down'), 'fp8x4': ('fp8_moe4_gate_up', 'fp8_moe4_down'),
            'int4': ('int4_moe_gate_up', 'int4_moe_down')}

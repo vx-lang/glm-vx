@@ -214,7 +214,7 @@ def test_fp8_resident_matches_float32_resident_on_the_same_weights():
 def test_fp8_x4_kernels_match_the_hand_kernels(graph):
     # fp8_kernels='x4' (#30, #31): fp8_matvec4 for the Linears and fp8_moe4_* for the routed experts,
     # another summation order, so close to the default path rather than equal; the same argmax.
-    model, _ = fp8_model(31, hidden_size=136, moe_intermediate_size=132)
+    model, _ = fp8_model(31, hidden_size=144, moe_intermediate_size=144)
     runs = {}
     for kernels in ('hand', 'x4'):
         resident = ResidentGLM(model, ctx=Context(), max_tokens=32, device_experts=True, graph=graph, fp8_kernels=kernels)

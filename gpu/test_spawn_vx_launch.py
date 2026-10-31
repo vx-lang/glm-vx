@@ -117,7 +117,7 @@ def expert_weights(rng, fmt, experts, rows, cols):
     """One projection for all experts in `fmt`, named as the expert_matvec kernels name them."""
     if fmt == 'bf16':
         return dict(weight=bf16(rng, experts * rows * cols))
-    if fmt in ('fp8', 'fp8x4'):  # fp8x4: the codes viewed as u32 (fp8_moe4_*), cols % 4 == 0
+    if fmt in ('fp8', 'fp8x4'):  # fp8x4: the codes viewed as u32 (fp8_moe4_*), cols % 16 == 0
         codes = fp8(rng, experts * rows * cols)
         return dict(weight=codes.view('u4') if fmt == 'fp8x4' else codes,
                     scales=rng.uniform(0.001, 0.1, size=experts * -(-rows // 128) * -(-cols // 128)).astype('f4'))
@@ -244,8 +244,8 @@ CASES = {
     **{f'{p}expert_matvec': expert_matvec(f) for p, f in (('', 'f32'), ('bf16_', 'bf16'), ('fp8_', 'fp8'), ('int4_', 'int4'))},
     **{f'{p}moe_gate_up': moe_gate_up(f) for p, f in (('', 'f32'), ('bf16_', 'bf16'), ('fp8_', 'fp8'), ('int4_', 'int4'))},
     **{f'{p}moe_down': moe_down(f) for p, f in (('', 'f32'), ('bf16_', 'bf16'), ('fp8_', 'fp8'), ('int4_', 'int4'))},
-    'fp8_moe4_gate_up': moe_gate_up('fp8x4', cols=260),
-    'fp8_moe4_down': moe_down('fp8x4', cols=132),
+    'fp8_moe4_gate_up': moe_gate_up('fp8x4', cols=272),
+    'fp8_moe4_down': moe_down('fp8x4', cols=144),
 }
 
 

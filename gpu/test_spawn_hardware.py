@@ -188,10 +188,10 @@ def test_spawn_mla_chunks_at_matches_mla_decode_at(context, count, splits):
     np.testing.assert_allclose(outs['mla_chunks_at'], outs['mla_decode_at'], rtol=1e-4, atol=1e-5)
 
 
-# fp8_matvec4 (four codes a load, table decode, #30) against the NumPy model of its order, bit for
+# fp8_matvec4 (sixteen codes a lane step, one 16-byte load, #30) against the NumPy model of its order, bit for
 # bit: the kernel has no fused multiply-adds, so the device rounds as NumPy does.
 @pytest.mark.skipif(not (BUILD / 'spawn/fp8_matvec4.ptx').exists(), reason='fp8_matvec4 not built (gpu/spawn/build.sh)')
-@pytest.mark.parametrize('rows,cols', [(5, 132), (300, 1000), (6144, 16384), (2048, 6144)])
+@pytest.mark.parametrize('rows,cols', [(5, 144), (300, 1008), (6144, 16384), (2048, 6144)])
 def test_spawn_fp8_matvec4_matches_its_order(context, rows, cols):
     from gpu.test_spawn_vx_host import fp8_matvec4_case
     weight, scales, x, expected = fp8_matvec4_case(rows, cols, rows * 13 + cols)
