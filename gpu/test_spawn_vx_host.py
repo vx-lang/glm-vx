@@ -823,6 +823,58 @@ def test_topk_chunks_and_merge_at_read_tokens_from_the_step(run, tokens):
         np.testing.assert_array_equal(out_ids[0], np.argsort(-scores[:tokens], kind='stable')[:k])
 
 
+# topk_radix_pass rounds 0 .. 8, then topk_radix_sort (#32): the same selection by radix select,
+# eight one-byte rounds over the key and the position reversed, then a gather and one sort. Round r
+# counts into row r of hists (hist, its view) and reads only the rows below; the sort clears them.
+def topk_radix(run, scores, tokens, k, at=None):
+    hists, vals, count = np.zeros(8 * 256, np.uint32), np.zeros(2048, np.int64), np.zeros(1, np.uint32)
+    size = dict(tokens=tokens) if at is None else dict(step=at[0], max_tokens=at[1])
+    suffix = '' if at is None else '_at'
+    for r in range(9):
+        row = slice(min(r, 7) * 256, min(r, 7) * 256 + 256)
+        out = run('topk_radix_pass' + suffix, hist=hists[row].copy(), hists=hists, vals=vals, count=count,
+                  scores=scores.view(np.int32), k=k, round=r, **size)
+        if r < 8:
+            hists[row] = out['hist']
+        vals, count = out['vals'], out['count']
+    n = min(k, tokens)
+    out = run('topk_radix_sort' + suffix, out_ids=np.full(k, -7, np.int32), vals=vals, count=count, hists=hists, k=k,
+              **size)
+    assert not out['count'].any() and not out['hists'].any()  # ready for the next call
+    return out['out_ids'][:n], count[0]
+
+
+@pytest.mark.parametrize('tokens,k,ties', [(2049, 2048, True), (5000, 2048, True), (6145, 64, False), (20000, 2048, True),
+                                           (70000, 2048, False), (9000, 1, True), (3000, 2048, 'equal'), (100, 7, False)])
+def test_topk_radix_matches_stable_argsort(run, tokens, k, ties):
+    rng = np.random.default_rng(tokens * 5 + k)
+    if ties == 'equal':
+        scores = np.zeros(tokens, F)  # every round but the last ties; the position bytes decide
+    else:
+        scores = rng.integers(-4, 4, size=tokens).astype(F) if ties else rng.normal(size=tokens).astype(F)
+    scores[3], scores[7], scores[9], scores[5] = np.nan, -0.0, np.inf, -np.inf  # NaN sorts last; -0.0 ties +0.0
+    scores[-1] = np.inf
+    got, gathered = topk_radix(run, scores, tokens, k)
+    assert gathered == min(k, tokens)
+    np.testing.assert_array_equal(got, np.argsort(-scores, kind='stable')[:min(k, tokens)])
+
+
+# The same under graph replay: tokens from the step buffer, nine passes of ceil(max_tokens / 4096)
+# blocks and one sort, whatever the step's context; up to 2048 tokens they write no ids.
+@pytest.mark.parametrize('tokens', [100, 2048, 2049, 6000, 9000, 20000])
+def test_topk_radix_at_reads_tokens_from_the_step(run, tokens):
+    max_tokens, k = 20000, 2048
+    rng = np.random.default_rng(tokens)
+    scores = rng.integers(-50, 50, size=max_tokens).astype(F)
+    step = np.array([tokens - 1, tokens, min(k, tokens), 1], np.int32)
+    got, gathered = topk_radix(run, scores, tokens, k, at=(step, max_tokens))
+    if tokens <= 2048:
+        assert gathered == 0
+        np.testing.assert_array_equal(got, -7)  # topk_sort_at's
+    else:
+        np.testing.assert_array_equal(got, np.argsort(-scores[:tokens], kind='stable')[:k])
+
+
 @pytest.mark.parametrize('experts,k,ties', [(256, 8, False), (256, 8, True), (7, 3, True), (1, 1, False), (33, 8, True)])
 def test_router(run, experts, k, ties):
     rng = np.random.default_rng(experts * 10 + k)

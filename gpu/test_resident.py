@@ -385,12 +385,17 @@ def test_long_contexts_select_through_chunk_sorts_and_merges(index_topk):
     resident = {topk: ResidentGLM(model, ctx=Context(), max_tokens=7000, topk=topk) for topk in ('sort', 'radix')}
     # Under graph replay the launches are those captured for max_tokens, reading tokens from the step buffer.
     resident['graph'] = ResidentGLM(model, ctx=Context(), max_tokens=7000, topk='sort', graph=True, device_experts=True)
+    # long_topk='select': topk_radix_pass rounds and topk_radix_sort in place of the chunk sorts and merges.
+    resident['select'] = ResidentGLM(model, ctx=Context(), max_tokens=7000, topk='sort', long_topk='select')
+    resident['graph_select'] = ResidentGLM(model, ctx=Context(), max_tokens=7000, topk='sort', long_topk='select',
+                                           graph=True, device_experts=True)
     try:
         for tokens in (2049, 4096, 7000):
             scores = rng.integers(-20, 20, size=tokens).astype(np.float32)  # ties
             scores[[3, 7, 9]] = np.nan, -0.0, np.inf
             want = np.argsort(-scores, kind='stable')[:min(index_topk, tokens)]
-            resident['graph'].step.upload(np.array([tokens - 1, tokens, min(index_topk, tokens), 1], np.int32))
+            for name in ('graph', 'graph_select'):
+                resident[name].step.upload(np.array([tokens - 1, tokens, min(index_topk, tokens), 1], np.int32))
             for r in resident.values():
                 r.scores.view((tokens,)).upload(scores)
                 r._select(tokens)
@@ -399,6 +404,10 @@ def test_long_contexts_select_through_chunk_sorts_and_merges(index_topk):
         assert sort['topk_chunks'] == 3 and sort['topk_merge'] == 1 + 1 + 2 and 'topk_stable' not in sort
         assert radix['topk_stable'] == 3 and 'topk_chunks' not in radix
         assert graph['topk_chunks_at'] == 3 and graph['topk_merge_at'] == 3 * 2 and 'topk_stable_long_at' not in graph
+        select, graph_select = resident['select'].launches, resident['graph_select'].launches
+        assert select['topk_radix_pass'] == 3 * 9 and select['topk_radix_sort'] == 3 and 'topk_chunks' not in select
+        assert graph_select['topk_radix_pass_at'] == 3 * 9 and graph_select['topk_radix_sort_at'] == 3
+        assert 'topk_chunks_at' not in graph_select and 'topk_stable_long_at' not in graph_select
     finally:
         for r in resident.values():
             r.close()

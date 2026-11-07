@@ -1,0 +1,150 @@
+// The stable top-k past 2048 tokens by radix select (#32), step 1 of 2: call it with round = 0 ..
+// 8, then topk_radix_sort.vx. Each position is one 64-bit value, its key (topk_key: bigger score,
+// bigger key; NaN is 0) above its position reversed (2^32 - 1 - position), so the values are
+// distinct and the first min(k, tokens) of np.argsort(-scores, kind='stable') are the min(k,
+// tokens) largest. Rounds 0 .. 7 find byte 7 - r of the threshold, the smallest selected value:
+//   - Every block first replays rounds 0 .. r - 1 from their histograms (row q of hists, [8 * 256]):
+//     above[d] = the count of bytes >= d, by doubling; the largest d with above[d] >= the number
+//     still to select is byte 7 - q of the threshold. When d's bucket holds exactly the number
+//     still to select, every value in it is selected and the rest is decided: the later rounds
+//     count nothing.
+//   - Then it counts, in a shared histogram, byte 7 - r of the values whose bytes above it equal
+//     the threshold's, and adds its counts to hist: row r of hists, which it reads only below r.
+// Round 8 replays all eight and gathers every value whose found bytes are at or above the
+// threshold's, min(k, tokens) of them: each takes a slot of vals from an atomic count, so their
+// order there depends on timing; topk_radix_sort.vx sorts them and clears hists and count, which
+// must be zero at the first call. Each round reads every score once. (The replay would be code
+// after the nest of blocks in one launch, but Vx cannot keep a shared tensor there yet.)
+// Scores arrive as raw float32 bits in an i32 tensor; k <= 2048, tokens < 2^31.
+import core::sync::atomic;
+
+// Order-preserving map from float32 bits to [0, 2^32): bigger key == bigger score; NaN is 0.
+macro_rules! topk_key {
+    ($bits:expr) => {
+        unsafe {
+          let dv_b: i64 = ($bits as i64) & 4294967295;
+          let dv_man: i64 = dv_b & 8388607;
+          let mut dv_key: i64 = dv_b + 2147483648;
+          if dv_b >= 2147483648 { dv_key = 4294967295 - dv_b; }
+          if dv_b == 2147483648 { dv_key = 2147483648; }
+          if ((dv_b >> 23) & 255) == 255 && dv_man != 0 { dv_key = 0; }
+          dv_key
+        }
+    };
+}
+
+pub fn glm_vx_spawn_topk_radix_pass(hist: &mut Tensor<u32, [?], Memory::HBM>, hists: &Tensor<u32, [?], Memory::HBM>,
+                                    vals: &mut Tensor<i64, [?], Memory::HBM>, count: &mut Tensor<u32, [?], Memory::HBM>,
+                                    scores: &Tensor<i32, [?], Memory::HBM>, tokens: i32, k: i32, round: i32) -> void {
+  spawn on(Topology::Device) {
+    for b in 0..(tokens + 4095) / 4096 across blocks {
+      let mut counts = unsafe { Tensor<i32, [256], Memory::SMEM>::uninit() };
+      let mut above_a = unsafe { Tensor<i32, [256], Memory::SMEM>::uninit() };
+      let mut above_b = unsafe { Tensor<i32, [256], Memory::SMEM>::uninit() };
+      let local = Tensor<u32, [256], Memory::SMEM>::fill(0u32);
+      // Lane 0 keeps the threshold's two halves as found so far (0, 1), the number still to
+      // select (2), its bits found (3) and whether the rest is decided (4).
+      let mut found = unsafe { Tensor<i64, [5], Memory::SMEM>::uninit() };
+      for l in 0..256 across lanes {
+        if l == 0 {
+          let needed: i32 = k.min(tokens);
+          found[0] = 0;
+          found[1] = 0;
+          found[2] = needed as i64;
+          found[3] = 0;
+          let mut decided: i64 = 0;
+          if needed <= 0 || k > 2048 || round < 0 || round > 8 { decided = 1; }
+          found[4] = decided;
+        }
+      }
+      for q in 0..round.min(8) {
+        for l in 0..256 across lanes {
+          let c: i32 = hists[q * 256 + l] as i32;
+          counts[l] = c;
+          above_a[l] = c;
+        }
+        for s in 0..4 {
+          for l in 0..256 across lanes {
+            let mut v: i32 = above_a[l];
+            if l + (1 << (s * 2)) < 256 { v = v + above_a[l + (1 << (s * 2))]; }
+            above_b[l] = v;
+          }
+          for l in 0..256 across lanes {
+            let mut v: i32 = above_b[l];
+            if l + (2 << (s * 2)) < 256 { v = v + above_b[l + (2 << (s * 2))]; }
+            above_a[l] = v;
+          }
+        }
+        for l in 0..256 across lanes {
+          if l == 0 {
+            if found[4] == 0 {
+              // The largest d with above[d] >= needed; above[0] >= needed always.
+              let needed: i32 = found[2] as i32;
+              let mut lo: i32 = 0;
+              let mut hi: i32 = 255;
+              while lo < hi {
+                let mid: i32 = (lo + hi + 1) / 2;
+                if above_a[mid] >= needed { lo = mid; } else { hi = mid - 1; }
+              }
+              let mut over: i32 = 0;
+              if lo < 255 { over = above_a[lo + 1]; }
+              let left: i32 = needed - over;
+              let shift: i64 = (24 - 8 * (q % 4)) as i64;
+              if q < 4 { found[0] = found[0] + ((lo as i64) << shift); } else { found[1] = found[1] + ((lo as i64) << shift); }
+              found[2] = left as i64;
+              found[3] = (8 * (q + 1)) as i64;
+              if counts[lo] == left { found[4] = 1; }
+            }
+          }
+        }
+      }
+      for l in 0..256 across lanes {
+        let high: i64 = found[0];
+        let low: i64 = found[1];
+        let bits: i32 = found[3] as i32;
+        let decided: bool = found[4] != 0;
+        let end: i32 = tokens.min(b * 4096 + 4096);
+        let mut i: i32 = b * 4096 + l;
+        if round < 8 && !decided {
+          // Round r < 4 counts byte 3 - r of the key, round r >= 4 byte 7 - r of the position half.
+          let shift: i64 = (24 - 8 * (round % 4)) as i64;
+          while i < end {
+            let key: i64 = topk_key!(scores[i]);
+            let place: i64 = 4294967295 - (i as i64);
+            let mut half: i64 = key;
+            let mut known: i64 = high;
+            let mut same: bool = true;
+            if round >= 4 { half = place; known = low; same = key == high; }
+            if round % 4 != 0 { same = same && (half >> (shift + 8)) == (known >> (shift + 8)); }
+            if same {
+              let _o = atomic_fetch_add_u32(&local, ((half >> shift) & 255) as i32, 1u32, AtomicOrdering::Relaxed);
+            }
+            i = i + 256;
+          }
+        }
+        if round == 8 && bits > 0 {
+          while i < end {
+            let key: i64 = topk_key!(scores[i]);
+            let place: i64 = 4294967295 - (i as i64);
+            let mut taken: bool = false;
+            if bits <= 32 {
+              taken = (key >> ((32 - bits) as i64)) >= (high >> ((32 - bits) as i64));
+            } else {
+              taken = key > high || (key == high && (place >> ((64 - bits) as i64)) >= (low >> ((64 - bits) as i64)));
+            }
+            if taken {
+              let at: u32 = atomic_fetch_add_u32(count, 0, 1u32, AtomicOrdering::Relaxed);
+              vals[at as i64] = (key - 2147483648) * 4294967296 + place;
+            }
+            i = i + 256;
+          }
+        }
+      }
+      for l in 0..256 across lanes {
+        let c: u32 = local[l];
+        if round < 8 && c != 0u32 { let _g = atomic_fetch_add_u32(hist, l, c, AtomicOrdering::Relaxed); }
+      }
+    }
+  }
+  return;
+}

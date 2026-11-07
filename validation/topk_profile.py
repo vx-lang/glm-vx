@@ -3,8 +3,9 @@
 gpu/topk.vx's radix select (topk_stable, one block, 256 histogram rows in device memory cleared
 and summed four times), gpu/spawn's topk_sort (one shared-memory bitonic sort, up to 2048
 tokens) and, past 2048 tokens, topk_chunks then topk_merge rounds (a block sorts each 2048-token
-chunk, then rows merge pairwise), at GLM-5.3's index_topk of 2048. The chunk path's time is that
-of all its launches, back to back on one stream. Each launch is timed with CUDA events after a 512 MB
+chunk, then rows merge pairwise) or topk_radix_pass rounds then topk_radix_sort (eight one-byte
+rounds of atomic counts over every block, a gather, one sort), at GLM-5.3's index_topk of 2048.
+The chunk and select paths' times are those of all their launches, back to back on one stream. Each launch is timed with CUDA events after a 512 MB
 copy (moe_profile.l2_flush), the median of --repeats; every id list is checked against
 np.argsort(-scores, kind='stable').
 
@@ -19,7 +20,7 @@ import numpy as np
 from validation.moe_profile import event_us
 
 K = 2048
-TOKENS = [64, 256, 1024, 2048, 8192, 32768, 131072]
+TOKENS = [64, 256, 1024, 2048, 8192, 32768, 131072, 1 << 20]
 
 
 def main():
@@ -41,13 +42,17 @@ def main():
     sort = SpawnKernel(ctx, build / 'spawn' / 'topk_sort.ptx')
     chunk_sort = SpawnKernel(ctx, build / 'spawn' / 'topk_chunks.ptx')
     merge = SpawnKernel(ctx, build / 'spawn' / 'topk_merge.ptx')
+    passes = SpawnKernel(ctx, build / 'spawn' / 'topk_radix_pass.ptx')
+    gather_sort = SpawnKernel(ctx, build / 'spawn' / 'topk_radix_sort.ptx')
+    hists = ctx.tensor((8 * 256,), 'uint32', np.zeros(8 * 256, 'u4').tobytes())
+    vals, count = ctx.tensor((2048,), 'int64'), ctx.tensor((1,), 'uint32', np.zeros(1, 'u4').tobytes())
     results = []
     for tokens in TOKENS:
         scores = rng.normal(size=tokens).astype('f4')
         want = np.argsort(-scores, kind='stable')[:min(K, tokens)]
         d_scores = ctx.tensor((tokens,), 'int32', scores.view('i4').tobytes())
         scratch = ctx.tensor((scratch_ints(tokens, K),), 'int32')
-        outs = {name: ctx.tensor((min(K, tokens),), 'int32') for name in (('radix', 'sort') if tokens <= 2048 else ('radix', 'merge'))}
+        outs = {name: ctx.tensor((min(K, tokens),), 'int32') for name in (('radix', 'sort') if tokens <= 2048 else ('radix', 'merge', 'select'))}
         chunks = -(-tokens // 2048)
         lists = [ctx.tensor((chunks, 2048), 'int64') for _ in range(2)]
 
@@ -59,11 +64,17 @@ def main():
                              tokens=tokens, k=K)
                 count, r = -(-count // 2), r + 1
 
+        def select(out):
+            for r in range(9):
+                passes.launch(stream=stream, hist=hists.view((256,), 'uint32', offset=min(r, 7) * 1024), hists=hists,
+                              vals=vals, count=count, scores=d_scores, tokens=tokens, k=K, round=r)
+            gather_sort.launch(stream=stream, out_ids=out, vals=vals, count=count, hists=hists, tokens=tokens, k=K)
+
         runs = {
             'radix': lambda out: radix.launch((1,), (256,), [out, d_scores, scratch, C.c_int32(tokens), C.c_int32(K)],
                                               stream=stream),
             'sort': lambda out: sort.launch(stream=stream, out_ids=out, scores=d_scores, tokens=tokens, k=K),
-            'merge': chunks_and_merge}
+            'merge': chunks_and_merge, 'select': select}
         for name, out in outs.items():
             runs[name](out)
             stream.synchronize()
@@ -76,9 +87,10 @@ def main():
     args.output.write_text(json.dumps(dict(k=K, results=results), indent=2) + '\n')
     by = {(r['kernel'], r['tokens']): r['us'] for r in results}
     lines = [f'# Stable top-k, k = {K}. CUDA events, L2 flushed, median of {args.repeats}.', '',
-             '| tokens | topk_stable (radix) us | topk_sort us | topk_chunks + topk_merge us |', '|---|---|---|---|']
+             '| tokens | topk_stable (radix) us | topk_sort us | topk_chunks + topk_merge us | topk_radix_pass + topk_radix_sort us |',
+             '|---|---|---|---|---|']
     cell = lambda name, t: f"{by[(name, t)]:.1f}" if (name, t) in by else '-'
-    lines += [f"| {t} | {cell('radix', t)} | {cell('sort', t)} | {cell('merge', t)} |" for t in TOKENS]
+    lines += [f"| {t} | {cell('radix', t)} | {cell('sort', t)} | {cell('merge', t)} | {cell('select', t)} |" for t in TOKENS]
     text = '\n'.join(lines) + '\n'
     args.output.with_suffix('.md').write_text(text)
     print(text)

@@ -15,7 +15,8 @@
 # skip the ncu pass where a container blocks its counters; it falls back to events anyway).
 # Use OMP_NUM_THREADS well below the host's vCPU count (NumPy thrashes on 128-vCPU pods).
 #
-# Toolchain: one vxc bundle from Vx main, a9d832fd or later (mla_heads_at's lane-0 writes, and
+# Toolchain: one vxc bundle from Vx main, 60fea665 or later (#2949, #2943, #2969: topk_radix's
+# atomics; #2938: mla_heads_at's lane rows in registers; a9d832fd: its lane-0 writes, and
 # #2648's shfl.bfly sums; #2375: read-only and 16-byte loads;
 # #2363: bf16_decode!'s f32::from_bits calls in one across loop; #2240: mla_decode_at reads its step
 # buffer; #2247: its 1024-thread block is declared to ptxas, or the launch is refused). It also has

@@ -208,7 +208,10 @@ def check_params(ptx: str, entry: str, params):
         global_reg = re.search(rf'cvta\.to\.global\.u64\s+(%rd\d+), {re.escape(reg[1])};', body)
         base = global_reg[1] if global_reg else reg[1]
         addresses = derived(body, base)
-        if any(re.search(rf'st\.global(?:\.v[24])?\.\w+\s+\[{re.escape(a)}([+-]\d+)?\]', body) for a in addresses):
+        # An atomic read-modify-write (core::sync::atomic) changes the tensor as a store does.
+        if any(re.search(rf'st\.global(?:\.v[24])?\.\w+\s+\[{re.escape(a)}([+-]\d+)?\]', body)
+               or re.search(rf'(?:atom|red)\.global(?:\.\w+)+\s+(?:%\w+,\s*)?\[{re.escape(a)}([+-]\d+)?\]', body)
+               for a in addresses):
             stored.add(p['name'])
         # Element width: loads through this tensor must be as wide as its element in the manifest,
         # which catches a manifest whose read-only tensors of different types are out of place.
