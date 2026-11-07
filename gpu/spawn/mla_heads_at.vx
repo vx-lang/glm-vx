@@ -29,8 +29,8 @@ pub fn glm_vx_spawn_mla_heads_at(out: &mut Tensor<f32, [?, ?], Memory::HBM>, num
         if split < splits && heads > 0 && heads % 4 == 0 && rank > 0 && rank <= 1024 && rope_dim >= 0 && rope_dim <= 1024
            && tokens >= 0 && count >= 0 && selection_stride == 0 && splits > 0 && threads >= 0 {
           let mut a = unsafe { Tensor<f32, [32, 4, 32], Memory::SMEM>::uninit() };
-          let mut score = unsafe { Tensor<f32, [32, 4, 32], Memory::SMEM>::uninit() };
-          let mut token_of = unsafe { Tensor<i32, [32, 32], Memory::SMEM>::uninit() };
+          let mut score = unsafe { Tensor<f32, [32, 4], Memory::SMEM>::uninit() };
+          let mut token_of = unsafe { Tensor<i32, [32], Memory::SMEM>::uninit() };
           let mut p = unsafe { Tensor<f32, [128], Memory::SMEM>::uninit() };
           let mut fold = unsafe { Tensor<f32, [4, 3], Memory::SMEM>::uninit() };
           let mut acc = unsafe { Tensor<f32, [4, 1024], Memory::SMEM>::uninit() };
@@ -85,7 +85,8 @@ pub fn glm_vx_spawn_mla_heads_at(out: &mut Tensor<f32, [?, ?], Memory::HBM>, num
               let t1: f32 = lanes::sum(&a[w][1], 32);
               let t2: f32 = lanes::sum(&a[w][2], 32);
               let t3: f32 = lanes::sum(&a[w][3], 32);
-              // Each lane keeps a copy (a lane loop in a subgroup has 32 passes); readers take lane 0's.
+              // Lane 0 keeps the warp's token and scores for the loops after the barrier (a write under
+              // `lane == 0` passes the race proof from Vx a9d832fd on).
               for lane in 0..32 across lanes {
                 let q: i32 = chunk * 32 + w;
                 let mut token: i32 = -1;
@@ -93,11 +94,13 @@ pub fn glm_vx_spawn_mla_heads_at(out: &mut Tensor<f32, [?, ?], Memory::HBM>, num
                   let candidate: i32 = selected[split + q * splits];
                   if candidate >= 0 && candidate < tokens { token = candidate; }
                 }
-                token_of[w][lane] = token;
-                score[w][0][lane] = t0 * scale;
-                score[w][1][lane] = t1 * scale;
-                score[w][2][lane] = t2 * scale;
-                score[w][3][lane] = t3 * scale;
+                if lane == 0 {
+                  token_of[w] = token;
+                  score[w][0] = t0 * scale;
+                  score[w][1] = t1 * scale;
+                  score[w][2] = t2 * scale;
+                  score[w][3] = t3 * scale;
+                }
               }
             }
             // Each head's step: fold[g] = (next_m, alpha, 1 when the chunk has a valid token).
@@ -108,8 +111,8 @@ pub fn glm_vx_spawn_mla_heads_at(out: &mut Tensor<f32, [?, ?], Memory::HBM>, num
               let mut any: i32 = 0;
               let mut w: i32 = 0;
               while w < 32 {
-                if token_of[w][0] >= 0 {
-                  if any == 0 || score[w][g][0] > chunk_max { chunk_max = score[w][g][0]; }
+                if token_of[w] >= 0 {
+                  if any == 0 || score[w][g] > chunk_max { chunk_max = score[w][g]; }
                   any = 1;
                 }
                 w = w + 1;
@@ -129,7 +132,7 @@ pub fn glm_vx_spawn_mla_heads_at(out: &mut Tensor<f32, [?, ?], Memory::HBM>, num
               let g: i32 = i / 32;
               let w: i32 = i % 32;
               let mut weight: f32 = 0.0;
-              if token_of[w][0] >= 0 { weight = (score[w][g][0] - fold[g][0]).fast_exp(); }
+              if token_of[w] >= 0 { weight = (score[w][g] - fold[g][0]).fast_exp(); }
               p[i] = weight;
             }
             for t in 0..1024 across lanes {
@@ -140,7 +143,7 @@ pub fn glm_vx_spawn_mla_heads_at(out: &mut Tensor<f32, [?, ?], Memory::HBM>, num
                 let mut s3: f32 = acc[3][t] * fold[3][1];
                 let mut w: i32 = 0;
                 while w < 32 {
-                  let token: i32 = token_of[w][0];
+                  let token: i32 = token_of[w];
                   if token >= 0 {
                     let v: f32 = cache_latent[token * rank + t];
                     s0 = s0 + p[w] * v;
@@ -162,7 +165,7 @@ pub fn glm_vx_spawn_mla_heads_at(out: &mut Tensor<f32, [?, ?], Memory::HBM>, num
                 let mut sum: f32 = state[g][1] * fold[g][1];
                 let mut w: i32 = 0;
                 while w < 32 {
-                  if token_of[w][0] >= 0 { sum = sum + p[g * 32 + w]; }
+                  if token_of[w] >= 0 { sum = sum + p[g * 32 + w]; }
                   w = w + 1;
                 }
                 state[g][0] = fold[g][0];

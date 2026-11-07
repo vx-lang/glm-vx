@@ -16,7 +16,9 @@ also cover every pass. A kernel whose rows have a run-time length writes a rank-
 times numbers; `launch.py` passes a rank-2 `DeviceTensor` as its 7-word descriptor. A row's
 index may then be anything, as in topk's `hist[t][digit]`.
 
-All 53 kernels build with Vx main from 4ecbecb9 on. That commit (#2375, Vx #2362) loads a `&`
+All 53 kernels build with Vx main from a9d832fd on. Its race proof accepts mla_heads_at's writes
+under `lane == 0`, and since #2648 every `lanes::` reduction is a shfl.bfly tree, so each lane gets
+lane 0's bits. 4ecbecb9 (#2375, Vx #2362) loads a `&`
 tensor through the read-only cache (`ld.global.nc`) and, since the machine files give HBM
 `alignment: 16 B`, four words at a 16-byte boundary as one `ld.global.nc.v4`: bf16_matvec4 and
 int4_matvec4 read their weights and x that way. Every `&` tensor must then start on 16 bytes;
@@ -111,7 +113,7 @@ Two launches use the same PTX:
 | `fp8_moe_gate_up.vx`, `fp8_moe_down.vx` | new: the same for FP8 experts | 69, 56 |
 | `fp8_moe4_gate_up.vx`, `fp8_moe4_down.vx` | new: the FP8 pair reading sixteen codes a lane step through `fp8_row_dot4!` (#31) | 80, 64 (sm_80); 72, 56 (sm_90) |
 | `mla_chunks_at.vx` | new: `mla_decode_at` with 32 tokens a chunk, one subgroup a token (#33); equal to rounding | 32 (sm_90) |
-| `mla_heads_at.vx` | new: `mla_chunks_at` with four heads a block, each selected latent row read once for them (#33); equal to `mla_chunks_at` bit for bit; buffers per group of four heads | 32 (sm_80), 58 (sm_90) |
+| `mla_heads_at.vx` | new: `mla_chunks_at` with four heads a block, each selected latent row read once for them (#33); equal to `mla_chunks_at` bit for bit; buffers per group of four heads; lane 0 keeps each warp's token and scores (Vx a9d832fd) | 32 (sm_80), 32 (sm_90; ptxas's choice for a 1024-thread block, 32 B spills) |
 | `mla_decode.vx` | new: mla_partial and mla_merge in one launch (Vx #2187 code of a group, #2188 arrival counts) | 31 |
 
 The five expert kernels let a decode step run its MoE without reading the router's ids on the
