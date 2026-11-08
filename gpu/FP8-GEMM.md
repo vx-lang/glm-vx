@@ -248,7 +248,22 @@ H100 writes `fp8_gemm_hardware.json` with time, TFLOP/s and GB/s per shape.
 
 ## Vx findings
 
-1. **Two `if` statements in a row in a spawn region fail with E3048.** The first `if` is reported
+**The kernels no longer build with Vx main.** Since Vx #2097 the `across` loops give the launch
+shape, and `spawn on(Topology::Device) grid(..) block(..)` no longer parses ("Unexpected token
+Identifier(\"grid\")"; checked with 4ecbecb9, a9d832fd and 60fea665). The port to `across` loops
+waits on declared writes for `mlir!` blocks (Vx #252, design in Vx
+`docs/discussions/mlir_declared_writes_in_across.md`). The race proof refuses a call in an
+`across` loop whose `mlir!` body may write ("the call to `fence_barrier_init` may write through an
+argument, and the checker does not read its body"). A pure one such as `bf16_bits` is accepted, and
+`writes_only()` with no tensors is built: the two fences and `prefetch.tensormap` in sm90.vx can
+say it now (`ensures writes_only()` on the fn and `ensures : [writes_only()]` on its `mlir!` block;
+scalar arguments only, Vx E8007). The mbarrier init and arrive and the TMA loads write shared
+memory through an address, and wgmma reads it, so they need the tensor form. `scripts/pod_validate.sh` leaves the GEMM out until then. The numbers above are from the last
+vxc that built it.
+
+1. **No longer happens (checked on Vx 60fea665):** the same code with `across` loops (blocks, then
+   `for tid in 0..64 across lanes`) compiles for sm_90a. The old repro's syntax no longer parses.
+   It was: **two `if` statements in a row in a spawn region fail with E3048.** The first `if` is reported
    as "this `if` has no `else`, so it has no value". The same code in a host function compiles.
    This happens with the old vxc too. Repro (`--machine` any GPU machine file, `--emit-ptx`):
 
@@ -269,7 +284,9 @@ H100 writes `fp8_gemm_hardware.json` with time, TFLOP/s and GB/s per shape.
    ```
 
    A statement between the two `if`s, or an `else`, avoids it. The kernel uses `else`.
-2. **`Tensor<f32, [64], Memory::REG>::fill(0.0)` stays a loop with a variable index.** That puts
+2. **No longer happens (checked on Vx 60fea665):** in a lane loop, `::fill(0.0)` of a 64-element
+   REG tensor, a `while` that adds into it and a store loop give 96 registers, no stack and no
+   `.local` on sm_90a. It was: **`Tensor<f32, [64], Memory::REG>::fill(0.0)` stays a loop with a variable index.** That puts
    the tensor in local memory: 528 bytes of stack, and every promotion goes through `ld.local`. A
    `for r in 0..64 { acc[r] = 0.0; }` loop is unrolled and fixes it. `::fill` of a REG tensor
    should unroll, or be refused, like any other variable index (E6033).
@@ -303,6 +320,10 @@ H100 writes `fp8_gemm_hardware.json` with time, TFLOP/s and GB/s per shape.
    ```
 
 ## What is left for DeepGEMM-level speed
+
+The Vx asks are filed: setmaxnreg (Vx #2989), a `CUtensorMap` kernel parameter (#2990), clusters
+and TMA multicast (#2991), persistent kernels with a tile scheduler (#2992), and a bf16 store with
+`stmatrix` or TMA (#2993).
 
 - **setmaxnreg** (producer about 40, consumers 232). Then m64n256 or two m64n128 accumulators can
   keep one wgmma group in flight while the previous block is promoted, and BLOCK_N = 256 halves
