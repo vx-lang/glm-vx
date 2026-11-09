@@ -385,7 +385,7 @@ def test_long_contexts_select_through_chunk_sorts_and_merges(index_topk):
     resident = {topk: ResidentGLM(model, ctx=Context(), max_tokens=7000, topk=topk) for topk in ('sort', 'radix')}
     # Under graph replay the launches are those captured for max_tokens, reading tokens from the step buffer.
     resident['graph'] = ResidentGLM(model, ctx=Context(), max_tokens=7000, topk='sort', graph=True, device_experts=True)
-    # long_topk='select': topk_radix_pass rounds and topk_radix_sort in place of the chunk sorts and merges.
+    # long_topk='select': topk_radix rounds in place of the chunk sorts and merges.
     resident['select'] = ResidentGLM(model, ctx=Context(), max_tokens=7000, topk='sort', long_topk='select')
     resident['graph_select'] = ResidentGLM(model, ctx=Context(), max_tokens=7000, topk='sort', long_topk='select',
                                            graph=True, device_experts=True)
@@ -405,8 +405,8 @@ def test_long_contexts_select_through_chunk_sorts_and_merges(index_topk):
         assert radix['topk_stable'] == 3 and 'topk_chunks' not in radix
         assert graph['topk_chunks_at'] == 3 and graph['topk_merge_at'] == 3 * 2 and 'topk_stable_long_at' not in graph
         select, graph_select = resident['select'].launches, resident['graph_select'].launches
-        assert select['topk_radix_pass'] == 3 * 9 and select['topk_radix_sort'] == 3 and 'topk_chunks' not in select
-        assert graph_select['topk_radix_pass_at'] == 3 * 9 and graph_select['topk_radix_sort_at'] == 3
+        assert select['topk_radix'] == 3 * 9 and 'topk_chunks' not in select
+        assert graph_select['topk_radix_at'] == 3 * 9
         assert 'topk_chunks_at' not in graph_select and 'topk_stable_long_at' not in graph_select
     finally:
         for r in resident.values():

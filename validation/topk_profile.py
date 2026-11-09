@@ -3,8 +3,9 @@
 gpu/topk.vx's radix select (topk_stable, one block, 256 histogram rows in device memory cleared
 and summed four times), gpu/spawn's topk_sort (one shared-memory bitonic sort, up to 2048
 tokens) and, past 2048 tokens, topk_chunks then topk_merge rounds (a block sorts each 2048-token
-chunk, then rows merge pairwise) or topk_radix_pass rounds then topk_radix_sort (eight one-byte
-rounds of atomic counts over every block, a gather, one sort), at GLM-5.3's index_topk of 2048.
+chunk, then rows merge pairwise) or topk_radix rounds (eight one-byte rounds of atomic counts
+over every block, each scanned by its last block, then a gather and one sort), at GLM-5.3's
+index_topk of 2048.
 The chunk and select paths' times are those of all their launches, back to back on one stream. Each launch is timed with CUDA events after a 512 MB
 copy (moe_profile.l2_flush), the median of --repeats; every id list is checked against
 np.argsort(-scores, kind='stable').
@@ -42,10 +43,10 @@ def main():
     sort = SpawnKernel(ctx, build / 'spawn' / 'topk_sort.ptx')
     chunk_sort = SpawnKernel(ctx, build / 'spawn' / 'topk_chunks.ptx')
     merge = SpawnKernel(ctx, build / 'spawn' / 'topk_merge.ptx')
-    passes = SpawnKernel(ctx, build / 'spawn' / 'topk_radix_pass.ptx')
-    gather_sort = SpawnKernel(ctx, build / 'spawn' / 'topk_radix_sort.ptx')
-    hists = ctx.tensor((8 * 256,), 'uint32', np.zeros(8 * 256, 'u4').tobytes())
+    rounds = SpawnKernel(ctx, build / 'spawn' / 'topk_radix.ptx')
+    hist, state = ctx.tensor((256,), 'uint32', np.zeros(256, 'u4').tobytes()), ctx.tensor((5,), 'int64')
     vals, count = ctx.tensor((2048,), 'int64'), ctx.tensor((1,), 'uint32', np.zeros(1, 'u4').tobytes())
+    arrivals = ctx.tensor((1,), 'int32', np.zeros(1, 'i4').tobytes())
     results = []
     for tokens in TOKENS:
         scores = rng.normal(size=tokens).astype('f4')
@@ -66,9 +67,8 @@ def main():
 
         def select(out):
             for r in range(9):
-                passes.launch(stream=stream, hist=hists.view((256,), 'uint32', offset=min(r, 7) * 1024), hists=hists,
-                              vals=vals, count=count, scores=d_scores, tokens=tokens, k=K, round=r)
-            gather_sort.launch(stream=stream, out_ids=out, vals=vals, count=count, hists=hists, tokens=tokens, k=K)
+                rounds.launch(stream=stream, out_ids=out, hist=hist, state=state, vals=vals, count=count, scores=d_scores,
+                              tokens=tokens, k=K, round=r, arrivals=arrivals)
 
         runs = {
             'radix': lambda out: radix.launch((1,), (256,), [out, d_scores, scratch, C.c_int32(tokens), C.c_int32(K)],
@@ -87,7 +87,7 @@ def main():
     args.output.write_text(json.dumps(dict(k=K, results=results), indent=2) + '\n')
     by = {(r['kernel'], r['tokens']): r['us'] for r in results}
     lines = [f'# Stable top-k, k = {K}. CUDA events, L2 flushed, median of {args.repeats}.', '',
-             '| tokens | topk_stable (radix) us | topk_sort us | topk_chunks + topk_merge us | topk_radix_pass + topk_radix_sort us |',
+             '| tokens | topk_stable (radix) us | topk_sort us | topk_chunks + topk_merge us | topk_radix us |',
              '|---|---|---|---|---|']
     cell = lambda name, t: f"{by[(name, t)]:.1f}" if (name, t) in by else '-'
     lines += [f"| {t} | {cell('radix', t)} | {cell('sort', t)} | {cell('merge', t)} | {cell('select', t)} |" for t in TOKENS]

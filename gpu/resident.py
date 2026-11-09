@@ -411,11 +411,14 @@ class ResidentGLM:
                 # topk_chunks' sorted rows and topk_merge's, swapped each round (#32).
                 chunks = -(-cap // TOPK_CHUNK)
                 self.topk_lists = [t((chunks, TOPK_CHUNK), 'int64') for _ in range(2)]
-                # topk_radix_pass's eight rows of counts, its gathered values and their count; zero
-                # once, topk_radix_sort re-zeroes them (#32).
-                self.topk_hists = t((8 * 256,), 'uint32', np.zeros(8 * 256, np.uint32))
+                # topk_radix's counts, the threshold so far, the gathered values, their count and
+                # its last block's arrivals; hist, count and arrivals zero once, round 8 and each
+                # last block re-zero them (#32).
+                self.topk_hist = t((256,), 'uint32', np.zeros(256, np.uint32))
+                self.topk_state = t((5,), 'int64')
                 self.topk_vals = t((TOPK_CHUNK,), 'int64')
                 self.topk_count = t((1,), 'uint32', np.zeros(1, np.uint32))
+                self.topk_arrivals = t((1,), 'int32', np.zeros(1, np.int32))
         self.selected_count = 0
         self.gate, self.up, self.act = t((width,)), t((width,)), t((width,))
         self.fused = t((2 * int(c.get('moe_intermediate_size', 1)),))
@@ -519,10 +522,10 @@ class ResidentGLM:
 
     def _topk_merge(self):
         """Whether contexts past TOPK_SORT_TOKENS select through gpu/spawn's topk_chunks and topk_merge
-        rounds, or with long_topk='select' its topk_radix_pass rounds and topk_radix_sort (the same ids
+        rounds, or with long_topk='select' its topk_radix rounds (the same ids
         as topk_stable): with 'sort', when they are built and index_topk <= 2048. The chunk is
         topk_sort's limit, so past it there are always two chunks or more."""
-        names = ('topk_chunks', 'topk_merge') if self.long_topk == 'merge' else ('topk_radix_pass', 'topk_radix_sort')
+        names = ('topk_chunks', 'topk_merge') if self.long_topk == 'merge' else ('topk_radix',)
         if self.graph:
             names = tuple(n + '_at' for n in names)
         return (self._topk_sort() and hasattr(self, 'topk_lists') and TOPK_SORT_TOKENS == TOPK_CHUNK
@@ -530,7 +533,7 @@ class ResidentGLM:
 
     def _topk_chunks_and_merge(self, tokens):
         """topk_chunks, then topk_merge rounds until one row is left; the last writes selected.
-        long_topk='select': topk_radix_pass rounds 0 .. 8, then topk_radix_sort, which writes it."""
+        long_topk='select': topk_radix rounds 0 .. 8; round 8 writes it."""
         if self.long_topk == 'select':
             return self._topk_radix(tokens)
         lists, out_ids = self.topk_lists, self.selected.view((1, self.index_topk))
@@ -551,16 +554,13 @@ class ResidentGLM:
             count, r = -(-count // 2), r + 1
 
     def _topk_radix(self, tokens):
-        hists, k = self.topk_hists, self.index_topk
         size = dict(step=self.step, max_tokens=self.max_tokens) if self.graph else dict(tokens=tokens)
-        suffix = '_at' if self.graph else ''
         scores = self.scores.view(self.scores.shape if self.graph else (tokens,), 'int32')
         for r in range(9):
-            # Round r counts into row r of hists and reads the rows below it; round 8 gathers.
-            self._spawn('topk_radix_pass' + suffix, hist=hists.view((256,), 'uint32', offset=min(r, 7) * 1024),
-                        hists=hists, vals=self.topk_vals, count=self.topk_count, scores=scores, k=k, round=r, **size)
-        self._spawn('topk_radix_sort' + suffix, out_ids=self.selected, vals=self.topk_vals, count=self.topk_count,
-                    hists=hists, k=k, **size)
+            # Rounds 0 .. 7 find a byte of the threshold each; round 8 gathers, sorts and writes selected.
+            self._spawn('topk_radix_at' if self.graph else 'topk_radix', out_ids=self.selected, hist=self.topk_hist,
+                        state=self.topk_state, vals=self.topk_vals, count=self.topk_count, scores=scores,
+                        k=self.index_topk, round=r, arrivals=self.topk_arrivals, **size)
 
     def _topk_kernel(self, name=None):
         name = name or ('topk_stable_at' if self.graph else 'topk_stable')

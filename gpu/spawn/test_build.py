@@ -230,6 +230,26 @@ def test_every_kernel_has_a_launch_shape_that_launch_reads(tmp_path):
             assert launch_size(size, values) >= 1, (source.stem, size)
 
 
+@needs_vxc
+def test_spawn_vxc_passes_a_feature_flag(tmp_path):
+    """topk_radix's `// spawn-vxc: -fweak-relaxed-atomics` keeps its atomics relaxed: no fence after
+    the shared-memory counts. Only the arrival's fences, before and after its atomic, remain."""
+    source = (HERE / 'topk_radix.vx').read_text()
+    assert '// spawn-vxc: -fweak-relaxed-atomics' in source
+    shutil.copy(HERE / 'device.vx', tmp_path)
+    fenced = {}
+    for name, text in (('weak', source), ('default', source.replace('// spawn-vxc: -fweak-relaxed-atomics\n', ''))):
+        (tmp_path / f'{name}.vx').write_text(text)
+        result = run_build(tmp_path / f'{name}.vx', tmp_path / f'{name}.ptx')
+        assert result.returncode == 0, result.stderr
+        ptx = (tmp_path / f'{name}.ptx').read_text()
+        fenced[name] = ptx.count('fence.')
+        assert json.loads((tmp_path / f'{name}.json').read_text())['vxc_flags'] == (['-fweak-relaxed-atomics'] if name == 'weak' else [])
+    shared = (tmp_path / 'weak.ptx').read_text().split('atom.shared.add.u32')[1].split('\n')[1]
+    assert 'fence' not in shared
+    assert fenced['weak'] == 4 and fenced['default'] > fenced['weak'], fenced
+
+
 DISPATCH = os.environ.get('VX_DISPATCH_LIB')
 needs_dispatch = pytest.mark.skipif(not (VXC and DISPATCH and shutil.which('llvm-config')),
                                     reason='set VXC, VX_DISPATCH_LIB and put llvm-config on PATH')

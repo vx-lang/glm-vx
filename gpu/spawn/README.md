@@ -16,9 +16,11 @@ also cover every pass. A kernel whose rows have a run-time length writes a rank-
 times numbers; `launch.py` passes a rank-2 `DeviceTensor` as its 7-word descriptor. A row's
 index may then be anything, as in topk's `hist[t][digit]`.
 
-All 57 kernels build with Vx main from 60fea665 on. Its atomics take a `&mut` tensor (#2949),
+All 55 kernels build with Vx main from 12fea615 on. #2979 lets the code after a nest of blocks
+(which the last block to finish runs) keep shared-memory tensors, which topk_radix's per-round
+scan and sort need. 60fea665's atomics take a `&mut` tensor (#2949),
 mark no atomic target read-only (#2943) and let a write go to a slot that an atomic fetch_add gave
-(#2969), which topk_radix_pass's gather needs; #2938 keeps mla_heads_at's lane rows in registers.
+(#2969), which topk_radix's gather needs; #2938 keeps mla_heads_at's lane rows in registers.
 a9d832fd's race proof accepts mla_heads_at's writes under `lane == 0`, and since #2648 every `lanes::` reduction is a shfl.bfly tree, so each lane gets
 lane 0's bits. 4ecbecb9 (#2375, Vx #2362) loads a `&`
 tensor through the read-only cache (`ld.global.nc`) and, since the machine files give HBM
@@ -95,7 +97,7 @@ Two launches use the same PTX:
 | `topk.vx` | `glm_vx_gpu_topk_stable` (its own scratch: `gpu.topk.spawn_buffers`) | 32 |
 | `topk_sort.vx`, `topk_sort_at.vx` | new: the same selection for up to 2048 tokens, one shared-memory bitonic sort, no scratch (#32); `_at` reads tokens from the step buffer | 22 (sm_90) |
 | `topk_chunks.vx`, `topk_merge.vx` (and `_at`) | new: the same selection past 2048 tokens, no histogram (#32): a block sorts each 2048-token chunk, then `ceil(log2(chunks))` launches merge sorted rows pairwise, keeping the first 2048; `_at` reads tokens from the step buffer, captured for `max_tokens` | 24, 26 (sm_80) |
-| `topk_radix_pass.vx`, `topk_radix_sort.vx` (and `_at`) | new: the same selection past 2048 tokens by radix select (#32): nine launches of one block per 4096 tokens, eight that count one byte of (key, position reversed) with atomic adds into a row of `hists` each (every block replays the rows below to find the threshold so far), one that gathers the selected values into atomic-count slots; then one block sorts them and zeroes `hists` and `count` for the next call. `ResidentGLM(long_topk='select')`; the default is still the chunk sort | 32, 20 (sm_80); 32, 22 (sm_90) |
+| `topk_radix.vx`, `topk_radix_at.vx` | new: the same selection past 2048 tokens by radix select (#32): nine launches of one 512-lane block per 4096 tokens. Rounds 0 to 7 count one byte of (key, position reversed) with atomic adds into `hist`; the last block to finish scans it, keeps the threshold so far in `state` and zeroes `hist`. Round 8 gathers the selected values into atomic-count slots, and its last block sorts them, writes the ids and zeroes `count`. `ResidentGLM(long_topk='select')`; the default is still the chunk sort; `_at` reads tokens from the step buffer | 32, 32 (sm_80); 32, 40 (sm_90) |
 | `rmsnorm_rows.vx` | `glm_vx_gpu_rmsnorm_rows`, and `glm_vx_gpu_rmsnorm` as rows = 1 | 23 |
 | `residual_rmsnorm.vx` | `glm_vx_gpu_residual_rmsnorm` | 24 |
 | `layernorm.vx` | `glm_vx_gpu_layernorm` | 26 |
@@ -188,7 +190,14 @@ Vx does. The library's `pub fn` takes every parameter of the function, so each m
 kernel uses, and `build.py` refuses a library whose embedded kernel is not the PTX it checked.
 
 Each file holds one `pub fn glm_vx_spawn_NAME` with one `spawn on` region, and may start with
-`// spawn-include: device.vx` to paste the helpers in front. The PTX entry has the function's
+`// spawn-include: device.vx` to paste the helpers in front, and `// spawn-vxc: -fFEATURE` for a
+vxc feature flag on that kernel only. topk_radix takes `-fweak-relaxed-atomics`: Vx makes each
+relaxed atomic an acquire, so no relaxed read is reordered with a later write (no load
+buffering), and NVPTX gives that a `fence.acq_rel.sys` after every atomic, the shared-memory
+counts of the hot loop too. No lane of topk_radix orders memory by a relaxed atomic: a gather's
+store goes to the slot its fetch_add returned, a last block's read and clear of a count is one
+lane on one address, and the blocks reach the last block through the arrival's own fences, which
+the flag keeps. The PTX entry has the function's
 name, and its parameters are the function's parameters, in declared order (Vx
 `docs/lang/abi.md` section 3.5); a rank-1 tensor is five u64 (base, aligned pointer, offset,
 size, stride). `launch.py` takes the arguments by name.

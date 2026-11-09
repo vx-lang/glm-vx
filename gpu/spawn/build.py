@@ -21,6 +21,8 @@ from pathlib import Path
 SCALARS = {'i32': '.u32', 'i64': '.u64', 'f32': '.f32'}
 ELEMENT_BITS = {'f32': 32, 'i32': 32, 'i64': 64, 'u32': 32, 'u16': 16, 'u8': 8}
 INCLUDE = re.compile(r'^//\s*spawn-include:\s*(\S+)\s*$', re.M)
+# `// spawn-vxc: -fFEATURE`: a vxc feature flag for this kernel only (Vx's -f values).
+VXC_FLAG = re.compile(r'^//\s*spawn-vxc:\s*(-f[\w-]+)\s*$', re.M)
 
 
 def split_top(text: str):
@@ -108,8 +110,8 @@ def build_library(args, combined_text, name, params, env, ptx):
         combined.write_text(combined_text)
         # The optimization level as for --emit-ptx: the device image follows it, and the PTX checked
         # above must be the PTX this library launches.
-        result = subprocess.run([args.vxc, '--machine', str(args.machine.resolve()), str(combined),
-                                 '--action', 'emit-obj', '-o', str(obj)], text=True, capture_output=True, env=env)
+        result = subprocess.run([args.vxc, '--machine', str(args.machine.resolve()), *VXC_FLAG.findall(combined_text),
+                                 str(combined), '--action', 'emit-obj', '-o', str(obj)], text=True, capture_output=True, env=env)
         if result.returncode or not obj.exists():
             raise ValueError(f'vxc emit-obj failed ({result.returncode}):\n{result.stderr}')
         args.library.parent.mkdir(parents=True, exist_ok=True)
@@ -259,8 +261,10 @@ def main() -> int:
             combined = Path(temp, args.source.name)
             combined.write_text(''.join(included) + source)
             emitted = Path(temp, 'kernels.ptx')
-            result = subprocess.run([args.vxc, '--machine', str(args.machine.resolve()), '--emit-ptx', str(combined),
-                                     '-o', str(emitted)], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+            flags = VXC_FLAG.findall(source)
+            result = subprocess.run([args.vxc, '--machine', str(args.machine.resolve()), *flags, '--emit-ptx',
+                                     str(combined), '-o', str(emitted)], text=True, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, env=env)
             if result.returncode:
                 raise ValueError(f'vxc failed ({result.returncode}):\n{result.stderr}')
             ptx = emitted.read_text()
@@ -283,7 +287,7 @@ def main() -> int:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         evidence = {'schema': 'glm-vx-spawn-v2', 'entry': name, 'params': params, 'vx_params': kernels[0]['params'],
                     'launch': kernels[0].get('launch'), 'dynamic_shared_bytes': dynamic_shared,
-                    'arch': args.arch, 'source_sha256': hashlib.sha256((''.join(included) + source).encode()).hexdigest(),
+                    'arch': args.arch, 'vxc_flags': flags, 'source_sha256': hashlib.sha256((''.join(included) + source).encode()).hexdigest(),
                     'ptx_sha256': hashlib.sha256(ptx.encode()).hexdigest(),
                     'vxc': subprocess.run([args.vxc, '--version'], text=True, stdout=subprocess.PIPE).stdout.strip(),
                     'assembly_validated': False, 'gpu_execution_validated': False}

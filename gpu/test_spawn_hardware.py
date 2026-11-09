@@ -279,10 +279,10 @@ def test_spawn_topk_chunks_and_merge_match_stable_argsort(context, tokens, k, ti
     np.testing.assert_array_equal(download(out)[0], np.argsort(-scores, kind='stable')[:k])
 
 
-# topk_radix_pass rounds 0 .. 8 then topk_radix_sort (#32): the selection past 2048 tokens by radix
-# select with atomic counts, against the host's rule, twice on the same buffers: the gather's order
-# depends on timing, the ids must not, and each call leaves hists and count at zero for the next.
-@pytest.mark.skipif(not (BUILD / 'spawn/topk_radix_sort.ptx').exists(), reason='topk_radix not built (gpu/spawn/build.sh)')
+# topk_radix rounds 0 .. 8 (#32): the selection past 2048 tokens by radix select with atomic
+# counts, against the host's rule, twice on the same buffers: the gather's order depends on timing,
+# the ids must not, and each call leaves hist, count and the arrival count at zero for the next.
+@pytest.mark.skipif(not (BUILD / 'spawn/topk_radix.ptx').exists(), reason='topk_radix not built (gpu/spawn/build.sh)')
 @pytest.mark.parametrize('tokens,k,ties', [(2049, 2048, True), (8192, 2048, False), (70000, 2048, True), (1 << 20, 2048, False),
                                            (9000, 16, True), (100000, 2048, 'equal')])
 def test_spawn_topk_radix_matches_stable_argsort(context, tokens, k, ties):
@@ -292,19 +292,18 @@ def test_spawn_topk_radix_matches_stable_argsort(context, tokens, k, ties):
     else:
         scores = rng.integers(-50, 50, size=tokens).astype('f4') if ties else rng.normal(size=tokens).astype('f4')
     scores[[3, 5, 7, 9]] = np.nan, -np.inf, -0.0, np.inf
-    hists = upload(context, np.zeros(8 * 256, 'u4'))
+    hist, state = upload(context, np.zeros(256, 'u4')), context.tensor((5,), 'int64')
     vals, count, out = context.tensor((2048,), 'int64'), upload(context, np.zeros(1, 'u4')), context.tensor((k,), 'int32')
-    d_scores = upload(context, scores.view(np.int32))
-    passes, sort = SpawnKernel(context, BUILD / 'spawn/topk_radix_pass.ptx'), SpawnKernel(context, BUILD / 'spawn/topk_radix_sort.ptx')
+    arrivals, d_scores = upload(context, np.zeros(1, 'i4')), upload(context, scores.view(np.int32))
+    radix = SpawnKernel(context, BUILD / 'spawn/topk_radix.ptx')
     want = np.argsort(-scores, kind='stable')[:k]
     for _ in range(2):
         for r in range(9):
-            passes.launch(hist=hists.view((256,), 'uint32', offset=min(r, 7) * 1024), hists=hists, vals=vals, count=count,
-                          scores=d_scores, tokens=tokens, k=k, round=r)
-        sort.launch(out_ids=out, vals=vals, count=count, hists=hists, tokens=tokens, k=k)
+            radix.launch(out_ids=out, hist=hist, state=state, vals=vals, count=count, scores=d_scores, tokens=tokens, k=k,
+                         round=r, arrivals=arrivals)
         context.synchronize()
         np.testing.assert_array_equal(download(out), want)
-        assert not download(hists).any() and not download(count).any()
+        assert not download(hist).any() and not download(count).any() and not download(arrivals).any()
 
 
 # topk_sort (#32): one shared-memory bitonic sort for up to 2048 tokens, against the host's rule.
