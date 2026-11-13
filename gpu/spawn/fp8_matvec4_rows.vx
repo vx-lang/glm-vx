@@ -1,0 +1,83 @@
+// fp8_matvec4 for m = 1 to 4 vectors at once (MTP verification, #16): out[v][r] ([4, rows]) is what
+// fp8_matvec4 writes to out[r] for the vector x[v * cols ..], bit for bit. The weight is read once
+// for all of them: each code is decoded and scaled once, then multiplied into the m sums, each sum
+// in fp8_matvec4's order (lane l: columns tile * 512 + 16l .. + 15, tile by tile, then
+// lanes::sum's tree). One warp of 32 lanes a row, four rows a block. weight is the [rows, cols]
+// code bytes viewed as u32 (cols % 16 == 0). Another width, or m > 4, writes zeros to rows
+// 0 .. min(m, 4) - 1; m < 1 writes nothing.
+// spawn-include: device.vx
+
+macro_rules! fp8_rows_terms {
+    ($word:expr, $scale:expr, $x:ident, $col:expr, $cols:expr, $m:expr, $s0:ident, $s1:ident, $s2:ident, $s3:ident) => {
+        unsafe {
+          let dv_word: i32 = $word;
+          let dv_col: i64 = $col;
+          let mut dv_j: i32 = 0;
+          while dv_j < 4 {
+            let dv_term: f32 = fp8_decode!(dv_word >> (dv_j * 8)) * $scale;
+            let dv_at: i64 = dv_col + (dv_j as i64);
+            $s0 = $s0 + dv_term * $x[dv_at];
+            if $m > 1 { $s1 = $s1 + dv_term * $x[$cols + dv_at]; }
+            if $m > 2 { $s2 = $s2 + dv_term * $x[2 * $cols + dv_at]; }
+            if $m > 3 { $s3 = $s3 + dv_term * $x[3 * $cols + dv_at]; }
+            dv_j = dv_j + 1;
+          }
+        }
+    };
+}
+
+pub fn glm_vx_spawn_fp8_matvec4_rows(out: &mut Tensor<f32, [?, ?], Memory::HBM>, weight: &Tensor<u32, [?], Memory::HBM>,
+                                     scales: &Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                                     rows: i32, cols: i32, m: i32) -> void {
+  spawn on(Topology::Device) {
+    for rb in 0..(rows - 1) / 4 + 1 across blocks {
+      let mut a = unsafe { Tensor<f32, [16, 32], Memory::SMEM>::uninit() };
+      for w in 0..4 across subgroups {
+        for lane in 0..32 across lanes {
+          let row: i64 = (rb * 4 + w) as i64;
+          let n: i64 = cols as i64;
+          let mut s0: f32 = 0.0;
+          let mut s1: f32 = 0.0;
+          let mut s2: f32 = 0.0;
+          let mut s3: f32 = 0.0;
+          if row < (rows as i64) && cols % 16 == 0 && m >= 1 && m <= 4 {
+            let tiles: i64 = (n + 127) / 128;
+            let words: i64 = n / 4;
+            // row * words, written with its factor 4 (Vx #2362), as fp8_row_dot4! does.
+            let row_words: i64 = row * (n / 16) * 4;
+            let scale_base: i64 = (row / 128) * tiles;
+            let mut at: i64 = (lane as i64) * 4;
+            while at < words {
+              let w0: i32 = weight[row_words + at] as i32;
+              let w1: i32 = weight[row_words + at + 1] as i32;
+              let w2: i32 = weight[row_words + at + 2] as i32;
+              let w3: i32 = weight[row_words + at + 3] as i32;
+              let scale: f32 = scales[scale_base + at / 32];
+              let col: i64 = at * 4;
+              fp8_rows_terms!(w0, scale, x, col, n, m, s0, s1, s2, s3);
+              fp8_rows_terms!(w1, scale, x, col + 4, n, m, s0, s1, s2, s3);
+              fp8_rows_terms!(w2, scale, x, col + 8, n, m, s0, s1, s2, s3);
+              fp8_rows_terms!(w3, scale, x, col + 12, n, m, s0, s1, s2, s3);
+              at = at + 128;
+            }
+          }
+          a[w * 4][lane] = s0;
+          a[w * 4 + 1][lane] = s1;
+          a[w * 4 + 2][lane] = s2;
+          a[w * 4 + 3][lane] = s3;
+        }
+        let t0: f32 = lanes::sum(&a[w * 4], 32);
+        let t1: f32 = lanes::sum(&a[w * 4 + 1], 32);
+        let t2: f32 = lanes::sum(&a[w * 4 + 2], 32);
+        let t3: f32 = lanes::sum(&a[w * 4 + 3], 32);
+        if rb * 4 + w < rows && cols >= 0 {
+          if m >= 1 { out[0][rb * 4 + w] = t0; }
+          if m >= 2 { out[1][rb * 4 + w] = t1; }
+          if m >= 3 { out[2][rb * 4 + w] = t2; }
+          if m >= 4 { out[3][rb * 4 + w] = t3; }
+        }
+      }
+    }
+  }
+  return;
+}

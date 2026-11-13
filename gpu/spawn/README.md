@@ -16,7 +16,7 @@ also cover every pass. A kernel whose rows have a run-time length writes a rank-
 times numbers; `launch.py` passes a rank-2 `DeviceTensor` as its 7-word descriptor. A row's
 index may then be anything, as in topk's `hist[t][digit]`.
 
-All 55 kernels build with Vx main from 12fea615 on; the repo is tested with 89832571, which
+All 56 kernels build with Vx main from 12fea615 on; the repo is tested with 89832571, which
 also builds the CPU library in minutes (950a6f71, Vx #3326). #2979 lets the code after a nest of blocks
 (which the last block to finish runs) keep shared-memory tensors, which topk_radix's per-round
 scan and sort need. 60fea665's atomics take a `&mut` tensor (#2949),
@@ -93,6 +93,7 @@ Two launches use the same PTX:
 | `int4_matmul.vx` | `glm_vx_gpu_int4_matmul` (out is [M, N]) | 40 |
 | `fp8_matvec.vx` | `glm_vx_gpu_fp8_matvec` | 45 |
 | `fp8_matvec4.vx` | new: `fp8_matvec` reading sixteen codes a lane step (weight viewed as u32, cols % 16 == 0) as one `ld.global.nc.v4`, decoded by `fp8_decode!`'s bit cast (#30) | 56 (sm_80), 48 (sm_90) |
+| `fp8_matvec4_rows.vx` | new: `fp8_matvec4` for m = 1 to 4 vectors on one read of the weight, each row bit for bit `fp8_matvec4`'s (MTP verification of k + 1 tokens, #16); out is [4, rows]. x loads are scalar for now (the per-vector guards), the weight one `ld.global.nc.v4` | 64 (sm_80), 48 (sm_90) |
 | `fp8_matmul.vx` | `glm_vx_gpu_fp8_matmul` (out is [M, N]) | 46 |
 | `gemm_f32.vx` | `glm_vx_gpu_gemm_f32` | 32 |
 | `topk.vx` | `glm_vx_gpu_topk_stable` (its own scratch: `gpu.topk.spawn_buffers`) | 32 |

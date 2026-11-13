@@ -203,6 +203,29 @@ def test_spawn_fp8_matvec4_matches_its_order(context, rows, cols):
     np.testing.assert_array_equal(download(out).view(np.uint32), np.asarray(expected, 'f4').view(np.uint32))
 
 
+# fp8_matvec4_rows (MTP verification, #16): each of m vectors gets fp8_matvec4's bits on the device,
+# at GLM-5.3's widest projections, so verifying k + 1 tokens at once gives decoding's logits.
+@pytest.mark.skipif(not (BUILD / 'spawn/fp8_matvec4_rows.ptx').exists(), reason='fp8_matvec4_rows not built (gpu/spawn/build.sh)')
+@pytest.mark.parametrize('rows,cols', [(5, 144), (6144, 16384), (2048, 6144)])
+@pytest.mark.parametrize('m', [1, 4])
+def test_spawn_fp8_matvec4_rows_is_fp8_matvec4_per_vector(context, rows, cols, m):
+    from gpu.test_spawn_vx_host import fp8_matvec4_case
+    weight, scales, _, _ = fp8_matvec4_case(rows, cols, rows * 13 + cols)
+    xs = np.random.default_rng(rows + m).normal(size=(4, cols)).astype('f4')
+    w, s = upload(context, weight.view(np.uint32).reshape(-1)), upload(context, scales.reshape(-1))
+    out = context.tensor((4, rows))
+    SpawnKernel(context, BUILD / 'spawn/fp8_matvec4_rows.ptx').launch(
+        rows=rows, cols=cols, m=m, weight=w, scales=s, x=upload(context, xs.reshape(-1)), out=out)
+    single = SpawnKernel(context, BUILD / 'spawn/fp8_matvec4.ptx')
+    context.synchronize()
+    got = download(out)
+    for v in range(m):
+        one = context.tensor((rows,))
+        single.launch(rows=rows, cols=cols, weight=w, scales=s, x=upload(context, xs[v]), out=one)
+        context.synchronize()
+        np.testing.assert_array_equal(got[v].view(np.uint32), download(one).view(np.uint32))
+
+
 # bf16_matvec4 and int4_matvec4 (four u32 words a lane step, #30) against the NumPy model of
 # their order, bit for bit, at small and GLM-5.3 shapes.
 @pytest.mark.skipif(not (BUILD / 'spawn/bf16_matvec4.ptx').exists(), reason='bf16_matvec4 not built (gpu/spawn/build.sh)')

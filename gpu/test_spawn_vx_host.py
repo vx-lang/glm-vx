@@ -343,6 +343,39 @@ def test_fp8_matvec4(run, rows, cols):
     bits_equal(got, expected)
 
 
+# fp8_matvec4_rows (MTP verification, #16): m vectors against one read of the weight. Each row of
+# out must be fp8_matvec4's result for its vector, bit for bit, so that verifying k + 1 tokens at
+# once gives the logits that decoding them one by one gives; rows past m stay as they were.
+@pytest.mark.parametrize('m', [1, 2, 3, 4])
+@pytest.mark.parametrize('rows,cols', [(5, 144), (300, 1008), (130, 6144), (2, 576)])
+def test_fp8_matvec4_rows_is_fp8_matvec4_per_vector(run, rows, cols, m):
+    weight, scales, _, _ = fp8_matvec4_case(rows, cols, rows * 13 + cols)
+    rng = np.random.default_rng(rows + cols + m)
+    xs = rng.normal(size=(4, cols)).astype(F)
+    out = np.full((4, rows), 7.0, F)
+    got = run('fp8_matvec4_rows', out=out, weight=weight.view(np.uint32).reshape(-1), scales=scales.reshape(-1),
+              x=xs.reshape(-1), rows=rows, cols=cols, m=m)['out']
+    per_col = scales[np.arange(rows)[:, None] // 128, np.arange(cols)[None, :] // 128]
+    for v in range(4):
+        if v < m:
+            bits_equal(got[v], warp_tree(strided_sums(lane_run_order((fp8(weight) * per_col) * xs[v], 16), 32)))
+            single = run('fp8_matvec4', out=np.zeros(rows, F), weight=weight.view(np.uint32).reshape(-1),
+                         scales=scales.reshape(-1), x=xs[v], rows=rows, cols=cols)['out']
+            bits_equal(got[v], single)
+        else:
+            bits_equal(got[v], np.full(rows, 7.0, F))
+
+
+@pytest.mark.parametrize('m,cols', [(0, 144), (5, 144), (2, 100)])
+def test_fp8_matvec4_rows_refuses_other_counts_and_widths(run, m, cols):
+    weight = np.zeros((3, cols), np.uint8)
+    got = run('fp8_matvec4_rows', out=np.full((4, 3), 7.0, F), weight=np.zeros(3 * cols // 4 + 1, np.uint32),
+              scales=np.ones(2, F), x=np.ones(4 * cols, F), rows=3, cols=cols, m=m)['out']
+    want = np.full((4, 3), 7.0, F)
+    want[:min(max(m, 0), 4)] = 0.0  # m > 4, or a width that is not a multiple of 16: zeros; m < 1: nothing
+    bits_equal(got, want)
+
+
 def test_fp8_matvec4_decodes_every_code(run):
     # Row r holds the r-th code at column r (each code but NaN, then two zeros), scale 1, x 1:
     # every row's sum is its code's decoded value.
