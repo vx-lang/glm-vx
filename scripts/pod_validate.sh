@@ -12,7 +12,9 @@
 # compressed-tensors Linears to the INT4 device test. PYTHON (default python3), LAYERS (full-width
 # layers, default 4), TOKENS (default 48), REFERENCE_TOKENS (tokens of the full-width hybrid
 # reference, default 20), STRESS (concurrent stress processes, default 8), TIMER (ncu, or events to
-# skip the ncu pass where a container blocks its counters; it falls back to events anyway).
+# skip the ncu pass where a container blocks its counters; it falls back to events anyway),
+# BASELINE (the evidence directory the layer gate compares with; default the newest earlier one of
+# this GPU that has layer reports, e.g. evidence/h100-20261026).
 # Use OMP_NUM_THREADS well below the host's vCPU count (NumPy thrashes on 128-vCPU pods).
 #
 # Toolchain: one vxc bundle from Vx main, 12fea615 or later (#2979: topk_radix's last-block
@@ -39,6 +41,7 @@ if [[ -n $cap && -z ${PTXAS_ARCH:-} ]]; then export PTXAS_ARCH=sm_${cap/./}; fi
 if [[ -z ${PTXAS:-} && -x /usr/local/cuda/bin/ptxas ]]; then export PTXAS=/usr/local/cuda/bin/ptxas; fi
 out=${1:-evidence/${gpu:-gpu}-$(date -u +%Y%m%d)}
 if [[ -e $out ]]; then echo "$out exists; preserve evidence" >&2; exit 2; fi
+: "${BASELINE:=$(for d in evidence/"${gpu:-none}"-*; do compgen -G "$d/layer-*-*.json" >/dev/null && echo "$d"; done | sort | tail -1)}"
 mkdir -p "$out"
 failed=0
 summary=()
@@ -148,6 +151,11 @@ for mode in int4 bf16; do
       --timer "$TIMER" --output "$out/layer-profile-$mode-$kernels.json"
   done
 done
+# The per-layer timing gate (#29): each report above against BASELINE's of the same format, and
+# each other kernel choice against this run's hand kernels. It fails on a slowdown, not on a missed
+# target (#30, #31, #32), which it reports.
+step layer-gate $PYTHON -m validation.layer_gate ${BASELINE:+--baseline "$BASELINE"} --output "$out/layer-gate.md" \
+  "$out"/layer-profile-*.json
 step moe-profile $PYTHON -m validation.moe_profile --timer "$TIMER" --output "$out/moe-profile.json"
 # The dense matvec kernels (hand, spawn, and the *_matvec4 of #30) at GLM-5.3's projection shapes.
 step matvec-profile $PYTHON -m validation.matvec_profile --output "$out/matvec-profile.json"
