@@ -20,8 +20,14 @@ accepted tokens, and the MTP layer runs again on the accepted positions with the
 states, as vLLM's proposer does with the target's hidden states. So the output is the model's
 greedy output whatever the drafts are, and the caches end as plain decoding leaves them.
 
+With a temperature T > 0 the drafts are sampled from the MTP layer's softmax(logits / T) (q), and
+accepted by speculative sampling (Leviathan et al. 2023, Chen et al. 2023): draft d with probability
+min(1, p(d) / q(d)), where p is the model's softmax(logits / T); the first rejected one is replaced
+by a sample of max(0, p - q), normalized; after k accepted drafts the model's token is sampled from
+p. Each emitted token then has the model's own distribution, given the tokens before it: the
+distribution glm_vx.scheduler samples, whatever the drafts are. T = 0 is greedy, as above.
+
 Not here yet:
-  - sampling: acceptance by the draft and target probabilities;
   - index_share_for_mtp_iteration: each draft step runs the MTP layer's indexer, where the
     official recipe reuses the first step's selection;
   - one batched verification step: the model runs the k + 1 tokens one at a time, which computes
@@ -92,13 +98,42 @@ def _choose(logits):
     return int(np.argmax(logits))
 
 
-def generate(model, prompt, max_new_tokens, *, draft_tokens=3, drafter=None, eos=(), cache=None, choose_draft=None):
-    """Greedy generation with MTP drafts: the same tokens as plain greedy decoding.
+def probabilities(logits, temperature):
+    """softmax(logits / temperature) in float64, as glm_vx.scheduler samples."""
+    scaled = (np.asarray(logits, np.float64) - float(np.max(logits))) / temperature
+    probs = np.exp(scaled)
+    return probs / probs.sum()
+
+
+def sample(probs, rng):
+    return int(rng.choice(len(probs), p=probs))
+
+
+def accept_sampled(target, draft, drafts, rng):
+    """Speculative sampling of one round: (accepted, token).
+
+    target: the model's k + 1 distributions, at the next token and after each draft; draft: the
+    k distributions the drafts were sampled from; drafts: the k tokens. The first `accepted` drafts
+    are kept and `token` follows them."""
+    for j, (d, p, q) in enumerate(zip(drafts, target, draft)):
+        if rng.random() * q[d] < p[d]:  # u < min(1, p(d) / q(d)), with q(d) > 0 since d ~ q
+            continue
+        residual = np.maximum(p - q, 0.0)
+        return j, sample(residual / residual.sum(), rng)
+    return len(drafts), sample(target[len(drafts)], rng)
+
+
+def generate(model, prompt, max_new_tokens, *, draft_tokens=3, drafter=None, eos=(), cache=None, choose_draft=None,
+             temperature=0.0, rng=None):
+    """Generation with MTP drafts: greedy (temperature 0), the same tokens as plain greedy decoding;
+    or sampled at `temperature` from `rng` (numpy Generator), each token from the model's own
+    distribution given the tokens before it.
 
     Returns (tokens, cache, drafter, stats). `cache` (the model's, new if None) ends holding the
     prompt and every emitted token but the last, as plain decoding leaves it. `choose_draft(logits,
     position, step)` picks the draft token for `position`, the round's step-th draft (default
-    argmax); any choice gives the same output.
+    argmax); any choice gives the same output. Sampling draws the drafts from the MTP layer's own
+    distribution, which speculative sampling needs, so it takes no `choose_draft`.
     """
     prompt = [int(t) for t in prompt]
     if not prompt or max_new_tokens < 1 or draft_tokens < 1:
@@ -110,6 +145,11 @@ def generate(model, prompt, max_new_tokens, *, draft_tokens=3, drafter=None, eos
     drafter = drafter or MTPDrafter(model)
     if drafter.position != 0:
         raise ValueError('the drafter must start empty')
+    sampled = temperature > 0
+    if sampled and (rng is None or choose_draft is not None):
+        raise ValueError('sampling needs an rng and draws its own drafts')
+    if not np.isfinite(temperature) or temperature < 0:
+        raise ValueError('temperature must be finite and nonnegative')
     choose_draft = choose_draft or (lambda logits, position, step: _choose(logits))
     stop = {int(t) for t in eos}
     stats = Stats()
@@ -124,27 +164,35 @@ def generate(model, prompt, max_new_tokens, *, draft_tokens=3, drafter=None, eos
     # The MTP cache for the prompt: position p from (token p + 1, h_p).
     for p in range(len(prompt) - 1):
         drafter.step(prompt[p + 1], hiddens[p], p)
-    out = [_choose(logits)]
+    out = [sample(probabilities(logits, temperature), rng) if sampled else _choose(logits)]
     hidden, position = hiddens[-1], len(prompt) - 1  # the next draft step: (out[-1], h at position)
     while len(out) < max_new_tokens and out[-1] not in stop:
         k = min(draft_tokens, max_new_tokens - len(out))
-        drafts, token, h = [], out[-1], hidden
+        drafts, draft_probs, token, h = [], [], out[-1], hidden
         for j in range(k):
             draft_logits, h = drafter.step(token, h, position + j)
-            token = choose_draft(draft_logits, position + j + 2, j)
+            if sampled:
+                draft_probs.append(probabilities(draft_logits, temperature))
+                token = sample(draft_probs[-1], rng)
+            else:
+                token = choose_draft(draft_logits, position + j + 2, j)
             drafts.append(token)
         # Verify: the model on out[-1] and the drafts, at positions position + 1 ...
         start = cache.position
         verified, verified_hidden, verified_selections = [], [], []
         for token in [out[-1]] + drafts:
             logits, h = model.forward_hidden(token, cache)
-            verified.append(_choose(logits))
+            verified.append(probabilities(logits, temperature) if sampled else _choose(logits))
             verified_hidden.append(h)
             verified_selections.append(selections())
-        accepted = 0
-        while accepted < k and drafts[accepted] == verified[accepted]:
-            accepted += 1
-        emitted = drafts[:accepted] + [verified[accepted]]
+        if sampled:
+            accepted, last = accept_sampled(verified, draft_probs, drafts, rng)
+        else:
+            accepted = 0
+            while accepted < k and drafts[accepted] == verified[accepted]:
+                accepted += 1
+            last = verified[accepted]
+        emitted = drafts[:accepted] + [last]
         stats.rounds += 1
         stats.drafted += k
         stats.accepted += accepted

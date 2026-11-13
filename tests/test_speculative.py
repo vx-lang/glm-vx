@@ -178,3 +178,95 @@ def test_the_mtp_step_follows_the_vllm_wiring():
         g = rms(y, w['model.layers.4.shared_head.norm.weight'])
         np.testing.assert_allclose(hidden, g, rtol=1e-5, atol=1e-6)
         np.testing.assert_allclose(logits, w['lm_head.weight'] @ g, rtol=1e-5, atol=1e-5)
+
+
+# Sampling. Chi-square tests with fixed seeds; each threshold is about p = 1e-4 for its degrees of
+# freedom, and the always-accept rule, which is wrong, fails the same test.
+
+from glm_vx import speculative  # noqa: E402
+
+
+def chi_square(counts, probs):
+    counts, expected = np.asarray(counts, float), np.asarray(probs, float) * np.sum(counts)
+    return float(np.sum((counts - expected) ** 2 / expected))
+
+
+def round_samples(rule, target, draft, trials, seed):
+    """(first emitted, second emitted given the first draft was kept) over many rounds of k = 2."""
+    rng = np.random.default_rng(seed)
+    first, second = np.zeros(5), np.zeros(5)
+    for _ in range(trials):
+        drafts = [speculative.sample(q, rng) for q in draft]
+        accepted, last = rule(target, draft, drafts, rng)
+        emitted = drafts[:accepted] + [last]
+        first[emitted[0]] += 1
+        if accepted >= 1:
+            second[emitted[1]] += 1
+    return first, second
+
+
+def always_accept(target, draft, drafts, rng):
+    return len(drafts), speculative.sample(target[len(drafts)], rng)
+
+
+def test_speculative_sampling_keeps_the_target_distribution():
+    rng = np.random.default_rng(11)
+    target = [rng.dirichlet(np.ones(5)) for _ in range(3)]
+    draft = [rng.dirichlet(np.ones(5)) for _ in range(2)]
+    first, second = round_samples(speculative.accept_sampled, target, draft, 20000, seed=1)
+    assert chi_square(first, target[0]) < 24 and chi_square(second, target[1]) < 24
+    wrong_first, _ = round_samples(always_accept, target, draft, 20000, seed=1)
+    assert chi_square(wrong_first, target[0]) > 100  # the test can tell
+
+
+def test_identical_draft_and_target_accept_every_draft():
+    rng = np.random.default_rng(2)
+    p = [rng.dirichlet(np.ones(5)) for _ in range(4)]
+    for _ in range(200):
+        drafts = [speculative.sample(q, rng) for q in p[:3]]
+        assert speculative.accept_sampled(p, p[:3], drafts, rng)[0] == 3
+
+
+def sampling_model():
+    c = dict(tiny_config(), num_nextn_predict_layers=1, vocab_size=8)
+    w = tiny_weights(c, seed=3, mtp=True)
+    w['lm_head.weight'] *= 8  # spread but uneven distributions; the drafts are accepted about half the time
+    return GlmMoeDsaModel(c, w, NumpyBackend())
+
+
+def exact_marginals(m, prompt, temperature):
+    """P(token i of the output) for i = 0, 1, 2, by enumerating the model's own distributions."""
+    def dist(tokens):
+        cache = m.new_cache()
+        for t in tokens:
+            logits = m.forward(t, cache)
+        return speculative.probabilities(logits, temperature)
+    p0 = dist(prompt)
+    p1 = {a: dist(prompt + [a]) for a in range(8)}
+    m1 = sum(p0[a] * p1[a] for a in range(8))
+    m2 = sum(p0[a] * p1[a][b] * dist(prompt + [a, b]) for a in range(8) for b in range(8))
+    return p0, m1, m2
+
+
+def test_sampled_generation_has_the_models_distribution():
+    m, prompt, temperature = sampling_model(), [1, 2, 3], 1.0
+    want = exact_marginals(m, prompt, temperature)
+    rng = np.random.default_rng(5)
+    counts, drafted, accepted = np.zeros((3, 8)), 0, 0
+    for _ in range(1200):
+        out, _, _, stats = speculative.generate(m, prompt, 3, draft_tokens=2, temperature=temperature, rng=rng)
+        for i, t in enumerate(out):
+            counts[i, t] += 1
+        drafted, accepted = drafted + stats.drafted, accepted + stats.accepted
+    assert 0.2 < accepted / drafted < 0.8  # both paths taken often
+    for i in range(3):
+        assert chi_square(counts[i], want[i]) < 30, (i, counts[i], want[i] * 1200)
+
+
+def test_sampling_needs_an_rng_and_its_own_drafts():
+    m = sampling_model()
+    with pytest.raises(ValueError):
+        speculative.generate(m, [1], 3, temperature=1.0)
+    with pytest.raises(ValueError):
+        speculative.generate(m, [1], 3, temperature=1.0, rng=np.random.default_rng(0),
+                             choose_draft=lambda logits, position, step: 0)
