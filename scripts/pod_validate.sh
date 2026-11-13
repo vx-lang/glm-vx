@@ -17,7 +17,9 @@
 # this GPU that has layer reports, e.g. evidence/h100-20261026).
 # Use OMP_NUM_THREADS well below the host's vCPU count (NumPy thrashes on 128-vCPU pods).
 #
-# Toolchain: one vxc bundle from Vx main, 12fea615 or later (#2979: topk_radix's last-block
+# Toolchain: one vxc bundle from Vx main, 950a6f71 or later (tested: 89832571). Before 950a6f71
+# (Vx #3326) step build-cpu-lib takes hours: packed.vx's raw-pointer writes asked z3 a question per
+# pair. The GPU kernels alone need 12fea615 (#2979: topk_radix's last-block
 # scan and sort; #2949, #2943, #2969: its atomics; #2938: mla_heads_at's lane rows in registers; a9d832fd: its lane-0 writes, and
 # #2648's shfl.bfly sums; #2375: read-only and 16-byte loads;
 # #2363: bf16_decode!'s f32::from_bits calls in one across loop; #2240: mla_decode_at reads its step
