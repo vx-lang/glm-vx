@@ -67,6 +67,8 @@ class GlmMoeDsaModel:
         self.weights, self.backend = weights, backend
         c = self.config
         self.n_layers = int(c['num_hidden_layers'])
+        # MTP layers (glm_vx/speculative.py) follow the decoder layers: model.layers.{n_layers} and on.
+        self.mtp_layers = int(c.get('num_nextn_predict_layers') or 0)
         self.hidden = int(c['hidden_size'])
         self.heads = int(c['num_attention_heads'])
         self.rank = int(c['kv_lora_rank'])
@@ -111,6 +113,14 @@ class GlmMoeDsaModel:
             raise ValueError('DSA layers must be full/shared and start with a full indexer')
         if any(t not in ('dense', 'sparse') for t in self.mlp_types):
             raise ValueError('MLP layer type must be dense or sparse')
+
+    def indexer_type(self, layer):
+        """'full' or 'shared'. An MTP layer (index n_layers and up) has its own full indexer."""
+        return self.indexer_types[layer] if layer < self.n_layers else 'full'
+
+    def mlp_type(self, layer):
+        """'dense' or 'sparse'. An MTP layer is a MoE layer."""
+        return self.mlp_types[layer] if layer < self.n_layers else 'sparse'
 
     def _trace(self, position, name, value):
         """Optional validation observer receives an owning copy, never live state."""
@@ -216,7 +226,7 @@ class GlmMoeDsaModel:
         self._trace(position, f'layer.{layer}.rope_key', rotary_key)
         state.latents.append(np.asarray(latent, dtype=np.float32).copy())
         state.rope_keys.append(np.asarray(rotary_key, dtype=np.float32).copy())
-        if self.indexer_types[layer] == 'full':
+        if self.indexer_type(layer) == 'full':
             selected = self._index(prefix + '.indexer', x, q_residual, position, state)
         else:
             if previous_selection is None:
@@ -318,7 +328,7 @@ class GlmMoeDsaModel:
     def _feed_forward(self, layer, x, position=0):
         prefix = f'model.layers.{layer}.mlp'
         stage = f'layer.{layer}.mlp'
-        if self.mlp_types[layer] == 'dense':
+        if self.mlp_type(layer) == 'dense':
             result = self._mlp(prefix, x, position)
             self._trace(position, stage + '.output', result)
             return result
@@ -378,6 +388,25 @@ class GlmMoeDsaModel:
         """Append one token at cache.position and return next-token logits."""
         return self._forward(token_id, cache, output_logits=True)
 
+    def forward_hidden(self, token_id, cache):
+        """forward(), and also the final hidden state after model.norm: the input of an MTP layer."""
+        return self._forward(token_id, cache, output_logits=True, output_hidden=True)
+
+    def truncate(self, cache, position, selections=None):
+        """Roll the cache back to its first `position` tokens, as if no later token had run.
+
+        `selections` are the layers' selected_indices after the token at position - 1 ran (each
+        layer's state.selected_indices then); without them the selections are left as they are."""
+        if not 0 <= position <= cache.position:
+            raise ValueError('can only roll a cache back')
+        for i, state in enumerate(cache.layers):
+            del state.latents[position:]
+            del state.rope_keys[position:]
+            del state.index_keys[position if self.indexer_type(i) == 'full' else 0:]
+            if selections is not None:
+                state.selected_indices = None if selections[i] is None else selections[i].copy()
+        cache.position = position
+
     def prefill_token(self, token_id, cache):
         """Append a non-final prompt token without computing unused logits.
 
@@ -387,7 +416,7 @@ class GlmMoeDsaModel:
         """
         return self._forward(token_id, cache, output_logits=False)
 
-    def _forward(self, token_id, cache, *, output_logits):
+    def _forward(self, token_id, cache, *, output_logits, output_hidden=False):
         if not isinstance(token_id, (int, np.integer)) or not 0 <= int(token_id) < int(self.config['vocab_size']):
             raise ValueError('token_id must be an integer in the vocabulary')
         if not isinstance(cache, RequestCache) or len(cache.layers) != self.n_layers:
@@ -408,8 +437,7 @@ class GlmMoeDsaModel:
             logits = None
             if output_logits:
                 x = self._norm('model.norm', x, self.eps)
-                head = 'model.embed_tokens' if self.config.get('tie_word_embeddings', False) else 'lm_head'
-                logits = self._linear(head, x)
+                logits = self._linear(self.head_name, x)
                 self._trace(position, "logits", logits)
         except Exception:
             # A missing shard/backend failure must not poison the request cache.
@@ -420,7 +448,11 @@ class GlmMoeDsaModel:
                 state.selected_indices = old_selection
             raise
         cache.position += 1
-        return logits
+        return (logits, x) if output_hidden else logits
+
+    @property
+    def head_name(self):
+        return 'model.embed_tokens' if self.config.get('tie_word_embeddings', False) else 'lm_head'
 
     def prefill_chunk(self, token_ids, cache, *, output_logits=True):
         """Opt-in, bounded layer-wise prefill; final logits or None for a prefix."""
@@ -443,12 +475,15 @@ Model = GlmMoeDsaModel
 GLMModel = GlmMoeDsaModel
 
 
-def tiny_weights(config, seed=0, parameter_limit=10_000_000, shapes_only=False):
+def tiny_weights(config, seed=0, parameter_limit=10_000_000, shapes_only=False, mtp=False):
     """Generate deterministic float32 test tensors with native checkpoint names.
 
     These are random, untrained weights for architecture/backend smoke tests.
     A ten-million-parameter cap prevents accidentally allocating the official
     hundreds-of-billions-parameter checkpoint through this demo helper.
+    With `mtp`, also the config's num_nextn_predict_layers MTP layers (the official layer-78 names
+    at model.layers.{num_hidden_layers} and on), generated after every other tensor, so the
+    others are the same with or without them.
     """
     model = GlmMoeDsaModel(config, {}, None)
     c = model.config
@@ -478,8 +513,12 @@ def tiny_weights(config, seed=0, parameter_limit=10_000_000, shapes_only=False):
     if not c.get('tie_word_embeddings', False):
         matrix('lm_head', c['vocab_size'], model.hidden)
     norm('model.norm', model.hidden)
-    for layer in range(model.n_layers):
+    for layer in range(model.n_layers + (model.mtp_layers if mtp else 0)):
         prefix = f'model.layers.{layer}'
+        if layer >= model.n_layers:
+            matrix(prefix + '.eh_proj', model.hidden, 2 * model.hidden)
+            for name in ('.enorm', '.hnorm', '.shared_head.norm'):
+                norm(prefix + name, model.hidden)
         norm(prefix + '.input_layernorm', model.hidden)
         norm(prefix + '.post_attention_layernorm', model.hidden)
         a = prefix + '.self_attn'
@@ -491,13 +530,13 @@ def tiny_weights(config, seed=0, parameter_limit=10_000_000, shapes_only=False):
         norm(a + '.kv_a_layernorm', model.rank)
         matrix(a + '.kv_b_proj', model.heads * (model.nope + model.value_dim), model.rank)
         matrix(a + '.o_proj', model.hidden, model.heads * model.value_dim, attention_bias)
-        if model.indexer_types[layer] == 'full':
+        if model.indexer_type(layer) == 'full':
             matrix(a + '.indexer.wq_b', model.index_heads * model.index_dim, c['q_lora_rank'])
             matrix(a + '.indexer.wk', model.index_dim, model.hidden)
             norm(a + '.indexer.k_norm', model.index_dim, True)
             matrix(a + '.indexer.weights_proj', model.index_heads, model.hidden)
         m = prefix + '.mlp'
-        if model.mlp_types[layer] == 'dense':
+        if model.mlp_type(layer) == 'dense':
             mlp(m, c['intermediate_size'])
         else:
             experts = int(c['n_routed_experts'])
