@@ -1,0 +1,38 @@
+{
+  "status": "pass",
+  "backend": "numpy-reference",
+  "layers": 3,
+  "model": "zai-org/GLM-5.3",
+  "revision": "aca966e4e02791568aa6a4ced368624b3d897f42",
+  "atol": 0.002,
+  "rtol": 0.002,
+  "torch": "2.15.0+cpu",
+  "transformers": "5.19.0.dev0",
+  "library": null,
+  "scope": "trained GLM-5.3 weights, first 3 layers + embeddings + head, vs official eager F32 CPU; short prompts (the indexer keeps every token)",
+  "seconds": 799,
+  "reports": [
+    {
+      "prompt": "The capital of France is Paris. The capital of Germany is",
+      "tokens": 12,
+      "max_abs_diff": 9.5367431640625e-06,
+      "mean_abs_diff": 6.808751891185238e-07,
+      "max_abs_logit": 11.401233673095703,
+      "top1_match_all_positions": true,
+      "greedy_tokens": 8,
+      "greedy_first_mismatch": 8,
+      "ok": true
+    },
+    {
+      "prompt": "def fibonacci(n):\n    if n < 2:\n        return n\n    return",
+      "tokens": 17,
+      "max_abs_diff": 1.049041748046875e-05,
+      "mean_abs_diff": 7.13945439656527e-07,
+      "max_abs_logit": 19.99592399597168,
+      "top1_match_all_positions": true,
+      "greedy_tokens": 8,
+      "greedy_first_mismatch": 8,
+      "ok": true
+    }
+  ]
+}

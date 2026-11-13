@@ -1,0 +1,31 @@
+{
+  "model": "zai-org/GLM-5.3",
+  "revision": "aca966e4e02791568aa6a4ced368624b3d897f42",
+  "layers": 3,
+  "tensor_bytes": 5009968512,
+  "files": {
+    "model-00001-of-00141.safetensors": {
+      "sha256": "8978a07d05163c6218965197300410a920a02ac0e6ee8bd0167a67d06fecd93e",
+      "bytes": 4608754712,
+      "tensors": 56,
+      "source": "https://huggingface.co/zai-org/GLM-5.3/resolve/aca966e4e02791568aa6a4ced368624b3d897f42/model-00001-of-00141.safetensors"
+    },
+    "model-00020-of-00141.safetensors": {
+      "sha256": "06585a5191c5e6cc49683d803baa847f71a543c415fdfe0149dc5704414aa600",
+      "bytes": 401211832,
+      "tensors": 27,
+      "source": "https://huggingface.co/zai-org/GLM-5.3/resolve/aca966e4e02791568aa6a4ced368624b3d897f42/model-00020-of-00141.safetensors"
+    },
+    "model-00141-of-00141.safetensors": {
+      "sha256": "bc3f83aa5b0c9f155a6a2eed34d8bedb9d851bbc060eb01845779fd612da2f95",
+      "bytes": 12528,
+      "tensors": 1,
+      "source": "https://huggingface.co/zai-org/GLM-5.3/resolve/aca966e4e02791568aa6a4ced368624b3d897f42/model-00141-of-00141.safetensors"
+    },
+    "tokenizer.json": {
+      "sha256": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d",
+      "bytes": 20217442,
+      "source": "https://huggingface.co/zai-org/GLM-5.3/resolve/aca966e4e02791568aa6a4ced368624b3d897f42/tokenizer.json"
+    }
+  }
+}
