@@ -128,7 +128,7 @@ class ResidentGLM:
 
     def __init__(self, model, *, max_tokens=4096, ptx_dir=None, device=0, ctx=None, max_weight_bytes=None,
                  device_topk=True, device_experts=False, fused_attention=False, graph=False, fp8_kernels='hand',
-                 topk='auto', long_topk='merge', mla_kernel='decode', matvec_kernels='hand'):
+                 topk='auto', long_topk='merge', mla_kernel='decode', matvec_kernels='hand', mtp=False):
         if getattr(model, 'packed_weights', False):
             raise NotImplementedError('ResidentGLM supports expanded float32 weights only')
         if getattr(model, 'expert_placement', None) is not None:
@@ -137,6 +137,10 @@ class ResidentGLM:
             raise ValueError('max_tokens must be a positive integer')
         self.model, self.config = model, model.config
         self.max_tokens = max_tokens
+        # mtp: also the checkpoint's MTP layer (model.layers.{num_hidden_layers}, #16), for mtp_step.
+        self.mtp = bool(mtp)
+        if self.mtp and model.mtp_layers < 1:
+            raise ValueError('mtp=True needs a config with num_nextn_predict_layers >= 1')
         self.device_topk = bool(device_topk)
         self.device_experts = bool(device_experts)
         self.fused_attention = bool(fused_attention)
@@ -430,7 +434,7 @@ class ResidentGLM:
         self.latent_new = self.rope_new = self.index_key_new = None
         if self.graph:
             self.latent_new, self.rope_new, self.index_key_new = t((self.rank,)), t((self.rot,)), t((self.index_dim,))
-        if 'sparse' in m.mlp_types:
+        if 'sparse' in m.mlp_types or self.mtp:  # the MTP layer is a MoE layer
             experts = int(c['n_routed_experts'])
             k = int(c['num_experts_per_tok'])
             self.router_logits = t((experts,))
@@ -440,10 +444,14 @@ class ResidentGLM:
         vocab = int(c['vocab_size'])
         self.logits = t((vocab,))
         # Per-layer caches, all rows the caller has produced so far stay on the device.
-        self.latents = [t((cap, self.rank)) for _ in range(m.n_layers)]
-        self.rope_keys = [t((cap, self.rot)) for _ in range(m.n_layers)]
-        self.index_keys = [t((cap, self.index_dim)) if m.indexer_types[i] == 'full' else None
-                           for i in range(m.n_layers)]
+        # With mtp=True, one more of each for the MTP layer, at index n_layers.
+        layers = m.n_layers + (1 if self.mtp else 0)
+        self.latents = [t((cap, self.rank)) for _ in range(layers)]
+        self.rope_keys = [t((cap, self.rot)) for _ in range(layers)]
+        self.index_keys = [t((cap, self.index_dim)) if m.indexer_type(i) == 'full' else None
+                           for i in range(layers)]
+        if self.mtp:
+            self.mtp_input = t((2 * self.hidden,))  # [enorm(embedding), hnorm(hidden)], eh_proj's input
 
     def reset(self):
         """Start a new sequence. Device caches are overwritten as positions are reused."""
@@ -802,14 +810,14 @@ class ResidentGLM:
             kv_t = self._upload_weight(kv_name + ':nope_t', np.ascontiguousarray(kv[:, :self.nope, :].transpose(0, 2, 1)))
         return kv_t
 
-    def _attention(self, layer, x, position, shared_ok):
+    def _attention(self, layer, x, position, shared_ok, reuse_selection=False):
         prefix = f'model.layers.{layer}.self_attn'
         bias = bool(self.config.get('attention_bias', False))
         self._linear(prefix + '.q_a_proj', x, self.q_a, bias)
         self._rmsnorm(self.q_a, self._weight(prefix + '.q_a_layernorm.weight'), self.q_res, 1e-6)
         self._linear(prefix + '.q_b_proj', self.q_res, self.query)
         self._linear(prefix + '.kv_a_proj_with_mqa', x, self.compressed, bias)
-        full = self.model.indexer_types[layer] == 'full'
+        full = self.model.indexer_type(layer) == 'full' and not reuse_selection
         if full:
             self._index_project(prefix + '.indexer', x, self.q_res, self.iq, self.ik, self.head_weights_raw)
         self._attention_core(layer, position, shared_ok, self.query, self.compressed,
@@ -889,7 +897,7 @@ class ResidentGLM:
     def _feed_forward(self, layer, x):
         m, c = self.model, self.config
         prefix = f'model.layers.{layer}.mlp'
-        if m.mlp_types[layer] == 'dense':
+        if m.mlp_type(layer) == 'dense':
             self._mlp(prefix, x, self.ffn_out)
             return
         experts = int(c['n_routed_experts'])
@@ -969,19 +977,22 @@ class ResidentGLM:
     def _layers(self, position):
         """Every layer of one decode step, from self.x (the embedding row) to the final residual
         in self.x; with graph=True, what the step graph holds."""
+        for layer in range(self.model.n_layers):
+            self._layer(layer, position, layer > 0)
+
+    def _layer(self, layer, position, have_selection, reuse_selection=False):
+        """One decoder layer from self.x to self.x: attention and the feed-forward, each with its
+        norm and residual. reuse_selection: attend to self.selected without running a full indexer."""
         m = self.model
-        have_selection = False
-        for layer in range(m.n_layers):
-            prefix = f'model.layers.{layer}'
-            self._rmsnorm(self.x, self._weight(prefix + '.input_layernorm.weight'), self.norm, m.eps)
-            self._attention(layer, self.norm, position, have_selection)
-            have_selection = True
-            self._add(self.x_next, self.x, self.attn_out, self.hidden)
-            self.x, self.x_next = self.x_next, self.x
-            self._rmsnorm(self.x, self._weight(prefix + '.post_attention_layernorm.weight'), self.norm, m.eps)
-            self._feed_forward(layer, self.norm)
-            self._add(self.x_next, self.x, self.ffn_out, self.hidden)
-            self.x, self.x_next = self.x_next, self.x
+        prefix = f'model.layers.{layer}'
+        self._rmsnorm(self.x, self._weight(prefix + '.input_layernorm.weight'), self.norm, m.eps)
+        self._attention(layer, self.norm, position, have_selection or reuse_selection, reuse_selection)
+        self._add(self.x_next, self.x, self.attn_out, self.hidden)
+        self.x, self.x_next = self.x_next, self.x
+        self._rmsnorm(self.x, self._weight(prefix + '.post_attention_layernorm.weight'), self.norm, m.eps)
+        self._feed_forward(layer, self.norm)
+        self._add(self.x_next, self.x, self.ffn_out, self.hidden)
+        self.x, self.x_next = self.x_next, self.x
 
     def preload(self, reserve_bytes=256 * 1024 ** 2):
         """Upload every weight decode can use (all layers, every routed expert, the final norm and
@@ -1025,8 +1036,12 @@ class ResidentGLM:
             for n in ('gate_proj', 'up_proj', 'down_proj'):
                 linear(f'{prefix}.{n}')
 
-        for layer in range(m.n_layers):
+        for layer in range(m.n_layers + (1 if self.mtp else 0)):
             p = f'model.layers.{layer}'
+            if layer == m.n_layers:  # the MTP layer's own inputs and head norm
+                linear(p + '.eh_proj')
+                for n in ('enorm', 'hnorm', 'shared_head.norm'):
+                    self._weight(f'{p}.{n}.weight')
             self._weight(p + '.input_layernorm.weight')
             self._weight(p + '.post_attention_layernorm.weight')
             a = p + '.self_attn'
@@ -1037,13 +1052,13 @@ class ResidentGLM:
             self._weight(a + '.kv_a_layernorm.weight')
             self._kv_nope_t(a)
             self._weight(a + '.kv_b_proj.weight')
-            if m.indexer_types[layer] == 'full':
+            if m.indexer_type(layer) == 'full':
                 for n in ('wq_b', 'wk', 'weights_proj'):
                     linear(f'{a}.indexer.{n}')
                 self._weight(a + '.indexer.k_norm.weight')
                 self._weight(a + '.indexer.k_norm.bias')
             f = p + '.mlp'
-            if m.mlp_types[layer] == 'dense':
+            if m.mlp_type(layer) == 'dense':
                 mlp(f)
                 continue
             linear(f + '.gate')
@@ -1064,6 +1079,43 @@ class ResidentGLM:
         linear('model.embed_tokens' if c.get('tie_word_embeddings', False) else 'lm_head')
         if self.device_topk:
             self._topk_kernel()
+
+    def forward_hidden(self, token_id):
+        """forward(), and the final hidden state after model.norm: (logits, hidden), MTP's input."""
+        logits = self.forward(token_id)
+        return logits, np.frombuffer(self.norm.download(), dtype=np.float32).copy()
+
+    def mtp_step(self, token_id, hidden, position, *, reuse_selection=False):
+        """The MTP layer (mtp=True; glm_vx/speculative.py's MTPDrafter.step on the device): from the
+        token at position + 1 and the hidden state at position, its logits for the token at
+        position + 2 and its own hidden state, (logits, hidden). It writes its cache rows at
+        `position`, so stepping again at a position replaces what was there; reuse_selection
+        attends to the positions the last step selected (index_share_for_mtp_iteration).
+        Not with graph=True."""
+        m, c = self.model, self.config
+        if not self.mtp:
+            raise ValueError('mtp_step needs ResidentGLM(..., mtp=True)')
+        if self.graph:
+            raise ValueError('mtp_step does not run under graph=True yet')
+        if not 0 <= position < self.max_tokens or not 0 <= int(token_id) < int(c['vocab_size']):
+            raise ValueError('mtp_step: position or token out of range')
+        prefix = f'model.layers.{m.n_layers}'
+        embedding = np.zeros(self.hidden, np.float32) if position == 0 else m._embedding(int(token_id))
+        self.x.upload(np.ascontiguousarray(embedding, dtype=np.float32))
+        self.x_next.upload(np.ascontiguousarray(hidden, dtype=np.float32))
+        halves = [self.mtp_input.view((self.hidden,), offset=i * self.hidden * 4) for i in (0, 1)]
+        self._rmsnorm(self.x, self._weight(prefix + '.enorm.weight'), halves[0], m.eps)
+        self._rmsnorm(self.x_next, self._weight(prefix + '.hnorm.weight'), halves[1], m.eps)
+        self._project(prefix + '.eh_proj', self.mtp_input, self.x)
+        cosine, sine = _cached_rope_coefficients(self.rot, float(position), float(m.theta))
+        self.cos.upload(np.ascontiguousarray(cosine, dtype=np.float32))
+        self.sin.upload(np.ascontiguousarray(sine, dtype=np.float32))
+        self._layer(m.n_layers, position, False, reuse_selection)
+        self._rmsnorm(self.x, self._weight(prefix + '.shared_head.norm.weight'), self.norm, m.eps)
+        head = 'model.embed_tokens' if c.get('tie_word_embeddings', False) else 'lm_head'
+        self._project(head, self.norm, self.logits)
+        return (np.frombuffer(self.logits.download(), dtype=np.float32).copy(),
+                np.frombuffer(self.norm.download(), dtype=np.float32).copy())
 
     def forward_many(self, token_ids):
         """Append one to four tokens as one step: (logits, hidden), each [len(token_ids), ...], the
@@ -1164,7 +1216,7 @@ class ResidentGLM:
                           self._many_row(q_res, i), 1e-6)
         self._project_many(prefix + '.q_b_proj', q_res, query, count)
         self._project_many(prefix + '.kv_a_proj_with_mqa', x, compressed, count, bias)
-        full = self.model.indexer_types[layer] == 'full'
+        full = self.model.indexer_type(layer) == 'full'
         if full:
             iq = self._many('iq', self.index_heads * self.index_dim)
             ik, head_weights = self._many('ik', self.index_dim), self._many('head_weights', self.index_heads)
@@ -1200,7 +1252,7 @@ class ResidentGLM:
         c = self.config
         prefix = f'model.layers.{layer}.mlp'
         out = self._many('ffn_out', self.hidden)
-        if self.model.mlp_types[layer] == 'dense':
+        if self.model.mlp_type(layer) == 'dense':
             return self._mlp_many(prefix, x, out, count)
         experts, k = int(c['n_routed_experts']), int(c['num_experts_per_tok'])
         moe = self._many('moe_sum', self.hidden)

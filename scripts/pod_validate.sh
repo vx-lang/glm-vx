@@ -119,6 +119,9 @@ step test-resident-graph hw gpu/test_resident_graph_hardware.py
 # forward_many (MTP verification, #16): 1 to 4 tokens as one step, bit for bit the one-at-a-time run,
 # with fp8_matvec4_rows reading each FP8 weight once for all of them.
 step test-resident-many hw gpu/test_resident_many_hardware.py
+# MTP speculative decoding (#16): the MTP layer drafts on the device, forward_many verifies; the tokens
+# and cache rows equal plain greedy decoding's.
+step test-speculative-resident hw gpu/test_speculative_resident_hardware.py
 
 # Full-width float32 checks resident against the hybrid path, which reads every result back (about
 # 33 s per token): REFERENCE_TOKENS of them (default 20, above the full config's index_topk of 16).
