@@ -31,8 +31,9 @@ p. Each emitted token then has the model's own distribution, given the tokens be
 distribution glm_vx.scheduler samples, whatever the drafts are. T = 0 is greedy, as above.
 
 Not here yet:
-  - one batched verification step: the model runs the k + 1 tokens one at a time, which computes
-    the same values. A batched step is what makes drafts pay on a GPU (gpu/resident.py).
+  - a batched verification step on the GPU (gpu/resident.py), which is what makes drafts pay.
+    Here verification is one glm_vx.prefill chunk of the k + 1 tokens (batched projections and
+    grouped experts, the same values as token by token); batched=False runs them one at a time.
 """
 from dataclasses import dataclass, field
 
@@ -130,7 +131,7 @@ def accept_sampled(target, draft, drafts, rng):
 
 
 def generate(model, prompt, max_new_tokens, *, draft_tokens=3, drafter=None, eos=(), cache=None, choose_draft=None,
-             temperature=0.0, rng=None):
+             temperature=0.0, rng=None, batched=True):
     """Generation with MTP drafts: greedy (temperature 0), the same tokens as plain greedy decoding;
     or sampled at `temperature` from `rng` (numpy Generator), each token from the model's own
     distribution given the tokens before it.
@@ -187,12 +188,18 @@ def generate(model, prompt, max_new_tokens, *, draft_tokens=3, drafter=None, eos
             drafts.append(token)
         # Verify: the model on out[-1] and the drafts, at positions position + 1 ...
         start = cache.position
-        verified, verified_hidden, verified_selections = [], [], []
-        for token in [out[-1]] + drafts:
-            logits, h = model.forward_hidden(token, cache)
-            verified.append(probabilities(logits, temperature) if sampled else _choose(logits))
-            verified_hidden.append(h)
-            verified_selections.append(selections())
+        if batched:
+            from .prefill import prefill
+            all_logits, verified_hidden, verified_selections = prefill(
+                model, [out[-1]] + drafts, cache, output_all_logits=True, output_details=True)
+        else:
+            all_logits, verified_hidden, verified_selections = [], [], []
+            for token in [out[-1]] + drafts:
+                logits, h = model.forward_hidden(token, cache)
+                all_logits.append(logits)
+                verified_hidden.append(h)
+                verified_selections.append(selections())
+        verified = [probabilities(l, temperature) if sampled else _choose(l) for l in all_logits]
         if sampled:
             accepted, last = accept_sampled(verified, draft_probs, drafts, rng)
         else:

@@ -165,3 +165,34 @@ def test_batched_serving_prefix_reuse_and_seed_equivalence():
         assert sb.status()['active_requests'] == 0
     finally:
         sa.close(); sb.close()
+
+
+@pytest.mark.parametrize('split', [[5, 7], [3, 9], [12]])
+def test_details_are_each_positions_hidden_and_selections(split):
+    """output_details: what forward_hidden and the cache give token by token (MTP verification)."""
+    a, b = models(29)
+    ca, cb = a.new_cache(), b.new_cache()
+    tokens = [1, 15, 2, 8, 5, 17, 21, 9, 4, 8, 3, 2]  # index_topk 4: later positions select
+    want_logits, want_hidden, want_selections = [], [], []
+    for t in tokens:
+        logits, hidden = a.forward_hidden(t, ca)
+        want_logits.append(logits)
+        want_hidden.append(hidden)
+        want_selections.append([s.selected_indices.copy() for s in ca.layers])
+    cursor = 0
+    for count in split:
+        logits, hidden, selections = prefill(b, tokens[cursor:cursor + count], cb,
+                                             output_all_logits=True, output_details=True)
+        np.testing.assert_array_equal(logits, np.stack(want_logits[cursor:cursor + count]))
+        np.testing.assert_array_equal(hidden, np.stack(want_hidden[cursor:cursor + count]))
+        for got, want in zip(selections, want_selections[cursor:cursor + count]):
+            for g, w in zip(got, want):
+                np.testing.assert_array_equal(g, w)
+        cursor += count
+    compare_cache(ca, cb)
+
+
+def test_details_need_all_logits():
+    a, _ = models()
+    with pytest.raises(ValueError, match='details'):
+        prefill(a, [1, 2], a.new_cache(), output_details=True)

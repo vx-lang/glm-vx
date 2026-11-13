@@ -319,3 +319,17 @@ def test_the_config_turns_index_sharing_on():
     assert MTPDrafter(model(index_share_for_mtp_iteration=True)).index_share
     assert not MTPDrafter(model()).index_share
     assert not MTPDrafter(model(index_share_for_mtp_iteration=True), index_share=False).index_share
+
+
+@pytest.mark.parametrize('temperature', [0.0, 1.0])
+def test_batched_verification_matches_one_token_at_a_time(temperature):
+    m = model(seed=11)
+    tokens = prompt(12, 8)
+    runs = []
+    for batched in (True, False):
+        rng = np.random.default_rng(3) if temperature else None
+        runs.append(generate(m, tokens, 14, draft_tokens=3, temperature=temperature, rng=rng, batched=batched))
+    (got, cache, drafter, stats), (want, want_cache, want_drafter, want_stats) = runs
+    assert got == want and stats.accepted_per_round == want_stats.accepted_per_round
+    assert_same_cache(cache, want_cache)
+    assert_same_mtp(drafter, want_drafter)

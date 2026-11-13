@@ -128,8 +128,13 @@ def _attention(model, layer, x, start, state, previous):
     return _linear(model, prefix + '.o_proj', np.stack(values), bias), selections
 
 
-def prefill(model, tokens, cache, *, output_all_logits=False, output_logits=True):
+def prefill(model, tokens, cache, *, output_all_logits=False, output_logits=True, output_details=False):
     """Append 1..64 tokens atomically and return final (or every) next logits.
+
+    With output_details (and output_all_logits), returns (logits, hidden, selections): every
+    position's logits, its final hidden state after model.norm, and each layer's selected_indices
+    after it, [position][layer], as model.forward_hidden and the cache would give token by token.
+    MTP verification (glm_vx/speculative.py) runs its k + 1 tokens as one such chunk.
 
     A failed chunk restores cache lengths and selections. Trace callbacks use
     the single-token executor until stage-complete batched tracing is supported.
@@ -139,6 +144,8 @@ def prefill(model, tokens, cache, *, output_all_logits=False, output_logits=True
         raise ValueError('logit options must be boolean')
     if output_all_logits and not output_logits:
         raise ValueError('all logits requires output_logits')
+    if type(output_details) is not bool or (output_details and not output_all_logits):
+        raise ValueError('details require output_all_logits')
     if model.trace is not None:
         raise ValueError('batched prefill does not yet support validation trace callbacks')
     if not isinstance(tokens, (list, tuple)) or not 0 < len(tokens) <= MAX_PREFILL_CHUNK:
@@ -158,10 +165,11 @@ def prefill(model, tokens, cache, *, output_all_logits=False, output_logits=True
     old = [state.selected_indices for state in cache.layers]
     try:
         x = np.stack([model._embedding(int(token)) for token in tokens])
-        selected = None
+        selected, by_layer = None, []
         for layer, state in enumerate(cache.layers):
             prefix = f'model.layers.{layer}'
             attention, selected = _attention(model, layer, _norm(model, prefix + '.input_layernorm', x, model.eps), start, state, selected)
+            by_layer.append(selected)
             x = x + attention
             x = x + _feed_forward(model, layer, _norm(model, prefix + '.post_attention_layernorm', x, model.eps))
         if not output_logits:
@@ -169,8 +177,11 @@ def prefill(model, tokens, cache, *, output_all_logits=False, output_logits=True
             return None
         final = x if output_all_logits else x[-1:]
         head = 'model.embed_tokens' if model.config.get('tie_word_embeddings', False) else 'lm_head'
-        logits = _linear(model, head, _norm(model, 'model.norm', final, model.eps))
+        hidden = _norm(model, 'model.norm', final, model.eps)
+        logits = _linear(model, head, hidden)
         cache.position += len(tokens)
+        if output_details:
+            return logits, hidden, [[by_layer[layer][i] for layer in range(model.n_layers)] for i in range(len(tokens))]
         return logits if output_all_logits else logits[0]
     except BaseException:
         for i, state in enumerate(cache.layers):
