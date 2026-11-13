@@ -207,7 +207,7 @@ class GlmMoeDsaModel:
             return np.asarray(topk(scores, count), dtype=np.int64)
         return np.argsort(-scores, kind='stable')[:count].astype(np.int64)
 
-    def _attention(self, layer, x, position, state, previous_selection):
+    def _attention(self, layer, x, position, state, previous_selection, reuse_selection=False):
         b, c = self.backend, self.config
         prefix = f'model.layers.{layer}.self_attn'
         has_bias = bool(c.get('attention_bias', False))
@@ -226,7 +226,7 @@ class GlmMoeDsaModel:
         self._trace(position, f'layer.{layer}.rope_key', rotary_key)
         state.latents.append(np.asarray(latent, dtype=np.float32).copy())
         state.rope_keys.append(np.asarray(rotary_key, dtype=np.float32).copy())
-        if self.indexer_type(layer) == 'full':
+        if self.indexer_type(layer) == 'full' and not reuse_selection:
             selected = self._index(prefix + '.indexer', x, q_residual, position, state)
         else:
             if previous_selection is None:
@@ -364,18 +364,20 @@ class GlmMoeDsaModel:
         self._trace(position, stage + '.output', result)
         return result
 
-    def forward_layer(self, layer, x, position, state, previous_selection=None):
+    def forward_layer(self, layer, x, position, state, previous_selection=None, reuse_selection=False):
         """Execute one layer for bounded validation replay of captured inputs.
 
         The caller owns cache consistency/rollback for this low-level entry point.
         Normal serving uses forward(), which validates and rolls back the request.
+        With reuse_selection, a layer with a full indexer attends to previous_selection instead
+        of running its indexer, as a shared one does (an MTP layer's later draft steps).
         """
         prefix = f'model.layers.{layer}'
         selected = previous_selection
         self._trace(position, f'layer.{layer}.input', x)
         normalized = self._norm(prefix + '.input_layernorm', x, self.eps)
         self._trace(position, f'layer.{layer}.input_norm', normalized)
-        attended, selected = self._attention(layer, normalized, position, state, selected)
+        attended, selected = self._attention(layer, normalized, position, state, selected, reuse_selection)
         x = x + attended
         self._trace(position, f'layer.{layer}.attention_residual', x)
         normalized = self._norm(prefix + '.post_attention_layernorm', x, self.eps)

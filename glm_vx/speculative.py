@@ -11,7 +11,10 @@ next from the next token t and the model's hidden state h at the current positio
     logits = lm_head(g)              (the model's own head and embeddings)
 
 Drafting k tokens chains it: the next step takes the draft token and g in place of t and h, at the
-next position. The MTP layer's cache at position p holds what the layer computed from
+next position. With index_share_for_mtp_iteration (true in GLM-5.3's config), only the first draft
+step runs the MTP layer's indexer; the later ones attend to the tokens it selected, as vLLM's MTP
+speculator does (set_skip_topk), so they skip the indexer and add no index key. This changes the
+drafts, never the output. The MTP layer's cache at position p holds what the layer computed from
 (token p+1, h_p), so after a round of drafts only the first entry is right: the later ones came
 from drafts and draft hidden states. Verification runs the model on the next token and the k
 drafts; the drafts are accepted up to the first one the model's greedy choice disagrees with, and
@@ -28,8 +31,6 @@ p. Each emitted token then has the model's own distribution, given the tokens be
 distribution glm_vx.scheduler samples, whatever the drafts are. T = 0 is greedy, as above.
 
 Not here yet:
-  - index_share_for_mtp_iteration: each draft step runs the MTP layer's indexer, where the
-    official recipe reuses the first step's selection;
   - one batched verification step: the model runs the k + 1 tokens one at a time, which computes
     the same values. A batched step is what makes drafts pay on a GPU (gpu/resident.py).
 """
@@ -43,10 +44,12 @@ from .model import LayerCache, RequestCache
 class MTPDrafter:
     """The model's first MTP layer, model.layers.{num_hidden_layers}, with its own cache."""
 
-    def __init__(self, model):
+    def __init__(self, model, index_share=None):
         if model.mtp_layers < 1:
             raise ValueError('the config has no MTP layer (num_nextn_predict_layers)')
         self.model = model
+        self.index_share = bool(model.config.get('index_share_for_mtp_iteration', False)
+                                if index_share is None else index_share)
         self.layer = model.n_layers
         self.prefix = f'model.layers.{self.layer}'
         self.state = LayerCache()
@@ -55,9 +58,10 @@ class MTPDrafter:
     def position(self):
         return len(self.state.latents)
 
-    def step(self, token, hidden, position):
+    def step(self, token, hidden, position, selection=None):
         """The MTP layer at `position` from (token at position + 1, hidden at position): its logits
-        for the token at position + 2 and its hidden state."""
+        for the token at position + 2 and its hidden state. With `selection`, it attends to those
+        positions instead of running its indexer. state.selected_indices is what it attended to."""
         m = self.model
         if position != self.position:
             raise ValueError(f'MTP cache holds {self.position} positions, the step is at {position}')
@@ -68,7 +72,7 @@ class MTPDrafter:
             m._norm(self.prefix + '.enorm', embedding, m.eps),
             m._norm(self.prefix + '.hnorm', np.asarray(hidden, np.float32), m.eps))))
         try:
-            x, _ = m.forward_layer(self.layer, x, position, self.state)
+            x, _ = m.forward_layer(self.layer, x, position, self.state, selection, selection is not None)
         except Exception:
             self.truncate(position)
             raise
@@ -76,6 +80,8 @@ class MTPDrafter:
         return m._linear(m.head_name, hidden), hidden
 
     def truncate(self, position):
+        """Back to positions 0 .. position - 1. A step that reused a selection added no index key,
+        and only draft steps reuse one, so the index keys never run past a kept position."""
         del self.state.latents[position:]
         del self.state.rope_keys[position:]
         del self.state.index_keys[position:]
@@ -168,9 +174,11 @@ def generate(model, prompt, max_new_tokens, *, draft_tokens=3, drafter=None, eos
     hidden, position = hiddens[-1], len(prompt) - 1  # the next draft step: (out[-1], h at position)
     while len(out) < max_new_tokens and out[-1] not in stop:
         k = min(draft_tokens, max_new_tokens - len(out))
-        drafts, draft_probs, token, h = [], [], out[-1], hidden
+        drafts, draft_probs, token, h, shared = [], [], out[-1], hidden, None
         for j in range(k):
-            draft_logits, h = drafter.step(token, h, position + j)
+            draft_logits, h = drafter.step(token, h, position + j, shared)
+            if j == 0 and drafter.index_share:
+                shared = drafter.state.selected_indices.copy()
             if sampled:
                 draft_probs.append(probabilities(draft_logits, temperature))
                 token = sample(draft_probs[-1], rng)

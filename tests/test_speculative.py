@@ -270,3 +270,52 @@ def test_sampling_needs_an_rng_and_its_own_drafts():
     with pytest.raises(ValueError):
         speculative.generate(m, [1], 3, temperature=1.0, rng=np.random.default_rng(0),
                              choose_draft=lambda logits, position, step: 0)
+
+
+class RecordingDrafter(MTPDrafter):
+    """Records (position, selection attended to, whether it was reused) for each step."""
+    def __init__(self, model, index_share):
+        super().__init__(model, index_share=index_share)
+        self.steps = []
+
+    def step(self, token, hidden, position, selection=None):
+        result = super().step(token, hidden, position, selection)
+        self.steps.append((position, self.state.selected_indices.copy(), selection is not None))
+        return result
+
+
+@pytest.mark.parametrize('share', [False, True])
+def test_index_sharing_reuses_the_first_draft_steps_selection(share):
+    m = model(seed=7)  # index_topk 4: past 4 tokens each step selects
+    tokens = prompt(8, 9)
+    want, want_cache = greedy(m, tokens, 10)
+    drafter = RecordingDrafter(m, share)
+    got, cache, drafter, _ = generate(m, tokens, 10, draft_tokens=3, drafter=drafter)
+    assert got == want
+    assert_same_cache(cache, want_cache)
+    assert_same_mtp(drafter, scratch_mtp(m, tokens + got))
+    reused = [(p, s) for p, s, r in drafter.steps if r]
+    if not share:
+        assert not reused
+        return
+    assert reused
+    # Each reused selection is the one the round's first draft step chose, positions at or before it.
+    first = None
+    for p, s, r in drafter.steps:
+        if not r:
+            first = (p, s)
+            continue
+        np.testing.assert_array_equal(s, first[1])
+        assert s.max() <= first[0] < p
+    # Without sharing the same drafts would have selected for themselves: at least one step picks
+    # a position the first step could not (its own draft positions).
+    plain = RecordingDrafter(m, False)
+    generate(m, tokens, 10, draft_tokens=3, drafter=plain)
+    rounds = [(p, s) for p, s, _ in plain.steps]
+    assert any(s.max() > p - 1 for p, s in rounds[len(tokens) - 1:])
+
+
+def test_the_config_turns_index_sharing_on():
+    assert MTPDrafter(model(index_share_for_mtp_iteration=True)).index_share
+    assert not MTPDrafter(model()).index_share
+    assert not MTPDrafter(model(index_share_for_mtp_iteration=True), index_share=False).index_share
