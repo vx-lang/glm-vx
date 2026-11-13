@@ -22,11 +22,11 @@ def device_rows(resident, upto):
     return out
 
 
-def run(model, step, **options):
+def run(model, step, ctx=Context, **options):
     """(one at a time, forward_many) on two residents of `model`: logits, the next token's logits, caches."""
     results = []
     for many in (False, True):
-        resident = ResidentGLM(model, ctx=Context(), max_tokens=32, **options)
+        resident = ResidentGLM(model, ctx=ctx(), max_tokens=32, **options)
         try:
             for t in PREFIX:
                 resident.forward(t, logits=False)

@@ -116,6 +116,9 @@ step test-resident-fused-attention hw gpu/test_resident_fused_attention_hardware
 # The decode step captured once as a CUDA graph and replayed every token (#25, #26) against the
 # per-launch path, bit for bit, 5 weight layouts and 700 steps through 1 to 3 MLA splits.
 step test-resident-graph hw gpu/test_resident_graph_hardware.py
+# forward_many (MTP verification, #16): 1 to 4 tokens as one step, bit for bit the one-at-a-time run,
+# with fp8_matvec4_rows reading each FP8 weight once for all of them.
+step test-resident-many hw gpu/test_resident_many_hardware.py
 
 # Full-width float32 checks resident against the hybrid path, which reads every result back (about
 # 33 s per token): REFERENCE_TOKENS of them (default 20, above the full config's index_topk of 16).
