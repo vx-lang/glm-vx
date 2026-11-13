@@ -5,7 +5,7 @@ with fp8_matvec4_rows reading each FP8 weight once for all of them. Needs a GPU,
 import pytest
 
 from gpu.test_resident import SPAWN, build, fp8_model
-from gpu.test_resident_many import TOKENS, assert_same, run
+from gpu.test_resident_many import TOKENS, assert_same, graph_run, run
 
 
 @pytest.fixture(scope='module')
@@ -32,3 +32,11 @@ def test_fp8_tokens_as_one_step_on_the_gpu(ctx, kernels):
     results = run(model, TOKENS[6:10], ctx=lambda: ctx, fp8_kernels=kernels, device_experts=True)
     assert_same(results)
     assert (results[1][3].get('fp8_matvec4_rows', 0) > 0) == (kernels == 'x4')
+
+
+@pytest.mark.parametrize('kernels', ['hand', 'x4'])
+def test_graph_steps_are_forward_under_graph_on_the_gpu(ctx, kernels):
+    # forward_many's graphs (count 2 eager, captured, replayed; count 3 eager) against forward's.
+    model, _ = fp8_model(31, hidden_size=144, moe_intermediate_size=144)
+    want, got = (graph_run(model, many, ctx=lambda: ctx, fp8_kernels=kernels) for many in (False, True))
+    assert_same([want[:3] + ({},), got[:3] + ({},)])

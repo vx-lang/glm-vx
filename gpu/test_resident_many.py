@@ -102,9 +102,45 @@ def test_limits():
         assert resident.position == 6
     finally:
         resident.close()
-    graph = ResidentGLM(model, ctx=Context(), max_tokens=8, graph=True, device_topk=True, device_experts=True)
+
+
+GRAPH = dict(graph=True, device_topk=True, device_experts=True)
+GROUPS = [2, 2, 2, 3]  # count 2 runs eagerly, is captured, then replayed; count 3 is a graph of its own
+
+
+def graph_run(model, many, ctx=Context, **options):
+    """Logits of every position after PREFIX, the next token's, the caches and the replays, on a
+    graph=True resident: forward_many in GROUPS, or forward one token at a time."""
+    steps = (TOKENS[6:] + TOKENS[:3])[:sum(GROUPS)]
+    resident = ResidentGLM(model, ctx=ctx(), max_tokens=32, **GRAPH, **options)
     try:
-        with pytest.raises(ValueError, match='graph'):
-            graph.forward_many([1])
+        for t in PREFIX:
+            resident.forward(t, logits=False)
+        if many:
+            logits, at = [], 0
+            for n in GROUPS:
+                logits.append(resident.forward_many(steps[at:at + n])[0])
+                at += n
+            logits = np.concatenate(logits)
+        else:
+            logits = np.stack([resident.forward(t) for t in steps])
+        replays = resident.replays
+        after = resident.forward(TOKENS[-1])
+        return logits, after, device_rows(resident, len(PREFIX) + len(steps) + 1), replays
     finally:
-        graph.close()
+        resident.close()
+
+
+@pytest.mark.parametrize('options', [dict(), dict(fused_attention=True, mla_kernel='chunks')], ids=['split', 'chunks'])
+def test_graph_steps_are_forward_under_graph(options):
+    model = build(seed=3)
+    want, got = graph_run(model, False, **options), graph_run(model, True, **options)
+    assert_same([want[:3] + ({},), got[:3] + ({},)])
+    # PREFIX: one eager step, a capture, four replays; then counts 2 (eager, capture, replay) and 3 (eager).
+    assert got[3] == len(PREFIX) - 1 + 2
+
+
+def test_graph_fp8_x4_steps_are_forward_under_graph():
+    model, _ = fp8_model(31, hidden_size=144, moe_intermediate_size=144)
+    want, got = graph_run(model, False, fp8_kernels='x4'), graph_run(model, True, fp8_kernels='x4')
+    assert_same([want[:3] + ({},), got[:3] + ({},)])

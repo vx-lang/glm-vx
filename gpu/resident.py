@@ -57,6 +57,10 @@ kernel loaded before the capture at the second; the arithmetic is the per-launch
 logits are equal bit for bit. It needs ``device_topk`` and ``device_experts`` (no host read inside a
 step). With ``fused_attention`` the graph holds gpu/spawn's mla_decode_at (#27): splits_max splits
 per head, those past the step's splits idle but arriving, so the arrival counts still return to zero.
+forward_many and mtp_step (#16) run as graphs of their own too: forward_many one for each token
+count, with each token's cos, sin and step buffer uploaded beside the embedding rows; mtp_step one
+with the indexer and one reusing the last selection. Each runs eagerly the first time and is captured
+the second, and gives what the eager kernels give bit for bit.
 
 ``mla_kernel='chunks'`` runs the fused attention under graph replay through gpu/spawn's
 mla_chunks_at (#33): 32 tokens a chunk, equal to mla_decode_at to rounding. ``mla_kernel='heads'``
@@ -165,6 +169,9 @@ class ResidentGLM:
         if self.graph and not (self.device_topk and self.device_experts):
             raise ValueError('graph=True needs device_topk and device_experts: a captured step cannot read device memory')
         self._step_graph, self._warm = None, False
+        # forward_many's graphs by token count, mtp_step's by reuse_selection: run eagerly the first
+        # time, captured the second, replayed after (_replay).
+        self._graphs, self._warmed = {}, set()
         self.replays = 0
         self.max_weight_bytes = max_weight_bytes
         self.weight_bytes = 0
@@ -383,14 +390,32 @@ class ResidentGLM:
             # The step's inputs back to back, one upload per token: x (the embedding row; the
             # ping-pong returns to it after every layer's two swaps), cos, sin, then the int32 step
             # buffer [position, tokens, count, splits] the *_at kernels read.
-            self.step_inputs = t((self.hidden + 2 * half + 4,))
+            # With mtp=True the MTP step's hidden state follows them, so mtp_step uploads once too.
+            inputs = self.hidden + 2 * half + 4
+            self._inputs = t((inputs + (self.hidden if self.mtp else 0),))
+            self.step_inputs = self._inputs.view((inputs,))
+            if self.mtp:
+                self.mtp_hidden = self._inputs.view((self.hidden,), offset=inputs * 4)
             self.x = self.step_inputs.view((self.hidden,))
             self.cos = self.step_inputs.view((half,), offset=self.hidden * 4)
             self.sin = self.step_inputs.view((half,), offset=(self.hidden + half) * 4)
             self.step = self.step_inputs.view((4,), 'int32', offset=(self.hidden + 2 * half) * 4)
+            # forward_many's inputs: the [MANY_TOKENS, hidden] embedding rows, then each token's cos,
+            # sin and step buffer, a 256-byte aligned block a token.
+            block = -(-(2 * half + 4) // 64) * 64
+            self._many_inputs = t((MANY_TOKENS * (self.hidden + block),))
+            self._many_buffers = {('x', self.hidden): self._many_inputs.view((MANY_TOKENS, self.hidden))}
+            base = MANY_TOKENS * self.hidden * 4
+            self._many_steps = [(self._many_inputs.view((half,), offset=base + i * block * 4),
+                                 self._many_inputs.view((half,), offset=base + (i * block + half) * 4),
+                                 self._many_inputs.view((4,), 'int32', offset=base + (i * block + 2 * half) * 4))
+                                for i in range(MANY_TOKENS)]
+            self._many_block = block
         else:
             self.x = t((self.hidden,))
             self.cos, self.sin = t((half,)), t((half,))
+            if self.mtp:
+                self.mtp_hidden = t((self.hidden,))
         self.x_next, self.norm = t((self.hidden,)), t((self.hidden,))
         self.attn_out, self.ffn_out = t((self.hidden,)), t((self.hidden,))
         self.q_a, self.q_res = t((q_rank,)), t((q_rank,))
@@ -943,11 +968,8 @@ class ResidentGLM:
         cosine, sine = _cached_rope_coefficients(self.rot, float(position), float(m.theta))
         cosine, sine = (np.ascontiguousarray(v, dtype=np.float32) for v in (cosine, sine))
         if self.graph:
-            tokens = position + 1
-            count = min(self.index_topk, tokens)
-            splits = min(self.splits_max, max(1, (count + 255) // 256))
-            step = np.array([position, tokens, count, splits], np.int32).view(np.float32)
-            self.step_inputs.upload(np.concatenate([embedding, cosine, sine, step]))
+            count = min(self.index_topk, position + 1)
+            self.step_inputs.upload(np.concatenate([embedding, cosine, sine, self._step_buffer(position, count)]))
             if self._step_graph is not None:
                 self._step_graph.launch(self.stream)
                 self.replays += 1
@@ -973,6 +995,32 @@ class ResidentGLM:
         head = 'model.embed_tokens' if c.get('tie_word_embeddings', False) else 'lm_head'
         self._project(head, self.norm, self.logits)
         return np.frombuffer(self.logits.download(), dtype=np.float32).copy()
+
+    def _step_buffer(self, position, count):
+        """The step buffer the *_at kernels read, [position, tokens, count, splits], as float32 bits."""
+        splits = min(self.splits_max, max(1, (count + 255) // 256))
+        return np.array([position, position + 1, count, splits], np.int32).view(np.float32)
+
+    def _rope_inputs(self, position):
+        cosine, sine = _cached_rope_coefficients(self.rot, float(position), float(self.model.theta))
+        return [np.ascontiguousarray(v, dtype=np.float32) for v in (cosine, sine)]
+
+    def _replay(self, key, body):
+        """With graph=True, body's launches as the graph `key`: run eagerly the first time (every weight
+        uploaded, every kernel and scratch buffer made), captured and launched the second, replayed
+        after. Everything that changes per call comes from the inputs uploaded before."""
+        if key in self._graphs:
+            self._graphs[key].launch(self.stream)
+            self.replays += 1
+        elif key not in self._warmed:
+            body()
+            self._warmed.add(key)
+        else:
+            with self.stream.capture() as graph:
+                body()
+            self._graphs[key] = graph
+            graph.launch(self.stream)
+            self.replays += 1
 
     def _layers(self, position):
         """Every layer of one decode step, from self.x (the embedding row) to the final residual
@@ -1091,31 +1139,50 @@ class ResidentGLM:
         position + 2 and its own hidden state, (logits, hidden). It writes its cache rows at
         `position`, so stepping again at a position replaces what was there; reuse_selection
         attends to the positions the last step selected (index_share_for_mtp_iteration).
-        Not with graph=True."""
+
+        With graph=True the step is a graph of its own, one for each reuse_selection: one upload
+        of [embedding, cos, sin, step buffer, hidden], one launch, then the head."""
         m, c = self.model, self.config
+        if self._closed:
+            raise RuntimeError('ResidentGLM is closed')
         if not self.mtp:
             raise ValueError('mtp_step needs ResidentGLM(..., mtp=True)')
-        if self.graph:
-            raise ValueError('mtp_step does not run under graph=True yet')
         if not 0 <= position < self.max_tokens or not 0 <= int(token_id) < int(c['vocab_size']):
             raise ValueError('mtp_step: position or token out of range')
-        prefix = f'model.layers.{m.n_layers}'
         embedding = np.zeros(self.hidden, np.float32) if position == 0 else m._embedding(int(token_id))
-        self.x.upload(np.ascontiguousarray(embedding, dtype=np.float32))
-        self.x_next.upload(np.ascontiguousarray(hidden, dtype=np.float32))
-        halves = [self.mtp_input.view((self.hidden,), offset=i * self.hidden * 4) for i in (0, 1)]
-        self._rmsnorm(self.x, self._weight(prefix + '.enorm.weight'), halves[0], m.eps)
-        self._rmsnorm(self.x_next, self._weight(prefix + '.hnorm.weight'), halves[1], m.eps)
-        self._project(prefix + '.eh_proj', self.mtp_input, self.x)
-        cosine, sine = _cached_rope_coefficients(self.rot, float(position), float(m.theta))
-        self.cos.upload(np.ascontiguousarray(cosine, dtype=np.float32))
-        self.sin.upload(np.ascontiguousarray(sine, dtype=np.float32))
-        self._layer(m.n_layers, position, False, reuse_selection)
+        embedding = np.ascontiguousarray(embedding, dtype=np.float32)
+        hidden = np.ascontiguousarray(hidden, dtype=np.float32)
+        cosine, sine = self._rope_inputs(position)
+        reuse_selection = bool(reuse_selection)
+        if self.graph:
+            # Reusing, the step attends to the last selection: its count, not this position's.
+            count = self.selected_count if reuse_selection else min(self.index_topk, position + 1)
+            self._inputs.upload(np.concatenate([embedding, cosine, sine, self._step_buffer(position, count), hidden]))
+            self._replay(('mtp', reuse_selection), lambda: self._mtp_layer(position, reuse_selection))
+            self.selected_count = count
+        else:
+            self.x.upload(embedding)
+            self.mtp_hidden.upload(hidden)
+            self.cos.upload(cosine)
+            self.sin.upload(sine)
+            self._mtp_layer(position, reuse_selection)
+        prefix = f'model.layers.{m.n_layers}'
         self._rmsnorm(self.x, self._weight(prefix + '.shared_head.norm.weight'), self.norm, m.eps)
         head = 'model.embed_tokens' if c.get('tie_word_embeddings', False) else 'lm_head'
         self._project(head, self.norm, self.logits)
         return (np.frombuffer(self.logits.download(), dtype=np.float32).copy(),
                 np.frombuffer(self.norm.download(), dtype=np.float32).copy())
+
+    def _mtp_layer(self, position, reuse_selection):
+        """From the embedding in self.x and the hidden state in self.mtp_hidden to the MTP layer's
+        residual in self.x: eh_proj([enorm(embedding), hnorm(hidden)]), then its decoder layer."""
+        m = self.model
+        prefix = f'model.layers.{m.n_layers}'
+        halves = [self.mtp_input.view((self.hidden,), offset=i * self.hidden * 4) for i in (0, 1)]
+        self._rmsnorm(self.x, self._weight(prefix + '.enorm.weight'), halves[0], m.eps)
+        self._rmsnorm(self.mtp_hidden, self._weight(prefix + '.hnorm.weight'), halves[1], m.eps)
+        self._project(prefix + '.eh_proj', self.mtp_input, self.x)
+        self._layer(m.n_layers, position, False, reuse_selection)
 
     def forward_many(self, token_ids):
         """Append one to four tokens as one step: (logits, hidden), each [len(token_ids), ...], the
@@ -1126,12 +1193,13 @@ class ResidentGLM:
         fp8_matvec4_rows, which reads each weight once for up to four vectors; other formats run
         their kernel per token. Everything else runs per token, in order, so each token's attention
         and indexer see the cache rows of the tokens before it, and each token keeps its own
-        top-k for the shared-indexer layers. Not with graph=True yet."""
+        top-k for the shared-indexer layers.
+
+        With graph=True the layers are one graph for each token count: one upload of the
+        embedding rows and each token's cos, sin and step buffer, one launch, then the head."""
         m, c = self.model, self.config
         if self._closed:
             raise RuntimeError('ResidentGLM is closed')
-        if self.graph:
-            raise ValueError('forward_many does not run under graph=True yet')
         tokens = [int(t) for t in token_ids]
         if not 1 <= len(tokens) <= MANY_TOKENS or any(not 0 <= t < int(c['vocab_size']) for t in token_ids):
             raise ValueError(f'forward_many takes 1 to {MANY_TOKENS} tokens of the vocabulary')
@@ -1141,9 +1209,37 @@ class ResidentGLM:
         if start + count > int(c.get('max_position_embeddings', 2 ** 31 - 1)):
             raise ValueError('Request exceeds max_position_embeddings')
         hidden = self.hidden
-        x, x_next, norm = self._many('x', hidden), self._many('x_next', hidden), self._many('norm', hidden)
+        x, norm = self._many('x', hidden), self._many('norm', hidden)
+        embeddings = np.zeros((MANY_TOKENS, hidden), np.float32)
         for i, token in enumerate(tokens):
-            self._many_row(x, i).upload(np.ascontiguousarray(m._embedding(token), dtype=np.float32))
+            embeddings[i] = m._embedding(token)
+        if self.graph:
+            steps = np.zeros((MANY_TOKENS, self._many_block), np.float32)
+            for i in range(count):
+                cosine, sine = self._rope_inputs(start + i)
+                steps[i, :2 * len(cosine) + 4] = np.concatenate(
+                    [cosine, sine, self._step_buffer(start + i, min(self.index_topk, start + i + 1))])
+            self._many_inputs.upload(np.concatenate([embeddings.ravel(), steps.ravel()]))
+            self._replay(('many', count), lambda: self._layers_many(start, count))
+            self.selected_count = min(self.index_topk, start + count)
+        else:
+            x.upload(embeddings)
+            self._layers_many(start, count)
+        self.position += count
+        for i in range(count):
+            self._rmsnorm(self._many_row(x, i), self._weight('model.norm.weight'), self._many_row(norm, i), m.eps)
+        vocab = int(c['vocab_size'])
+        logits = self._many('logits', vocab)
+        head = 'model.embed_tokens' if c.get('tie_word_embeddings', False) else 'lm_head'
+        self._project_many(head, norm, logits, count)
+        rows = lambda t, width: np.frombuffer(t.download(), dtype=np.float32).reshape(MANY_TOKENS, width)[:count].copy()
+        return rows(logits, vocab), rows(norm, hidden)
+
+    def _layers_many(self, start, count):
+        """Every layer for forward_many's tokens, from the embedding rows in x to the final residuals
+        in x; with graph=True, what its graph holds."""
+        m, hidden = self.model, self.hidden
+        x, x_next, norm = self._many('x', hidden), self._many('x_next', hidden), self._many('norm', hidden)
         selected, counts = self.selected, [0] * count
         try:
             for layer in range(m.n_layers):
@@ -1162,15 +1258,6 @@ class ResidentGLM:
         finally:
             self.selected = selected
         self.selected_count = counts[-1]
-        self.position += count
-        for i in range(count):
-            self._rmsnorm(self._many_row(x, i), self._weight('model.norm.weight'), self._many_row(norm, i), m.eps)
-        vocab = int(c['vocab_size'])
-        logits = self._many('logits', vocab)
-        head = 'model.embed_tokens' if c.get('tie_word_embeddings', False) else 'lm_head'
-        self._project_many(head, norm, logits, count)
-        rows = lambda t, width: np.frombuffer(t.download(), dtype=np.float32).reshape(MANY_TOKENS, width)[:count].copy()
-        return rows(logits, vocab), rows(norm, hidden)
 
     def _many(self, name, width):
         """A [MANY_TOKENS, width] scratch matrix of forward_many, allocated on first use."""
@@ -1224,18 +1311,27 @@ class ResidentGLM:
             self._project_many(prefix + '.indexer.wk', x, ik, count)
             self._project_many(prefix + '.indexer.weights_proj', x, head_weights, count)
         heads_out = self._many('heads_out', self.heads * self.value_dim)
-        for i in range(count):
-            position = start + i
-            cosine, sine = _cached_rope_coefficients(self.rot, float(position), float(self.model.theta))
-            self.cos.upload(np.ascontiguousarray(cosine, dtype=np.float32))
-            self.sin.upload(np.ascontiguousarray(sine, dtype=np.float32))
-            # Each token's own top-k: a full indexer writes it, the shared layers after it read it.
-            self.selected = self._many_selection(i)
-            self.selected_count = counts[i]
-            index = tuple(self._many_row(t, i) for t in (iq, ik, head_weights)) if full else None
-            self._attention_core(layer, position, shared_ok, self._many_row(query, i), self._many_row(compressed, i), index)
-            counts[i] = self.selected_count
-            self._copy(self._many_row(heads_out, i), self.heads_out, self.heads * self.value_dim)
+        inputs = (self.cos, self.sin, self.step) if self.graph else None
+        try:
+            for i in range(count):
+                position = start + i
+                if self.graph:  # this token's cos, sin and step buffer, uploaded with the embeddings
+                    self.cos, self.sin, self.step = self._many_steps[i]
+                else:
+                    cosine, sine = self._rope_inputs(position)
+                    self.cos.upload(cosine)
+                    self.sin.upload(sine)
+                # Each token's own top-k: a full indexer writes it, the shared layers after it read it.
+                self.selected = self._many_selection(i)
+                self.selected_count = counts[i]
+                index = tuple(self._many_row(t, i) for t in (iq, ik, head_weights)) if full else None
+                self._attention_core(layer, position, shared_ok, self._many_row(query, i), self._many_row(compressed, i),
+                                     index)
+                counts[i] = self.selected_count
+                self._copy(self._many_row(heads_out, i), self.heads_out, self.heads * self.value_dim)
+        finally:
+            if self.graph:
+                self.cos, self.sin, self.step = inputs
         attended = self._many('attn_out', self.hidden)
         self._project_many(prefix + '.o_proj', heads_out, attended, count, bias)
         return attended

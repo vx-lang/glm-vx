@@ -11,7 +11,8 @@ hidden states, as on the CPU.
   resident = ResidentGLM(model, max_tokens=..., mtp=True, fp8_kernels='x4', device_experts=True)
   tokens, stats = generate(resident, prompt, 64, draft_tokens=3)
 
-draft_tokens is at most 3: forward_many verifies up to four tokens.
+draft_tokens is at most 3: forward_many verifies up to four tokens. With graph=True (and
+device_experts) forward, forward_many and mtp_step each replay CUDA graphs, with the same tokens.
 """
 import numpy as np
 

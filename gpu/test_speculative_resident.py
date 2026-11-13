@@ -49,8 +49,38 @@ def test_the_mtp_layer_on_the_device_is_the_cpu_ones(model):
         resident.close()
 
 
-def plain(model, prompt, new, eos=()):
-    resident = resident_of(model)
+GRAPH = dict(graph=True, device_topk=True, device_experts=True)
+
+
+def test_the_mtp_layer_under_graph_is_the_eager_ones(model):
+    # Each graph (full indexer, reused selection) runs eagerly, is captured, then replayed.
+    steps = [(0, False), (1, False), (2, True), (3, False), (4, True), (5, True), (6, False), (7, True)]
+    rng = np.random.default_rng(7)
+    hiddens = [rng.standard_normal(model.hidden).astype(np.float32) for _ in steps]
+    results = []
+    for options in (dict(device_experts=True), GRAPH):
+        resident = resident_of(model, **options)
+        try:
+            results.append([resident.mtp_step(PROMPT[p % len(PROMPT)], h, p, reuse_selection=reuse)
+                            for (p, reuse), h in zip(steps, hiddens)])
+            assert resident.replays == (6 if resident.graph else 0)  # each graph: captured, then 2 replays
+        finally:
+            resident.close()
+    for (want_logits, want_hidden), (logits, hidden) in zip(*results):
+        np.testing.assert_array_equal(logits.view(np.uint32), want_logits.view(np.uint32))
+        np.testing.assert_array_equal(hidden.view(np.uint32), want_hidden.view(np.uint32))
+
+
+@pytest.mark.parametrize('index_share', [False, True])
+def test_generation_under_graph_is_greedy_decoding(model, index_share):
+    want, want_rows, want_position = plain(model, PROMPT, 10, device_experts=True)
+    got, rows, position, stats = speculated(model, PROMPT, 10, draft_tokens=3, index_share=index_share, **GRAPH)
+    assert got == want and position == want_position and stats.rounds >= 3
+    assert_rows_equal({key: v for key, v in rows.items() if key[1] < model.n_layers}, want_rows)
+
+
+def plain(model, prompt, new, eos=(), **options):
+    resident = resident_of(model, **options)
     try:
         tokens = speculative.greedy(resident, prompt, new, eos=eos)
         return tokens, device_rows(resident, resident.position), resident.position
@@ -58,8 +88,8 @@ def plain(model, prompt, new, eos=()):
         resident.close()
 
 
-def speculated(model, prompt, new, **options):
-    resident = resident_of(model)
+def speculated(model, prompt, new, *, graph=False, device_topk=True, device_experts=False, **options):
+    resident = resident_of(model, graph=graph, device_topk=device_topk, device_experts=device_experts)
     try:
         tokens, stats = speculative.generate(resident, prompt, new, **options)
         return tokens, device_rows(resident, resident.position), resident.position, stats

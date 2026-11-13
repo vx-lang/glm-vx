@@ -117,10 +117,11 @@ step test-resident-fused-attention hw gpu/test_resident_fused_attention_hardware
 # per-launch path, bit for bit, 5 weight layouts and 700 steps through 1 to 3 MLA splits.
 step test-resident-graph hw gpu/test_resident_graph_hardware.py
 # forward_many (MTP verification, #16): 1 to 4 tokens as one step, bit for bit the one-at-a-time run,
-# with fp8_matvec4_rows reading each FP8 weight once for all of them.
+# with fp8_matvec4_rows reading each FP8 weight once for all of them; under graph=True, forward_many's
+# graphs against forward's.
 step test-resident-many hw gpu/test_resident_many_hardware.py
 # MTP speculative decoding (#16): the MTP layer drafts on the device, forward_many verifies; the tokens
-# and cache rows equal plain greedy decoding's.
+# and cache rows equal plain greedy decoding's, also with all three replaying graphs.
 step test-speculative-resident hw gpu/test_speculative_resident_hardware.py
 
 # Full-width float32 checks resident against the hybrid path, which reads every result back (about
