@@ -95,6 +95,7 @@ I = C.c_int32
 F = C.c_float
 _ELEMENTWISE_BLOCK = 256
 TOPK_SORT_TOKENS = 2048  # gpu/spawn/topk_sort.vx sorts contexts up to this many tokens (#32)
+MANY_TOKENS = 4  # forward_many's limit: fp8_matvec4_rows takes up to four vectors (#16)
 TOPK_CHUNK = 2048  # past it, topk_chunks sorts chunks of this many, topk_merge merges them (#32)
 _MAX_GRID = 65535
 
@@ -730,23 +731,25 @@ class ResidentGLM:
                     cols=inter, **down_args, **common)
 
     # ---------------------------------------------------------------- blocks
-    def _index(self, layer, prefix, x, position):
-        """DSA indexer for one layer: refresh its keys, score all causal keys, choose the top-k."""
-        m = self.model
+    def _index_project(self, prefix, x, q_res, iq, ik, head_weights_raw):
+        """The indexer's three projections: its queries from q_res, its key and head weights from x."""
+        self._linear(prefix + '.wq_b', q_res, iq)
+        self._linear(prefix + '.wk', x, ik)
+        self._linear(prefix + '.weights_proj', x, head_weights_raw)
+
+    def _index_core(self, layer, prefix, position, iq, ik, head_weights_raw):
+        """The indexer after its projections: the key row, the rotated queries, scores, top-k."""
         tokens = position + 1
-        self._linear(prefix + '.wq_b', self.q_res, self.iq)
-        self._linear(prefix + '.wk', x, self.ik)
-        self._launch('layernorm', 1, 256, [self.ik_norm, self.ik, self._weight(prefix + '.k_norm.weight'),
+        self._launch('layernorm', 1, 256, [self.ik_norm, ik, self._weight(prefix + '.k_norm.weight'),
                                            self._weight(prefix + '.k_norm.bias'), I(1), I(self.index_dim), F(1e-6)])
         row = self._new_row(self.index_keys[layer], position, self.index_dim, self.index_key_new)
         self._copy(row, self.ik_norm, self.index_dim)
         self._rope(row, self.ik_norm, 1, self.rot, self.rot, self.rot)
         self._store_row(self.index_keys[layer], row, self.index_dim)
-        self._copy(self.iq_rot, self.iq, self.index_heads * self.index_dim)
-        self._rope(self.iq_rot, self.iq, self.index_heads, self.rot, self.index_dim, self.index_dim)
-        self._linear(prefix + '.weights_proj', x, self.head_weights_raw)
+        self._copy(self.iq_rot, iq, self.index_heads * self.index_dim)
+        self._rope(self.iq_rot, iq, self.index_heads, self.rot, self.index_dim, self.index_dim)
         self._launch('scale', self._grid(self.index_heads), _ELEMENTWISE_BLOCK,
-                     [self.head_weights, self.head_weights_raw, F(_f32(self.index_heads ** -0.5, 'scale')), I(self.index_heads)])
+                     [self.head_weights, head_weights_raw, F(_f32(self.index_heads ** -0.5, 'scale')), I(self.index_heads)])
         scale = F(_f32(self.index_dim ** -0.5, 'scale'))
         if self.graph:
             self._launch('index_scores_at', (self.max_tokens + 3) // 4, 128,
@@ -800,22 +803,33 @@ class ResidentGLM:
         return kv_t
 
     def _attention(self, layer, x, position, shared_ok):
-        m, c = self.model, self.config
         prefix = f'model.layers.{layer}.self_attn'
-        bias = bool(c.get('attention_bias', False))
-        qk = self.nope + self.rot
+        bias = bool(self.config.get('attention_bias', False))
         self._linear(prefix + '.q_a_proj', x, self.q_a, bias)
         self._rmsnorm(self.q_a, self._weight(prefix + '.q_a_layernorm.weight'), self.q_res, 1e-6)
         self._linear(prefix + '.q_b_proj', self.q_res, self.query)
         self._linear(prefix + '.kv_a_proj_with_mqa', x, self.compressed, bias)
+        full = self.model.indexer_types[layer] == 'full'
+        if full:
+            self._index_project(prefix + '.indexer', x, self.q_res, self.iq, self.ik, self.head_weights_raw)
+        self._attention_core(layer, position, shared_ok, self.query, self.compressed,
+                             (self.iq, self.ik, self.head_weights_raw) if full else None)
+        self._linear(prefix + '.o_proj', self.heads_out, self.attn_out, bias)
+
+    def _attention_core(self, layer, position, shared_ok, query, compressed, index):
+        """One token's attention after its projections: its cache rows, the indexer's top-k (index:
+        its (queries, key, head weights), for a full indexer), MLA over the selection, and the
+        per-head values in self.heads_out. The caller runs o_proj."""
+        prefix = f'model.layers.{layer}.self_attn'
+        qk = self.nope + self.rot
         latent_row = self._new_row(self.latents[layer], position, self.rank, self.latent_new)
-        self._rmsnorm(self.compressed.view((self.rank,)), self._weight(prefix + '.kv_a_layernorm.weight'), latent_row, 1e-6)
+        self._rmsnorm(compressed.view((self.rank,)), self._weight(prefix + '.kv_a_layernorm.weight'), latent_row, 1e-6)
         self._store_row(self.latents[layer], latent_row, self.rank)
         rope_row = self._new_row(self.rope_keys[layer], position, self.rot, self.rope_new)
-        self._rope(rope_row, self.compressed.view((self.rot,), offset=self.rank * 4), 1, self.rot, self.rot, self.rot)
+        self._rope(rope_row, compressed.view((self.rot,), offset=self.rank * 4), 1, self.rot, self.rot, self.rot)
         self._store_row(self.rope_keys[layer], rope_row, self.rot)
-        if m.indexer_types[layer] == 'full':
-            self._index(layer, prefix + '.indexer', x, position)
+        if index is not None:
+            self._index_core(layer, prefix + '.indexer', position, *index)
         elif not shared_ok:
             raise ValueError('Shared DSA layer has no preceding full indexer selection')
 
@@ -824,9 +838,9 @@ class ResidentGLM:
         kv_b = self._weight(prefix + '.kv_b_proj.weight')
         warps = 4
         self._launch('matvec_heads', (self.heads * self.rank + warps - 1) // warps, 128,
-                     [self.latent_q, kv_t, self.query, I(self.heads), I(self.rank), I(self.nope),
+                     [self.latent_q, kv_t, query, I(self.heads), I(self.rank), I(self.nope),
                       I(self.rank * self.nope), I(qk), I(self.rank)])
-        self._rope(self.rot_q, self.query.view((self.heads * qk - self.nope,), offset=self.nope * 4),
+        self._rope(self.rot_q, query.view((self.heads * qk - self.nope,), offset=self.nope * 4),
                    self.heads, self.rot, qk, self.rot)
         count = self.selected_count
         splits = min(self.splits_max, max(1, (count + 255) // 256))
@@ -871,7 +885,6 @@ class ResidentGLM:
         self._launch('matvec_heads', (self.heads * self.value_dim + warps - 1) // warps, 128,
                      [self.heads_out, value_w, self.attended, I(self.heads), I(self.value_dim), I(self.rank),
                       I((self.nope + self.value_dim) * self.rank), I(self.rank), I(self.value_dim)])
-        self._linear(prefix + '.o_proj', self.heads_out, self.attn_out, bias)
 
     def _feed_forward(self, layer, x):
         m, c = self.model, self.config
@@ -1051,6 +1064,176 @@ class ResidentGLM:
         linear('model.embed_tokens' if c.get('tie_word_embeddings', False) else 'lm_head')
         if self.device_topk:
             self._topk_kernel()
+
+    def forward_many(self, token_ids):
+        """Append one to four tokens as one step: (logits, hidden), each [len(token_ids), ...], the
+        logits and the final hidden state (after model.norm) of every position, bit for bit what
+        forward() gives one token at a time. MTP verification (glm_vx/speculative.py, #16).
+
+        The projections run once for all the tokens: with fp8_kernels='x4', FP8 Linears through
+        fp8_matvec4_rows, which reads each weight once for up to four vectors; other formats run
+        their kernel per token. Everything else runs per token, in order, so each token's attention
+        and indexer see the cache rows of the tokens before it, and each token keeps its own
+        top-k for the shared-indexer layers. Not with graph=True yet."""
+        m, c = self.model, self.config
+        if self._closed:
+            raise RuntimeError('ResidentGLM is closed')
+        if self.graph:
+            raise ValueError('forward_many does not run under graph=True yet')
+        tokens = [int(t) for t in token_ids]
+        if not 1 <= len(tokens) <= MANY_TOKENS or any(not 0 <= t < int(c['vocab_size']) for t in token_ids):
+            raise ValueError(f'forward_many takes 1 to {MANY_TOKENS} tokens of the vocabulary')
+        start, count = self.position, len(tokens)
+        if start + count > self.max_tokens:
+            raise ValueError(f'sequence exceeds max_tokens={self.max_tokens}')
+        if start + count > int(c.get('max_position_embeddings', 2 ** 31 - 1)):
+            raise ValueError('Request exceeds max_position_embeddings')
+        hidden = self.hidden
+        x, x_next, norm = self._many('x', hidden), self._many('x_next', hidden), self._many('norm', hidden)
+        for i, token in enumerate(tokens):
+            self._many_row(x, i).upload(np.ascontiguousarray(m._embedding(token), dtype=np.float32))
+        selected, counts = self.selected, [0] * count
+        try:
+            for layer in range(m.n_layers):
+                prefix = f'model.layers.{layer}'
+                for i in range(count):
+                    self._rmsnorm(self._many_row(x, i), self._weight(prefix + '.input_layernorm.weight'),
+                                  self._many_row(norm, i), m.eps)
+                attended = self._attention_many(layer, norm, start, count, layer > 0, counts)
+                for i in range(count):
+                    self._add(self._many_row(x_next, i), self._many_row(x, i), self._many_row(attended, i), hidden)
+                    self._rmsnorm(self._many_row(x_next, i), self._weight(prefix + '.post_attention_layernorm.weight'),
+                                  self._many_row(norm, i), m.eps)
+                ffn = self._feed_forward_many(layer, norm, count)
+                for i in range(count):
+                    self._add(self._many_row(x, i), self._many_row(x_next, i), self._many_row(ffn, i), hidden)
+        finally:
+            self.selected = selected
+        self.selected_count = counts[-1]
+        self.position += count
+        for i in range(count):
+            self._rmsnorm(self._many_row(x, i), self._weight('model.norm.weight'), self._many_row(norm, i), m.eps)
+        vocab = int(c['vocab_size'])
+        logits = self._many('logits', vocab)
+        head = 'model.embed_tokens' if c.get('tie_word_embeddings', False) else 'lm_head'
+        self._project_many(head, norm, logits, count)
+        rows = lambda t, width: np.frombuffer(t.download(), dtype=np.float32).reshape(MANY_TOKENS, width)[:count].copy()
+        return rows(logits, vocab), rows(norm, hidden)
+
+    def _many(self, name, width):
+        """A [MANY_TOKENS, width] scratch matrix of forward_many, allocated on first use."""
+        buffers = self.__dict__.setdefault('_many_buffers', {})
+        if (name, width) not in buffers:
+            buffers[name, width] = self._tensor((MANY_TOKENS, width))
+        return buffers[name, width]
+
+    @staticmethod
+    def _many_row(matrix, i):
+        width = matrix.shape[1]
+        return matrix.view((width,), offset=i * width * 4)
+
+    def _project_many(self, prefix, x, out, count, bias=False):
+        """out[i] = W x[i] for i < count, each row what _linear(prefix, x[i], out[i], bias) writes."""
+        fmt = self._format(prefix)
+        rows, cols = out.shape[1], x.shape[1]
+        if fmt == 'fp8' and self.fp8_kernels == 'x4' and cols % 16 == 0:
+            codes, scales, shape = self._fp8_weight(prefix)
+            if tuple(shape) != (rows, cols):
+                raise ValueError(f'{prefix}: FP8 weight is {shape[0]}x{shape[1]}, got x [{cols}] -> out [{rows}]')
+            self._spawn('fp8_matvec4_rows', out=out, weight=codes.view((rows * cols // 4,), 'uint32'),
+                        scales=scales.view((int(np.prod(scales.shape)),)), x=x.view((MANY_TOKENS * cols,)),
+                        rows=rows, cols=cols, m=count)
+            if bias:
+                for i in range(count):
+                    self._add(self._many_row(out, i), self._many_row(out, i), self._weight(prefix + '.bias'), rows)
+            return out
+        for i in range(count):
+            self._linear(prefix, self._many_row(x, i), self._many_row(out, i), bias)
+        return out
+
+    def _attention_many(self, layer, x, start, count, shared_ok, counts):
+        """_attention for forward_many's tokens: o_proj's outputs, one row a token."""
+        prefix = f'model.layers.{layer}.self_attn'
+        bias = bool(self.config.get('attention_bias', False))
+        q_rank, qk = int(self.config['q_lora_rank']), self.nope + self.rot
+        q_a, q_res = self._many('q_a', q_rank), self._many('q_res', q_rank)
+        query, compressed = self._many('query', self.heads * qk), self._many('compressed', self.rank + self.rot)
+        self._project_many(prefix + '.q_a_proj', x, q_a, count, bias)
+        for i in range(count):
+            self._rmsnorm(self._many_row(q_a, i), self._weight(prefix + '.q_a_layernorm.weight'),
+                          self._many_row(q_res, i), 1e-6)
+        self._project_many(prefix + '.q_b_proj', q_res, query, count)
+        self._project_many(prefix + '.kv_a_proj_with_mqa', x, compressed, count, bias)
+        full = self.model.indexer_types[layer] == 'full'
+        if full:
+            iq = self._many('iq', self.index_heads * self.index_dim)
+            ik, head_weights = self._many('ik', self.index_dim), self._many('head_weights', self.index_heads)
+            self._project_many(prefix + '.indexer.wq_b', q_res, iq, count)
+            self._project_many(prefix + '.indexer.wk', x, ik, count)
+            self._project_many(prefix + '.indexer.weights_proj', x, head_weights, count)
+        heads_out = self._many('heads_out', self.heads * self.value_dim)
+        for i in range(count):
+            position = start + i
+            cosine, sine = _cached_rope_coefficients(self.rot, float(position), float(self.model.theta))
+            self.cos.upload(np.ascontiguousarray(cosine, dtype=np.float32))
+            self.sin.upload(np.ascontiguousarray(sine, dtype=np.float32))
+            # Each token's own top-k: a full indexer writes it, the shared layers after it read it.
+            self.selected = self._many_selection(i)
+            self.selected_count = counts[i]
+            index = tuple(self._many_row(t, i) for t in (iq, ik, head_weights)) if full else None
+            self._attention_core(layer, position, shared_ok, self._many_row(query, i), self._many_row(compressed, i), index)
+            counts[i] = self.selected_count
+            self._copy(self._many_row(heads_out, i), self.heads_out, self.heads * self.value_dim)
+        attended = self._many('attn_out', self.hidden)
+        self._project_many(prefix + '.o_proj', heads_out, attended, count, bias)
+        return attended
+
+    def _many_selection(self, i):
+        selections = self.__dict__.setdefault('_many_selections', {})
+        if i not in selections:
+            selections[i] = self._tensor((self.index_topk,), 'int32')
+        return selections[i]
+
+    def _feed_forward_many(self, layer, x, count):
+        """_feed_forward for forward_many's tokens, one row a token: the dense MLP and the shared
+        experts once for all of them, the router and the routed experts per token."""
+        c = self.config
+        prefix = f'model.layers.{layer}.mlp'
+        out = self._many('ffn_out', self.hidden)
+        if self.model.mlp_types[layer] == 'dense':
+            return self._mlp_many(prefix, x, out, count)
+        experts, k = int(c['n_routed_experts']), int(c['num_experts_per_tok'])
+        moe = self._many('moe_sum', self.hidden)
+        for i in range(count):
+            row = self._many_row(x, i)
+            self._project(prefix + '.gate', row, self.router_logits)
+            self._launch('router', 1, 32,
+                         [self.route_ids, self.route_weights, self.router_logits,
+                          self._weight(prefix + '.gate.e_score_correction_bias'), I(experts), I(k),
+                          F(_f32(float(c.get('routed_scaling_factor', 1.0)), 'router scale'))])
+            if self.device_experts:
+                self._device_moe(prefix, row, k)
+            else:
+                self._copy(self.moe_sum, self.zeros, self.hidden)
+                self._host_experts(prefix, row, k)
+            self._copy(self._many_row(moe, i), self.moe_sum, self.hidden)
+        if int(c.get('n_shared_experts', 1)) > 0:
+            shared = self._mlp_many(prefix + '.shared_experts', x, self._many('mlp_out', self.hidden), count)
+            for i in range(count):
+                self._add(self._many_row(moe, i), self._many_row(moe, i), self._many_row(shared, i), self.hidden)
+        for i in range(count):
+            self._copy(self._many_row(out, i), self._many_row(moe, i), self.hidden)
+        return out
+
+    def _mlp_many(self, prefix, x, out, count):
+        width = self._out_features(prefix + '.gate_proj')
+        gate, up, act = (self._many(name, width) for name in ('gate', 'up', 'act'))
+        self._project_many(prefix + '.gate_proj', x, gate, count)
+        self._project_many(prefix + '.up_proj', x, up, count)
+        for i in range(count):
+            self._swiglu(self._many_row(gate, i), self._many_row(up, i), self._many_row(act, i), width)
+        self._project_many(prefix + '.down_proj', act, out, count)
+        return out
 
     def prefill(self, token_ids):
         """Token-by-token prefill; returns the stacked logits of every position."""
