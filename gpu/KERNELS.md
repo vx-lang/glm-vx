@@ -67,13 +67,15 @@ rows. The original `rmsnorm` and `softmax` symbols retain their single-vector
 `n` argument ABI and use the same internal helpers with `rows=1,dim=n`.
 
 **Router.** A single full warp selects up to eight experts from at most 256.
-Each lane scans at most eight expert logits; repeated warp argmax reductions
-select descending `sigmoid(logit)+bias`, resolving ties by smaller expert ID.
-Selected original sigmoid values are normalized by their sum plus `1e-20`, then
-multiplied by the caller's scale. Selection bias does not change output weights.
-Indices are exchanged as float32 shuffle values, which represent IDs up to 255
-exactly. A block barrier after each selection makes its ID visible to all lanes
-before excluding it from the next argmax. Only the selected IDs and weights need
+Each lane reads its at most eight experts' logits and biases once (all sixteen
+loads before any arithmetic) and keeps their `sigmoid(logit)+bias` in registers;
+repeated warp argmax reductions select them in descending order, resolving ties
+by smaller expert ID. The owning lane marks a chosen expert in a bit mask, so a
+selection is register compares and one argmax, with no memory or barrier between
+selections (#29). Selected original sigmoid values are normalized by their sum
+plus `1e-20`, then multiplied by the caller's scale. Selection bias does not
+change output weights. Indices are exchanged as float32 shuffle values, which
+represent IDs up to 255 exactly. Only the selected IDs and weights need
 to return to the host in a compatibility integration. E>256/K>8 require another
 implementation and must be rejected by the caller.
 

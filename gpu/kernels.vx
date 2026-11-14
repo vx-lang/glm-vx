@@ -547,7 +547,38 @@ fn vxk_warp_argmax(score: f32, index: i32) -> i32 {
   return result;
 }
 
+// vxk_sigmoid's bits without its branch: the same expf argument and the same division, chosen by
+// selects, so the router's sixteen loads have no branch to sink behind (#29).
+fn vxk_sigmoid_flat(x: f32) -> f32 {
+  let mut result: f32 = 0.0;
+  unsafe {
+    let positive: bool = x >= 0.0;
+    let z: f32 = expf(if positive { 0.0 - x } else { x });
+    let top: f32 = if positive { 1.0 } else { z };
+    result = top / (1.0 + z);
+  }
+  return result;
+}
+
+// Lane `lane`'s score for its c-th expert, lane + 32c (c < 8): the router's scores in registers.
+fn vxk_router_score(c: i32, s0: f32, s1: f32, s2: f32, s3: f32, s4: f32, s5: f32, s6: f32, s7: f32) -> f32 {
+  let mut result: f32 = s7;
+  if c == 0 { result = s0; }
+  if c == 1 { result = s1; }
+  if c == 2 { result = s2; }
+  if c == 3 { result = s3; }
+  if c == 4 { result = s4; }
+  if c == 5 { result = s5; }
+  if c == 6 { result = s6; }
+  return result;
+}
+
 // One full warp, bounded E<=256,K<=8. Selection bias changes IDs only.
+// Each lane reads its (at most eight) experts' scores once, into registers, and marks the experts
+// taken in a bit mask, so a slot is register compares and one warp argmax: no reload of the
+// logits, the bias and the indices chosen so far, and no barrier, per slot (#29). The rule is
+// unchanged: a lane keeps its first largest score in expert order, and the warp the lower id on a
+// tie, so the ids and weights are the old kernel's bit for bit (gpu/test_simt.py).
 pub fn glm_vx_gpu_router(indices: *mut i32, weights: *mut f32, logits: *const f32, bias: *const f32, experts: i32, k: i32, scale: f32) -> void {
   if experts <= 0 { return; }
   if experts > 256 { return; }
@@ -558,31 +589,66 @@ pub fn glm_vx_gpu_router(indices: *mut i32, weights: *mut f32, logits: *const f3
     if vx_gpu_block_idx_x() != 0 { return; }
     if vx_gpu_block_dim_x() != 32 { return; }
     let lane: i32 = vx_gpu_thread_idx_x();
+    // All sixteen loads first, from an index clamped into range, and no guard after them, so
+    // none waits behind another's sigmoid. A score past the end is never read: `taken` masks it.
+    let last: i32 = experts - 1;
+    let i0: i32 = if lane < experts { lane } else { last };
+    let i1: i32 = if lane + 32 < experts { lane + 32 } else { last };
+    let i2: i32 = if lane + 64 < experts { lane + 64 } else { last };
+    let i3: i32 = if lane + 96 < experts { lane + 96 } else { last };
+    let i4: i32 = if lane + 128 < experts { lane + 128 } else { last };
+    let i5: i32 = if lane + 160 < experts { lane + 160 } else { last };
+    let i6: i32 = if lane + 192 < experts { lane + 192 } else { last };
+    let i7: i32 = if lane + 224 < experts { lane + 224 } else { last };
+    let l0: f32 = logits[i0];
+    let l1: f32 = logits[i1];
+    let l2: f32 = logits[i2];
+    let l3: f32 = logits[i3];
+    let l4: f32 = logits[i4];
+    let l5: f32 = logits[i5];
+    let l6: f32 = logits[i6];
+    let l7: f32 = logits[i7];
+    let b0: f32 = bias[i0];
+    let b1: f32 = bias[i1];
+    let b2: f32 = bias[i2];
+    let b3: f32 = bias[i3];
+    let b4: f32 = bias[i4];
+    let b5: f32 = bias[i5];
+    let b6: f32 = bias[i6];
+    let b7: f32 = bias[i7];
+    let s0: f32 = vxk_sigmoid_flat(l0) + b0;
+    let s1: f32 = vxk_sigmoid_flat(l1) + b1;
+    let s2: f32 = vxk_sigmoid_flat(l2) + b2;
+    let s3: f32 = vxk_sigmoid_flat(l3) + b3;
+    let s4: f32 = vxk_sigmoid_flat(l4) + b4;
+    let s5: f32 = vxk_sigmoid_flat(l5) + b5;
+    let s6: f32 = vxk_sigmoid_flat(l6) + b6;
+    let s7: f32 = vxk_sigmoid_flat(l7) + b7;
+    // Bit c: expert lane + 32c is past the end or already chosen.
+    let mut taken: u32 = 0u32;
+    for c in 0..8 { if lane + c * 32 >= experts { taken = taken | (1u32 << (c as u32)); } }
+    let mut mine: i32 = 0;
     for slot in 0..k {
       let mut best_index: i32 = -1;
       let mut best_score: f32 = 0.0;
-      for chunk in 0..((experts + 31) / 32) {
-        let e: i32 = lane + chunk * 32;
-        if e < experts {
-          let mut used: i32 = 0;
-          for previous in 0..slot { if indices[previous] == e { used = 1; } }
-          if used == 0 {
-            let score: f32 = vxk_sigmoid(logits[e]) + bias[e];
-            if best_index < 0 { best_index = e; best_score = score; }
-            else { if score > best_score { best_index = e; best_score = score; } }
-          }
+      for c in 0..8 {
+        if ((taken >> (c as u32)) & 1u32) == 0u32 {
+          let score: f32 = vxk_router_score(c, s0, s1, s2, s3, s4, s5, s6, s7);
+          if best_index < 0 { best_index = lane + c * 32; best_score = score; }
+          else { if score > best_score { best_index = lane + c * 32; best_score = score; } }
         }
       }
       let chosen: i32 = vxk_warp_argmax(best_score, best_index);
-      if lane == 0 { indices[slot] = chosen; weights[slot] = vxk_sigmoid(logits[chosen]); }
-      // Makes the chosen global IDs/weights visible before the next selection.
-      vx_gpu_barrier();
+      if chosen >= 0 {
+        if chosen % 32 == lane { taken = taken | (1u32 << ((chosen / 32) as u32)); }
+      }
+      if lane == slot { mine = chosen; }
     }
     let mut value: f32 = 0.0;
-    if lane < k { value = weights[lane]; }
+    if lane < k { value = vxk_sigmoid(logits[mine]); }
     let partial: f32 = vxk_warp_sum(value);
     let total: f32 = vx_gpu_shuffle_idx_f32(partial, 0) + 0.00000000000000000001;
-    if lane < k { weights[lane] = value / total * scale; }
+    if lane < k { indices[lane] = mine; weights[lane] = value / total * scale; }
     return;
   }
 }

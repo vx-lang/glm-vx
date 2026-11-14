@@ -136,3 +136,43 @@ def test_rmsnorm_rows_is_its_order_bitwise(simt,rows,dim,block):
     inplace=x.copy()
     simt.run('glm_vx_gpu_rmsnorm_rows',inplace,inplace,w,rows,dim,1e-5,grid=rows,block=block)
     np.testing.assert_array_equal(inplace.view(np.uint32),out.view(np.uint32))
+
+# The router's selection rule, lane by lane: lane l keeps the first largest score among its free
+# experts l, l + 32, .., then vxk_warp_argmax's shuffle-down tree keeps the larger score and, on a
+# tie, the lower id. Its scores live in registers since #29; the ids are this model's exactly,
+# ties, NaN and infinities included, and the weights the normalized sigmoids.
+def router_model(logits, bias, k, scale):
+    with np.errstate(over='ignore', invalid='ignore'):
+        sig = (np.float32(1) / (np.float32(1) + np.exp(-logits))).astype('f4')
+        sig[logits < 0] = (np.exp(logits) / (np.float32(1) + np.exp(logits)))[logits < 0]
+    score = (sig + bias).astype('f4'); experts = len(logits); taken = set(); ids = []
+    for slot in range(k):
+        lanes = []
+        for lane in range(32):
+            index, best = -1, np.float32(0)
+            for e in range(lane, experts, 32):
+                if e not in taken and (index < 0 or score[e] > best): index, best = e, score[e]
+            lanes.append((best, index))
+        for delta in (16, 8, 4, 2, 1):
+            lanes = [(o if (o := lanes[l + delta if l + delta < 32 else l])[1] >= 0 and (
+                lanes[l][1] < 0 or o[0] > lanes[l][0] or (o[0] == lanes[l][0] and o[1] < lanes[l][1]))
+                else lanes[l]) for l in range(32)]
+        ids.append(lanes[0][1]); taken.add(lanes[0][1])
+    weights = sig[ids].astype('f8')
+    return np.array(ids, 'i4'), (weights / (weights.sum() + 1e-20) * scale).astype('f4')
+
+@pytest.mark.parametrize('experts,k,mode', [(256, 8, 'normal'), (256, 8, 'ties'), (160, 8, 'bias'),
+                                            (33, 5, 'nan'), (7, 7, 'inf'), (1, 1, 'normal'), (32, 8, 'ties')])
+def test_router_is_its_selection_rule(simt, experts, k, mode):
+    rng = np.random.default_rng(experts * 10 + k)
+    logits = rng.normal(size=experts).astype('f4'); bias = (rng.normal(size=experts) * .1).astype('f4')
+    if mode == 'ties': logits = rng.integers(-2, 3, size=experts).astype('f4'); bias[:] = 0
+    if mode == 'bias': logits[:] = .5; bias = rng.integers(0, 2, size=experts).astype('f4')
+    if mode == 'nan': logits[rng.random(experts) < .25] = np.nan
+    if mode == 'inf': logits[[0, 3, 5]] = [np.inf, -np.inf, np.inf]
+    indices = np.full(8, -7, 'i4'); weights = np.full(8, -7, 'f4')
+    simt.run('glm_vx_gpu_router', indices, weights, logits, bias, experts, k, 2.5, block=32)
+    ids, expected = router_model(logits, bias, k, 2.5)
+    np.testing.assert_array_equal(indices[:k], ids)
+    np.testing.assert_allclose(weights[:k], expected, rtol=2e-6, equal_nan=True)
+    assert (indices[k:] == -7).all() and (weights[k:] == -7).all()
