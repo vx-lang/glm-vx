@@ -14,7 +14,9 @@
 # reference, default 20), STRESS (concurrent stress processes, default 8), TIMER (ncu, or events to
 # skip the ncu pass where a container blocks its counters; it falls back to events anyway),
 # BASELINE (the evidence directory the layer gate compares with; default the newest earlier one of
-# this GPU that has layer reports, e.g. evidence/h100-20261026).
+# this GPU that has layer reports, e.g. evidence/h100-20261026). STEPS (a regex: only the steps whose
+# names match run), e.g. the bottleneck profiles alone:
+#   STEPS='^(build-|layer-|moe-|matvec-|topk-|mla-)' scripts/pod_validate.sh
 # Use OMP_NUM_THREADS well below the host's vCPU count (NumPy thrashes on 128-vCPU pods).
 #
 # Toolchain: one vxc bundle from Vx main, 950a6f71 or later (tested: 89832571). Before 950a6f71
@@ -50,6 +52,7 @@ summary=()
 
 step() {  # step NAME CMD...: run, log to $out/NAME.txt, record the result
   local name=$1; shift
+  if [[ -n ${STEPS:-} && ! $name =~ $STEPS ]]; then return; fi
   local start=$SECONDS
   echo "== $name: $*"
   "$@" > "$out/$name.txt" 2>&1
