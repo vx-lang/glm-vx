@@ -220,7 +220,7 @@ CASES = {
                                        out=np.zeros((7, 333), 'f4')),
     'layernorm': lambda r: dict(rows=9, dim=333, eps=1e-6, x=normal(r, 9 * 333) + 3, weight=normal(r, 333),
                                 bias=normal(r, 333), threads=64, out=np.zeros((9, 333), 'f4')),
-    'argmax_rows': lambda r: dict(rows=4, dim=2048, x=r.integers(-3, 4, size=4 * 2048).astype('f4'), threads=256,
+    'argmax_rows': lambda r: dict(rows=4, dim=2048, x=r.integers(-3, 4, size=(4, 2048)).astype('f4'), threads=256,
                                   out=np.zeros(4, 'i4')),
     'softmax_rows': lambda r: dict(rows=4, dim=2048, x=normal(r, 4 * 2048, 3), threads=1024, out=np.zeros((4, 2048), 'f4')),
     'router': lambda r: dict(experts=256, k=8, indices=np.zeros(8, 'i4'), logits=normal(r, 256),
