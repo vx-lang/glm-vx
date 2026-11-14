@@ -125,6 +125,29 @@ def test_matvec_is_its_lane_order_bitwise(simt,shape):
     simt.run('glm_vx_gpu_matvec',out,w,x,*shape,grid=(shape[0]+3)//4,block=128)
     np.testing.assert_array_equal(out.view(np.uint32),warp_tree(strided_sums(w*x,32)).view(np.uint32))
 
+# matvec_rows (gpu/matvec_rows.vx, #29) stages a row's products in shared memory and adds them in
+# the hand matvec's lane order: the same bits as glm_vx_gpu_matvec, for the router's and the
+# indexer's shapes, rows shorter than a lane, a staging batch or the summing batch, and 8192
+# columns, its limit. One block a row; the emulator runs blocks of up to 256.
+@pytest.mark.parametrize('shape,block',[((256,6144),256),((32,6144),256),((7,131),64),((3,257),32),
+                                        ((2,2049),96),((4,31),32),((3,1),32),((2,8192),256),((3,0),64)])
+def test_matvec_rows_is_the_hand_matvec_bitwise(simt,shape,block):
+    from gpu.test_spawn_vx_host import strided_sums,warp_tree
+    rng=np.random.default_rng(shape[0]*shape[1]+block);w=rng.normal(size=shape).astype('f4');x=rng.normal(size=shape[1]).astype('f4')
+    w[0,:3]=-0.0
+    guarded=np.full(shape[0]+2,-5.,'f4');out=guarded[1:-1]
+    simt.run('glm_vx_gpu_matvec_rows',out,w,x,*shape,grid=shape[0]+1,block=block)
+    hand=np.zeros(shape[0],'f4')
+    simt.run('glm_vx_gpu_matvec',hand,w,x,*shape,grid=(shape[0]+3)//4,block=128)
+    np.testing.assert_array_equal(out.view(np.uint32),hand.view(np.uint32))
+    if shape[1]:np.testing.assert_array_equal(out.view(np.uint32),warp_tree(strided_sums(w*x,32)).view(np.uint32))
+    np.testing.assert_array_equal(guarded[[0,-1]],[-5.,-5.])
+
+def test_matvec_rows_refuses_more_columns_than_shared_memory(simt):
+    out=np.full(1,-5.,'f4');w=np.ones((1,8193),'f4')
+    simt.run('glm_vx_gpu_matvec_rows',out,w,w[0],1,8193,block=32)
+    np.testing.assert_array_equal(out,[-5.])
+
 # The hand rmsnorm's order, bit for bit (gpu/test_spawn_vx_host.py's rms_reference): thread t adds
 # d = t, t + block, .. in turn, then vxk_block_sum. Its loops take eight steps a batch (#29), so
 # rows shorter than a batch, ending inside one, and GLM-5.3's 6144.

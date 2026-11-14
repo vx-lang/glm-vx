@@ -59,6 +59,9 @@ def _run(stream,work):
     if isinstance(stream,Stream):stream.run(work)
     else:work()
 class Kernel:
+    # gpu/testing/simt.cpp starts an OS thread per lane per block, so its cost is threads launched:
+    # matvec_rows (gpu/resident.py) runs a warp a row here, the hand matvec's thread count.
+    rows_block=32
     def __init__(self,ctx,name):self.ctx,self.name=ctx,name
     def launch(self,grid,block,args,stream=None):
         unpacked=[]

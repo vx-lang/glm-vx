@@ -24,6 +24,7 @@ not a CPU-callable library interface. All pointers refer to device memory.
 | `swiglu` | One element per thread per grid-stride iteration | 256 | ceil(n/256), or a smaller positive grid |
 | `rope_glm` | One adjacent input pair per thread | 256 | ceil(heads*dim/2/256), or a smaller positive grid |
 | `matvec` | One warp per output row, columns striped across lanes | 128 | ceil(rows/4) |
+| `matvec_rows` (gpu/matvec_rows.ptx) | One block per output row, products staged in shared memory, cols <= 8192 | 1024 | rows |
 | `mla_partial` | One block per head and selected-token partition | 32*ceil(rank/32) | heads*splits |
 | `mla_merge` | One block per head, output coordinates across threads | 256 | heads |
 | `rmsnorm` | One vector, stable single-vector ABI | 256 | 1 |
@@ -96,6 +97,15 @@ RoPE convention used by some other models.
 Lane `l` processes columns `l, l+32, ...`, then five shuffle-down operations
 produce a lane-zero sum. No thread independently scans the full row. This is a
 float32 SIMT decode matvec, without tensor cores or a GEMM claim.
+
+`matvec_rows` (its own unit, gpu/matvec_rows.vx, built with 8192 shared floats)
+is the same sum for matrices of few rows (#29): the router's gate (256 x 6144)
+and the indexer's `weights_proj` (32 x 6144) are a few dozen warps on the whole
+GPU, each walking its row in one dependent batch of loads after another. A block
+owns a row instead: all its threads load the row and `x` together and store the
+rounded products in shared memory, then warp 0 adds them in `matvec`'s lane
+order and tree, so the output is `matvec`'s bit for bit. ResidentGLM uses it for
+float32 matrices of at most 1024 rows and 8192 columns when the PTX is built.
 
 **Sparse absorbed MLA.** The query's nonrotary key projection must already be
 absorbed into `q_latent[heads,rank]`. Cache storage remains compressed:

@@ -94,7 +94,8 @@ sha256sum gpu/build/*.ptx gpu/build/spawn/*.ptx gpu/build/spawn/*.so > "$out/ptx
 
 # Hardware tests skip without a usable device; a run where nothing passed is a failure, not "ok".
 hw() { $PYTHON -m pytest -q -rs "$@" | tee /dev/stderr | grep -qE '[0-9]+ passed'; }
-step test-hardware hw gpu/test_hardware.py gpu/test_gemm_hardware.py gpu/test_index_scores_hardware.py gpu/test_topk_hardware.py
+step test-hardware hw gpu/test_hardware.py gpu/test_gemm_hardware.py gpu/test_index_scores_hardware.py gpu/test_topk_hardware.py \
+    gpu/test_small_kernels_hardware.py
 step test-quant-hardware hw gpu/test_quant_hardware.py
 step test-spawn-hardware hw gpu/test_spawn_hardware.py
 # The same libraries on the CPU (Vx runs the regions in order with no device visible), against NumPy.

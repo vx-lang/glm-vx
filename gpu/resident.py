@@ -98,6 +98,11 @@ from .runtime import CUDAContext
 I = C.c_int32
 F = C.c_float
 _ELEMENTWISE_BLOCK = 256
+# float32 matrices of at most this many rows (the router's gate, the indexer's weights_proj) run
+# through gpu/matvec_rows.ptx, one block a row with its products staged in shared memory, when
+# that is built: the hand matvec's bits without its 24 memory round trips a 6144-column row (#29).
+MATVEC_ROWS_MAX = 1024
+MATVEC_ROWS_COLS = 8192  # matvec_rows.vx's shared floats
 TOPK_SORT_TOKENS = 2048  # gpu/spawn/topk_sort.vx sorts contexts up to this many tokens (#32)
 MANY_TOKENS = 4  # forward_many's limit: fp8_matvec4_rows takes up to four vectors (#16)
 TOPK_CHUNK = 2048  # past it, topk_chunks sorts chunks of this many, topk_merge merges them (#32)
@@ -487,8 +492,25 @@ class ResidentGLM:
     # ---------------------------------------------------------------- op helpers
     def _matvec(self, weight, x, out):
         rows, cols = weight.shape
-        self._launch('matvec', (rows + 3) // 4, 128, [out, weight, x, I(rows), I(cols)])
+        rows_kernel = rows <= MATVEC_ROWS_MAX and cols <= MATVEC_ROWS_COLS and self._matvec_rows()
+        if rows_kernel:
+            # One block a row: 1024 threads load a 6144-column row in one batch each. The CPU
+            # emulator's kernels ask for a warp (gpu/testing/context.py).
+            block = getattr(self._kernels['matvec_rows'], 'rows_block', 1024)
+            self._launch('matvec_rows', rows, block, [out, weight, x, I(rows), I(cols)])
+        else:
+            self._launch('matvec', (rows + 3) // 4, 128, [out, weight, x, I(rows), I(cols)])
         return out
+
+    def _matvec_rows(self):
+        """Whether matvec_rows.ptx is built (gpu/build.sh); its kernel, loaded once, is then in _kernels."""
+        if 'matvec_rows' not in self._kernels:
+            path = self._ptx_dir / 'matvec_rows.ptx'
+            if not path.exists():
+                return False
+            module = self._modules['matvec_rows'] = self.ctx.load_ptx(path)
+            self._kernels['matvec_rows'] = module.kernel('glm_vx_gpu_matvec_rows')
+        return True
 
     def _project(self, prefix, x, out):
         """out = W x for the Linear `prefix`: the INT4, FP8 or BF16 kernel on stored weights, else float32 matvec."""

@@ -1,0 +1,114 @@
+// glm_vx_gpu_matvec's sums bit for bit, for a matrix of few rows (#29): the router's gate
+// (256 x 6144) and the indexer's weights_proj (32 x 6144) are a few dozen warps on the whole GPU,
+// and each warp of the hand matvec walks its 6144-column row in 24 batches, one memory round trip
+// after another. Here one block owns a row: all its threads load the row and x at once and write
+// the products to shared memory, then warp 0 adds them in the hand matvec's order (lane l: columns
+// l, l + 32, .. in turn, then the warp tree). The products are the same rounded mul.rn, and the
+// adds the same add.rn in the same order, so out is the hand kernel's to the bit. Its own unit
+// because it needs `cols` shared floats (gpu/build.sh: --shared-floats 8192), which the kernels
+// in kernels.vx should not carry.
+extern "C" {
+  fn vx_gpu_thread_idx_x() -> i32;
+  fn vx_gpu_block_idx_x() -> i32;
+  fn vx_gpu_block_dim_x() -> i32;
+  fn vx_gpu_shuffle_down_f32(value: f32, delta: i32) -> f32;
+  fn vx_gpu_barrier() -> void;
+  fn vx_gpu_shared_f32() -> *mut f32;
+}
+
+// kernels.vx's vxk_warp_sum: lane zero holds the sum.
+fn vxk_rows_warp_sum(value: f32) -> f32 {
+  let mut result: f32 = 0.0;
+  unsafe {
+    let mut sum: f32 = value;
+    sum = sum + vx_gpu_shuffle_down_f32(sum, 16);
+    sum = sum + vx_gpu_shuffle_down_f32(sum, 8);
+    sum = sum + vx_gpu_shuffle_down_f32(sum, 4);
+    sum = sum + vx_gpu_shuffle_down_f32(sum, 2);
+    sum = sum + vx_gpu_shuffle_down_f32(sum, 1);
+    result = sum;
+  }
+  return result;
+}
+
+// One block per row (grid = rows), block a multiple of 32 in [32, 1024]; cols <= 8192, the shared
+// floats this unit is built with. Launch 1024 threads: a 6144-column row is then one batch of
+// loads per thread.
+pub fn glm_vx_gpu_matvec_rows(out: *mut f32, weight: *const f32, x: *const f32, rows: i32, cols: i32) -> void {
+  if rows <= 0 { return; }
+  if cols < 0 { return; }
+  if cols > 8192 { return; }
+  unsafe {
+    let tid: i32 = vx_gpu_thread_idx_x();
+    let block: i32 = vx_gpu_block_dim_x();
+    if block < 32 { return; }
+    if block > 1024 { return; }
+    if block % 32 != 0 { return; }
+    let row: i32 = vx_gpu_block_idx_x();
+    // The whole block returns together, before its barrier.
+    if row >= rows { return; }
+    let products: *mut f32 = vx_gpu_shared_f32();
+    let row_base: i64 = (row as i64) * (cols as i64);
+    // Eight columns a thread a batch, with no guard: a column past the row is clamped to the last,
+    // whose product it then stores again, the same bits. Behind guards LLVM sank each load to its
+    // store and ptxas issued two or three loads at a time; now all sixteen go first.
+    let last: i32 = cols - 1;
+    let mut c: i32 = tid;
+    for batch in 0..((cols + 8 * block - 1) / (8 * block)) {
+      let c0: i32 = if c < cols { c } else { last };
+      let c1: i32 = if c + block < cols { c + block } else { last };
+      let c2: i32 = if c + 2 * block < cols { c + 2 * block } else { last };
+      let c3: i32 = if c + 3 * block < cols { c + 3 * block } else { last };
+      let c4: i32 = if c + 4 * block < cols { c + 4 * block } else { last };
+      let c5: i32 = if c + 5 * block < cols { c + 5 * block } else { last };
+      let c6: i32 = if c + 6 * block < cols { c + 6 * block } else { last };
+      let c7: i32 = if c + 7 * block < cols { c + 7 * block } else { last };
+      let t0: f32 = weight[row_base + (c0 as i64)] * x[c0];
+      let t1: f32 = weight[row_base + (c1 as i64)] * x[c1];
+      let t2: f32 = weight[row_base + (c2 as i64)] * x[c2];
+      let t3: f32 = weight[row_base + (c3 as i64)] * x[c3];
+      let t4: f32 = weight[row_base + (c4 as i64)] * x[c4];
+      let t5: f32 = weight[row_base + (c5 as i64)] * x[c5];
+      let t6: f32 = weight[row_base + (c6 as i64)] * x[c6];
+      let t7: f32 = weight[row_base + (c7 as i64)] * x[c7];
+      products[c0] = t0;
+      products[c1] = t1;
+      products[c2] = t2;
+      products[c3] = t3;
+      products[c4] = t4;
+      products[c5] = t5;
+      products[c6] = t6;
+      products[c7] = t7;
+      c = c + 8 * block;
+    }
+    vx_gpu_barrier();
+    if tid < 32 {
+      // The hand matvec's lane order. A term past the row is +0.0, and sum starts at +0.0, so is
+      // never -0.0: adding it changes nothing, as there.
+      let mut sum: f32 = 0.0;
+      let mut d: i32 = tid;
+      for batch in 0..((cols + 255) / 256) {
+        let p0: f32 = if d < cols { products[d] } else { 0.0 };
+        let p1: f32 = if d + 32 < cols { products[d + 32] } else { 0.0 };
+        let p2: f32 = if d + 64 < cols { products[d + 64] } else { 0.0 };
+        let p3: f32 = if d + 96 < cols { products[d + 96] } else { 0.0 };
+        let p4: f32 = if d + 128 < cols { products[d + 128] } else { 0.0 };
+        let p5: f32 = if d + 160 < cols { products[d + 160] } else { 0.0 };
+        let p6: f32 = if d + 192 < cols { products[d + 192] } else { 0.0 };
+        let p7: f32 = if d + 224 < cols { products[d + 224] } else { 0.0 };
+        sum = sum + p0;
+        sum = sum + p1;
+        sum = sum + p2;
+        sum = sum + p3;
+        sum = sum + p4;
+        sum = sum + p5;
+        sum = sum + p6;
+        sum = sum + p7;
+        d = d + 256;
+      }
+      let total: f32 = vxk_rows_warp_sum(sum);
+      if tid == 0 { out[row] = total; }
+    }
+    return;
+  }
+}

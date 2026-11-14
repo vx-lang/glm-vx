@@ -44,6 +44,10 @@ void glm_vx_gpu_rope_glm(float *out, const float *x, const float *cosine,
 void glm_vx_gpu_matvec(float *out, const float *weight, const float *x,
     int32_t rows, int32_t cols);
 
+/* glm_vx_gpu_matvec_rows is in matvec_rows.ptx, built with 8192 shared floats: the same arguments
+ * and bits as glm_vx_gpu_matvec, for 0 <= cols <= 8192 (it writes nothing past that). One block per
+ * row, grid.x >= rows, block.x a multiple of 32 in [32,1024], suggested 1024. */
+
 /* Fused DSA: out:[tokens], q:[heads,dim], keys:[tokens,dim], weights:[heads].
  * out[t] = sum_h weights[h]*relu(dot(q[h],keys[t])*scale).
  * weights are ALREADY scaled by heads**-0.5; signed weights/scales are valid.

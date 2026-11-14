@@ -94,7 +94,7 @@ extern "C" int32_t simt_launch(void (*entry)(void*),void* arg,int32_t grid,int32
     if(grid<1||block<32||block%32||block>256)return -1;
     for(int b=0;b<grid;b++){
         std::barrier<> barrier(block);
-        float shared[4096]{};
+        float shared[8192]{};  // matvec_rows: a row of up to 8192 products
         std::vector<std::unique_ptr<Warp>> warps;
         for(int w=0;w<block/32;w++)warps.emplace_back(new Warp());
         std::vector<std::thread> lanes;

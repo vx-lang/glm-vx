@@ -45,6 +45,21 @@ def test_logits_match_reference_over_a_sparse_sequence():
     assert (got.argmax(-1) == expected.argmax(-1)).all()
 
 
+def test_matvec_rows_gives_the_hand_matvecs_logits(monkeypatch):
+    # The tiny model's float32 Linears all have few rows: matvec_rows (#29) runs every one of them,
+    # and the logits are the hand matvec's to the bit.
+    import gpu.resident as resident_module
+    model = build(seed=11)
+    a = ResidentGLM(model, ctx=Context(), max_tokens=32)
+    got = a.prefill(TOKENS[:6])
+    monkeypatch.setattr(resident_module, 'MATVEC_ROWS_MAX', 0)
+    b = ResidentGLM(model, ctx=Context(), max_tokens=32)
+    want = b.prefill(TOKENS[:6])
+    np.testing.assert_array_equal(got.view(np.uint32), want.view(np.uint32))
+    assert a.launches.get('matvec_rows', 0) > 0 and a.launches.get('matvec', 0) == 0
+    assert b.launches.get('matvec', 0) > 0 and 'matvec_rows' not in b.launches
+
+
 def test_reset_replays_identically_and_cache_rows_are_overwritten():
     model = build(seed=5)
     resident = ResidentGLM(model, ctx=Context(), max_tokens=32)
