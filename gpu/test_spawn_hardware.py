@@ -226,6 +226,21 @@ def test_spawn_fp8_matvec4_rows_is_fp8_matvec4_per_vector(context, rows, cols, m
         np.testing.assert_array_equal(got[v].view(np.uint32), download(one).view(np.uint32))
 
 
+# argmax_rows (#16): greedy decoding's token on the device, numpy.argmax at GLM-5.3's vocabulary,
+# ties to the first index, whatever the block size.
+@pytest.mark.skipif(not (BUILD / 'spawn/argmax_rows.ptx').exists(), reason='argmax_rows not built (gpu/spawn/build.sh)')
+@pytest.mark.parametrize('threads', [256, 1024])
+@pytest.mark.parametrize('ties', [False, True])
+def test_spawn_argmax_rows_is_numpys_argmax(context, threads, ties):
+    rng = np.random.default_rng(threads + ties)
+    x = (rng.integers(-3, 4, size=(4, 154880)) if ties else rng.normal(size=(4, 154880)) * 5).astype('f4')
+    out = context.tensor((4,), 'int32')
+    SpawnKernel(context, BUILD / 'spawn/argmax_rows.ptx').launch(rows=4, dim=154880, threads=threads,
+                                                                  x=upload(context, x), out=out)
+    context.synchronize()
+    np.testing.assert_array_equal(np.frombuffer(out.download(), np.int32), np.argmax(x, axis=1))
+
+
 # bf16_matvec4 and int4_matvec4 (four u32 words a lane step, #30) against the NumPy model of
 # their order, bit for bit, at small and GLM-5.3 shapes.
 @pytest.mark.skipif(not (BUILD / 'spawn/bf16_matvec4.ptx').exists(), reason='bf16_matvec4 not built (gpu/spawn/build.sh)')

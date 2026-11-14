@@ -22,11 +22,14 @@ from .resident import MANY_TOKENS
 
 
 def generate(resident, prompt, max_new_tokens, *, draft_tokens=3, eos=(), temperature=0.0, rng=None,
-             choose_draft=None, index_share=None):
+             choose_draft=None, index_share=None, device_tokens=None):
     """(tokens, stats): greedy at temperature 0, else sampled from `rng`; resident.reset() first.
 
     choose_draft(logits, position, step), greedy only, replaces the drafts (tests); index_share
-    defaults to the config's index_share_for_mtp_iteration."""
+    defaults to the config's index_share_for_mtp_iteration. device_tokens (greedy, no
+    choose_draft; default: when gpu/spawn's argmax_rows is built) picks every draft and verified
+    token on the device and keeps the hidden states there, so a step downloads token ids, not
+    logits; the tokens are the same."""
     prompt = [int(t) for t in prompt]
     if not prompt or max_new_tokens < 1 or not 1 <= draft_tokens < MANY_TOKENS:
         raise ValueError(f'need a prompt, max_new_tokens >= 1 and 1 <= draft_tokens <= {MANY_TOKENS - 1}')
@@ -37,6 +40,9 @@ def generate(resident, prompt, max_new_tokens, *, draft_tokens=3, eos=(), temper
         raise ValueError('generate needs ResidentGLM(..., mtp=True)')
     if index_share is None:
         index_share = bool(resident.config.get('index_share_for_mtp_iteration', False))
+    if device_tokens is None:
+        device_tokens = resident.spawn_built('argmax_rows')
+    device_tokens = bool(device_tokens) and not sampled and choose_draft is None
     choose_draft = choose_draft or (lambda logits, position, step: _choose(logits))
     stop = {int(t) for t in eos}
     stats = Stats()
@@ -54,7 +60,12 @@ def generate(resident, prompt, max_new_tokens, *, draft_tokens=3, eos=(), temper
         k = min(draft_tokens, max_new_tokens - len(out))
         drafts, draft_probs, token, h = [], [], out[-1], hidden
         for j in range(k):
-            draft_logits, h = resident.mtp_step(token, h, position + j, reuse_selection=index_share and j > 0)
+            reuse = index_share and j > 0
+            if device_tokens:
+                token, h = resident.mtp_step(token, h, position + j, reuse_selection=reuse, greedy=True)
+                drafts.append(token)
+                continue
+            draft_logits, h = resident.mtp_step(token, h, position + j, reuse_selection=reuse)
             if sampled:
                 draft_probs.append(probabilities(draft_logits, temperature))
                 token = sample(draft_probs[-1], rng)
@@ -62,8 +73,12 @@ def generate(resident, prompt, max_new_tokens, *, draft_tokens=3, eos=(), temper
                 token = choose_draft(draft_logits, position + j + 2, j)
             drafts.append(token)
         start = resident.position
-        all_logits, verified_hidden = resident.forward_many([out[-1]] + drafts)
-        verified = [probabilities(l, temperature) if sampled else _choose(l) for l in all_logits]
+        if device_tokens:
+            verified, verified_hidden = resident.forward_many([out[-1]] + drafts, greedy=True)
+            verified = [int(t) for t in verified]
+        else:
+            all_logits, verified_hidden = resident.forward_many([out[-1]] + drafts)
+            verified = [probabilities(l, temperature) if sampled else _choose(l) for l in all_logits]
         if sampled:
             accepted, last = accept_sampled(verified, draft_probs, drafts, rng)
         else:
@@ -77,7 +92,7 @@ def generate(resident, prompt, max_new_tokens, *, draft_tokens=3, eos=(), temper
         stats.accepted_per_round.append(accepted)
         resident.position = start + accepted + 1
         for i in range(accepted):  # the accepted drafts' MTP rows, from the model's hidden states
-            resident.mtp_step(drafts[i], verified_hidden[i], position + 1 + i)
+            resident.mtp_step(drafts[i], verified_hidden[i], position + 1 + i, greedy=device_tokens)
         for token in drafts[:accepted] + [last]:
             out.append(token)
             if token in stop or len(out) == max_new_tokens:

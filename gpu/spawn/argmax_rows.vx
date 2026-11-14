@@ -1,0 +1,39 @@
+// glm_vx_spawn_argmax_rows: out[row] = the index of the largest of x[row][0 .. dim], the first on a
+// tie, which is numpy.argmax for rows without NaN: greedy decoding's token on the device, so a step
+// downloads one id a row in place of the vocabulary's logits (#16). One block per row: lane
+// t < threads keeps the first largest of d = t, t + threads, .., then lanes::argmax combines the
+// lanes (an empty lane, id -1, never wins; then the larger value; on a tie the lower id), so the
+// result does not depend on `threads`. A bad dim or threads writes -1.
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_argmax_rows(out: &mut Tensor<i32, [?], Memory::HBM>, x: &Tensor<f32, [?, ?], Memory::HBM>,
+                                rows: i32, dim: i32, threads: i32) -> void {
+  spawn on(Topology::Device) {
+    for row in 0..rows across blocks {
+      if dim > 0 && threads >= 32 && threads <= 1024 && threads % 32 == 0 {
+        let mut sa = unsafe { Tensor<f32, [1024], Memory::SMEM>::uninit() };
+        let mut ia = unsafe { Tensor<i32, [1024], Memory::SMEM>::uninit() };
+        for t in 0..1024 across lanes {
+          let mut best_index: i32 = -1;
+          let mut best: f32 = 0.0;
+          if t < threads {
+            let mut d: i32 = t;
+            while d < dim {
+              let value: f32 = x[row][d];
+              if best_index < 0 { best_index = d; best = value; }
+              else { if value > best { best_index = d; best = value; } }
+              d = d + threads;
+            }
+          }
+          sa[t] = best;
+          ia[t] = best_index;
+        }
+        let chosen: i32 = lanes::argmax(&sa, &ia, threads);
+        for t in 0..1 across lanes { out[row] = chosen; }
+      } else {
+        for t in 0..1 across lanes { out[row] = -1; }
+      }
+    }
+  }
+  return;
+}

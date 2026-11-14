@@ -757,6 +757,26 @@ def test_layernorm(run, rows, dim, threads):
     bits_equal(got, c * inv * w + b)
 
 
+@pytest.mark.parametrize('rows,dim,threads', [(1, 154880, 1024), (4, 154880, 256), (5, 131, 64), (3, 1, 32)])
+def test_argmax_rows_is_numpys_argmax(run, rows, dim, threads):
+    # Few distinct values, so most rows tie at their maximum: the first index wins, as numpy.argmax.
+    rng = np.random.default_rng(rows * dim + 11)
+    x = rng.integers(-3, 4, size=(rows, dim)).astype(F)
+    x[0, :] = -np.inf
+    x[0, dim // 2] = -0.0
+    if dim > 1:
+        x[0, dim - 1] = 0.0  # equal to -0.0: still the first
+    got = run('argmax_rows', out=np.full(rows, 7, np.int32), x=x, rows=rows, dim=dim, threads=threads)['out']
+    np.testing.assert_array_equal(got, np.argmax(x, axis=1))
+
+
+def test_argmax_rows_refuses_a_bad_launch(run):
+    x = np.ones((2, 64), F)
+    for dim, threads in [(0, 64), (64, 48), (64, 2048)]:
+        got = run('argmax_rows', out=np.full(2, 7, np.int32), x=x, rows=2, dim=dim, threads=threads)['out']
+        np.testing.assert_array_equal(got, [-1, -1])
+
+
 @pytest.mark.parametrize('rows,dim,threads', [(1, 154880, 256), (5, 131, 64), (3, 1, 32), (4, 2048, 1024)])
 def test_softmax_rows(run, rows, dim, threads):
     rng = np.random.default_rng(rows * dim + 5)

@@ -79,6 +79,41 @@ def test_generation_under_graph_is_greedy_decoding(model, index_share):
     assert_rows_equal({key: v for key, v in rows.items() if key[1] < model.n_layers}, want_rows)
 
 
+@pytest.mark.parametrize('graph', [False, True])
+def test_greedy_steps_choose_on_the_device_what_the_logits_give(model, graph):
+    # mtp_step and forward_many with greedy=True: numpy.argmax of the logits they return otherwise,
+    # and a device hidden row in place of the downloaded one changes nothing.
+    results = []
+    for greedy in (False, True):
+        resident = resident_of(model, **(GRAPH if graph else dict(device_experts=True)))
+        try:
+            for t in PROMPT:
+                logits, hidden = resident.forward_hidden(t)
+            got = [resident.forward_many([1, 2, 3], greedy=greedy)]
+            h = got[0][1][2]  # the last position's hidden state: a device row or an array
+            for j in range(3):  # each graph eager, captured, replayed
+                got.append(resident.mtp_step(PROMPT[j], h, len(PROMPT) + j, greedy=greedy))
+                h = got[-1][1]
+            assert resident.launches.get('argmax_rows', 0) == (4 if greedy else 0)
+            results.append([(first, None if greedy else second) for first, second in got])
+        finally:
+            resident.close()
+    (want_many, _), *want_steps = results[0]
+    (many, _), *steps = results[1]
+    np.testing.assert_array_equal(many, np.argmax(want_many, axis=1))
+    assert [t for t, _ in steps] == [int(np.argmax(l)) for l, _ in want_steps]
+
+
+@pytest.mark.parametrize('graph', [False, True])
+def test_device_tokens_generate_the_host_ones(model, graph):
+    options = GRAPH if graph else dict(device_experts=True)
+    host = speculated(model, PROMPT, 10, draft_tokens=3, device_tokens=False, **options)
+    device = speculated(model, PROMPT, 10, draft_tokens=3, device_tokens=True, **options)
+    assert device[0] == host[0] and device[2] == host[2]
+    assert device[3].accepted_per_round == host[3].accepted_per_round
+    assert_rows_equal(device[1], host[1])  # the MTP layer's rows too
+
+
 def plain(model, prompt, new, eos=(), **options):
     resident = resident_of(model, **options)
     try:

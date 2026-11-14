@@ -468,6 +468,7 @@ class ResidentGLM:
                 self.moe_act = t((k * int(c['moe_intermediate_size']),))
         vocab = int(c['vocab_size'])
         self.logits = t((vocab,))
+        self.token_ids = t((MANY_TOKENS,), 'int32')  # argmax_rows' greedy tokens (greedy=True)
         # Per-layer caches, all rows the caller has produced so far stay on the device.
         # With mtp=True, one more of each for the MTP layer, at index n_layers.
         layers = m.n_layers + (1 if self.mtp else 0)
@@ -1133,12 +1134,17 @@ class ResidentGLM:
         logits = self.forward(token_id)
         return logits, np.frombuffer(self.norm.download(), dtype=np.float32).copy()
 
-    def mtp_step(self, token_id, hidden, position, *, reuse_selection=False):
+    def mtp_step(self, token_id, hidden, position, *, reuse_selection=False, greedy=False):
         """The MTP layer (mtp=True; glm_vx/speculative.py's MTPDrafter.step on the device): from the
         token at position + 1 and the hidden state at position, its logits for the token at
         position + 2 and its own hidden state, (logits, hidden). It writes its cache rows at
         `position`, so stepping again at a position replaces what was there; reuse_selection
         attends to the positions the last step selected (index_share_for_mtp_iteration).
+
+        hidden is an array, or a device row a step returned with greedy=True (copied on the
+        device). greedy=True returns (token, hidden): the argmax of the logits, chosen on the device
+        (gpu/spawn's argmax_rows, numpy.argmax's token), and the hidden state as a device row, valid
+        until the next step; only the token is downloaded.
 
         With graph=True the step is a graph of its own, one for each reuse_selection: one upload
         of [embedding, cos, sin, step buffer, hidden], one launch, then the head."""
@@ -1151,18 +1157,31 @@ class ResidentGLM:
             raise ValueError('mtp_step: position or token out of range')
         embedding = np.zeros(self.hidden, np.float32) if position == 0 else m._embedding(int(token_id))
         embedding = np.ascontiguousarray(embedding, dtype=np.float32)
+        on_device = hasattr(hidden, 'download')  # a device row from a greedy step
+        if on_device:
+            if tuple(hidden.shape) != (self.hidden,):
+                raise ValueError(f'mtp_step: a device hidden state is [{self.hidden}], got {list(hidden.shape)}')
+            device_hidden, hidden = hidden, np.zeros(self.hidden, np.float32)
         hidden = np.ascontiguousarray(hidden, dtype=np.float32)
         cosine, sine = self._rope_inputs(position)
         reuse_selection = bool(reuse_selection)
         if self.graph:
             # Reusing, the step attends to the last selection: its count, not this position's.
             count = self.selected_count if reuse_selection else min(self.index_topk, position + 1)
-            self._inputs.upload(np.concatenate([embedding, cosine, sine, self._step_buffer(position, count), hidden]))
+            inputs = [embedding, cosine, sine, self._step_buffer(position, count)]
+            if on_device:
+                self.step_inputs.upload(np.concatenate(inputs))
+                self._copy(self.mtp_hidden, device_hidden, self.hidden)
+            else:
+                self._inputs.upload(np.concatenate(inputs + [hidden]))
             self._replay(('mtp', reuse_selection), lambda: self._mtp_layer(position, reuse_selection))
             self.selected_count = count
         else:
             self.x.upload(embedding)
-            self.mtp_hidden.upload(hidden)
+            if on_device:
+                self._copy(self.mtp_hidden, device_hidden, self.hidden)
+            else:
+                self.mtp_hidden.upload(hidden)
             self.cos.upload(cosine)
             self.sin.upload(sine)
             self._mtp_layer(position, reuse_selection)
@@ -1170,8 +1189,19 @@ class ResidentGLM:
         self._rmsnorm(self.x, self._weight(prefix + '.shared_head.norm.weight'), self.norm, m.eps)
         head = 'model.embed_tokens' if c.get('tie_word_embeddings', False) else 'lm_head'
         self._project(head, self.norm, self.logits)
+        if greedy:
+            return int(self._argmax(self.logits.view((1, self.logits.shape[0])), 1)[0]), self.norm
         return (np.frombuffer(self.logits.download(), dtype=np.float32).copy(),
                 np.frombuffer(self.norm.download(), dtype=np.float32).copy())
+
+    def spawn_built(self, name):
+        """Whether gpu/spawn kernel `name` is built in ptx_dir/spawn."""
+        return (self._ptx_dir / 'spawn' / (name + '.ptx')).exists()
+
+    def _argmax(self, logits, count):
+        """numpy.argmax of each of the first `count` rows of the [rows, vocab] logits, on the device."""
+        self._spawn('argmax_rows', out=self.token_ids, x=logits, rows=count, dim=logits.shape[1], threads=1024)
+        return np.frombuffer(self.token_ids.download(), dtype=np.int32)[:count].copy()
 
     def _mtp_layer(self, position, reuse_selection):
         """From the embedding in self.x and the hidden state in self.mtp_hidden to the MTP layer's
@@ -1184,7 +1214,7 @@ class ResidentGLM:
         self._project(prefix + '.eh_proj', self.mtp_input, self.x)
         self._layer(m.n_layers, position, False, reuse_selection)
 
-    def forward_many(self, token_ids):
+    def forward_many(self, token_ids, *, greedy=False):
         """Append one to four tokens as one step: (logits, hidden), each [len(token_ids), ...], the
         logits and the final hidden state (after model.norm) of every position, bit for bit what
         forward() gives one token at a time. MTP verification (glm_vx/speculative.py, #16).
@@ -1194,6 +1224,10 @@ class ResidentGLM:
         their kernel per token. Everything else runs per token, in order, so each token's attention
         and indexer see the cache rows of the tokens before it, and each token keeps its own
         top-k for the shared-indexer layers.
+
+        greedy=True returns (tokens, hiddens): each position's argmax token, chosen on the device
+        (argmax_rows), and its hidden state as a device row (mtp_step takes it), valid until the
+        next forward_many; only the tokens are downloaded.
 
         With graph=True the layers are one graph for each token count: one upload of the
         embedding rows and each token's cos, sin and step buffer, one launch, then the head."""
@@ -1232,6 +1266,8 @@ class ResidentGLM:
         logits = self._many('logits', vocab)
         head = 'model.embed_tokens' if c.get('tie_word_embeddings', False) else 'lm_head'
         self._project_many(head, norm, logits, count)
+        if greedy:
+            return self._argmax(logits, count), [self._many_row(norm, i) for i in range(count)]
         rows = lambda t, width: np.frombuffer(t.download(), dtype=np.float32).reshape(MANY_TOKENS, width)[:count].copy()
         return rows(logits, vocab), rows(norm, hidden)
 
