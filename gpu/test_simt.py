@@ -86,7 +86,9 @@ def test_split_online_mla_matches_dense_selected_oracle(simt,count,splits):
 
 @pytest.mark.parametrize('heads,tokens,dim,block', [
     (1, 1, 1, 32), (3, 5, 31, 64), (5, 7, 32, 128),
-    (3, 5, 33, 128), (4, 3, 131, 64), (64, 1, 128, 32)])
+    (3, 5, 33, 128), (4, 3, 131, 64), (64, 1, 128, 32),
+    # eight heads a group (#29): GLM-5.3's 32 x 128, and groups ending past the heads
+    (32, 9, 128, 128), (9, 4, 128, 64), (17, 3, 40, 96)])
 def test_index_scores_all_heads_and_warp_tails(simt, heads, tokens, dim, block):
     from gpu.testing.index_reference import inputs, ordered_f32, warp_order_f32, reference_f64
     q, keys, weights = args = inputs(heads, tokens, dim)

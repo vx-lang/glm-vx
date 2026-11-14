@@ -199,20 +199,64 @@ fn vxk_index_scores(out: *mut f32, q: *const f32, keys: *const f32, weights: *co
     let token: i32 = vx_gpu_block_idx_x() * (block / 32) + tid / 32;
     // Whole warps exit together, including tail warps, before full-mask shuffles.
     if token >= tokens { return; }
+    // Eight heads a group: their dot products side by side, each in its own order (lane l adds
+    // d = l, l + 32, ..), then their eight warp sums, which do not wait on one another, and lane 0
+    // adds the weighted heads in head order, so the score is the one-head-at-a-time loop's bit for
+    // bit. That loop ran 32 dependent shuffle trees and q loads back to back per token (#29). A
+    // head past the end reads the last head's q row and is not added.
     let mut score: f32 = 0.0;
-    for head in 0..heads {
-      let mut dot: f32 = 0.0;
+    let mut h0: i32 = 0;
+    for group in 0..((heads + 7) / 8) {
+      let q0: i32 = h0 * dim;
+      let q1: i32 = (if h0 + 1 < heads { h0 + 1 } else { heads - 1 }) * dim;
+      let q2: i32 = (if h0 + 2 < heads { h0 + 2 } else { heads - 1 }) * dim;
+      let q3: i32 = (if h0 + 3 < heads { h0 + 3 } else { heads - 1 }) * dim;
+      let q4: i32 = (if h0 + 4 < heads { h0 + 4 } else { heads - 1 }) * dim;
+      let q5: i32 = (if h0 + 5 < heads { h0 + 5 } else { heads - 1 }) * dim;
+      let q6: i32 = (if h0 + 6 < heads { h0 + 6 } else { heads - 1 }) * dim;
+      let q7: i32 = (if h0 + 7 < heads { h0 + 7 } else { heads - 1 }) * dim;
+      let mut dot0: f32 = 0.0;
+      let mut dot1: f32 = 0.0;
+      let mut dot2: f32 = 0.0;
+      let mut dot3: f32 = 0.0;
+      let mut dot4: f32 = 0.0;
+      let mut dot5: f32 = 0.0;
+      let mut dot6: f32 = 0.0;
+      let mut dot7: f32 = 0.0;
       let mut d: i32 = lane;
       for iteration in 0..((dim + 31) / 32) {
-        if d < dim { dot = dot + q[head * dim + d] * keys[token * dim + d]; }
+        if d < dim {
+          let key: f32 = keys[token * dim + d];
+          dot0 = dot0 + q[q0 + d] * key;
+          dot1 = dot1 + q[q1 + d] * key;
+          dot2 = dot2 + q[q2 + d] * key;
+          dot3 = dot3 + q[q3 + d] * key;
+          dot4 = dot4 + q[q4 + d] * key;
+          dot5 = dot5 + q[q5 + d] * key;
+          dot6 = dot6 + q[q6 + d] * key;
+          dot7 = dot7 + q[q7 + d] * key;
+        }
         d = d + 32;
       }
-      let scaled: f32 = vxk_warp_sum(dot) * scale;
+      let scaled0: f32 = vxk_warp_sum(dot0) * scale;
+      let scaled1: f32 = vxk_warp_sum(dot1) * scale;
+      let scaled2: f32 = vxk_warp_sum(dot2) * scale;
+      let scaled3: f32 = vxk_warp_sum(dot3) * scale;
+      let scaled4: f32 = vxk_warp_sum(dot4) * scale;
+      let scaled5: f32 = vxk_warp_sum(dot5) * scale;
+      let scaled6: f32 = vxk_warp_sum(dot6) * scale;
+      let scaled7: f32 = vxk_warp_sum(dot7) * scale;
       if lane == 0 {
-        let mut activated: f32 = scaled;
-        if activated < 0.0 { activated = 0.0; }
-        score = score + weights[head] * activated;
+        if h0 + 0 < heads { let mut a: f32 = scaled0; if a < 0.0 { a = 0.0; } score = score + weights[h0 + 0] * a; }
+        if h0 + 1 < heads { let mut a: f32 = scaled1; if a < 0.0 { a = 0.0; } score = score + weights[h0 + 1] * a; }
+        if h0 + 2 < heads { let mut a: f32 = scaled2; if a < 0.0 { a = 0.0; } score = score + weights[h0 + 2] * a; }
+        if h0 + 3 < heads { let mut a: f32 = scaled3; if a < 0.0 { a = 0.0; } score = score + weights[h0 + 3] * a; }
+        if h0 + 4 < heads { let mut a: f32 = scaled4; if a < 0.0 { a = 0.0; } score = score + weights[h0 + 4] * a; }
+        if h0 + 5 < heads { let mut a: f32 = scaled5; if a < 0.0 { a = 0.0; } score = score + weights[h0 + 5] * a; }
+        if h0 + 6 < heads { let mut a: f32 = scaled6; if a < 0.0 { a = 0.0; } score = score + weights[h0 + 6] * a; }
+        if h0 + 7 < heads { let mut a: f32 = scaled7; if a < 0.0 { a = 0.0; } score = score + weights[h0 + 7] * a; }
       }
+      h0 = h0 + 8;
     }
     if lane == 0 { out[token] = score; }
     return;

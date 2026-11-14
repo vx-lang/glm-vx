@@ -9,7 +9,11 @@ and zero are accepted. There is no second head normalization, causal masking,
 softmax, or top-k in this entry.
 
 A warp owns one token and reduces each head's dot product across its 32 lanes.
-Lane zero accumulates weighted ReLU outputs in head order. Four token warps per
+It takes the heads eight at a time (#29): the eight dot products side by side
+with the key element loaded once, then eight independent warp sums, so their
+loads and shuffle trees overlap instead of running 32 in a row. Each head's
+products and tree are in the same order as before, and lane zero accumulates
+weighted ReLU outputs in head order, so the scores are unchanged bit for bit. Four token warps per
 128-thread block handle arbitrary token/dimension tails. Inactive whole warps
 return before the full-mask shuffles. The kernel requires no scratch, shared
 memory or atomics and never materializes the head-by-token score matrix.
