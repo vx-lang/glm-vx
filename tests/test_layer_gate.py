@@ -97,3 +97,11 @@ def test_the_command_line_keeps_evidence_and_exits_one_on_a_regression(tmp_path)
         layer_gate.main([str(EVIDENCE / 'layer-events-int4.json'), '--output', str(out)])
     assert layer_gate.main([str(EVIDENCE / 'layer-profile-int4.json'), '--baseline', str(EVIDENCE),
                             '--output', str(tmp_path / 'old.md')]) == 1
+
+
+def test_the_command_line_skips_layer_profiles_launch_lists(tmp_path):
+    # pod_validate passes layer-profile-*.json, which also matches each report's .launches.json.
+    run = tmp_path / 'layer-profile-int4.json'
+    run.write_text((EVIDENCE / 'layer-events-int4.json').read_text())
+    (tmp_path / 'layer-profile-int4.launches.json').write_text('[]')
+    assert layer_gate.main([str(p) for p in sorted(tmp_path.glob('layer-profile-*.json'))]) == 0

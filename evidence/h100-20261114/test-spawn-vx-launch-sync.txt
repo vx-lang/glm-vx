@@ -1,0 +1,391 @@
+..F...F........FFFF.......F...........................FF...              [100%]
+=================================== FAILURES ===================================
+______________ test_vx_launch_matches_python_launch[argmax_rows] _______________
+
+context = <gpu.runtime.CUDAContext object at 0x7cb993350b90>
+name = 'argmax_rows'
+
+    @pytest.mark.parametrize('name', sorted(CASES))
+    def test_vx_launch_matches_python_launch(context, name):
+        ptx = SPAWN / f'{name}.ptx'
+        if not ptx.exists():
+            pytest.skip(f'{ptx} not built')
+        try:
+            vx = VxKernel(ptx)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(str(e))
+        python = SpawnKernel(context, ptx)
+        mutable = [p['name'] for p in python.params if p.get('mut')]
+        ours, theirs = (on_device(context, CASES[name](np.random.default_rng(len(name)))) for _ in range(2))
+>       python.launch(**ours)  # the manifest's shape, which is Vx's
+        ^^^^^^^^^^^^^^^^^^^^^
+
+gpu/test_spawn_vx_launch.py:288: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+gpu/spawn/launch.py:125: in launch
+    self.kernel.launch(grid, block, self.arguments(values), shared_bytes=self.shared_bytes, stream=stream)
+                                    ^^^^^^^^^^^^^^^^^^^^^^
+gpu/spawn/launch.py:105: in arguments
+    args += [value, value] + [C.c_uint64(w) for w in descriptor_words(p, value)]
+                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+param = {'name': 'x', 'kind': 'memref', 'element': 'f32', 'rank': 2, ...}
+value = <gpu.runtime.DeviceTensor object at 0x7cb9933ba030>
+
+    def descriptor_words(param, value):
+        """Offset, sizes and strides of the memref descriptor for a DeviceTensor (row-major, offset 0).
+        A rank-1 parameter takes any tensor as its flat view; a rank-2 one needs a rank-2 tensor."""
+        rank = param.get('rank', 1)
+        if rank == 1:
+            return [0, value.size, 1]
+        if len(value.shape) != rank:
+>           raise TypeError(f'{param["name"]} must have rank {rank}, not shape {tuple(value.shape)}')
+E           TypeError: x must have rank 2, not shape (8192,)
+
+gpu/spawn/launch.py:61: TypeError
+______________ test_vx_launch_matches_python_launch[bf16_matvec4] ______________
+
+context = <gpu.runtime.CUDAContext object at 0x7cb993350b90>
+name = 'bf16_matvec4'
+
+    @pytest.mark.parametrize('name', sorted(CASES))
+    def test_vx_launch_matches_python_launch(context, name):
+        ptx = SPAWN / f'{name}.ptx'
+        if not ptx.exists():
+            pytest.skip(f'{ptx} not built')
+        try:
+            vx = VxKernel(ptx)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(str(e))
+        python = SpawnKernel(context, ptx)
+        mutable = [p['name'] for p in python.params if p.get('mut')]
+        ours, theirs = (on_device(context, CASES[name](np.random.default_rng(len(name)))) for _ in range(2))
+        python.launch(**ours)  # the manifest's shape, which is Vx's
+>       vx(**theirs)
+
+gpu/test_spawn_vx_launch.py:289: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.spawn.vx_launch.VxKernel object at 0x7cb9933e98b0>, stream = None
+values = {'rows': 96, 'cols': 6144, 'weight': <gpu.runtime.DeviceTensor object at 0x7cb9933e9b20>, 'x': <gpu.runtime.DeviceTensor object at 0x7cb9933eae10>, ...}
+
+    def __call__(self, *, stream=None, **values):
+        missing = self.names ^ set(values)
+        if missing:
+            raise TypeError(f'{self.manifest["entry"]}: arguments do not match parameters: {sorted(missing)}')
+        args, context = [], None
+        for p in self.params:
+            value = values[p['name']]
+            if p['kind'] == 'scalar':
+                args.append(value)
+                continue
+            if not isinstance(value, DeviceTensor):
+                raise TypeError(f'{p["name"]} must be a DeviceTensor')
+>           if str(value.dtype) != _ELEMENT[p['element']]:
+                                   ^^^^^^^^^^^^^^^^^^^^^^
+E           KeyError: 'u32'
+
+gpu/spawn/vx_launch.py:108: KeyError
+______________ test_vx_launch_matches_python_launch[fp8_matvec4] _______________
+
+context = <gpu.runtime.CUDAContext object at 0x7cb993350b90>
+name = 'fp8_matvec4'
+
+    @pytest.mark.parametrize('name', sorted(CASES))
+    def test_vx_launch_matches_python_launch(context, name):
+        ptx = SPAWN / f'{name}.ptx'
+        if not ptx.exists():
+            pytest.skip(f'{ptx} not built')
+        try:
+            vx = VxKernel(ptx)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(str(e))
+        python = SpawnKernel(context, ptx)
+        mutable = [p['name'] for p in python.params if p.get('mut')]
+        ours, theirs = (on_device(context, CASES[name](np.random.default_rng(len(name)))) for _ in range(2))
+        python.launch(**ours)  # the manifest's shape, which is Vx's
+>       vx(**theirs)
+
+gpu/test_spawn_vx_launch.py:289: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.spawn.vx_launch.VxKernel object at 0x7cb993351df0>, stream = None
+values = {'rows': 300, 'cols': 6144, 'scales': <gpu.runtime.DeviceTensor object at 0x7cb9933ebc50>, 'weight': <gpu.runtime.DeviceTensor object at 0x7cb9933e8710>, ...}
+
+    def __call__(self, *, stream=None, **values):
+        missing = self.names ^ set(values)
+        if missing:
+            raise TypeError(f'{self.manifest["entry"]}: arguments do not match parameters: {sorted(missing)}')
+        args, context = [], None
+        for p in self.params:
+            value = values[p['name']]
+            if p['kind'] == 'scalar':
+                args.append(value)
+                continue
+            if not isinstance(value, DeviceTensor):
+                raise TypeError(f'{p["name"]} must be a DeviceTensor')
+>           if str(value.dtype) != _ELEMENT[p['element']]:
+                                   ^^^^^^^^^^^^^^^^^^^^^^
+E           KeyError: 'u32'
+
+gpu/spawn/vx_launch.py:108: KeyError
+____________ test_vx_launch_matches_python_launch[fp8_matvec4_rows] ____________
+
+context = <gpu.runtime.CUDAContext object at 0x7cb993350b90>
+name = 'fp8_matvec4_rows'
+
+    @pytest.mark.parametrize('name', sorted(CASES))
+    def test_vx_launch_matches_python_launch(context, name):
+        ptx = SPAWN / f'{name}.ptx'
+        if not ptx.exists():
+            pytest.skip(f'{ptx} not built')
+        try:
+            vx = VxKernel(ptx)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(str(e))
+        python = SpawnKernel(context, ptx)
+        mutable = [p['name'] for p in python.params if p.get('mut')]
+        ours, theirs = (on_device(context, CASES[name](np.random.default_rng(len(name)))) for _ in range(2))
+        python.launch(**ours)  # the manifest's shape, which is Vx's
+>       vx(**theirs)
+
+gpu/test_spawn_vx_launch.py:289: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.spawn.vx_launch.VxKernel object at 0x7cb9933e8410>, stream = None
+values = {'rows': 300, 'cols': 6144, 'm': 3, 'scales': <gpu.runtime.DeviceTensor object at 0x7cb7800fc890>, ...}
+
+    def __call__(self, *, stream=None, **values):
+        missing = self.names ^ set(values)
+        if missing:
+            raise TypeError(f'{self.manifest["entry"]}: arguments do not match parameters: {sorted(missing)}')
+        args, context = [], None
+        for p in self.params:
+            value = values[p['name']]
+            if p['kind'] == 'scalar':
+                args.append(value)
+                continue
+            if not isinstance(value, DeviceTensor):
+                raise TypeError(f'{p["name"]} must be a DeviceTensor')
+>           if str(value.dtype) != _ELEMENT[p['element']]:
+                                   ^^^^^^^^^^^^^^^^^^^^^^
+E           KeyError: 'u32'
+
+gpu/spawn/vx_launch.py:108: KeyError
+_____________ test_vx_launch_matches_python_launch[fp8_moe4_down] ______________
+
+context = <gpu.runtime.CUDAContext object at 0x7cb993350b90>
+name = 'fp8_moe4_down'
+
+    @pytest.mark.parametrize('name', sorted(CASES))
+    def test_vx_launch_matches_python_launch(context, name):
+        ptx = SPAWN / f'{name}.ptx'
+        if not ptx.exists():
+            pytest.skip(f'{ptx} not built')
+        try:
+            vx = VxKernel(ptx)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(str(e))
+        python = SpawnKernel(context, ptx)
+        mutable = [p['name'] for p in python.params if p.get('mut')]
+        ours, theirs = (on_device(context, CASES[name](np.random.default_rng(len(name)))) for _ in range(2))
+        python.launch(**ours)  # the manifest's shape, which is Vx's
+>       vx(**theirs)
+
+gpu/test_spawn_vx_launch.py:289: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.spawn.vx_launch.VxKernel object at 0x7cb7800ff920>, stream = None
+values = {'out': <gpu.runtime.DeviceTensor object at 0x7cb780161130>, 'act': <gpu.runtime.DeviceTensor object at 0x7cb780161250...: <gpu.runtime.DeviceTensor object at 0x7cb780161340>, 'ids': <gpu.runtime.DeviceTensor object at 0x7cb780161430>, ...}
+
+    def __call__(self, *, stream=None, **values):
+        missing = self.names ^ set(values)
+        if missing:
+            raise TypeError(f'{self.manifest["entry"]}: arguments do not match parameters: {sorted(missing)}')
+        args, context = [], None
+        for p in self.params:
+            value = values[p['name']]
+            if p['kind'] == 'scalar':
+                args.append(value)
+                continue
+            if not isinstance(value, DeviceTensor):
+                raise TypeError(f'{p["name"]} must be a DeviceTensor')
+>           if str(value.dtype) != _ELEMENT[p['element']]:
+                                   ^^^^^^^^^^^^^^^^^^^^^^
+E           KeyError: 'u32'
+
+gpu/spawn/vx_launch.py:108: KeyError
+____________ test_vx_launch_matches_python_launch[fp8_moe4_gate_up] ____________
+
+context = <gpu.runtime.CUDAContext object at 0x7cb993350b90>
+name = 'fp8_moe4_gate_up'
+
+    @pytest.mark.parametrize('name', sorted(CASES))
+    def test_vx_launch_matches_python_launch(context, name):
+        ptx = SPAWN / f'{name}.ptx'
+        if not ptx.exists():
+            pytest.skip(f'{ptx} not built')
+        try:
+            vx = VxKernel(ptx)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(str(e))
+        python = SpawnKernel(context, ptx)
+        mutable = [p['name'] for p in python.params if p.get('mut')]
+        ours, theirs = (on_device(context, CASES[name](np.random.default_rng(len(name)))) for _ in range(2))
+        python.launch(**ours)  # the manifest's shape, which is Vx's
+>       vx(**theirs)
+
+gpu/test_spawn_vx_launch.py:289: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.spawn.vx_launch.VxKernel object at 0x7cb780162cc0>, stream = None
+values = {'act': <gpu.runtime.DeviceTensor object at 0x7cb780114440>, 'x': <gpu.runtime.DeviceTensor object at 0x7cb780114560>, 'ids': <gpu.runtime.DeviceTensor object at 0x7cb780114620>, 'k': 4, ...}
+
+    def __call__(self, *, stream=None, **values):
+        missing = self.names ^ set(values)
+        if missing:
+            raise TypeError(f'{self.manifest["entry"]}: arguments do not match parameters: {sorted(missing)}')
+        args, context = [], None
+        for p in self.params:
+            value = values[p['name']]
+            if p['kind'] == 'scalar':
+                args.append(value)
+                continue
+            if not isinstance(value, DeviceTensor):
+                raise TypeError(f'{p["name"]} must be a DeviceTensor')
+>           if str(value.dtype) != _ELEMENT[p['element']]:
+                                   ^^^^^^^^^^^^^^^^^^^^^^
+E           KeyError: 'u32'
+
+gpu/spawn/vx_launch.py:108: KeyError
+______________ test_vx_launch_matches_python_launch[int4_matvec4] ______________
+
+context = <gpu.runtime.CUDAContext object at 0x7cb993350b90>
+name = 'int4_matvec4'
+
+    @pytest.mark.parametrize('name', sorted(CASES))
+    def test_vx_launch_matches_python_launch(context, name):
+        ptx = SPAWN / f'{name}.ptx'
+        if not ptx.exists():
+            pytest.skip(f'{ptx} not built')
+        try:
+            vx = VxKernel(ptx)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(str(e))
+        python = SpawnKernel(context, ptx)
+        mutable = [p['name'] for p in python.params if p.get('mut')]
+        ours, theirs = (on_device(context, CASES[name](np.random.default_rng(len(name)))) for _ in range(2))
+        python.launch(**ours)  # the manifest's shape, which is Vx's
+>       vx(**theirs)
+
+gpu/test_spawn_vx_launch.py:289: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.spawn.vx_launch.VxKernel object at 0x7cb780117860>, stream = None
+values = {'rows': 3, 'cols': 1152, 'scales': <gpu.runtime.DeviceTensor object at 0x7cb78018a510>, 'scale_kind': 1, ...}
+
+    def __call__(self, *, stream=None, **values):
+        missing = self.names ^ set(values)
+        if missing:
+            raise TypeError(f'{self.manifest["entry"]}: arguments do not match parameters: {sorted(missing)}')
+        args, context = [], None
+        for p in self.params:
+            value = values[p['name']]
+            if p['kind'] == 'scalar':
+                args.append(value)
+                continue
+            if not isinstance(value, DeviceTensor):
+                raise TypeError(f'{p["name"]} must be a DeviceTensor')
+>           if str(value.dtype) != _ELEMENT[p['element']]:
+                                   ^^^^^^^^^^^^^^^^^^^^^^
+E           KeyError: 'u32'
+
+gpu/spawn/vx_launch.py:108: KeyError
+_______________ test_vx_launch_matches_python_launch[topk_radix] _______________
+
+context = <gpu.runtime.CUDAContext object at 0x7cb993350b90>
+name = 'topk_radix'
+
+    @pytest.mark.parametrize('name', sorted(CASES))
+    def test_vx_launch_matches_python_launch(context, name):
+        ptx = SPAWN / f'{name}.ptx'
+        if not ptx.exists():
+            pytest.skip(f'{ptx} not built')
+        try:
+            vx = VxKernel(ptx)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(str(e))
+        python = SpawnKernel(context, ptx)
+        mutable = [p['name'] for p in python.params if p.get('mut')]
+        ours, theirs = (on_device(context, CASES[name](np.random.default_rng(len(name)))) for _ in range(2))
+        python.launch(**ours)  # the manifest's shape, which is Vx's
+>       vx(**theirs)
+
+gpu/test_spawn_vx_launch.py:289: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.spawn.vx_launch.VxKernel object at 0x7cb7800fd520>, stream = None
+values = {'tokens': 5000, 'k': 64, 'round': 0, 'out_ids': <gpu.runtime.DeviceTensor object at 0x7cb780189fa0>, ...}
+
+    def __call__(self, *, stream=None, **values):
+        missing = self.names ^ set(values)
+        if missing:
+            raise TypeError(f'{self.manifest["entry"]}: arguments do not match parameters: {sorted(missing)}')
+        args, context = [], None
+        for p in self.params:
+            value = values[p['name']]
+            if p['kind'] == 'scalar':
+                args.append(value)
+                continue
+            if not isinstance(value, DeviceTensor):
+                raise TypeError(f'{p["name"]} must be a DeviceTensor')
+>           if str(value.dtype) != _ELEMENT[p['element']]:
+                                   ^^^^^^^^^^^^^^^^^^^^^^
+E           KeyError: 'u32'
+
+gpu/spawn/vx_launch.py:108: KeyError
+_____________ test_vx_launch_matches_python_launch[topk_radix_at] ______________
+
+context = <gpu.runtime.CUDAContext object at 0x7cb993350b90>
+name = 'topk_radix_at'
+
+    @pytest.mark.parametrize('name', sorted(CASES))
+    def test_vx_launch_matches_python_launch(context, name):
+        ptx = SPAWN / f'{name}.ptx'
+        if not ptx.exists():
+            pytest.skip(f'{ptx} not built')
+        try:
+            vx = VxKernel(ptx)
+        except (FileNotFoundError, OSError) as e:
+            pytest.skip(str(e))
+        python = SpawnKernel(context, ptx)
+        mutable = [p['name'] for p in python.params if p.get('mut')]
+        ours, theirs = (on_device(context, CASES[name](np.random.default_rng(len(name)))) for _ in range(2))
+        python.launch(**ours)  # the manifest's shape, which is Vx's
+>       vx(**theirs)
+
+gpu/test_spawn_vx_launch.py:289: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <gpu.spawn.vx_launch.VxKernel object at 0x7cb7800fef60>, stream = None
+values = {'max_tokens': 6000, 'k': 64, 'round': 8, 'step': <gpu.runtime.DeviceTensor object at 0x7cb78010d1c0>, ...}
+
+    def __call__(self, *, stream=None, **values):
+        missing = self.names ^ set(values)
+        if missing:
+            raise TypeError(f'{self.manifest["entry"]}: arguments do not match parameters: {sorted(missing)}')
+        args, context = [], None
+        for p in self.params:
+            value = values[p['name']]
+            if p['kind'] == 'scalar':
+                args.append(value)
+                continue
+            if not isinstance(value, DeviceTensor):
+                raise TypeError(f'{p["name"]} must be a DeviceTensor')
+>           if str(value.dtype) != _ELEMENT[p['element']]:
+                                   ^^^^^^^^^^^^^^^^^^^^^^
+E           KeyError: 'u32'
+
+gpu/spawn/vx_launch.py:108: KeyError
+9 failed, 50 passed in 1.11s

@@ -1,0 +1,352 @@
+{
+  "regressions": [
+    {
+      "run": "int4",
+      "reference": "baseline layer-events-int4.json",
+      "layer": 0,
+      "what": "self_attn.o_proj",
+      "us": 193.02399456501007,
+      "ref_us": 172.31999337673187
+    },
+    {
+      "run": "int4",
+      "reference": "baseline layer-events-int4.json",
+      "layer": 0,
+      "what": "mlp.gate_proj",
+      "us": 133.4719955921173,
+      "ref_us": 120.4800009727478
+    },
+    {
+      "run": "int4",
+      "reference": "baseline layer-events-int4.json",
+      "layer": 0,
+      "what": "mlp.up_proj",
+      "us": 133.12000036239624,
+      "ref_us": 120.19199877977371
+    },
+    {
+      "run": "int4",
+      "reference": "baseline layer-events-int4.json",
+      "layer": 0,
+      "what": "mlp.down_proj",
+      "us": 148.60799908638,
+      "ref_us": 133.53599607944489
+    },
+    {
+      "run": "int4",
+      "reference": "baseline layer-events-int4.json",
+      "layer": 1,
+      "what": "self_attn.o_proj",
+      "us": 192.1280026435852,
+      "ref_us": 174.17599260807037
+    },
+    {
+      "run": "int4",
+      "reference": "baseline layer-events-int4.json",
+      "layer": 1,
+      "what": "mlp.gate_proj",
+      "us": 132.64000415802002,
+      "ref_us": 120.15999853610992
+    },
+    {
+      "run": "int4",
+      "reference": "baseline layer-events-int4.json",
+      "layer": 1,
+      "what": "mlp.up_proj",
+      "us": 134.0479999780655,
+      "ref_us": 120.60800194740295
+    },
+    {
+      "run": "int4",
+      "reference": "baseline layer-events-int4.json",
+      "layer": 1,
+      "what": "mlp.down_proj",
+      "us": 148.80000054836273,
+      "ref_us": 134.75200533866882
+    },
+    {
+      "run": "int4",
+      "reference": "baseline layer-events-int4.json",
+      "layer": 2,
+      "what": "self_attn.o_proj",
+      "us": 191.5840059518814,
+      "ref_us": 172.92800545692444
+    },
+    {
+      "run": "int4",
+      "reference": "baseline layer-events-int4.json",
+      "layer": 2,
+      "what": "mlp.gate_proj",
+      "us": 132.22399353981018,
+      "ref_us": 119.99999731779099
+    },
+    {
+      "run": "int4",
+      "reference": "baseline layer-events-int4.json",
+      "layer": 2,
+      "what": "mlp.up_proj",
+      "us": 132.86399841308594,
+      "ref_us": 120.54400146007538
+    },
+    {
+      "run": "int4",
+      "reference": "baseline layer-events-int4.json",
+      "layer": 2,
+      "what": "mlp.down_proj",
+      "us": 147.96799421310425,
+      "ref_us": 133.63200426101685
+    },
+    {
+      "run": "int4",
+      "reference": "baseline layer-events-int4.json",
+      "layer": 3,
+      "what": "self_attn.o_proj",
+      "us": 192.54399836063385,
+      "ref_us": 173.5360026359558
+    }
+  ],
+  "targets": [
+    {
+      "issue": "#32",
+      "layer": 0,
+      "what": "topk at 64 tokens",
+      "value": 10.400000028312206,
+      "unit": "us",
+      "target": 20.0,
+      "met": true,
+      "us": 10.400000028312206,
+      "us_at_peak": null,
+      "run": "bf16"
+    },
+    {
+      "issue": "#32",
+      "layer": 0,
+      "what": "topk at 64 tokens",
+      "value": 10.367999784648418,
+      "unit": "us",
+      "target": 20.0,
+      "met": true,
+      "us": 10.367999784648418,
+      "us_at_peak": null,
+      "run": "f32"
+    },
+    {
+      "issue": "#30",
+      "layer": 0,
+      "what": "self_attn.o_proj",
+      "value": 10.56348416274214,
+      "unit": "% of peak",
+      "target": 60.0,
+      "met": false,
+      "us": 241.98399484157562,
+      "us_at_peak": 25.5619409714606,
+      "run": "fp8"
+    },
+    {
+      "issue": "#30",
+      "layer": 0,
+      "what": "mlp.gate_proj",
+      "value": 11.00694501092061,
+      "unit": "% of peak",
+      "target": 60.0,
+      "met": false,
+      "us": 174.17599260807037,
+      "us_at_peak": 19.17145572859545,
+      "run": "fp8"
+    },
+    {
+      "issue": "#30",
+      "layer": 0,
+      "what": "mlp.up_proj",
+      "value": 10.906753598912568,
+      "unit": "% of peak",
+      "target": 60.0,
+      "met": false,
+      "us": 175.77600479125977,
+      "us_at_peak": 19.17145572859545,
+      "run": "fp8"
+    },
+    {
+      "issue": "#30",
+      "layer": 0,
+      "what": "mlp.down_proj",
+      "value": 10.221941228099444,
+      "unit": "% of peak",
+      "target": 60.0,
+      "met": false,
+      "us": 187.55200505256653,
+      "us_at_peak": 19.17145572859545,
+      "run": "fp8"
+    },
+    {
+      "issue": "#30",
+      "layer": 0,
+      "what": "self_attn.q_a_proj",
+      "value": 3.811119645783218,
+      "unit": "% of peak",
+      "target": 60.0,
+      "met": false,
+      "us": 83.83999764919281,
+      "us_at_peak": 3.195242621432575,
+      "run": "fp8"
+    },
+    {
+      "issue": "#31",
+      "layer": 3,
+      "what": "mlp.experts",
+      "value": 14.11076970055846,
+      "unit": "% of peak",
+      "target": 60.0,
+      "met": false,
+      "us": 543.4559881687164,
+      "us_at_peak": 76.6858229143818,
+      "run": "fp8"
+    },
+    {
+      "issue": "#32",
+      "layer": 0,
+      "what": "topk at 64 tokens",
+      "value": 10.367999784648418,
+      "unit": "us",
+      "target": 20.0,
+      "met": true,
+      "us": 10.367999784648418,
+      "us_at_peak": null,
+      "run": "fp8"
+    },
+    {
+      "issue": "#30",
+      "layer": 0,
+      "what": "self_attn.o_proj",
+      "value": 27.833124195108145,
+      "unit": "% of peak",
+      "target": 60.0,
+      "met": false,
+      "us": 91.839998960495,
+      "us_at_peak": 25.5619409714606,
+      "run": "fp8-x4"
+    },
+    {
+      "issue": "#30",
+      "layer": 0,
+      "what": "mlp.gate_proj",
+      "value": 33.33934387551304,
+      "unit": "% of peak",
+      "target": 60.0,
+      "met": false,
+      "us": 57.50399827957153,
+      "us_at_peak": 19.17145572859545,
+      "run": "fp8-x4"
+    },
+    {
+      "issue": "#30",
+      "layer": 0,
+      "what": "mlp.up_proj",
+      "value": 33.26529701672536,
+      "unit": "% of peak",
+      "target": 60.0,
+      "met": false,
+      "us": 57.631999254226685,
+      "us_at_peak": 19.17145572859545,
+      "run": "fp8-x4"
+    },
+    {
+      "issue": "#30",
+      "layer": 0,
+      "what": "mlp.down_proj",
+      "value": 27.67242513332825,
+      "unit": "% of peak",
+      "target": 60.0,
+      "met": false,
+      "us": 69.2799985408783,
+      "us_at_peak": 19.17145572859545,
+      "run": "fp8-x4"
+    },
+    {
+      "issue": "#30",
+      "layer": 0,
+      "what": "self_attn.q_a_proj",
+      "value": 19.092031986274314,
+      "unit": "% of peak",
+      "target": 60.0,
+      "met": false,
+      "us": 16.736000776290894,
+      "us_at_peak": 3.195242621432575,
+      "run": "fp8-x4"
+    },
+    {
+      "issue": "#31",
+      "layer": 3,
+      "what": "mlp.experts",
+      "value": 33.0496763550526,
+      "unit": "% of peak",
+      "target": 60.0,
+      "met": false,
+      "us": 232.03199356794357,
+      "us_at_peak": 76.6858229143818,
+      "run": "fp8-x4"
+    },
+    {
+      "issue": "#32",
+      "layer": 0,
+      "what": "topk at 64 tokens",
+      "value": 10.623999871313572,
+      "unit": "us",
+      "target": 20.0,
+      "met": true,
+      "us": 10.623999871313572,
+      "us_at_peak": null,
+      "run": "fp8-x4"
+    },
+    {
+      "issue": "#32",
+      "layer": 0,
+      "what": "topk at 64 tokens",
+      "value": 10.623999871313572,
+      "unit": "us",
+      "target": 20.0,
+      "met": true,
+      "us": 10.623999871313572,
+      "us_at_peak": null,
+      "run": "int4"
+    }
+  ],
+  "compared": [
+    {
+      "run": "bf16",
+      "reference": "baseline layer-events-bf16.json",
+      "us": 11100.991920568049,
+      "ref_us": 10888.44799529761
+    },
+    {
+      "run": "f32",
+      "reference": "baseline layer-events-f32.json",
+      "us": 4466.62395587191,
+      "ref_us": 4348.768008407205
+    },
+    {
+      "run": "fp8",
+      "reference": "baseline layer-events-fp8.json",
+      "us": 6584.544003941119,
+      "ref_us": 6245.375896804035
+    },
+    {
+      "run": "fp8-x4",
+      "reference": "baseline layer-events-fp8.json",
+      "us": 3457.215945236385,
+      "ref_us": 6245.375896804035
+    },
+    {
+      "run": "fp8-x4",
+      "reference": "this run, fp8 hand kernels",
+      "us": 3457.215945236385,
+      "ref_us": 6584.544003941119
+    },
+    {
+      "run": "int4",
+      "reference": "baseline layer-events-int4.json",
+      "us": 5337.472030892968,
+      "ref_us": 4763.007998466492
+    }
+  ]
+}

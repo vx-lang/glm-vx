@@ -254,6 +254,8 @@ def main(argv=None):
     args = p.parse_args(argv)
     runs = {}
     for path in args.runs:
+        if path.name.endswith('.launches.json'):  # layer_profile's launch list beside each report
+            continue
         report = json.loads(path.read_text())
         if 'kernels' not in report or 'format' not in report:
             p.error(f'{path} is not a layer_profile report')
