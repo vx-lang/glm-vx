@@ -149,13 +149,32 @@ pub fn glm_vx_gpu_matvec(out: *mut f32, weight: *const f32, x: *const f32, rows:
     let lane: i32 = tid % 32;
     let row: i32 = vx_gpu_block_idx_x() * (block / 32) + tid / 32;
     if row >= rows { return; }
+    // Eight steps a batch: their sixteen loads first, then their terms added in step order, the
+    // same sum as one step at a time (a term past the row is +0.0, and sum starts at +0.0, so is
+    // never -0.0). ptxas kept four steps in flight, so a 6144-column row was 48 memory round
+    // trips in a row, and a matvec of few rows (the router's 256, the indexer's 32) could not
+    // hide them (#29); eight halve that.
     let mut sum: f32 = 0.0;
+    let row_base: i64 = (row as i64) * (cols as i64);
     let mut c: i32 = lane;
-    for iteration in 0..((cols + 31) / 32) {
-      if c < cols {
-        sum = sum + weight[row * cols + c] * x[c];
-      }
-      c = c + 32;
+    for batch in 0..((cols + 255) / 256) {
+      let t0: f32 = if c < cols { weight[row_base + (c as i64)] * x[c] } else { 0.0 };
+      let t1: f32 = if c + 32 < cols { weight[row_base + ((c + 32) as i64)] * x[c + 32] } else { 0.0 };
+      let t2: f32 = if c + 64 < cols { weight[row_base + ((c + 64) as i64)] * x[c + 64] } else { 0.0 };
+      let t3: f32 = if c + 96 < cols { weight[row_base + ((c + 96) as i64)] * x[c + 96] } else { 0.0 };
+      let t4: f32 = if c + 128 < cols { weight[row_base + ((c + 128) as i64)] * x[c + 128] } else { 0.0 };
+      let t5: f32 = if c + 160 < cols { weight[row_base + ((c + 160) as i64)] * x[c + 160] } else { 0.0 };
+      let t6: f32 = if c + 192 < cols { weight[row_base + ((c + 192) as i64)] * x[c + 192] } else { 0.0 };
+      let t7: f32 = if c + 224 < cols { weight[row_base + ((c + 224) as i64)] * x[c + 224] } else { 0.0 };
+      sum = sum + t0;
+      sum = sum + t1;
+      sum = sum + t2;
+      sum = sum + t3;
+      sum = sum + t4;
+      sum = sum + t5;
+      sum = sum + t6;
+      sum = sum + t7;
+      c = c + 256;
     }
     let total: f32 = vxk_warp_sum(sum);
     if lane == 0 { out[row] = total; }
@@ -418,16 +437,49 @@ fn vxk_rmsnorm_rows(out: *mut f32, x: *const f32, weight: *const f32, rows: i32,
     if block < 32 { return; }
     if block > 1024 { return; }
     if block % 32 != 0 { return; }
+    // Eight steps a batch, their loads first (as glm_vx_gpu_matvec): one block reads the whole
+    // row, so a step's memory round trip was the kernel's time (#29). The same sums: a square past
+    // the row is +0.0 and ss starts at +0.0.
     let mut ss: f32 = 0.0;
-    for iteration in 0..((dim + block - 1) / block) {
-      let d: i32 = tid + iteration * block;
-      if d < dim { ss = ss + x[base + d] * x[base + d]; }
+    for batch in 0..((dim + 8 * block - 1) / (8 * block)) {
+      let d: i32 = tid + batch * 8 * block;
+      let q0: f32 = if d < dim { x[base + d] * x[base + d] } else { 0.0 };
+      let q1: f32 = if d + 1 * block < dim { x[base + d + 1 * block] * x[base + d + 1 * block] } else { 0.0 };
+      let q2: f32 = if d + 2 * block < dim { x[base + d + 2 * block] * x[base + d + 2 * block] } else { 0.0 };
+      let q3: f32 = if d + 3 * block < dim { x[base + d + 3 * block] * x[base + d + 3 * block] } else { 0.0 };
+      let q4: f32 = if d + 4 * block < dim { x[base + d + 4 * block] * x[base + d + 4 * block] } else { 0.0 };
+      let q5: f32 = if d + 5 * block < dim { x[base + d + 5 * block] * x[base + d + 5 * block] } else { 0.0 };
+      let q6: f32 = if d + 6 * block < dim { x[base + d + 6 * block] * x[base + d + 6 * block] } else { 0.0 };
+      let q7: f32 = if d + 7 * block < dim { x[base + d + 7 * block] * x[base + d + 7 * block] } else { 0.0 };
+      ss = ss + q0;
+      ss = ss + q1;
+      ss = ss + q2;
+      ss = ss + q3;
+      ss = ss + q4;
+      ss = ss + q5;
+      ss = ss + q6;
+      ss = ss + q7;
     }
     let total: f32 = vxk_block_sum(ss);
     let inv: f32 = 1.0 / sqrtf(total / (dim as f32) + eps);
-    for iteration in 0..((dim + block - 1) / block) {
-      let d: i32 = tid + iteration * block;
-      if d < dim { out[base + d] = x[base + d] * inv * weight[d]; }
+    for batch in 0..((dim + 8 * block - 1) / (8 * block)) {
+      let d: i32 = tid + batch * 8 * block;
+      let v0: f32 = if d < dim { x[base + d] * inv * weight[d] } else { 0.0 };
+      let v1: f32 = if d + 1 * block < dim { x[base + d + 1 * block] * inv * weight[d + 1 * block] } else { 0.0 };
+      let v2: f32 = if d + 2 * block < dim { x[base + d + 2 * block] * inv * weight[d + 2 * block] } else { 0.0 };
+      let v3: f32 = if d + 3 * block < dim { x[base + d + 3 * block] * inv * weight[d + 3 * block] } else { 0.0 };
+      let v4: f32 = if d + 4 * block < dim { x[base + d + 4 * block] * inv * weight[d + 4 * block] } else { 0.0 };
+      let v5: f32 = if d + 5 * block < dim { x[base + d + 5 * block] * inv * weight[d + 5 * block] } else { 0.0 };
+      let v6: f32 = if d + 6 * block < dim { x[base + d + 6 * block] * inv * weight[d + 6 * block] } else { 0.0 };
+      let v7: f32 = if d + 7 * block < dim { x[base + d + 7 * block] * inv * weight[d + 7 * block] } else { 0.0 };
+      if d < dim { out[base + d] = v0; }
+      if d + 1 * block < dim { out[base + d + 1 * block] = v1; }
+      if d + 2 * block < dim { out[base + d + 2 * block] = v2; }
+      if d + 3 * block < dim { out[base + d + 3 * block] = v3; }
+      if d + 4 * block < dim { out[base + d + 4 * block] = v4; }
+      if d + 5 * block < dim { out[base + d + 5 * block] = v5; }
+      if d + 6 * block < dim { out[base + d + 6 * block] = v6; }
+      if d + 7 * block < dim { out[base + d + 7 * block] = v7; }
     }
     return;
   }

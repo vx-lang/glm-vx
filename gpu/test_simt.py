@@ -111,3 +111,28 @@ def test_index_scores_invalid_scalar_geometry_does_not_write(simt, tokens, heads
     simt.run('glm_vx_gpu_index_scores', out, source, source, source,
              tokens, heads, dim, 1., block=block)
     np.testing.assert_array_equal(out, [-7654.])
+
+# The hand matvec's order, bit for bit (gpu/test_spawn_vx_host.py's model): lane l adds columns
+# l, l + 32, .. in turn, then vxk_warp_sum's tree. Its loop loads eight steps a batch (#29), so
+# widths around the batch's 256 columns, and the router's and the indexer's shapes.
+@pytest.mark.parametrize('shape',[(7,131),(5,256),(3,257),(2,511),(4,31),(256,6144),(32,6144)])
+def test_matvec_is_its_lane_order_bitwise(simt,shape):
+    from gpu.test_spawn_vx_host import strided_sums,warp_tree
+    rng=np.random.default_rng(shape[0]*shape[1]);w=rng.normal(size=shape).astype('f4');x=rng.normal(size=shape[1]).astype('f4')
+    out=np.zeros(shape[0],'f4')
+    simt.run('glm_vx_gpu_matvec',out,w,x,*shape,grid=(shape[0]+3)//4,block=128)
+    np.testing.assert_array_equal(out.view(np.uint32),warp_tree(strided_sums(w*x,32)).view(np.uint32))
+
+# The hand rmsnorm's order, bit for bit (gpu/test_spawn_vx_host.py's rms_reference): thread t adds
+# d = t, t + block, .. in turn, then vxk_block_sum. Its loops take eight steps a batch (#29), so
+# rows shorter than a batch, ending inside one, and GLM-5.3's 6144.
+@pytest.mark.parametrize('rows,dim,block',[(1,6144,256),(3,131,64),(2,333,96),(1,2049,256),(4,2048,128),(2,7,32)])  # the emulator runs blocks of up to 256
+def test_rmsnorm_rows_is_its_order_bitwise(simt,rows,dim,block):
+    from gpu.test_spawn_vx_host import rms_reference
+    rng=np.random.default_rng(rows*dim+block);x=rng.normal(size=(rows,dim)).astype('f4');w=rng.normal(size=dim).astype('f4')
+    out=np.zeros_like(x)
+    simt.run('glm_vx_gpu_rmsnorm_rows',out,x,w,rows,dim,1e-5,grid=rows,block=block)
+    np.testing.assert_array_equal(out.view(np.uint32),rms_reference(x,w,1e-5,block).view(np.uint32))
+    inplace=x.copy()
+    simt.run('glm_vx_gpu_rmsnorm_rows',inplace,inplace,w,rows,dim,1e-5,grid=rows,block=block)
+    np.testing.assert_array_equal(inplace.view(np.uint32),out.view(np.uint32))
