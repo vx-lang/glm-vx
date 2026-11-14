@@ -31,6 +31,8 @@ from validation.moe_profile import event_us
 SHAPES = [('q_a_proj', 2048, 6144), ('q_b_proj', 16384, 2048), ('kv_a_proj', 576, 6144),
           ('o_proj', 6144, 16384), ('mlp.gate/up', 12288, 6144), ('mlp.down', 6144, 12288),
           ('shared_expert.gate/up', 2048, 6144), ('shared_expert.down', 6144, 2048)]
+# The output projection stays BF16 in every checkpoint format, so only --format bf16 times it.
+LM_HEAD = ('lm_head', 154880, 6144)
 
 
 def cublaslt_kernels(ctx, build, rows, cols, x, codes, scales, stream, orientation):
@@ -126,7 +128,7 @@ def main():
     rng = np.random.default_rng(1)
     peak = peak_bandwidth()
     results = []
-    for name, rows, cols in SHAPES:
+    for name, rows, cols in SHAPES + ([LM_HEAD] if args.format == 'bf16' else []):
         nbytes, launches, outs = kernels(args.format, ctx, build, rng, rows, cols, stream)
         for launch in launches.values():
             launch()

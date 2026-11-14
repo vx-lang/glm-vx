@@ -91,6 +91,16 @@ fi
 step build-spawn bash gpu/spawn/build.sh
 step build-cpu-lib bash kernels/build.sh
 sha256sum gpu/build/*.ptx gpu/build/spawn/*.ptx gpu/build/spawn/*.so > "$out/ptx.sha256" 2>/dev/null
+# cuBLASLt 12.9+ for gpu/cublaslt.py (Hopper's block-scaled FP8); CUDA 12.8 images ship 12.8. When none
+# loads, pip installs the wheel: nvidia-cublas (CUDA 13) on a 580+ driver, nvidia-cublas-cu12 before.
+cublaslt_check() { $PYTHON -c 'from gpu import cublaslt as L; lib = L.load_library(); print("cublaslt", lib._name, lib.cublasLtGetVersion())'; }
+cublaslt_setup() {
+  cublaslt_check && return
+  local driver; driver=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)
+  $PYTHON -m pip install -q "$([[ ${driver%%.*} -ge 580 ]] && echo nvidia-cublas || echo 'nvidia-cublas-cu12>=12.9')" && cublaslt_check
+}
+step build-cublaslt cublaslt_setup
+grep -h '^cublaslt' "$out/build-cublaslt.txt" >> "$out/host.txt" 2>/dev/null
 
 # Hardware tests skip without a usable device; a run where nothing passed is a failure, not "ok".
 hw() { $PYTHON -m pytest -q -rs "$@" | tee /dev/stderr | grep -qE '[0-9]+ passed'; }

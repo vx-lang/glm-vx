@@ -16,7 +16,11 @@ float32-activation kernels', not equal (the maintainer's call, #29: SGLang quant
 
 Either way ``out`` holds, for each token, its n outputs contiguously when m == 1. Which orientation the
 library accepts, and how fast, is a GPU question: gpu/test_cublaslt_hardware.py and
-validation/cublaslt_profile.py answer it. Not a performance claim.
+``validation/matvec_profile.py --cublaslt-orientation`` answer it. Not a performance claim.
+
+Hopper's block scales need cuBLASLt 12.9 or later; load_library skips older ones (CUDA 12.8 images
+ship 12.8). Where the system's is older, the pip wheel works: ``pip install nvidia-cublas`` (CUDA 13,
+driver 580+) or ``nvidia-cublas-cu12`` (12.9), found under the ``nvidia`` package as torch keeps it.
 """
 import ctypes as C
 import os
@@ -50,20 +54,33 @@ class _Heuristic(C.Structure):
                 ('reserved', C.c_int * 4)]
 
 
+MIN_VERSION = 120900  # cublasLtGetVersion(): 12.9.0, the first with Hopper's VEC128 / BLK128x128 scales
+
+
+def _wheel_dirs():
+    """The nvidia namespace package's lib directories: cu13/lib (CUDA 13 wheels), cublas/lib (12.x)."""
+    import importlib.util
+    try:
+        spec = importlib.util.find_spec('nvidia')
+    except (ImportError, ValueError):
+        return
+    for root in (spec.submodule_search_locations or []) if spec else []:
+        yield os.path.join(root, 'cu13', 'lib')
+        yield os.path.join(root, 'cublas', 'lib')
+
+
 def _library_names():
     if os.environ.get('VX_CUBLASLT_LIB'):
         yield os.environ['VX_CUBLASLT_LIB']
+    for directory in _wheel_dirs():  # before the system's: an image's CUDA may predate 12.9
+        for name in ('libcublasLt.so.13', 'libcublasLt.so.12'):
+            if os.path.exists(os.path.join(directory, name)):
+                yield os.path.join(directory, name)
     yield from ('libcublasLt.so.13', 'libcublasLt.so.12', 'libcublasLt.so')
-    try:  # the pip wheel (nvidia-cublas), where torch images keep it
-        import nvidia.cublas
-        for path in nvidia.cublas.__path__:
-            for name in ('libcublasLt.so.13', 'libcublasLt.so.12'):
-                yield os.path.join(path, 'lib', name)
-    except ImportError:
-        pass
 
 
 def load_library():
+    """The first libcublasLt of at least MIN_VERSION: VX_CUBLASLT_LIB, the pip wheels, the system's."""
     errors = []
     for name in _library_names():
         try:
@@ -73,6 +90,10 @@ def load_library():
             continue
         lib.cublasLtGetStatusName.restype = C.c_char_p
         lib.cublasLtGetVersion.restype = _SIZE
+        version = int(lib.cublasLtGetVersion())
+        if version < MIN_VERSION:
+            errors.append(f'{name}: version {version} < {MIN_VERSION} (no Hopper block scales)')
+            continue
         lib.cublasLtMatrixLayoutCreate.argtypes = [C.POINTER(_P), C.c_int, _U64, _U64, _I64]
         lib.cublasLtMatmulDescCreate.argtypes = [C.POINTER(_P), C.c_int, C.c_int]
         lib.cublasLtMatmulDescSetAttribute.argtypes = [_P, C.c_int, _P, _SIZE]

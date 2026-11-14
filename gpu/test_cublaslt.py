@@ -122,3 +122,37 @@ def test_pack_weight_scales_pads_each_row_block_to_four():
     packed = L.pack_weight_scales(np.arange(6, dtype='f4').reshape(2, 3))
     np.testing.assert_array_equal(packed, [[0, 1, 2, 0], [3, 4, 5, 0]])
     assert L.pack_weight_scales(np.ones((1, 8), 'f4')).shape == (1, 8)
+
+
+def test_loader_prefers_the_wheels_and_skips_libraries_before_12_9(monkeypatch, tmp_path):
+    for sub, name in (('cu13/lib', 'libcublasLt.so.13'), ('cublas/lib', 'libcublasLt.so.12')):
+        (tmp_path / sub).mkdir(parents=True)
+        (tmp_path / sub / name).touch()
+    monkeypatch.delenv('VX_CUBLASLT_LIB', raising=False)
+    monkeypatch.setattr(L, '_wheel_dirs', lambda: iter([str(tmp_path / 'cu13/lib'), str(tmp_path / 'cublas/lib')]))
+    names = list(L._library_names())
+    assert names[:2] == [str(tmp_path / 'cu13/lib/libcublasLt.so.13'), str(tmp_path / 'cublas/lib/libcublasLt.so.12')]
+    assert names[2:] == ['libcublasLt.so.13', 'libcublasLt.so.12', 'libcublasLt.so']
+
+    versions = {names[0]: None, names[1]: 120800, 'libcublasLt.so.13': 130600}  # None: fails to load
+    opened = []
+
+    class FakeCDLL:
+        def __init__(self, name):
+            if versions.get(name) is None:
+                raise OSError('not found')
+            opened.append(name)
+            self.cublasLtGetVersion = lambda: versions[name]
+            self.cublasLtGetStatusName = self.cublasLtGetVersion  # restype set on it, unused
+
+        def __getattr__(self, attr):
+            fn = lambda *a: 0
+            self.__dict__[attr] = fn
+            return fn
+
+    monkeypatch.setattr(L.C, 'CDLL', FakeCDLL)
+    L.load_library()
+    assert opened == [names[1], 'libcublasLt.so.13']  # 12.8 opened and skipped, 13.6 taken
+    versions['libcublasLt.so.13'] = 120800
+    with pytest.raises(L.CublasLtUnavailable, match='120800 < 120900'):
+        L.load_library()
