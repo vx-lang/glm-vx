@@ -27,7 +27,7 @@ if [[ ${APT:-1} != 0 ]] && command -v apt-get >/dev/null; then
   if [[ ! -x /usr/lib/llvm-22/bin/mlir-translate ]]; then
     wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
     bash /tmp/llvm.sh 22
-    apt-get install -y -qq libmlir-22-dev mlir-22-tools clang-22 lld-22 llvm-22-dev
+    apt-get install -y -qq libmlir-22-dev mlir-22-tools clang-22 lld-22 llvm-22-dev libpolly-22-dev
   fi
 fi
 if ! command -v cargo >/dev/null && [[ ! -x $HOME/.cargo/bin/cargo ]]; then
@@ -40,8 +40,8 @@ mkdir -p "$work/src"
 tar -xzf "$src" -C "$work/src"
 # A full build: it also makes libvx_std_core.so, which programs with a GPU spawn link against.
 (cd "$work/src" && CARGO_TARGET_DIR="$work/target" cargo build --release)
-out=$(ls -d "$work"/target/release/build/vxc-*/out | while read -r d; do
-  [[ -f $d/libvx_cuda_dispatch.so ]] && echo "$d"; done | head -1)
+# vxc's build-script output: build/vxc-<hash>/out, or build/vxc/<hash>/out with cargo 1.100's layout.
+out=$(find "$work"/target/release/build -path '*vxc*/out/libvx_cuda_dispatch.so' -printf '%h\n' 2>/dev/null | head -1)
 [[ -n $out ]] || { echo "no libvx_cuda_dispatch.so in the build (is the CUDA toolkit installed?)" >&2; exit 3; }
 
 mkdir -p "$work/$name/bin" "$work/$name/lib"
@@ -50,7 +50,9 @@ cp "$work/target/release/libvx_std_core.so" "$out/libvx_cuda_dispatch.so" "$out/
 cp -r "$work/src/stdlib" "$work/$name/stdlib"
 tar --use-compress-program=unzstd -xf "$old" -C "$work/$name" --strip-components=1 --wildcards '*/llvm-22'
 
-nm -D "$work/$name/lib/libvx_cuda_dispatch.so" | grep -q ' vx_cuda_set_stream$' \
+# Not `nm | grep -q`: under pipefail grep's early exit gives nm a SIGPIPE and fails the check.
+exports=$(nm -D "$work/$name/lib/libvx_cuda_dispatch.so")
+grep -q ' vx_cuda_set_stream$' <<< "$exports" \
   || { echo "libvx_cuda_dispatch.so does not export vx_cuda_set_stream" >&2; exit 3; }
 echo "glibc needed by vxc: $(objdump -T "$work/$name/bin/vxc" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
 tar -C "$work" --use-compress-program='zstd -T0 -10' -cf "$work/$name.tar.zst" "$name"

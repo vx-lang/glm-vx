@@ -55,7 +55,8 @@ if [[ -f $prefix/lib/libvx_cuda_dispatch.so ]]; then
 fi
 # Vx's collectives (gpu/collective.py) dlopen libnccl.so.2. When only the pip wheel
 # (nvidia-nccl-cu12) has it, the loader cannot find it, so point VX_NCCL_LIB at the wheel's copy.
-if ! ldconfig -p 2>/dev/null | grep -q 'libnccl\.so\.2 '; then
+# Not `ldconfig -p | grep -q`: under pipefail grep's early exit fails ldconfig with a SIGPIPE.
+if ! grep -q 'libnccl\.so\.2 ' <<< "$(ldconfig -p 2>/dev/null)"; then
   nccl=$(python3 -c 'import nvidia.nccl, pathlib; print(pathlib.Path(nvidia.nccl.__path__[0]) / "lib" / "libnccl.so.2")' 2>/dev/null || true)
   if [[ -n $nccl && -f $nccl ]]; then
     echo "export VX_NCCL_LIB=$nccl" >> "$prefix/env.sh"
