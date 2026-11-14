@@ -92,8 +92,8 @@ Two launches use the same PTX:
 | `int4_matvec4.vx` | new: `int4_matvec` reading four u32 words a lane step, 32 codes in one group (#30) | 48 (sm_80), 40 (sm_90) |
 | `int4_matmul.vx` | `glm_vx_gpu_int4_matmul` (out is [M, N]) | 40 |
 | `fp8_matvec.vx` | `glm_vx_gpu_fp8_matvec` | 45 |
-| `fp8_matvec4.vx` | new: `fp8_matvec` reading sixteen codes a lane step (weight viewed as u32, cols % 16 == 0) as one `ld.global.nc.v4`, decoded by `fp8_decode!`'s bit cast (#30) | 56 (sm_80), 48 (sm_90) |
-| `fp8_matvec4_rows.vx` | new: `fp8_matvec4` for m = 1 to 4 vectors on one read of the weight, each row bit for bit `fp8_matvec4`'s (MTP verification of k + 1 tokens, #16); out is [4, rows]. x loads are scalar for now (the per-vector guards), the weight one `ld.global.nc.v4` | 64 (sm_80), 48 (sm_90) |
+| `fp8_matvec4.vx` | new: `fp8_matvec` reading sixteen codes a lane step (weight viewed as u32, cols % 16 == 0) as one `ld.global.nc.v4`, decoded by `fp8_decode!`'s bit cast (#30). A lane step with no NaN code and \|scale\| < 256 takes `fp8_word_terms_fast!` (sign and exponent placed in two or three integer ops, scale * 2^120 folded, no NaN select): 127 sm_90 instructions per 16 codes where it took 209, the same bits | 63 (sm_80), 48 (sm_90) |
+| `fp8_matvec4_rows.vx` | new: `fp8_matvec4` for m = 1 to 4 vectors on one read of the weight, each row bit for bit `fp8_matvec4`'s (MTP verification of k + 1 tokens, #16); out is [4, rows]. x loads are scalar for now (the per-vector guards), the weight one `ld.global.nc.v4`; the same fast lane steps as `fp8_matvec4` | 64 (sm_80), 56 (sm_90) |
 | `argmax_rows.vx` | new: numpy.argmax of each row (the first index on a tie), one block a row combined by `lanes::argmax`: greedy decoding's token on the device, so a step downloads one id a row in place of the logits (#16) | 20 (sm_80), 19 (sm_90) |
 | `fp8_matmul.vx` | `glm_vx_gpu_fp8_matmul` (out is [M, N]) | 46 |
 | `gemm_f32.vx` | `glm_vx_gpu_gemm_f32` | 32 |
@@ -119,7 +119,7 @@ Two launches use the same PTX:
 | `bf16_moe_gate_up.vx`, `bf16_moe_down.vx` | new: the same for bf16 experts | 47, 47 |
 | `int4_moe_gate_up.vx`, `int4_moe_down.vx` | new: the same for INT4 experts | 47, 47 |
 | `fp8_moe_gate_up.vx`, `fp8_moe_down.vx` | new: the same for FP8 experts | 69, 56 |
-| `fp8_moe4_gate_up.vx`, `fp8_moe4_down.vx` | new: the FP8 pair reading sixteen codes a lane step through `fp8_row_dot4!` (#31) | 80, 64 (sm_80); 72, 56 (sm_90) |
+| `fp8_moe4_gate_up.vx`, `fp8_moe4_down.vx` | new: the FP8 pair reading sixteen codes a lane step through `fp8_row_dot4!` (#31), with its fast lane steps | 80, 64 (sm_80); 72, 56 (sm_90) |
 | `mla_chunks_at.vx` | new: `mla_decode_at` with 32 tokens a chunk, one subgroup a token (#33); equal to rounding | 32 (sm_90) |
 | `mla_heads_at.vx` | new: `mla_chunks_at` with four heads a block, each selected latent row read once for them (#33); equal to `mla_chunks_at` bit for bit; buffers per group of four heads; lane 0 keeps each warp's token and scores (Vx a9d832fd) | 32 (sm_80, 36 B spills), 32 (sm_90, 20 B spills; ptxas's choice for a 1024-thread block); #2938 keeps its lane rows in registers, 17.6 KB shared memory |
 | `mla_decode.vx` | new: mla_partial and mla_merge in one launch (Vx #2187 code of a group, #2188 arrival counts) | 31 |

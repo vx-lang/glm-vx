@@ -320,11 +320,19 @@ def test_fp8_matvec(run, rows, cols):
     bits_equal(got, warp_tree(strided_sums((fp8(weight) * per_col) * x, 32)))
 
 
-def fp8_matvec4_case(rows, cols, seed):
+def fp8_matvec4_case(rows, cols, seed, scales=None, nan_rows=()):
+    """scales: a list cycled over the scale blocks in place of uniform(0.001, 0.1); nan_rows: rows
+    that get one NaN code each (the others have none)."""
     rng = np.random.default_rng(seed)
     weight = rng.integers(0, 256, size=(rows, cols), dtype=np.uint8)
     weight[(weight & 0x7F) == 0x7F] = 0
-    scales = rng.uniform(0.001, 0.1, size=(-(-rows // 128), -(-cols // 128))).astype(F)
+    for r in nan_rows:
+        weight[r, rng.integers(cols)] = rng.choice([0x7F, 0xFF])
+    shape = (-(-rows // 128), -(-cols // 128))
+    if scales is None:
+        scales = rng.uniform(0.001, 0.1, size=shape).astype(F)
+    else:
+        scales = np.resize(np.asarray(scales, F), shape).astype(F)
     x = rng.normal(size=cols).astype(F)
     per_col = scales[np.arange(rows)[:, None] // 128, np.arange(cols)[None, :] // 128]
     # Lane l takes columns tile * 512 + 16l .. + 15 of each tile in turn.
@@ -341,6 +349,35 @@ def test_fp8_matvec4(run, rows, cols):
     got = run('fp8_matvec4', out=np.zeros(rows, F), weight=weight.view(np.uint32).reshape(-1), scales=scales.reshape(-1),
               x=x, rows=rows, cols=cols)['out']
     bits_equal(got, expected)
+
+
+# The fast path (no NaN select, scale * 2^120 folded, #30) and the exact one must give the same
+# bits: scales at and around 2^8 (|scale| >= 256 takes the exact path), subnormal and zero scales,
+# negative ones, and NaN codes (the exact path for that lane step; the row's sum is NaN).
+EDGE_SCALES = [300.0, 256.0, 255.99, -300.0, 2.0 ** -130, 1e-3, 0.0, -0.002, 2.0 ** 7]
+NAN_ROWS = (1, 4, 129)
+
+
+@pytest.mark.parametrize('rows,cols', [(5, 1008), (130, 1152)])
+def test_fp8_matvec4_fast_and_exact_paths_agree(run, rows, cols):
+    nan_rows = [r for r in NAN_ROWS if r < rows]
+    weight, scales, x, expected = fp8_matvec4_case(rows, cols, rows + cols, EDGE_SCALES, nan_rows)
+    words = weight.view(np.uint32).reshape(-1)
+    got = run('fp8_matvec4', out=np.zeros(rows, F), weight=words, scales=scales.reshape(-1), x=x, rows=rows,
+              cols=cols)['out']
+    nan = np.isin(np.arange(rows), nan_rows)
+    assert np.isnan(got[nan]).all() and np.isnan(expected[nan]).all()
+    bits_equal(got[~nan], expected[~nan])
+    xs = np.random.default_rng(cols).normal(size=(4, cols)).astype(F)
+    xs[0] = x
+    many = run('fp8_matvec4_rows', out=np.zeros((4, rows), F), weight=words, scales=scales.reshape(-1),
+               x=xs.reshape(-1), rows=rows, cols=cols, m=4)['out']
+    assert np.isnan(many[:, nan]).all()
+    bits_equal(many[0][~nan], expected[~nan])
+    for v in range(1, 4):
+        single = run('fp8_matvec4', out=np.zeros(rows, F), weight=words, scales=scales.reshape(-1), x=xs[v],
+                     rows=rows, cols=cols)['out']
+        bits_equal(many[v][~nan], single[~nan])
 
 
 # fp8_matvec4_rows (MTP verification, #16): m vectors against one read of the weight. Each row of

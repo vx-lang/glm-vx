@@ -227,6 +227,59 @@ macro_rules! fp8_word_terms {
     };
 }
 
+// The bits fp8_decode! builds for byte $j of $word, without its NaN check: the sign to bit 31,
+// exponent and mantissa to bits 26 .. 20, in two or three integer instructions (byte j moved to the
+// top, an arithmetic shift by 4, one mask) where fp8_decode! takes about six and a select (#30).
+// f32::from_bits of them times 2^120 is the code's value, for every code but the NaNs.
+macro_rules! fp8_bits {
+    ($word:expr, $j:expr) => {
+        unsafe {
+          let dv_shift: u32 = 8u32 * ($j as u32);
+          let dv_top: u32 = ($word & (255u32 << dv_shift)) << (24u32 - dv_shift);
+          (((dv_top as i32) >> 4) as u32) & 2280652800u32
+        }
+    };
+}
+
+// Whether none of the sixteen codes in four words is a NaN (S.1111.111): a byte's low seven bits
+// plus one reach its bit 7 only when they are all ones, and never carry into the next byte.
+macro_rules! fp8_no_nan4 {
+    ($w0:expr, $w1:expr, $w2:expr, $w3:expr) => {
+        unsafe {
+          ((((($w0 & 2139062143u32) + 16843009u32) | (($w1 & 2139062143u32) + 16843009u32)
+            | (($w2 & 2139062143u32) + 16843009u32) | (($w3 & 2139062143u32) + 16843009u32))
+            & 2155905152u32) == 0u32)
+        }
+    };
+}
+
+// fp8_word_terms! for a word with no NaN code and a scale with |scale| < 256, bit for bit: with
+// $scale120 = scale * 2^120 (exact, as |scale| < 2^8), from_bits(b) * $scale120 is the same real
+// number as (from_bits(b) * 2^120) * scale, whose first product is exact, so both round once to
+// the same float. One multiply a code fewer, and no NaN select (#30).
+macro_rules! fp8_word_terms_fast {
+    ($sum:expr, $word:expr, $scale120:expr, $x:ident, $col:expr) => {
+        unsafe {
+          let mut dv_sum: f32 = $sum;
+          let mut dv_j: i32 = 0;
+          while dv_j < 4 {
+            dv_sum = dv_sum + (f32::from_bits(fp8_bits!($word, dv_j)) * $scale120) * $x[$col + (dv_j as i64)];
+            dv_j = dv_j + 1;
+          }
+          dv_sum
+        }
+    };
+}
+
+// Whether a lane step of sixteen codes may take the fast terms: no NaN code, and |scale| < 256 (a
+// NaN or infinite scale fails too). The other steps keep fp8_word_terms!, so every result is the
+// same bits either way.
+macro_rules! fp8_fast4 {
+    ($w0:expr, $w1:expr, $w2:expr, $w3:expr, $scale:expr) => {
+        unsafe { (fp8_no_nan4!($w0, $w1, $w2, $w3)) && $scale < 256.0 && $scale > -256.0 }
+    };
+}
+
 // fp8_row_dot! reading sixteen codes a lane step (#30, #31): the weight bytes viewed as u32, each
 // expert's [rows, n] matrix back to back (n % 16 == 0, so every row starts on 16 bytes). Lane l
 // reads words 4l .. 4l + 3 of every 128-word tile (columns tile * 512 + 16l .. + 15, all in one
@@ -247,16 +300,28 @@ macro_rules! fp8_row_dot4 {
           let mut dv4_sum: f32 = 0.0;
           let mut dv4_at: i64 = ($lane as i64) * 4;
           while dv4_at < dv4_words {
-            let dv4_w0: i32 = $weight[dv4_row_words + dv4_at] as i32;
-            let dv4_w1: i32 = $weight[dv4_row_words + dv4_at + 1] as i32;
-            let dv4_w2: i32 = $weight[dv4_row_words + dv4_at + 2] as i32;
-            let dv4_w3: i32 = $weight[dv4_row_words + dv4_at + 3] as i32;
+            let dv4_w0: u32 = $weight[dv4_row_words + dv4_at];
+            let dv4_w1: u32 = $weight[dv4_row_words + dv4_at + 1];
+            let dv4_w2: u32 = $weight[dv4_row_words + dv4_at + 2];
+            let dv4_w3: u32 = $weight[dv4_row_words + dv4_at + 3];
             let dv4_scale: f32 = $scales[dv4_scale_base + dv4_at / 32];
             let dv4_col: i64 = dv4_xo + dv4_at * 4;
-            dv4_sum = fp8_word_terms!(dv4_sum, dv4_w0, dv4_scale, $x, dv4_col);
-            dv4_sum = fp8_word_terms!(dv4_sum, dv4_w1, dv4_scale, $x, dv4_col + 4);
-            dv4_sum = fp8_word_terms!(dv4_sum, dv4_w2, dv4_scale, $x, dv4_col + 8);
-            dv4_sum = fp8_word_terms!(dv4_sum, dv4_w3, dv4_scale, $x, dv4_col + 12);
+            if fp8_fast4!(dv4_w0, dv4_w1, dv4_w2, dv4_w3, dv4_scale) {
+              let dv4_s120: f32 = dv4_scale * f32::from_bits(2071986176u32);
+              dv4_sum = fp8_word_terms_fast!(dv4_sum, dv4_w0, dv4_s120, $x, dv4_col);
+              dv4_sum = fp8_word_terms_fast!(dv4_sum, dv4_w1, dv4_s120, $x, dv4_col + 4);
+              dv4_sum = fp8_word_terms_fast!(dv4_sum, dv4_w2, dv4_s120, $x, dv4_col + 8);
+              dv4_sum = fp8_word_terms_fast!(dv4_sum, dv4_w3, dv4_s120, $x, dv4_col + 12);
+            } else {
+              let dv4_i0: i32 = dv4_w0 as i32;
+              let dv4_i1: i32 = dv4_w1 as i32;
+              let dv4_i2: i32 = dv4_w2 as i32;
+              let dv4_i3: i32 = dv4_w3 as i32;
+              dv4_sum = fp8_word_terms!(dv4_sum, dv4_i0, dv4_scale, $x, dv4_col);
+              dv4_sum = fp8_word_terms!(dv4_sum, dv4_i1, dv4_scale, $x, dv4_col + 4);
+              dv4_sum = fp8_word_terms!(dv4_sum, dv4_i2, dv4_scale, $x, dv4_col + 8);
+              dv4_sum = fp8_word_terms!(dv4_sum, dv4_i3, dv4_scale, $x, dv4_col + 12);
+            }
             dv4_at = dv4_at + 128;
           }
           dv4_sum

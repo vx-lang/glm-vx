@@ -26,6 +26,27 @@ macro_rules! fp8_rows_terms {
     };
 }
 
+// fp8_rows_terms! for a word with no NaN code and |scale| < 256, bit for bit (device.vx's
+// fp8_word_terms_fast!): $scale120 = scale * 2^120, one multiply a code fewer, no NaN select.
+macro_rules! fp8_rows_terms_fast {
+    ($word:expr, $scale120:expr, $x:ident, $col:expr, $cols:expr, $m:expr, $s0:ident, $s1:ident, $s2:ident, $s3:ident) => {
+        unsafe {
+          let dv_word: u32 = $word;
+          let dv_col: i64 = $col;
+          let mut dv_j: i32 = 0;
+          while dv_j < 4 {
+            let dv_term: f32 = f32::from_bits(fp8_bits!(dv_word, dv_j)) * $scale120;
+            let dv_at: i64 = dv_col + (dv_j as i64);
+            $s0 = $s0 + dv_term * $x[dv_at];
+            if $m > 1 { $s1 = $s1 + dv_term * $x[$cols + dv_at]; }
+            if $m > 2 { $s2 = $s2 + dv_term * $x[2 * $cols + dv_at]; }
+            if $m > 3 { $s3 = $s3 + dv_term * $x[3 * $cols + dv_at]; }
+            dv_j = dv_j + 1;
+          }
+        }
+    };
+}
+
 pub fn glm_vx_spawn_fp8_matvec4_rows(out: &mut Tensor<f32, [?, ?], Memory::HBM>, weight: &Tensor<u32, [?], Memory::HBM>,
                                      scales: &Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
                                      rows: i32, cols: i32, m: i32) -> void {
@@ -48,16 +69,28 @@ pub fn glm_vx_spawn_fp8_matvec4_rows(out: &mut Tensor<f32, [?, ?], Memory::HBM>,
             let scale_base: i64 = (row / 128) * tiles;
             let mut at: i64 = (lane as i64) * 4;
             while at < words {
-              let w0: i32 = weight[row_words + at] as i32;
-              let w1: i32 = weight[row_words + at + 1] as i32;
-              let w2: i32 = weight[row_words + at + 2] as i32;
-              let w3: i32 = weight[row_words + at + 3] as i32;
+              let u0: u32 = weight[row_words + at];
+              let u1: u32 = weight[row_words + at + 1];
+              let u2: u32 = weight[row_words + at + 2];
+              let u3: u32 = weight[row_words + at + 3];
               let scale: f32 = scales[scale_base + at / 32];
               let col: i64 = at * 4;
-              fp8_rows_terms!(w0, scale, x, col, n, m, s0, s1, s2, s3);
-              fp8_rows_terms!(w1, scale, x, col + 4, n, m, s0, s1, s2, s3);
-              fp8_rows_terms!(w2, scale, x, col + 8, n, m, s0, s1, s2, s3);
-              fp8_rows_terms!(w3, scale, x, col + 12, n, m, s0, s1, s2, s3);
+              if fp8_fast4!(u0, u1, u2, u3, scale) {
+                let s120: f32 = scale * f32::from_bits(2071986176u32);
+                fp8_rows_terms_fast!(u0, s120, x, col, n, m, s0, s1, s2, s3);
+                fp8_rows_terms_fast!(u1, s120, x, col + 4, n, m, s0, s1, s2, s3);
+                fp8_rows_terms_fast!(u2, s120, x, col + 8, n, m, s0, s1, s2, s3);
+                fp8_rows_terms_fast!(u3, s120, x, col + 12, n, m, s0, s1, s2, s3);
+              } else {
+                let w0: i32 = u0 as i32;
+                let w1: i32 = u1 as i32;
+                let w2: i32 = u2 as i32;
+                let w3: i32 = u3 as i32;
+                fp8_rows_terms!(w0, scale, x, col, n, m, s0, s1, s2, s3);
+                fp8_rows_terms!(w1, scale, x, col + 4, n, m, s0, s1, s2, s3);
+                fp8_rows_terms!(w2, scale, x, col + 8, n, m, s0, s1, s2, s3);
+                fp8_rows_terms!(w3, scale, x, col + 12, n, m, s0, s1, s2, s3);
+              }
               at = at + 128;
             }
           }
