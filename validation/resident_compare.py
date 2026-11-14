@@ -87,6 +87,37 @@ def timed_resident(model, tokens, **options):
         resident.close()
 
 
+def cublaslt_projection_check(model, layers=(0,)):
+    """fp8_kernels='cublaslt' per dense FP8 Linear of the given layers: |resident - float64 sum of its
+    quantized operands| / max, and how far quantizing x alone moves it (/ max). The first is the
+    correctness gate; the logits' drift from float32 activations compounds the second, so it is reported."""
+    from gpu import fp8_quant
+    from gpu.resident import ResidentGLM
+    resident = ResidentGLM(model, max_tokens=2, device_experts=True, fp8_kernels='cublaslt')
+    rng, values, rows_out = np.random.default_rng(5), fp8_quant.e4m3_values(), []
+    try:
+        for prefix in sorted(model.weights.linears):
+            if '.experts.' in prefix or not any(prefix.startswith(f'model.layers.{i}.') for i in layers):
+                continue
+            codes, scales, _, (rows, cols) = model.weights.block_fp8(prefix)
+            if cols % 128:
+                continue
+            x = rng.normal(size=cols).astype('f4')
+            out = resident._project(prefix, resident._tensor((cols,), data=x.tobytes()), resident._tensor((rows,)))
+            got = np.frombuffer(out.download(), 'f4').astype(np.float64)
+            xq, xs = fp8_quant.quant_groups(x[None])
+            xd, want, exact = fp8_quant.dequant_groups(xq, xs)[0], np.empty(rows), np.empty(rows)
+            for r in range(0, rows, 128):  # a row block at a time: o_proj's float64 weights are 800 MB
+                w = values[codes[r:r + 128]] * np.repeat(scales[r // 128], 128)[:cols]
+                want[r:r + 128], exact[r:r + 128] = w @ xd, w @ x.astype(np.float64)
+            m = float(np.abs(want).max())
+            rows_out.append(dict(linear=prefix, rows=rows, cols=cols, error=float(np.abs(got - want).max()) / m,
+                                 quantization_drift=float(np.abs(want - exact).max()) / m))
+    finally:
+        resident.close()
+    return rows_out
+
+
 def quantized_main(args, config, weights, tokens, fmt):
     from glm_vx.backend import NumpyBackend
     source = {'int4': int4_source, 'fp8': fp8_source, 'bf16': bf16_source}[fmt](weights)
@@ -96,7 +127,9 @@ def quantized_main(args, config, weights, tokens, fmt):
     baseline.weights = lambda name: baseline_source(name)  # hides the packed formats: float32 path
     # --fp8-kernels x4 runs fp8_matvec4 and, with the routed experts chosen on the device in both
     # runs, fp8_moe4_* (#30, #31).
-    options = dict(fp8_kernels='x4', device_experts=True) if getattr(args, 'fp8_kernels', 'hand') == 'x4' else {}
+    # --fp8-kernels cublaslt also quantizes the dense Linears' activations to e4m3 for cuBLASLt (#29).
+    kernels = getattr(args, 'fp8_kernels', 'hand')
+    options = dict(fp8_kernels=kernels, device_experts=True) if kernels in ('x4', 'cublaslt') else {}
     got, got_s, got_warm, got_gib, launches = timed_resident(candidate, tokens, **options)
     expected, exp_s, exp_warm, exp_gib, _ = timed_resident(baseline, tokens, **{k: v for k, v in options.items() if k == 'device_experts'})
     diff = np.abs(got - expected)
@@ -109,9 +142,18 @@ def quantized_main(args, config, weights, tokens, fmt):
         **{f'{fmt}_seconds_per_token': got_s}, f32_seconds_per_token=exp_s,
         **{f'{fmt}_weights_gib_uploaded': got_gib}, f32_weights_gib_uploaded=exp_gib,
         **{f'{fmt}_matvec_launches': launches.get(f'{fmt}_matvec', 0)},
-        **({'fp8_kernels': 'x4', 'fp8_matvec4_launches': launches.get('fp8_matvec4', 0),
-            'fp8_moe4_launches': launches.get('fp8_moe4_gate_up', 0)} if options else {}),
+        **({'fp8_kernels': kernels, 'fp8_matvec4_launches': launches.get('fp8_matvec4', 0),
+            'fp8_moe4_launches': launches.get('fp8_moe4_gate_up', 0),
+            'cublaslt_launches': launches.get('cublaslt_fp8', 0)} if options else {}),
         note=f'single run, synthetic {fmt.upper()} encoding of random weights; kv_b_proj is dequantized to float32 in both; lazy uploads; not a benchmark')
+    if kernels == 'cublaslt':
+        # e4m3 activations, as SGLang's w8a8, move each projection by ~2-3% of its largest output
+        # (H100, 2026-11-14), and that compounds through the layers: the logits are reported, not gated.
+        # The gate is each dense Linear against the float64 sum of its own quantized operands.
+        report['projections'] = checks = cublaslt_projection_check(candidate)
+        report['gate'] = ('every dense FP8 Linear of layer 0 within 1e-3 of the float64 sum of its quantized '
+                          'operands (Hopper FP8 accumulation: ~2e-4); logits finite; logit drift reported')
+        return report, bool(checks) and all(c['error'] <= 1e-3 for c in checks) and bool(np.isfinite(got).all())
     return report, report['top1_equal'] and report['max_abs_diff'] <= 1e-4 * max(scale, 1.0)
 
 
@@ -127,11 +169,12 @@ def main():
     quant.add_argument('--int4', action='store_true', help='INT4 resident vs float32 resident on the dequantized weights')
     quant.add_argument('--fp8', action='store_true', help='block-FP8 resident vs float32 resident on the dequantized weights')
     quant.add_argument('--bf16', action='store_true', help='BF16 resident vs float32 resident on the same bf16 values')
-    p.add_argument('--fp8-kernels', choices=['hand', 'x4'], default='hand',
-                   help="with --fp8: x4 runs gpu/spawn's fp8_matvec4 and fp8_moe4_* (#30, #31)")
+    p.add_argument('--fp8-kernels', choices=['hand', 'x4', 'cublaslt'], default='hand',
+                   help="with --fp8: x4 runs gpu/spawn's fp8_matvec4 and fp8_moe4_* (#30, #31); cublaslt "
+                        "also runs the dense Linears through cuBLASLt on e4m3 activations (#29)")
     args = p.parse_args()
-    if args.fp8_kernels == 'x4' and not args.fp8:
-        p.error('--fp8-kernels x4 needs --fp8')
+    if args.fp8_kernels != 'hand' and not args.fp8:
+        p.error(f'--fp8-kernels {args.fp8_kernels} needs --fp8')
     if args.output.exists():
         p.error('output exists; preserve evidence')
     from gpu.backend import GPUBackend

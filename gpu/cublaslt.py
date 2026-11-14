@@ -145,10 +145,18 @@ class CublasLt:
 
 
 class Fp8BlockMatmul:
-    """out = dequant(x) @ dequant(W)^T for m tokens: x [m, k] e4m3 codes with VEC128 scales
-    [k/128, m] (gpu/fp8_quant.vx's layout; for m == 1 a plain [k/128]), W [n, k] e4m3 codes with
+    """out = dequant(x) @ dequant(W)^T for m tokens: x [mp, k] e4m3 codes with VEC128 scales
+    [k/128, mp] (gpu/fp8_quant.vx's layout, scale_rows mp), W [n, k] e4m3 codes with
     pack_weight_scales' 128x128 block scales. float32 accumulation; out float32, or bfloat16 bits in a
-    uint16 tensor. k must be a multiple of 128 (cuBLASLt's block size), and in practice n and k of 16."""
+    uint16 tensor. k must be a multiple of 128 (cuBLASLt's block size), and in practice n and k of 16.
+
+    mp (``padded_m``) is m rounded up to a multiple of 4: cuBLASLt 13.10 on an H100 refuses every
+    other token count (CUBLAS_STATUS_NOT_SUPPORTED at m = 1, 2, 3, 5). Rows m..mp-1 of x are
+    multiplied too and their outputs are not used, so they need only be readable. Token i's n
+    outputs are out[i*n:(i+1)*n] for 'weights_a' (D column major [n, mp]); 'weights_b' interleaves them
+    (D [mp, n], ld mp). On the H100 a matmul costs about the same at 4 tokens as at 1 would: the
+    weights are the traffic. Its float32 sums differ from float64 ones by ~3e-4 of the largest
+    output (Hopper's FP8 tensor-core accumulation), as SGLang's kernels do."""
     def __init__(self, lt, m, n, k, *, out_dtype='float32', orientation='weights_a', workspace_bytes=32 << 20):
         if k % 128:
             raise ValueError('k must be a multiple of 128')
@@ -157,6 +165,7 @@ class Fp8BlockMatmul:
         if orientation not in ('weights_a', 'weights_b'):
             raise ValueError("orientation must be 'weights_a' or 'weights_b'")
         self.lt, self.m, self.n, self.k = lt, m, n, k
+        self.padded_m = mp = -(-m // 4) * 4
         self.out_dtype, self.orientation = out_dtype, orientation
         lib, check = lt.lib, lt._check
         self._handles = []
@@ -172,15 +181,19 @@ class Fp8BlockMatmul:
         out_type = _OUT_TYPES[out_dtype]
         if weights_a:  # D[n, m] = W^T(k x n)^T x(k x m)
             self.a = layout(CUDA_R_8F_E4M3, k, n, k)
-            self.b = layout(CUDA_R_8F_E4M3, k, m, k)
-            self.c = layout(out_type, n, m, n)
+            self.b = layout(CUDA_R_8F_E4M3, k, mp, k)
+            self.c = layout(out_type, n, mp, n)
         else:  # D[m, n] = x^T(k x m)^T W(k x n)
-            self.a = layout(CUDA_R_8F_E4M3, k, m, k)
+            self.a = layout(CUDA_R_8F_E4M3, k, mp, k)
             self.b = layout(CUDA_R_8F_E4M3, k, n, k)
-            self.c = layout(out_type, m, n, m)
+            self.c = layout(out_type, mp, n, mp)
         self.workspace_bytes = workspace_bytes
         self.workspace = lt.context.tensor((max(workspace_bytes, 1),), 'uint8')
-        pref = self._make(lib.cublasLtMatmulPreferenceCreate, 'cublasLtMatmulPreferenceCreate',
+        # The heuristic refuses VEC128 / BLK128x128 modes without scale pointers ("requires a custom
+        # pointer"); any device address stands in until __call__ sets the real ones.
+        self._set(DESC_A_SCALE_POINTER, _P(self.workspace.pointer))
+        self._set(DESC_B_SCALE_POINTER, _P(self.workspace.pointer))
+        pref =self._make(lib.cublasLtMatmulPreferenceCreate, 'cublasLtMatmulPreferenceCreate',
                           lib.cublasLtMatmulPreferenceDestroy)
         size = _U64(workspace_bytes)
         check(lib.cublasLtMatmulPreferenceSetAttribute(pref, PREF_MAX_WORKSPACE_BYTES, C.byref(size), C.sizeof(size)),
@@ -205,7 +218,7 @@ class Fp8BlockMatmul:
                        f'cublasLtMatmulDescSetAttribute({attribute})')
 
     def __call__(self, out, x_codes, x_scales, w_codes, w_scales, stream=None):
-        m, n, k = self.m, self.n, self.k
+        m, n, k = self.padded_m, self.n, self.k
         padded_kb = -(-(k // 128) // 4) * 4
         expect = {'out': (out, m * n, self.out_dtype), 'x_codes': (x_codes, m * k, 'uint8'),
                   'x_scales': (x_scales, k // 128 * m, 'float32'), 'w_codes': (w_codes, n * k, 'uint8'),

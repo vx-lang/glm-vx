@@ -41,6 +41,8 @@ class FakeLib:
             pointer = args[2]._obj if hasattr(args[2], '_obj') else args[2]
             self.attrs[args[1]] = pointer.value
         elif name == 'cublasLtMatmulAlgoGetHeuristic':
+            # cuBLASLt 13.10 refuses VEC128 / BLK128x128 scale modes without scale pointers (INVALID_VALUE).
+            assert self.attrs.get(L.DESC_A_SCALE_POINTER) and self.attrs.get(L.DESC_B_SCALE_POINTER)
             C.cast(args[9], C.POINTER(C.c_int))[0] = self.algos
         elif name == 'cublasLtMatmul':
             self.matmuls.append(dict(a=args[3].value, a_layout=self.layouts[args[4].value], b=args[5].value,
@@ -71,6 +73,7 @@ class FakeContext:
 
 
 def _operands(ctx, m, n, k, out_dtype='float32'):
+    m = -(-m // 4) * 4  # cuBLASLt's token count: x and out are padded to it
     return dict(out=ctx.tensor((m, n), out_dtype), x_codes=ctx.tensor((m, k), 'uint8'),
                 x_scales=ctx.tensor((k // 128, m)), w_codes=ctx.tensor((n, k), 'uint8'),
                 w_scales=ctx.tensor((-(-n // 128), -(-(k // 128) // 4) * 4)))
@@ -94,11 +97,13 @@ def test_layouts_scales_and_pointers_follow_the_orientation(orientation):
     ws, xs = ops['w_scales'].pointer, ops['x_scales'].pointer
     assert call['scales'] == ((ws, xs) if weights_a else (xs, ws))
     # (type, rows, cols, ld), column major: op T on a k x rows operand is a row-major [rows, k] matrix.
-    e4m3 = L.CUDA_R_8F_E4M3
+    # One token is multiplied as 4 (padded_m): cuBLASLt refuses other token counts.
+    e4m3, mp = L.CUDA_R_8F_E4M3, mm.padded_m
+    assert mp == 4
     if weights_a:
-        assert (call['a_layout'], call['b_layout'], call['d_layout']) == ((e4m3, k, n, k), (e4m3, k, m, k), (L.CUDA_R_32F, n, m, n))
+        assert (call['a_layout'], call['b_layout'], call['d_layout']) == ((e4m3, k, n, k), (e4m3, k, mp, k), (L.CUDA_R_32F, n, mp, n))
     else:
-        assert (call['a_layout'], call['b_layout'], call['d_layout']) == ((e4m3, k, m, k), (e4m3, k, n, k), (L.CUDA_R_32F, m, n, m))
+        assert (call['a_layout'], call['b_layout'], call['d_layout']) == ((e4m3, k, mp, k), (e4m3, k, n, k), (L.CUDA_R_32F, mp, n, mp))
     assert call['d'] == ops['out'].pointer
     mm.close()
     assert lib.destroyed.count('cublasLtMatrixLayoutDestroy') == 3

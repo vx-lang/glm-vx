@@ -7,10 +7,11 @@ from gpu import fp8_quant
 from gpu.test_simt import simt  # noqa: F401  (the module's emulator fixture)
 
 
-def _run(simt, x):
+def _run(simt, x, scale_rows=None):
     rows, cols = x.shape
-    codes, scales = np.zeros((rows, cols), np.uint8), np.zeros((cols // 128, rows), np.float32)
-    simt.run('glm_vx_gpu_fp8_quant_groups', codes, scales, np.ascontiguousarray(x), rows, cols,
+    scale_rows = scale_rows or rows
+    codes, scales = np.zeros((rows, cols), np.uint8), np.full((cols // 128, scale_rows), -1, np.float32)
+    simt.run('glm_vx_gpu_fp8_quant_groups', codes, scales, np.ascontiguousarray(x), rows, cols, scale_rows,
              grid=-(-rows * cols // 128 // 4), block=128)
     return codes, scales
 
@@ -49,5 +50,19 @@ def test_widths_that_are_not_whole_groups_write_nothing(simt):
     assert (codes == 126).all()
     out = np.full((1, 200), 7, np.uint8)
     simt.run('glm_vx_gpu_fp8_quant_groups', out, np.zeros((2, 1), np.float32), np.ones((1, 200), np.float32), 1, 200,
+             1, grid=1, block=128)
+    assert (out == 7).all()
+
+
+def test_scale_rows_spaces_the_scales_and_must_cover_the_rows(simt):
+    # gpu/resident.py's cuBLASLt operand: one token, its scales 4 apart, the other 3 slots untouched.
+    x = np.random.default_rng(4).standard_normal((1, 512)).astype(np.float32)
+    codes, scales = _run(simt, x, scale_rows=4)
+    want_codes, want_scales = fp8_quant.quant_groups(x)
+    np.testing.assert_array_equal(codes, want_codes)
+    np.testing.assert_array_equal(scales[:, 0], want_scales[:, 0])
+    assert (scales[:, 1:] == -1).all()
+    out = np.full((2, 128), 7, np.uint8)  # scale_rows < rows: nothing written
+    simt.run('glm_vx_gpu_fp8_quant_groups', out, np.zeros(1, np.float32), np.ones((2, 128), np.float32), 2, 128, 1,
              grid=1, block=128)
     assert (out == 7).all()

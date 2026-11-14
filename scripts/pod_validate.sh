@@ -153,6 +153,9 @@ step resident-fp8x4-small $PYTHON -m validation.resident_compare --fp8 --fp8-ker
   --output "$out/resident-fp8x4-small.json"
 step resident-fp8x4-full$LAYERS $PYTHON -m validation.resident_compare --fp8 --fp8-kernels x4 --geometry full \
   --layers "$LAYERS" --tokens "$TOKENS" --output "$out/resident-fp8x4-full$LAYERS.json"
+# cuBLASLt on e4m3 activations (#29): near the float32-activation logits, not equal (SGLang's w8a8).
+step resident-fp8lt-full$LAYERS $PYTHON -m validation.resident_compare --fp8 --fp8-kernels cublaslt --geometry full \
+  --layers "$LAYERS" --tokens "$TOKENS" --output "$out/resident-fp8lt-full$LAYERS.json"
 # Graph replay against the per-launch path (#26), bit for bit, every routed expert resident.
 for mode in f32 int4 fp8 bf16; do
   step graph-$mode-small $PYTHON -m validation.resident_graph --format $mode --tokens "$TOKENS" --output "$out/graph-$mode-small.json"
@@ -168,6 +171,9 @@ for mode in f32 int4 fp8 bf16; do
 done
 step layer-profile-fp8x4 $PYTHON -m validation.layer_profile --format fp8 --fp8-kernels x4 --timer "$TIMER" \
   --output "$out/layer-profile-fp8x4.json"
+# The dense FP8 Linears through cuBLASLt on e4m3 activations (#29), the rest as fp8x4.
+step layer-profile-fp8lt $PYTHON -m validation.layer_profile --format fp8 --fp8-kernels cublaslt --timer "$TIMER" \
+  --output "$out/layer-profile-fp8lt.json"
 for mode in int4 bf16; do
   for kernels in spawn x4; do
     step layer-profile-$mode-$kernels $PYTHON -m validation.layer_profile --format $mode --matvec-kernels $kernels \

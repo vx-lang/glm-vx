@@ -50,8 +50,10 @@ def cublaslt_kernels(ctx, build, rows, cols, x, codes, scales, stream, orientati
     up = lambda a: ctx.tensor(a.shape, str(a.dtype), a.tobytes())
     blocks = scales.reshape(-(-rows // 128), -(-cols // 128))
     w_codes, w_scales = up(codes), up(pack_weight_scales(blocks))
-    x_codes, x_scales, out = ctx.tensor((cols,), 'uint8'), ctx.tensor((cols // 128,)), ctx.tensor((rows,))
-    quant = lambda: fp8_quant.launch(cublaslt_kernels.quant, x_codes, x_scales, x, 1, cols, stream=stream)
+    # cuBLASLt multiplies 4 tokens (gpu/cublaslt.py): x is row 0, rows 1-3 zero codes; out row 0 is x's.
+    x_codes, x_scales = up(np.zeros((4, cols), np.uint8)), up(np.ones((cols // 128, 4), np.float32))
+    out = ctx.tensor((4 * rows,))
+    quant = lambda: fp8_quant.launch(cublaslt_kernels.quant, x_codes, x_scales, x, 1, cols, stream=stream, scale_rows=4)
     matmul = lambda: mm(out, x_codes, x_scales, w_codes, w_scales, stream=stream)
     xq, xs = fp8_quant.quant_groups(np.frombuffer(x.download(), 'f4').reshape(1, cols))
     xd, values, grid = fp8_quant.dequant_groups(xq, xs).ravel(), fp8_quant.e4m3_values(), codes.reshape(rows, cols)
@@ -145,8 +147,9 @@ def main():
                 lt_launches, lt_out, reference = lt
                 lt_launches['cublaslt_mm']()
                 stream.synchronize()
-                got_lt = np.frombuffer(lt_out.download(), 'f4')
-                if not np.allclose(got_lt, reference, rtol=1e-4, atol=1e-4 * float(np.abs(reference).max())):
+                got_lt = np.frombuffer(lt_out.download(), 'f4')[:rows]
+                # Hopper's FP8 tensor cores accumulate below float32 within a 128-wide k block: ~3e-4.
+                if not np.allclose(got_lt, reference, rtol=1e-3, atol=1e-3 * float(np.abs(reference).max())):
                     raise SystemExit(f'{name}: cuBLASLt disagrees with float64 sums of its quantized operands')
                 launches.update(lt_launches)
         mb = nbytes / 1e6

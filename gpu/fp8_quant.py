@@ -55,7 +55,9 @@ def dequant_groups(codes, scales):
     return (values * np.asarray(scales, np.float64).T[..., None]).reshape(rows, cols)
 
 
-def launch(kernel, codes, scales, x, rows, cols, stream=None):
-    """glm_vx_gpu_fp8_quant_groups: a warp a (row, group), 128 threads a block."""
+def launch(kernel, codes, scales, x, rows, cols, stream=None, scale_rows=None):
+    """glm_vx_gpu_fp8_quant_groups: a warp a (row, group), 128 threads a block. scales is
+    [cols / 128, scale_rows] (default rows): 4 for one token in cuBLASLt's 4-token operand."""
     warps = rows * cols // GROUP
-    kernel.launch((-(-warps // 4),), (128,), [codes, scales, x, C.c_int32(rows), C.c_int32(cols)], stream=stream)
+    kernel.launch((-(-warps // 4),), (128,), [codes, scales, x, C.c_int32(rows), C.c_int32(cols),
+                                              C.c_int32(rows if scale_rows is None else scale_rows)], stream=stream)

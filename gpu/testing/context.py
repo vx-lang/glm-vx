@@ -34,6 +34,11 @@ class Tensor:
         assert raw.size==self.data.size,'upload size mismatch'
         self.data[...]=raw.reshape(self.data.shape)
         return self
+    def copy_from(self,source,stream=None):
+        assert not self.closed and not source.closed and source.nbytes==self.nbytes
+        def work():self.data.view(np.uint8).reshape(-1)[...]=source.data.view(np.uint8).reshape(-1)
+        _run(stream,work)
+        return self
     def close(self):self._closed=True
 class Graph:
     """A capture's launches, run again in order by launch(), on the tensors' contents then."""
@@ -102,14 +107,16 @@ class SpawnKernel:
             for name in self.mutable:values[name].data[...]=outs[name].reshape(values[name].data.shape)
         _run(stream,work)
 class Fp8BlockMatmul:
-    """gpu/cublaslt.Fp8BlockMatmul's contract (operand layouts, padded weight scales) as float64 NumPy
-    on these tensors, rounded to float32 once: cuBLASLt's own sum order is the GPU tests' to check."""
-    def __init__(self,ctx,m,n,k):self.ctx,self.m,self.n,self.k=ctx,m,n,k
+    """gpu/cublaslt.Fp8BlockMatmul's contract ('weights_a': x and out padded to padded_m tokens, token i's
+    outputs at out[i*n:(i+1)*n]; padded weight scales) as float64 NumPy on these tensors, rounded to
+    float32 once: cuBLASLt's own sum order is the GPU tests' to check."""
+    def __init__(self,ctx,m,n,k):self.ctx,self.m,self.n,self.k,self.padded_m=ctx,m,n,k,-(-m//4)*4
     def __call__(self,out,x_codes,x_scales,w_codes,w_scales,stream=None):
         from gpu import fp8_quant
-        m,n,k=self.m,self.n,self.k
+        mp,n,k=self.padded_m,self.n,self.k
+        assert out.data.size==mp*n and x_codes.data.size==mp*k and x_scales.data.size==k//128*mp
         def work():
-            x=fp8_quant.dequant_groups(x_codes.data.reshape(m,k),x_scales.data.reshape(k//128,m))
+            x=fp8_quant.dequant_groups(x_codes.data.reshape(mp,k),x_scales.data.reshape(k//128,mp))
             blocks=w_scales.data.reshape(-(-n//128),-1)[:,:k//128].astype(np.float64)
             w=fp8_quant.e4m3_values()[w_codes.data.reshape(n,k)]*np.repeat(np.repeat(blocks,128,0),128,1)[:n,:k]
             out.data[...]=(x@w.T).astype(np.float32).reshape(out.data.shape)

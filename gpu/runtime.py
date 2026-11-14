@@ -110,6 +110,7 @@ class CUDADriver:
             "cuMemAlloc_v2": [C.POINTER(_U64), _SIZE], "cuMemFree_v2": [_U64],
             "cuMemGetInfo_v2": [C.POINTER(_SIZE), C.POINTER(_SIZE)],
             "cuMemcpyHtoD_v2": [_U64, _P, _SIZE], "cuMemcpyDtoH_v2": [_P, _U64, _SIZE],
+            "cuMemcpyDtoDAsync_v2": [_U64, _U64, _SIZE, _P],
             "cuModuleLoadDataEx": [C.POINTER(_P), _P, _U32, _P, _P],
             "cuModuleUnload": [_P], "cuModuleGetFunction": [C.POINTER(_P), _P, C.c_char_p],
             "cuFuncGetAttribute": [C.POINTER(_I32), _I32, _P],
@@ -580,6 +581,22 @@ class DeviceTensor:
 
     def download(self):
         return self.allocation.download(offset=self.offset, nbytes=self.nbytes)
+
+    def copy_from(self, source, stream=None):
+        """Enqueue a device copy of source's bytes (same byte count) on stream; no synchronization,
+        so a capturing stream records it into its graph."""
+        if not isinstance(source, DeviceTensor):
+            raise TypeError("source must be a DeviceTensor")
+        if source.nbytes != self.nbytes:
+            raise ValueError(f"copy needs {self.nbytes} bytes, source has {source.nbytes}")
+        if source.context is not self.context:
+            raise ValueError("source belongs to another context")
+        with self.context._activate():
+            self.allocation._ensure_open()
+            source.allocation._ensure_open()
+            self.context.driver.call("cuMemcpyDtoDAsync_v2", self.pointer, source.pointer, self.nbytes,
+                                     _stream_handle(self.context, stream))
+        return self
 
     def close(self):
         self.allocation.close()

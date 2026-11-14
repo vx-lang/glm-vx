@@ -205,7 +205,7 @@ class ResidentGLM:
             self.stream = self.ctx.stream()
             self._kernels = {}
             self._spawn_kernels = {}
-            self._lt, self._lt_matmuls, self._lt_inputs = None, {}, {}  # fp8_kernels='cublaslt'
+            self._lt, self._lt_matmuls, self._lt_inputs, self._lt_outputs = None, {}, {}, {}  # fp8_kernels='cublaslt'
             self.launches = {}
             self._weights = {}
             self._allocate()
@@ -578,14 +578,16 @@ class ResidentGLM:
         scales = self._weights.get(key)
         if scales is None:  # BLK128x128_32F's layout: each row block's scales padded to a multiple of 4
             scales = self._weights[key] = self._upload_weight(key, pack_weight_scales(self.model.weights.block_fp8(prefix)[1]))
+        # cuBLASLt multiplies 4 tokens (gpu/cublaslt.py); this one is row 0, rows 1-3 stay zero codes.
         inputs = self._lt_inputs.get(cols)
         if inputs is None:
-            inputs = self._lt_inputs[cols] = (self._tensor((cols,), 'uint8'), self._tensor((cols // 128,)))
+            inputs = self._lt_inputs[cols] = (self._tensor((4, cols), 'uint8', np.zeros((4, cols), np.uint8)),
+                                              self._tensor((cols // 128, 4), 'float32', np.ones((cols // 128, 4), np.float32)))
         x_codes, x_scales = inputs
         if 'fp8_quant_groups' not in self._kernels:
             module = self._modules['fp8_quant'] = self.ctx.load_ptx(self._ptx_dir / 'fp8_quant.ptx')
             self._kernels['fp8_quant_groups'] = module.kernel('glm_vx_gpu_fp8_quant_groups')
-        self._launch('fp8_quant_groups', -(-cols // 128 // 4), 128, [x_codes, x_scales, x, I(1), I(cols)])
+        self._launch('fp8_quant_groups', -(-cols // 128 // 4), 128, [x_codes, x_scales, x, I(1), I(cols), I(4)])
         matmul = self._lt_matmuls.get((rows, cols))
         if matmul is None:
             factory = getattr(self.ctx, 'fp8_block_matmul', None)
@@ -597,7 +599,11 @@ class ResidentGLM:
                     self._lt = CublasLt(self.ctx)
                 matmul = Fp8BlockMatmul(self._lt, 1, rows, cols)
             self._lt_matmuls[(rows, cols)] = matmul
-        matmul(out, x_codes, x_scales, codes, scales, stream=self.stream)
+        lt_out = self._lt_outputs.get(rows)
+        if lt_out is None:
+            lt_out = self._lt_outputs[rows] = self._tensor((4, rows))
+        matmul(lt_out, x_codes, x_scales, codes, scales, stream=self.stream)
+        out.copy_from(lt_out.view((rows,)), stream=self.stream)  # token 0's outputs, the first rows floats
         self.launches['cublaslt_fp8'] = self.launches.get('cublaslt_fp8', 0) + 1
         return out
 

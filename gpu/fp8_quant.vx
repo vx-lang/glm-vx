@@ -42,12 +42,15 @@ fn vxk_quant_max(a: f32, b: f32) -> f32 {
   return a;
 }
 
-// codes:[rows, cols] u8, scales:[cols / 128, rows] (a group's scales for all rows side by side, the
-// MN-major layout block-scaled GEMMs read for activations), x:[rows, cols]; cols % 128 == 0.
-// One warp a (row, group): lane l quantizes l, l + 32, l + 64, l + 96. Launch 128 threads,
-// ceil(rows * cols / 128 / 4) blocks.
-pub fn glm_vx_gpu_fp8_quant_groups(codes: *mut u8, scales: *mut f32, x: *const f32, rows: i32, cols: i32) -> void {
+// codes:[rows, cols] u8, scales:[cols / 128, scale_rows] (a group's scales for all rows side by side,
+// the MN-major layout block-scaled GEMMs read for activations), x:[rows, cols]; cols % 128 == 0 and
+// scale_rows >= rows. cuBLASLt takes a multiple of 4 tokens (gpu/cublaslt.py), so one token's
+// scales sit 4 apart: rows 1, scale_rows 4. One warp a (row, group): lane l quantizes l, l + 32,
+// l + 64, l + 96. Launch 128 threads, ceil(rows * cols / 128 / 4) blocks.
+pub fn glm_vx_gpu_fp8_quant_groups(codes: *mut u8, scales: *mut f32, x: *const f32, rows: i32, cols: i32,
+                                   scale_rows: i32) -> void {
   if rows <= 0 { return; }
+  if scale_rows < rows { return; }
   if cols <= 0 { return; }
   if cols % 128 != 0 { return; }
   unsafe {
@@ -84,7 +87,7 @@ pub fn glm_vx_gpu_fp8_quant_groups(codes: *mut u8, scales: *mut f32, x: *const f
     m = vxk_quant_max(m, vx_gpu_shuffle_down_f32(m, 1));
     let amax: f32 = vx_gpu_shuffle_idx_f32(m, 0);
     let scale: f32 = vxk_quant_max(amax, 0.0000000001) / 448.0;
-    if lane == 0 { scales[(group as i64) * (rows as i64) + (row as i64)] = scale; }
+    if lane == 0 { scales[(group as i64) * (scale_rows as i64) + (row as i64)] = scale; }
     codes[base] = vxk_fp8_encode(v0 / scale) as u8;
     codes[base + 32] = vxk_fp8_encode(v1 / scale) as u8;
     codes[base + 64] = vxk_fp8_encode(v2 / scale) as u8;

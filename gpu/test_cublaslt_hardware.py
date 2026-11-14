@@ -44,11 +44,11 @@ def _up(ctx, a):
     return ctx.tensor(a.shape, str(a.dtype), a.tobytes())
 
 
-def _quantize(context, x):
+def _quantize(context, x, scale_rows=None):
     rows, cols = x.shape
     kernel = context.load_ptx(BUILD / 'fp8_quant.ptx').kernel('glm_vx_gpu_fp8_quant_groups')
-    codes, scales = context.tensor((rows, cols), 'uint8'), context.tensor((cols // 128, rows))
-    fp8_quant.launch(kernel, codes, scales, _up(context, x), rows, cols)
+    codes, scales = context.tensor((rows, cols), 'uint8'), context.tensor((cols // 128, scale_rows or rows))
+    fp8_quant.launch(kernel, codes, scales, _up(context, x), rows, cols, scale_rows=scale_rows)
     context.synchronize()
     return codes, scales
 
@@ -63,6 +63,16 @@ def test_quant_groups_matches_the_model_bitwise(context, rows, cols):
     np.testing.assert_array_equal(np.frombuffer(codes.download(), 'u1'), want_codes.ravel())
 
 
+def test_one_tokens_scales_four_apart(context):
+    # gpu/resident.py's cuBLASLt operand: one token, scales at stride 4 (scale_rows 4).
+    x = np.random.default_rng(5).standard_normal((1, 6144)).astype('f4')
+    codes, scales = _quantize(context, x, scale_rows=4)
+    want_codes, want_scales = fp8_quant.quant_groups(x)
+    got = np.frombuffer(scales.download(), 'u4').reshape(48, 4)[:, 0]
+    np.testing.assert_array_equal(got, want_scales.view('u4').ravel())
+    np.testing.assert_array_equal(np.frombuffer(codes.download(), 'u1'), want_codes.ravel())
+
+
 def _weights(rng, n, k):
     codes = rng.integers(0, 256, size=(n, k), dtype=np.uint8)
     codes[(codes & 0x7F) == 0x7F] = 0  # no NaN codes
@@ -73,26 +83,31 @@ def _weights(rng, n, k):
 
 @pytest.mark.parametrize('orientation', ['weights_a', 'weights_b'])
 @pytest.mark.parametrize('out_dtype', ['float32', 'uint16'])
-@pytest.mark.parametrize('m,n,k', [(1, 576, 6144), (1, 2048, 6144), (1, 6144, 2048), (4, 2048, 6144),
-                                   (1, 200, 384)])
+@pytest.mark.parametrize('m,n,k', [(1, 576, 6144), (1, 2048, 6144), (1, 6144, 2048), (2, 2048, 6144),
+                                   (4, 2048, 6144), (1, 200, 384)])
 def test_fp8_block_matmul(context, lt, orientation, out_dtype, m, n, k):
     from gpu.cublaslt import CublasLtUnavailable, Fp8BlockMatmul, pack_weight_scales
     rng = np.random.default_rng(n + k + m)
     x = (rng.standard_normal((m, k)) * rng.uniform(0.1, 10, size=(m, k // 128)).repeat(128, 1)).astype('f4')
-    x_codes, x_scales = _quantize(context, x)
+    mp = -(-m // 4) * 4  # cuBLASLt's token count; the padding rows are zeros
+    x_codes, x_scales = _quantize(context, np.concatenate([x, np.zeros((mp - m, k), 'f4')]))
     w_codes, blocks, w_values = _weights(rng, n, k)
     try:
         mm = Fp8BlockMatmul(lt, m, n, k, out_dtype=out_dtype, orientation=orientation)
     except CublasLtUnavailable as error:
         pytest.skip(str(error))
-    out = context.tensor((m, n), out_dtype)
+    assert mm.padded_m == mp
+    out = context.tensor((mp * n,), out_dtype)
     mm(out, x_codes, x_scales, _up(context, w_codes), _up(context, pack_weight_scales(blocks)))
     context.synchronize()
-    got = np.frombuffer(out.download(), 'f4' if out_dtype == 'float32' else 'u2').reshape(m, n)
+    got = np.frombuffer(out.download(), 'f4' if out_dtype == 'float32' else 'u2')
     if out_dtype == 'uint16':
         got = (got.astype(np.uint32) << 16).view('f4')
+    got = (got.reshape(mp, n) if orientation == 'weights_a' else got.reshape(n, mp).T)[:m]
     xq, xs = fp8_quant.quant_groups(x)
     want = fp8_quant.dequant_groups(xq, xs) @ w_values.T
-    tolerance = 1e-5 if out_dtype == 'float32' else 1e-2  # float32 sums; bfloat16 has 8 bits
+    # Hopper's FP8 tensor cores accumulate below float32 within a 128-wide k block (~3e-4 measured on an
+    # H100 NVL, cuBLASLt 13.10); bfloat16 output has 8 bits.
+    tolerance = 1e-3 if out_dtype == 'float32' else 1e-2
     np.testing.assert_allclose(got, want, rtol=tolerance, atol=tolerance * float(np.abs(want).max()))
     mm.close()
