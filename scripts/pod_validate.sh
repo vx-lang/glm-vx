@@ -95,7 +95,7 @@ sha256sum gpu/build/*.ptx gpu/build/spawn/*.ptx gpu/build/spawn/*.so > "$out/ptx
 # Hardware tests skip without a usable device; a run where nothing passed is a failure, not "ok".
 hw() { $PYTHON -m pytest -q -rs "$@" | tee /dev/stderr | grep -qE '[0-9]+ passed'; }
 step test-hardware hw gpu/test_hardware.py gpu/test_gemm_hardware.py gpu/test_index_scores_hardware.py gpu/test_topk_hardware.py \
-    gpu/test_small_kernels_hardware.py
+    gpu/test_small_kernels_hardware.py gpu/test_cublaslt_hardware.py
 step test-quant-hardware hw gpu/test_quant_hardware.py
 step test-spawn-hardware hw gpu/test_spawn_hardware.py
 # The same libraries on the CPU (Vx runs the regions in order with no device visible), against NumPy.
@@ -172,6 +172,9 @@ step layer-gate $PYTHON -m validation.layer_gate ${BASELINE:+--baseline "$BASELI
 step moe-profile $PYTHON -m validation.moe_profile --timer "$TIMER" --output "$out/moe-profile.json"
 # The dense matvec kernels (hand, spawn, and the *_matvec4 of #30) at GLM-5.3's projection shapes.
 step matvec-profile $PYTHON -m validation.matvec_profile --output "$out/matvec-profile.json"
+# cuBLASLt with the weights as operand B, as in its block-scaled FP8 sample (the step above: operand A).
+step matvec-profile-cublaslt-b $PYTHON -m validation.matvec_profile --cublaslt-orientation weights_b \
+    --output "$out/matvec-profile-cublaslt-b.json"
 for mode in bf16 int4; do
   step matvec-profile-$mode $PYTHON -m validation.matvec_profile --format $mode --output "$out/matvec-profile-$mode.json"
 done

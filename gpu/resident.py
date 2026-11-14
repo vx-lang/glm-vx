@@ -74,6 +74,13 @@ load. Their summation order differs from the hand kernels', so the logits are cl
 path's, not equal; each kernel's own order is pinned by gpu/test_spawn_vx_host.py. Widths that are
 not a multiple of 16 keep the default kernels.
 
+``fp8_kernels='cublaslt'`` runs the dense FP8 Linears whose input width is a multiple of 128 through
+cuBLASLt's block-scaled FP8 matmul (gpu/cublaslt.py, #29): x quantized to e4m3 per 128 columns
+(gpu/fp8_quant.vx), the checkpoint's 128x128 weight scales, float32 accumulation. That is SGLang's
+w8a8 block-FP8 scheme, so the logits are near the float32-activation kernels', not equal. The routed
+experts and forward_many keep the x4 kernels; other widths keep the hand kernel. A test context
+supplies fp8_block_matmul(m, n, k) in place of the library.
+
 ``matvec_kernels='spawn'`` runs INT4 and BF16 Linears through gpu/spawn's int4_matvec and
 bf16_matvec instead of the hand kernels. gpu/test_spawn_hardware.py checks each against its hand
 kernel bit for bit, so the logits do not change; the spawn kernels share device.vx's decode macros.
@@ -154,8 +161,8 @@ class ResidentGLM:
         self.device_experts = bool(device_experts)
         self.fused_attention = bool(fused_attention)
         self.graph = bool(graph)
-        if fp8_kernels not in ('hand', 'x4'):
-            raise ValueError("fp8_kernels must be 'hand' or 'x4'")
+        if fp8_kernels not in ('hand', 'x4', 'cublaslt'):
+            raise ValueError("fp8_kernels must be 'hand', 'x4' or 'cublaslt'")
         self.fp8_kernels = fp8_kernels
         if matvec_kernels not in ('hand', 'spawn', 'x4'):
             raise ValueError("matvec_kernels must be 'hand', 'spawn' or 'x4'")
@@ -198,6 +205,7 @@ class ResidentGLM:
             self.stream = self.ctx.stream()
             self._kernels = {}
             self._spawn_kernels = {}
+            self._lt, self._lt_matmuls, self._lt_inputs = None, {}, {}  # fp8_kernels='cublaslt'
             self.launches = {}
             self._weights = {}
             self._allocate()
@@ -223,6 +231,10 @@ class ResidentGLM:
     def close(self):
         if not self._closed:
             self._closed = True
+            for matmul in getattr(self, '_lt_matmuls', {}).values():
+                matmul.close()
+            if getattr(self, '_lt', None) is not None:
+                self._lt.close()
             if self._owns_context:
                 self.ctx.close()
 
@@ -532,6 +544,9 @@ class ResidentGLM:
             args = [packed, scales, x, I(rows), I(cols), I(kind)]
         elif fmt == 'fp8':
             codes, scales, (rows, cols) = self._fp8_weight(prefix)
+            if self.fp8_kernels == 'cublaslt' and cols % 128 == 0:
+                self._check_shape(prefix, fmt, rows, cols, x, out)
+                return self._fp8_cublaslt(prefix, codes, rows, cols, x, out)
             if self.fp8_kernels == 'x4' and cols % 16 == 0:
                 if out.shape != (rows,) or x.shape != (cols,):
                     raise ValueError(f'{prefix}: FP8 weight is {rows}x{cols}, got x {x.shape} -> out {out.shape}')
@@ -553,6 +568,37 @@ class ResidentGLM:
             args = [bits, x, I(rows), I(cols)]
         self._check_shape(prefix, fmt, rows, cols, x, out)
         self._launch(self._format_kernel(fmt), (rows + 3) // 4, 128, [out] + args)
+        return out
+
+    def _fp8_cublaslt(self, prefix, codes, rows, cols, x, out):
+        """out = W x through cuBLASLt (fp8_kernels='cublaslt'): x to e4m3 codes and per-128 scales in
+        scratch kept per width, then one block-scaled FP8 matmul on the stream."""
+        from .cublaslt import pack_weight_scales
+        key = prefix + ':fp8:cublaslt-scales'
+        scales = self._weights.get(key)
+        if scales is None:  # BLK128x128_32F's layout: each row block's scales padded to a multiple of 4
+            scales = self._weights[key] = self._upload_weight(key, pack_weight_scales(self.model.weights.block_fp8(prefix)[1]))
+        inputs = self._lt_inputs.get(cols)
+        if inputs is None:
+            inputs = self._lt_inputs[cols] = (self._tensor((cols,), 'uint8'), self._tensor((cols // 128,)))
+        x_codes, x_scales = inputs
+        if 'fp8_quant_groups' not in self._kernels:
+            module = self._modules['fp8_quant'] = self.ctx.load_ptx(self._ptx_dir / 'fp8_quant.ptx')
+            self._kernels['fp8_quant_groups'] = module.kernel('glm_vx_gpu_fp8_quant_groups')
+        self._launch('fp8_quant_groups', -(-cols // 128 // 4), 128, [x_codes, x_scales, x, I(1), I(cols)])
+        matmul = self._lt_matmuls.get((rows, cols))
+        if matmul is None:
+            factory = getattr(self.ctx, 'fp8_block_matmul', None)
+            if factory is not None:
+                matmul = factory(1, rows, cols)
+            else:
+                from .cublaslt import CublasLt, Fp8BlockMatmul
+                if self._lt is None:
+                    self._lt = CublasLt(self.ctx)
+                matmul = Fp8BlockMatmul(self._lt, 1, rows, cols)
+            self._lt_matmuls[(rows, cols)] = matmul
+        matmul(out, x_codes, x_scales, codes, scales, stream=self.stream)
+        self.launches['cublaslt_fp8'] = self.launches.get('cublaslt_fp8', 0) + 1
         return out
 
     @staticmethod
@@ -773,7 +819,7 @@ class ResidentGLM:
         common = dict(ids=self.route_ids, k=k, experts=experts, **gate[3])
         gate_args = dict(gate=gate[1][0], up=up[1][0])
         down_args = dict(down=down[1][0])
-        if fmt == 'fp8' and self.fp8_kernels == 'x4' and hidden % 16 == 0 and inter % 16 == 0:
+        if fmt == 'fp8' and self.fp8_kernels in ('x4', 'cublaslt') and hidden % 16 == 0 and inter % 16 == 0:
             kernel = 'fp8_moe4_'  # the codes as u32, sixteen a lane step (#31)
             words = lambda t: t.view((int(np.prod(t.shape)) // 4,), 'uint32')
             gate_args, down_args = dict(gate=words(gate[1][0]), up=words(up[1][0])), dict(down=words(down[1][0]))
@@ -1333,7 +1379,7 @@ class ResidentGLM:
         """out[i] = W x[i] for i < count, each row what _linear(prefix, x[i], out[i], bias) writes."""
         fmt = self._format(prefix)
         rows, cols = out.shape[1], x.shape[1]
-        if fmt == 'fp8' and self.fp8_kernels == 'x4' and cols % 16 == 0:
+        if fmt == 'fp8' and self.fp8_kernels in ('x4', 'cublaslt') and cols % 16 == 0:
             codes, scales, shape = self._fp8_weight(prefix)
             if tuple(shape) != (rows, cols):
                 raise ValueError(f'{prefix}: FP8 weight is {shape[0]}x{shape[1]}, got x [{cols}] -> out [{rows}]')

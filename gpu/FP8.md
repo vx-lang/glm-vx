@@ -103,3 +103,34 @@ Validated in this workspace on 2026-10-04:
 
 No GPU throughput, tensor-core acceleration, full-model execution, or batched
 projection claim follows from these checks.
+
+## cuBLASLt block-scaled FP8 (#29)
+
+`ResidentGLM(fp8_kernels='cublaslt')` sends the dense FP8 Linears whose input
+width is a multiple of 128 to cuBLASLt, the library path SGLang's Hopper kernels
+are measured against. It uses the same scheme as SGLang: activations
+quantized to e4m3 per 128 columns, the checkpoint's 128x128 weight scales, and
+float32 accumulation.
+
+- **Activations.** `gpu/fp8_quant.vx` quantizes them. Each group of 128 gets the
+  scale `max(|x|, 1e-10) / 448`, and its codes round `x / scale` to the nearest
+  e4m3 value, ties to the even code. Its codes and scales match
+  `gpu/fp8_quant.py`'s NumPy model bit for bit, on the emulator
+  (`gpu/test_fp8_quant.py`, every code, midpoint and neighbour) and on the GPU
+  (`gpu/test_cublaslt_hardware.py`). Vx has no f32-to-bits, so the encoder is
+  arithmetic: it finds the exponent by doubling, then rounds with
+  `(t + 2^23) - 2^23`.
+- **Matmul.** `gpu/cublaslt.py` calls `cublasLtMatmul` through ctypes, on
+  glm-vx's own context and stream, so CUDA graphs capture it. It uses
+  `BLK128x128_32F` scales for the weights and `VEC128_32F` for the activations.
+  `pack_weight_scales` pads each row block's scales to a multiple of 4, the size
+  cuBLASLt's sample gives the tensor.
+  - The exact scale layout, and whether the weights must be operand A or B,
+    are checked on the GPU: every block carries a different scale, so a wrong
+    layout fails.
+  - `validation/matvec_profile.py` times the quantizer plus matmul, and the
+    matmul alone, at GLM-5.3's eight dense shapes, against the Vx kernels.
+- **Accuracy.** The logits are near the float32-activation kernels', not
+  equal. That is accepted for #29, because SGLang quantizes its activations too.
+- **Not yet covered.** The routed experts and `forward_many` keep the x4
+  kernels. cuBLASLt's grouped mode for MoE is a separate step.

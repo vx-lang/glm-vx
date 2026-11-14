@@ -1,0 +1,94 @@
+// Activations to FP8 for cuBLASLt's block-scaled FP8 matmul (gpu/cublaslt.py, #29): each group of
+// 128 consecutive values of a row gets one float32 scale, max(|x|, 1e-10) / 448, and its values
+// become e4m3fn codes of x / scale, rounded to nearest even and clamped to +-448. This is SGLang's
+// per-token-group quantization (group 128, float32 scales), which its block-FP8 GEMMs take.
+extern "C" {
+  fn vx_gpu_thread_idx_x() -> i32;
+  fn vx_gpu_block_idx_x() -> i32;
+  fn vx_gpu_block_dim_x() -> i32;
+  fn vx_gpu_shuffle_down_f32(value: f32, delta: i32) -> f32;
+  fn vx_gpu_shuffle_idx_f32(value: f32, lane: i32) -> f32;
+}
+
+// The e4m3fn code nearest v, ties to the even code; |v| <= 448, so it never rounds to the NaN codes.
+// With e = max(floor(log2 |v|), -6), t = |v| * 2^(3 - e) is exact and lies in [8, 16) (in [0, 8)
+// for a subnormal), and its rounding r gives the code ((e + 7) << 3) + r - 8: a carry to r = 16 is
+// the next exponent's first code, and r = 8 at e = -6 is the smallest normal. Arithmetic only, as
+// Vx has no f32 to bits: (t + 2^23) - 2^23 rounds t to an integer, to even.
+fn vxk_fp8_encode(v: f32) -> i32 {
+  if v != v { return 127; }
+  let mut a: f32 = v;
+  if a < 0.0 { a = 0.0 - a; }
+  if a > 448.0 { a = 448.0; }
+  let mut e: i32 = -6;
+  let mut p: f32 = 0.03125;
+  let mut s: f32 = 512.0;
+  for step in 0..14 {
+    if a >= p {
+      e = e + 1;
+      p = p * 2.0;
+      s = s * 0.5;
+    }
+  }
+  let t: f32 = a * s;
+  let r: f32 = (t + 8388608.0) - 8388608.0;
+  let mut code: i32 = (e + 7) * 8 + (r as i32) - 8;
+  if v < 0.0 { code = code + 128; }
+  return code;
+}
+
+fn vxk_quant_max(a: f32, b: f32) -> f32 {
+  if b > a { return b; }
+  return a;
+}
+
+// codes:[rows, cols] u8, scales:[cols / 128, rows] (a group's scales for all rows side by side, the
+// MN-major layout block-scaled GEMMs read for activations), x:[rows, cols]; cols % 128 == 0.
+// One warp a (row, group): lane l quantizes l, l + 32, l + 64, l + 96. Launch 128 threads,
+// ceil(rows * cols / 128 / 4) blocks.
+pub fn glm_vx_gpu_fp8_quant_groups(codes: *mut u8, scales: *mut f32, x: *const f32, rows: i32, cols: i32) -> void {
+  if rows <= 0 { return; }
+  if cols <= 0 { return; }
+  if cols % 128 != 0 { return; }
+  unsafe {
+    let tid: i32 = vx_gpu_thread_idx_x();
+    let block: i32 = vx_gpu_block_dim_x();
+    if block < 32 { return; }
+    if block > 1024 { return; }
+    if block % 32 != 0 { return; }
+    let lane: i32 = tid % 32;
+    let groups: i32 = cols / 128;
+    let warp: i32 = vx_gpu_block_idx_x() * (block / 32) + tid / 32;
+    // Whole warps exit together, before their shuffles.
+    if warp >= rows * groups { return; }
+    let row: i32 = warp / groups;
+    let group: i32 = warp % groups;
+    let base: i64 = (row as i64) * (cols as i64) + ((group * 128 + lane) as i64);
+    let v0: f32 = x[base];
+    let v1: f32 = x[base + 32];
+    let v2: f32 = x[base + 64];
+    let v3: f32 = x[base + 96];
+    let mut a0: f32 = v0;
+    if a0 < 0.0 { a0 = 0.0 - a0; }
+    let mut a1: f32 = v1;
+    if a1 < 0.0 { a1 = 0.0 - a1; }
+    let mut a2: f32 = v2;
+    if a2 < 0.0 { a2 = 0.0 - a2; }
+    let mut a3: f32 = v3;
+    if a3 < 0.0 { a3 = 0.0 - a3; }
+    let mut m: f32 = vxk_quant_max(vxk_quant_max(a0, a1), vxk_quant_max(a2, a3));
+    m = vxk_quant_max(m, vx_gpu_shuffle_down_f32(m, 16));
+    m = vxk_quant_max(m, vx_gpu_shuffle_down_f32(m, 8));
+    m = vxk_quant_max(m, vx_gpu_shuffle_down_f32(m, 4));
+    m = vxk_quant_max(m, vx_gpu_shuffle_down_f32(m, 2));
+    m = vxk_quant_max(m, vx_gpu_shuffle_down_f32(m, 1));
+    let amax: f32 = vx_gpu_shuffle_idx_f32(m, 0);
+    let scale: f32 = vxk_quant_max(amax, 0.0000000001) / 448.0;
+    if lane == 0 { scales[(group as i64) * (rows as i64) + (row as i64)] = scale; }
+    codes[base] = vxk_fp8_encode(v0 / scale) as u8;
+    codes[base + 32] = vxk_fp8_encode(v1 / scale) as u8;
+    codes[base + 64] = vxk_fp8_encode(v2 / scale) as u8;
+    codes[base + 96] = vxk_fp8_encode(v3 / scale) as u8;
+    return;
+  }
+}

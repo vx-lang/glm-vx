@@ -101,8 +101,23 @@ class SpawnKernel:
             outs=self.ctx.host()(self.path,**arrays)
             for name in self.mutable:values[name].data[...]=outs[name].reshape(values[name].data.shape)
         _run(stream,work)
+class Fp8BlockMatmul:
+    """gpu/cublaslt.Fp8BlockMatmul's contract (operand layouts, padded weight scales) as float64 NumPy
+    on these tensors, rounded to float32 once: cuBLASLt's own sum order is the GPU tests' to check."""
+    def __init__(self,ctx,m,n,k):self.ctx,self.m,self.n,self.k=ctx,m,n,k
+    def __call__(self,out,x_codes,x_scales,w_codes,w_scales,stream=None):
+        from gpu import fp8_quant
+        m,n,k=self.m,self.n,self.k
+        def work():
+            x=fp8_quant.dequant_groups(x_codes.data.reshape(m,k),x_scales.data.reshape(k//128,m))
+            blocks=w_scales.data.reshape(-(-n//128),-1)[:,:k//128].astype(np.float64)
+            w=fp8_quant.e4m3_values()[w_codes.data.reshape(n,k)]*np.repeat(np.repeat(blocks,128,0),128,1)[:n,:k]
+            out.data[...]=(x@w.T).astype(np.float32).reshape(out.data.shape)
+        _run(stream,work)
+    def close(self):pass
 class Context:
     name='cpu-simt-test-only'
+    def fp8_block_matmul(self,m,n,k):return Fp8BlockMatmul(self,m,n,k)
     def __init__(self,*args,**kwargs):self.simt=Simt();self.tensors=[];self._host=None;self.capturing=0
     def host(self):
         if self._host is None:

@@ -16,5 +16,7 @@ mkdir -p gpu/build
 "$PYTHON" gpu/toolchain/build_ptx.py --source gpu/fp8_batched.vx --output gpu/build/fp8_batched.ptx --arch "$VX_GPU_ARCH" "${extra[@]}"
 "$PYTHON" gpu/toolchain/build_ptx.py --source gpu/bf16.vx --output gpu/build/bf16.ptx --arch "$VX_GPU_ARCH" "${extra[@]}"
 "$PYTHON" gpu/toolchain/build_ptx.py --source gpu/topk.vx --output gpu/build/topk.ptx --arch "$VX_GPU_ARCH" "${extra[@]}"
+# Activations to e4m3 per 128 columns for cuBLASLt's block-scaled FP8 matmul (gpu/cublaslt.py).
+"$PYTHON" gpu/toolchain/build_ptx.py --source gpu/fp8_quant.vx --output gpu/build/fp8_quant.ptx --arch "$VX_GPU_ARCH" "${extra[@]}"
 # matvec_rows stages a whole row's products in shared memory: up to 8192 columns (32 KiB).
 "$PYTHON" gpu/toolchain/build_ptx.py --source gpu/matvec_rows.vx --output gpu/build/matvec_rows.ptx --shared-floats 8192 --arch "$VX_GPU_ARCH" "${extra[@]}"

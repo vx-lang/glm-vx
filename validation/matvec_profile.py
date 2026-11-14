@@ -9,6 +9,12 @@ gives GPU time, GB/s for the weight bytes and scales, and the share of the devic
 bandwidth. The three outputs are checked to agree to 1e-4 relative (their summation orders differ);
 each kernel's exact order is pinned by the tests.
 
+For fp8 it also times cuBLASLt's block-scaled FP8 matmul (gpu/cublaslt.py, #29), SGLang's scheme:
+'cublaslt' is the activation quantization (gpu/fp8_quant.vx) and the matmul, 'cublaslt_mm' the matmul
+alone, in --cublaslt-orientation. Their output is checked to 1e-4 against float64 sums of the same
+quantized operands (not against the hand kernel, whose activations stay float32). Without
+libcublasLt, or when it has no algorithm for a shape, those rows are left out and the reason printed.
+
   python -m validation.matvec_profile --format bf16 --output run/matvec-bf16.json
 """
 import argparse
@@ -27,6 +33,33 @@ SHAPES = [('q_a_proj', 2048, 6144), ('q_b_proj', 16384, 2048), ('kv_a_proj', 576
           ('shared_expert.gate/up', 2048, 6144), ('shared_expert.down', 6144, 2048)]
 
 
+def cublaslt_kernels(ctx, build, rows, cols, x, codes, scales, stream, orientation):
+    """({'cublaslt': quantize and matmul, 'cublaslt_mm': matmul}, out, float64 reference), or a reason
+    string when cuBLASLt cannot run this shape."""
+    from gpu import fp8_quant
+    from gpu.cublaslt import CublasLt, CublasLtUnavailable, Fp8BlockMatmul, pack_weight_scales
+    try:
+        if getattr(cublaslt_kernels, 'ctx', None) is not ctx:
+            cublaslt_kernels.ctx, cublaslt_kernels.lt = ctx, CublasLt(ctx)
+            cublaslt_kernels.quant = ctx.load_ptx(build / 'fp8_quant.ptx').kernel('glm_vx_gpu_fp8_quant_groups')
+        mm = Fp8BlockMatmul(cublaslt_kernels.lt, 1, rows, cols, orientation=orientation)
+    except (CublasLtUnavailable, OSError) as error:
+        return str(error)
+    up = lambda a: ctx.tensor(a.shape, str(a.dtype), a.tobytes())
+    blocks = scales.reshape(-(-rows // 128), -(-cols // 128))
+    w_codes, w_scales = up(codes), up(pack_weight_scales(blocks))
+    x_codes, x_scales, out = ctx.tensor((cols,), 'uint8'), ctx.tensor((cols // 128,)), ctx.tensor((rows,))
+    quant = lambda: fp8_quant.launch(cublaslt_kernels.quant, x_codes, x_scales, x, 1, cols, stream=stream)
+    matmul = lambda: mm(out, x_codes, x_scales, w_codes, w_scales, stream=stream)
+    xq, xs = fp8_quant.quant_groups(np.frombuffer(x.download(), 'f4').reshape(1, cols))
+    xd, values, grid = fp8_quant.dequant_groups(xq, xs).ravel(), fp8_quant.e4m3_values(), codes.reshape(rows, cols)
+    reference = np.empty(rows)
+    for r in range(0, rows, 128):  # a row block at a time: o_proj's float64 weights would be 800 MB
+        reference[r:r + 128] = (values[grid[r:r + 128]] * np.repeat(blocks[r // 128], 128)[:cols]) @ xd
+    quant()  # the matmul alone reads this launch's codes
+    return {'cublaslt': lambda: (quant(), matmul()), 'cublaslt_mm': matmul}, out, reference
+
+
 def kernels(fmt, ctx, build, rng, rows, cols, stream):
     """(weight and scale bytes, {kernel: launch}, {kernel: out}) for one shape of format fmt."""
     from gpu.spawn.launch import SpawnKernel
@@ -42,6 +75,7 @@ def kernels(fmt, ctx, build, rng, rows, cols, stream):
         words = weight.view((rows * cols // 4,), 'uint32')  # the same bytes, four codes an element
         hand = ctx.load_ptx(build / 'fp8.ptx').kernel('glm_vx_gpu_fp8_matvec')
         spawn, four = (SpawnKernel(ctx, build / 'spawn' / f'{n}.ptx') for n in ('fp8_matvec', 'fp8_matvec4'))
+        kernels.fp8 = (x, codes, scales)
         return codes.nbytes + scales.nbytes, {
             'hand': lambda: hand.launch((-(-rows // 8),), (256,), [outs['hand'], weight, d_scales, x, i32(rows), i32(cols)],
                                         stream=stream),
@@ -81,6 +115,7 @@ def main():
     p.add_argument('--format', choices=['fp8', 'bf16', 'int4'], default='fp8')
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--repeats', type=int, default=20)
+    p.add_argument('--cublaslt-orientation', choices=['weights_a', 'weights_b'], default='weights_a')
     args = p.parse_args()
     if args.output.exists():
         p.error('output exists; preserve evidence')
@@ -100,6 +135,18 @@ def main():
         for k in ('spawn', 'matvec4'):
             if not np.allclose(got[k], got['hand'], rtol=1e-4, atol=1e-4 * float(np.abs(got['hand']).max())):
                 raise SystemExit(f'{name}: {k} disagrees with the hand kernel')
+        if args.format == 'fp8':
+            lt = cublaslt_kernels(ctx, build, rows, cols, *kernels.fp8, stream, args.cublaslt_orientation)
+            if isinstance(lt, str):
+                print(f'{name}: no cuBLASLt rows: {lt}')
+            else:
+                lt_launches, lt_out, reference = lt
+                lt_launches['cublaslt_mm']()
+                stream.synchronize()
+                got_lt = np.frombuffer(lt_out.download(), 'f4')
+                if not np.allclose(got_lt, reference, rtol=1e-4, atol=1e-4 * float(np.abs(reference).max())):
+                    raise SystemExit(f'{name}: cuBLASLt disagrees with float64 sums of its quantized operands')
+                launches.update(lt_launches)
         mb = nbytes / 1e6
         for kernel, launch in launches.items():
             us = event_us(ctx, stream, build / 'spawn', launch, args.repeats)
@@ -108,14 +155,17 @@ def main():
     ctx.close()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(dict(format=args.format, peak_dram_gbs=peak, results=results), indent=2) + '\n')
+    names = list(dict.fromkeys(r['kernel'] for r in results))
     lines = [f'# {args.format.upper()} dense matvec at GLM-5.3 shapes. Peak DRAM {peak:.0f} GB/s; CUDA events, '
-             f'L2 flushed, median of {args.repeats}.', '',
-             '| Projection | rows x cols | MB | us at peak | hand us | spawn us | matvec4 us | matvec4 % of peak |',
-             '|---|---|---|---|---|---|---|---|']
-    for i in range(0, len(results), 3):
-        h, s, f = results[i:i + 3]
-        lines.append(f"| {h['shape']} | {h['rows']} x {h['cols']} | {h['mb']:.1f} | {h['us_at_peak_bandwidth']:.1f} | "
-                     f"{h['us']:.1f} | {s['us']:.1f} | {f['us']:.1f} | {f['pct_of_peak_bandwidth']:.0f} |")
+             f'L2 flushed, median of {args.repeats}. us (% of peak bandwidth).', '',
+             '| Projection | rows x cols | MB | us at peak | ' + ' | '.join(names) + ' |',
+             '|---|---|---|---|' + '---|' * len(names)]
+    for shape in dict.fromkeys(r['shape'] for r in results):
+        row = {r['kernel']: r for r in results if r['shape'] == shape}
+        h = next(iter(row.values()))
+        cells = [f"{row[k]['us']:.1f} ({row[k]['pct_of_peak_bandwidth']:.0f}%)" if k in row else '-' for k in names]
+        lines.append(f"| {shape} | {h['rows']} x {h['cols']} | {h['mb']:.1f} | {h['us_at_peak_bandwidth']:.1f} | "
+                     + ' | '.join(cells) + ' |')
     text = '\n'.join(lines) + '\n'
     args.output.with_suffix('.md').write_text(text)
     print(text)

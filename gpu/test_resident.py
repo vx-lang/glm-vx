@@ -246,6 +246,48 @@ def test_fp8_x4_kernels_match_the_hand_kernels(graph):
         ResidentGLM(model, ctx=Context(), fp8_kernels='fast')
 
 
+def test_fp8_cublaslt_projection_is_its_quantized_sum():
+    # fp8_kernels='cublaslt' (#29): x to e4m3 per 128 columns (gpu/fp8_quant.vx, run here), then the
+    # block-scaled FP8 matmul (here the test context's float64 stand-in for cuBLASLt). The output is
+    # the float64 sum of the quantized operands, rounded once.
+    from gpu import fp8_quant
+    model, linears = fp8_model(23, hidden_size=128)
+    resident = ResidentGLM(model, ctx=Context(), max_tokens=32, fp8_kernels='cublaslt')
+    try:
+        prefix = next(p for p in linears if p.endswith('mlp.gate_proj'))
+        codes, scales, block, (rows, cols) = model.weights.block_fp8(prefix)
+        assert cols == 128
+        x = np.random.default_rng(5).normal(size=cols).astype('f4')
+        out = resident._project(prefix, resident._tensor((cols,), data=x.tobytes()), resident._tensor((rows,)))
+        got = np.frombuffer(out.download(), 'f4')
+        xq, xs = fp8_quant.quant_groups(x[None])
+        w = fp8_quant.e4m3_values()[codes] * np.repeat(np.repeat(scales, 128, 0), 128, 1)[:rows, :cols]
+        np.testing.assert_array_equal(got, (fp8_quant.dequant_groups(xq, xs) @ w.T).astype('f4').ravel())
+        assert resident.launches == {'fp8_quant_groups': 1, 'cublaslt_fp8': 1}
+    finally:
+        resident.close()
+
+
+@pytest.mark.parametrize('graph', [False, True])
+def test_fp8_cublaslt_logits_are_near_the_float32_activation_kernels(graph):
+    # Quantized activations move the logits by about the e4m3 step; the hidden-width Linears take
+    # cuBLASLt, the narrower ones the hand kernel, the routed experts the x4 kernels.
+    model, _ = fp8_model(29, hidden_size=128, moe_intermediate_size=128)
+    runs = {}
+    for kernels in ('hand', 'cublaslt'):
+        resident = ResidentGLM(model, ctx=Context(), max_tokens=32, device_experts=True, graph=graph, fp8_kernels=kernels)
+        try:
+            runs[kernels] = (np.stack([resident.forward(t) for t in TOKENS[:6]]), dict(resident.launches))
+        finally:
+            resident.close()
+    (hand, _), (lt, lt_launches) = runs['hand'], runs['cublaslt']
+    scale = float(np.abs(hand).max())
+    np.testing.assert_allclose(lt, hand, rtol=0.1, atol=0.05 * scale)
+    assert np.abs(lt - hand).max() > 0  # the activations were quantized
+    assert lt_launches.get('cublaslt_fp8', 0) > 0 and lt_launches['fp8_quant_groups'] == lt_launches['cublaslt_fp8']
+    assert lt_launches.get('fp8_moe4_gate_up', 0) > 0
+
+
 @pytest.mark.parametrize('fmt', ['int4', 'bf16'])
 def test_spawn_matvec_kernels_equal_the_hand_kernels(fmt):
     # matvec_kernels='spawn': gpu/spawn's int4_matvec and bf16_matvec for the Linears, the hand
