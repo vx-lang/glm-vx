@@ -1,0 +1,333 @@
+{
+  "entries": [
+    "glm_vx_gpu_matvec_heads",
+    "glm_vx_gpu_rope_strided",
+    "glm_vx_gpu_layernorm",
+    "glm_vx_gpu_scaled_add",
+    "glm_vx_gpu_scale",
+    "glm_vx_gpu_store_row",
+    "glm_vx_gpu_copy",
+    "glm_vx_gpu_add",
+    "glm_vx_gpu_softmax_rows",
+    "glm_vx_gpu_softmax",
+    "glm_vx_gpu_rmsnorm_rows",
+    "glm_vx_gpu_rmsnorm",
+    "glm_vx_gpu_router",
+    "glm_vx_gpu_mla_merge_at",
+    "glm_vx_gpu_mla_merge",
+    "glm_vx_gpu_mla_partial_at",
+    "glm_vx_gpu_mla_partial",
+    "glm_vx_gpu_index_scores_at",
+    "glm_vx_gpu_index_scores",
+    "glm_vx_gpu_matvec",
+    "glm_vx_gpu_rope_glm",
+    "glm_vx_gpu_swiglu",
+    "glm_vx_gpu_residual_rmsnorm"
+  ],
+  "hardware_index_registers": [
+    "%ctaid.x",
+    "%nctaid.x",
+    "%ntid.x",
+    "%tid.x"
+  ],
+  "tensor_core_mma": false,
+  "tf32_rna_conversion": false,
+  "warp_shuffle": true,
+  "block_barrier": true,
+  "shared_memory": true,
+  "device_exp2": true,
+  "device_sqrt": true,
+  "schema": "glm-vx-ptx-v1",
+  "arch": "sm_80",
+  "ptx_version": "7.6",
+  "source_sha256": "94080b2d10b1bc662da9bc714f6cfcb834b91e2cd4cf4fe28cb7cd9a83ee3eb1",
+  "ptx_sha256": "dabe22c455f3563260bfe5ecd6effc7e07fb878afc1d9c891b598ee1cbbdf398",
+  "shared_floats": 256,
+  "gpu_execution_validated": false,
+  "tools": {
+    "vxc": "vxc 0.0.4",
+    "mlir-translate": "Ubuntu LLVM version 22.1.8",
+    "opt": "Ubuntu LLVM version 22.1.8",
+    "llc": "Ubuntu LLVM version 22.1.8"
+  },
+  "assembly_validated": true,
+  "ptxas_version": "ptxas: NVIDIA (R) Ptx optimizing assembler\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Wed_Aug_20_01:55:12_PM_PDT_2025\nCuda compilation tools, release 13.0, V13.0.88\nBuild cuda_13.0.r13.0/compiler.36424714_0",
+  "ptxas_arch": "sm_90",
+  "cubin_sha256": "040fbcb80e14efb2dd2c2220b05803bc7929bdb84982b0535b04d6c68a51a2b4"
+}
+{
+  "entries": [
+    "glm_vx_gpu_fp8_matvec"
+  ],
+  "hardware_index_registers": [
+    "%ctaid.x",
+    "%ntid.x",
+    "%tid.x"
+  ],
+  "tensor_core_mma": false,
+  "tf32_rna_conversion": false,
+  "warp_shuffle": true,
+  "block_barrier": false,
+  "shared_memory": false,
+  "device_exp2": false,
+  "device_sqrt": false,
+  "schema": "glm-vx-ptx-v1",
+  "arch": "sm_80",
+  "ptx_version": "7.6",
+  "source_sha256": "abe0ac6241ef8690e72db8b58bf64cc4888de1589293d3d506fdaa6c5f364c9c",
+  "ptx_sha256": "dbc37818dcf26aeabb44b8b9c7dfaadb85e3ba89f6803e3293ca5ddd03c745e2",
+  "shared_floats": 256,
+  "gpu_execution_validated": false,
+  "tools": {
+    "vxc": "vxc 0.0.4",
+    "mlir-translate": "Ubuntu LLVM version 22.1.8",
+    "opt": "Ubuntu LLVM version 22.1.8",
+    "llc": "Ubuntu LLVM version 22.1.8"
+  },
+  "assembly_validated": true,
+  "ptxas_version": "ptxas: NVIDIA (R) Ptx optimizing assembler\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Wed_Aug_20_01:55:12_PM_PDT_2025\nCuda compilation tools, release 13.0, V13.0.88\nBuild cuda_13.0.r13.0/compiler.36424714_0",
+  "ptxas_arch": "sm_90",
+  "cubin_sha256": "1ef8980c5b46ac28d870137fddcdded077549a4ca7d1181306c6c2ac02744365"
+}
+{
+  "entries": [
+    "glm_vx_gpu_gemm_f32",
+    "glm_vx_gpu_gemm_tf32"
+  ],
+  "hardware_index_registers": [
+    "%ctaid.x",
+    "%ntid.x",
+    "%tid.x"
+  ],
+  "tensor_core_mma": true,
+  "tf32_rna_conversion": true,
+  "warp_shuffle": false,
+  "block_barrier": true,
+  "shared_memory": true,
+  "device_exp2": false,
+  "device_sqrt": false,
+  "schema": "glm-vx-ptx-v1",
+  "arch": "sm_80",
+  "ptx_version": "7.6",
+  "source_sha256": "a5c223c794edb520275f8e9e32839bd4b2dabb733f295585f2b8a03567ba9b9e",
+  "ptx_sha256": "9140764ec734ad6cac20f9ea35b12f50844ebdd2daca222e6b382062b6632e56",
+  "shared_floats": 320,
+  "gpu_execution_validated": false,
+  "tools": {
+    "vxc": "vxc 0.0.4",
+    "mlir-translate": "Ubuntu LLVM version 22.1.8",
+    "opt": "Ubuntu LLVM version 22.1.8",
+    "llc": "Ubuntu LLVM version 22.1.8"
+  },
+  "assembly_validated": true,
+  "ptxas_version": "ptxas: NVIDIA (R) Ptx optimizing assembler\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Wed_Aug_20_01:55:12_PM_PDT_2025\nCuda compilation tools, release 13.0, V13.0.88\nBuild cuda_13.0.r13.0/compiler.36424714_0",
+  "ptxas_arch": "sm_90",
+  "cubin_sha256": "e1cdd70fce3f33ae8af2ffe262350d07f8d1b89c7814d6ab337db053957b3e20"
+}
+{
+  "entries": [
+    "glm_vx_gpu_int4_matmul",
+    "glm_vx_gpu_int4_matvec"
+  ],
+  "hardware_index_registers": [
+    "%ctaid.x",
+    "%ntid.x",
+    "%tid.x"
+  ],
+  "tensor_core_mma": false,
+  "tf32_rna_conversion": false,
+  "warp_shuffle": true,
+  "block_barrier": false,
+  "shared_memory": false,
+  "device_exp2": false,
+  "device_sqrt": false,
+  "schema": "glm-vx-ptx-v1",
+  "arch": "sm_80",
+  "ptx_version": "7.6",
+  "source_sha256": "0b60d93335968fbd5650677184bc1ab8feb9175d41a4840df5cc01a1f4332173",
+  "ptx_sha256": "559e376f315adc3afcc0845973643d249dae6565a161e67905318103d314f4d9",
+  "shared_floats": 256,
+  "gpu_execution_validated": false,
+  "tools": {
+    "vxc": "vxc 0.0.4",
+    "mlir-translate": "Ubuntu LLVM version 22.1.8",
+    "opt": "Ubuntu LLVM version 22.1.8",
+    "llc": "Ubuntu LLVM version 22.1.8"
+  },
+  "assembly_validated": true,
+  "ptxas_version": "ptxas: NVIDIA (R) Ptx optimizing assembler\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Wed_Aug_20_01:55:12_PM_PDT_2025\nCuda compilation tools, release 13.0, V13.0.88\nBuild cuda_13.0.r13.0/compiler.36424714_0",
+  "ptxas_arch": "sm_90",
+  "cubin_sha256": "863e04dd97de37eb16bce607343453ed0ae4998e0f0c2f517fe9a5e923b29353"
+}
+{
+  "entries": [
+    "glm_vx_gpu_fp8_matmul"
+  ],
+  "hardware_index_registers": [
+    "%ctaid.x",
+    "%ntid.x",
+    "%tid.x"
+  ],
+  "tensor_core_mma": false,
+  "tf32_rna_conversion": false,
+  "warp_shuffle": true,
+  "block_barrier": false,
+  "shared_memory": false,
+  "device_exp2": false,
+  "device_sqrt": false,
+  "schema": "glm-vx-ptx-v1",
+  "arch": "sm_80",
+  "ptx_version": "7.6",
+  "source_sha256": "9980e92b0dd78d9e5bdc171f3a1f124400a410fe446c2840b97e8b0561e29b84",
+  "ptx_sha256": "699ba71bf27f165e35e73773c621a775f3c474cb7c121fc3b1fa628ea964ec74",
+  "shared_floats": 256,
+  "gpu_execution_validated": false,
+  "tools": {
+    "vxc": "vxc 0.0.4",
+    "mlir-translate": "Ubuntu LLVM version 22.1.8",
+    "opt": "Ubuntu LLVM version 22.1.8",
+    "llc": "Ubuntu LLVM version 22.1.8"
+  },
+  "assembly_validated": true,
+  "ptxas_version": "ptxas: NVIDIA (R) Ptx optimizing assembler\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Wed_Aug_20_01:55:12_PM_PDT_2025\nCuda compilation tools, release 13.0, V13.0.88\nBuild cuda_13.0.r13.0/compiler.36424714_0",
+  "ptxas_arch": "sm_90",
+  "cubin_sha256": "847e46400d944f66e4d74bbab37b939d67e87c9a3639b835a28e9eca595680ed"
+}
+{
+  "entries": [
+    "glm_vx_gpu_bf16_matmul",
+    "glm_vx_gpu_bf16_matvec"
+  ],
+  "hardware_index_registers": [
+    "%ctaid.x",
+    "%ntid.x",
+    "%tid.x"
+  ],
+  "tensor_core_mma": false,
+  "tf32_rna_conversion": false,
+  "warp_shuffle": true,
+  "block_barrier": false,
+  "shared_memory": false,
+  "device_exp2": false,
+  "device_sqrt": false,
+  "schema": "glm-vx-ptx-v1",
+  "arch": "sm_80",
+  "ptx_version": "7.6",
+  "source_sha256": "0e6c410f33348da0fb5f5cb9bd8fff531bc2fed1f4fd4eddccf736057c68ab0a",
+  "ptx_sha256": "12aea660b5d8cffd4efa99c22a56231f73363e94872d1ae5dbef5cdc42c57516",
+  "shared_floats": 256,
+  "gpu_execution_validated": false,
+  "tools": {
+    "vxc": "vxc 0.0.4",
+    "mlir-translate": "Ubuntu LLVM version 22.1.8",
+    "opt": "Ubuntu LLVM version 22.1.8",
+    "llc": "Ubuntu LLVM version 22.1.8"
+  },
+  "assembly_validated": true,
+  "ptxas_version": "ptxas: NVIDIA (R) Ptx optimizing assembler\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Wed_Aug_20_01:55:12_PM_PDT_2025\nCuda compilation tools, release 13.0, V13.0.88\nBuild cuda_13.0.r13.0/compiler.36424714_0",
+  "ptxas_arch": "sm_90",
+  "cubin_sha256": "3456099b3b74c957c4ac035e67a8e5f56fc9bfbc17dc5694213de0ce0c7e1ade"
+}
+{
+  "entries": [
+    "glm_vx_gpu_topk_stable_long_at",
+    "glm_vx_gpu_topk_stable_at",
+    "glm_vx_gpu_topk_stable"
+  ],
+  "hardware_index_registers": [
+    "%ntid.x",
+    "%tid.x"
+  ],
+  "tensor_core_mma": false,
+  "tf32_rna_conversion": false,
+  "warp_shuffle": false,
+  "block_barrier": true,
+  "shared_memory": false,
+  "device_exp2": false,
+  "device_sqrt": false,
+  "schema": "glm-vx-ptx-v1",
+  "arch": "sm_80",
+  "ptx_version": "7.6",
+  "source_sha256": "5ec391ea65f7d5ee2c12aa3a33ac491fb6ea9469ea6bd98c0f3d8c1e84b6306f",
+  "ptx_sha256": "bff46068970bfb4a8348c85fcc8fcc17f717df840e5dc2bf5c710072c9f38a60",
+  "shared_floats": 256,
+  "gpu_execution_validated": false,
+  "tools": {
+    "vxc": "vxc 0.0.4",
+    "mlir-translate": "Ubuntu LLVM version 22.1.8",
+    "opt": "Ubuntu LLVM version 22.1.8",
+    "llc": "Ubuntu LLVM version 22.1.8"
+  },
+  "assembly_validated": true,
+  "ptxas_version": "ptxas: NVIDIA (R) Ptx optimizing assembler\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Wed_Aug_20_01:55:12_PM_PDT_2025\nCuda compilation tools, release 13.0, V13.0.88\nBuild cuda_13.0.r13.0/compiler.36424714_0",
+  "ptxas_arch": "sm_90",
+  "cubin_sha256": "7f88bf03caefc68f65be583f69b860a46a568b411dc9b05d00d18d9057357764"
+}
+{
+  "entries": [
+    "glm_vx_gpu_fp8_quant_groups"
+  ],
+  "hardware_index_registers": [
+    "%ctaid.x",
+    "%ntid.x",
+    "%tid.x"
+  ],
+  "tensor_core_mma": false,
+  "tf32_rna_conversion": false,
+  "warp_shuffle": true,
+  "block_barrier": false,
+  "shared_memory": false,
+  "device_exp2": false,
+  "device_sqrt": false,
+  "schema": "glm-vx-ptx-v1",
+  "arch": "sm_80",
+  "ptx_version": "7.6",
+  "source_sha256": "a3c1398f2535451b46ae7ea006df1d3edfd2e7ebb8585d60c7bc0250229c156b",
+  "ptx_sha256": "a124e11e8e73803a831ec4e0d853552dadc3e8a6fb80f940f8d6a528070188ba",
+  "shared_floats": 256,
+  "gpu_execution_validated": false,
+  "tools": {
+    "vxc": "vxc 0.0.4",
+    "mlir-translate": "Ubuntu LLVM version 22.1.8",
+    "opt": "Ubuntu LLVM version 22.1.8",
+    "llc": "Ubuntu LLVM version 22.1.8"
+  },
+  "assembly_validated": true,
+  "ptxas_version": "ptxas: NVIDIA (R) Ptx optimizing assembler\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Wed_Aug_20_01:55:12_PM_PDT_2025\nCuda compilation tools, release 13.0, V13.0.88\nBuild cuda_13.0.r13.0/compiler.36424714_0",
+  "ptxas_arch": "sm_90",
+  "cubin_sha256": "eb6378173e89744b65f850c6b549466fc3bef12aad8ed639355a19db8fee9de9"
+}
+{
+  "entries": [
+    "glm_vx_gpu_matvec_rows"
+  ],
+  "hardware_index_registers": [
+    "%ctaid.x",
+    "%ntid.x",
+    "%tid.x"
+  ],
+  "tensor_core_mma": false,
+  "tf32_rna_conversion": false,
+  "warp_shuffle": true,
+  "block_barrier": true,
+  "shared_memory": true,
+  "device_exp2": false,
+  "device_sqrt": false,
+  "schema": "glm-vx-ptx-v1",
+  "arch": "sm_80",
+  "ptx_version": "7.6",
+  "source_sha256": "703f3e0168a67b53b1ba402f3045311f2797e5b4053d4a53cba9e423940637c0",
+  "ptx_sha256": "9d1708a22872d44b165bf1a0b83ed1ca9d67401e890810a77265560df2401cd6",
+  "shared_floats": 8192,
+  "gpu_execution_validated": false,
+  "tools": {
+    "vxc": "vxc 0.0.4",
+    "mlir-translate": "Ubuntu LLVM version 22.1.8",
+    "opt": "Ubuntu LLVM version 22.1.8",
+    "llc": "Ubuntu LLVM version 22.1.8"
+  },
+  "assembly_validated": true,
+  "ptxas_version": "ptxas: NVIDIA (R) Ptx optimizing assembler\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Wed_Aug_20_01:55:12_PM_PDT_2025\nCuda compilation tools, release 13.0, V13.0.88\nBuild cuda_13.0.r13.0/compiler.36424714_0",
+  "ptxas_arch": "sm_90",
+  "cubin_sha256": "f480233664a60b309b049bdff804aed855486887fa8a3c93a1500d5f8dc56224"
+}

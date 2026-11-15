@@ -88,6 +88,16 @@ fi
   echo "dispatch lib ${VX_DISPATCH_LIB:-none}"
   echo "vx_cuda_set_stream (Vx #2100): $(nm -D --defined-only "${VX_DISPATCH_LIB:-/dev/null}" 2>/dev/null | grep -qw vx_cuda_set_stream && echo exported || echo MISSING)"
 } >> "$out/host.txt"
+# The dispatch library links libcudart.so.12 and libcublas.so.12. A CUDA 13 image (Nebius H200,
+# driver 580) has neither, and then every spawn build fails on "Symbols not found: vx_plugin_*".
+# The CUDA 12 wheels run on that driver: install them and put their lib directories on the path.
+# Not a step, so a STEPS filter that skips the builds still gets the path.
+if [[ -n ${VX_DISPATCH_LIB:-} ]] && ldd "$VX_DISPATCH_LIB" 2>/dev/null | grep -qE 'lib(cudart|cublas)\.so\.12 => not found'; then
+  $PYTHON -m pip install -q nvidia-cuda-runtime-cu12 'nvidia-cublas-cu12>=12.9' >> "$out/host.txt" 2>&1
+  wheels=$($PYTHON -c 'import nvidia, pathlib; print(":".join(str(pathlib.Path(p) / d / "lib") for p in nvidia.__path__ for d in ("cuda_runtime", "cublas")))' 2>/dev/null)
+  export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$wheels
+  echo "dispatch lib's CUDA 12 runtime from the wheels: $(ldd "$VX_DISPATCH_LIB" | grep -cE 'lib(cudart|cublas)\.so\.12 => /') of 2 found" >> "$out/host.txt"
+fi
 step build-spawn bash gpu/spawn/build.sh
 step build-cpu-lib bash kernels/build.sh
 sha256sum gpu/build/*.ptx gpu/build/spawn/*.ptx gpu/build/spawn/*.so > "$out/ptx.sha256" 2>/dev/null

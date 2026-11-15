@@ -1,0 +1,95 @@
+{
+  "mode": "fp8-vs-f32-dequantized",
+  "geometry": "full",
+  "layers": 4,
+  "hidden": 6144,
+  "tokens": 48,
+  "fp8_linears": 806,
+  "bitwise_equal": false,
+  "max_abs_diff": 3.710352659225464,
+  "max_abs_logit": 5.602207183837891,
+  "top1_equal": false,
+  "fp8_seconds_per_token": 0.008118341354167077,
+  "f32_seconds_per_token": 0.005815811562499107,
+  "fp8_weights_gib_uploaded": 14.122198700904846,
+  "f32_weights_gib_uploaded": 44.880374908447266,
+  "fp8_matvec_launches": 0,
+  "fp8_kernels": "cublaslt",
+  "fp8_matvec4_launches": 0,
+  "fp8_moe4_launches": 96,
+  "cublaslt_launches": 3264,
+  "note": "single run, synthetic FP8 encoding of random weights; kv_b_proj is dequantized to float32 in both; lazy uploads; not a benchmark",
+  "projections": [
+    {
+      "linear": "model.layers.0.mlp.down_proj",
+      "rows": 6144,
+      "cols": 12288,
+      "error": 0.00015328579673400735,
+      "quantization_drift": 0.026472108354075558
+    },
+    {
+      "linear": "model.layers.0.mlp.gate_proj",
+      "rows": 12288,
+      "cols": 6144,
+      "error": 0.00011624737577849944,
+      "quantization_drift": 0.02497102397819428
+    },
+    {
+      "linear": "model.layers.0.mlp.up_proj",
+      "rows": 12288,
+      "cols": 6144,
+      "error": 0.00014536267854388455,
+      "quantization_drift": 0.031870029263602766
+    },
+    {
+      "linear": "model.layers.0.self_attn.indexer.wk",
+      "rows": 128,
+      "cols": 6144,
+      "error": 0.00011016321482508583,
+      "quantization_drift": 0.026036073156392576
+    },
+    {
+      "linear": "model.layers.0.self_attn.indexer.wq_b",
+      "rows": 4096,
+      "cols": 2048,
+      "error": 0.00016390977493519328,
+      "quantization_drift": 0.026045533187383365
+    },
+    {
+      "linear": "model.layers.0.self_attn.kv_a_proj_with_mqa",
+      "rows": 576,
+      "cols": 6144,
+      "error": 0.00014711629727551213,
+      "quantization_drift": 0.024001357531747147
+    },
+    {
+      "linear": "model.layers.0.self_attn.kv_b_proj",
+      "rows": 28672,
+      "cols": 512,
+      "error": 0.00023471754496358062,
+      "quantization_drift": 0.024672092790734016
+    },
+    {
+      "linear": "model.layers.0.self_attn.o_proj",
+      "rows": 6144,
+      "cols": 16384,
+      "error": 0.00013156027243758006,
+      "quantization_drift": 0.02752146937099098
+    },
+    {
+      "linear": "model.layers.0.self_attn.q_a_proj",
+      "rows": 2048,
+      "cols": 6144,
+      "error": 0.00012037902057320965,
+      "quantization_drift": 0.02290839359486866
+    },
+    {
+      "linear": "model.layers.0.self_attn.q_b_proj",
+      "rows": 16384,
+      "cols": 2048,
+      "error": 0.00016700756174401287,
+      "quantization_drift": 0.025827349259640104
+    }
+  ],
+  "gate": "every dense FP8 Linear of layer 0 within 1e-3 of the float64 sum of its quantized operands (Hopper FP8 accumulation: ~2e-4); logits finite; logit drift reported"
+}
