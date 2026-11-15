@@ -737,6 +737,94 @@ macro_rules! fp8t_pair_tile {
     };
 }
 
+// fp8t_pair_tile! for four rows a, b, c, d of one matrix (glm-vx #38): the tile's x and scales load once
+// for the four, so a lane has 16 words of weights in flight against 16 x values. Each row's fmas are
+// fp8t_pair_tile!'s, in the same order. The four rows share their 128-row block of scales ($sb).
+macro_rules! fp8t_quad_tile {
+    ($sa:ident, $sb2:ident, $sc:ident, $sd:ident, $w:ident, $scales:ident, $x:ident, $xo:expr, $ra:expr, $rb:expr, $rc:expr, $rd:expr, $sbase:expr, $word:expr) => {
+        unsafe {
+          let dv_w: i64 = $word;
+          let dv_u0: u32 = $w[$ra + dv_w];
+          let dv_u1: u32 = $w[$ra + dv_w + 32];
+          let dv_u2: u32 = $w[$ra + dv_w + 64];
+          let dv_u3: u32 = $w[$ra + dv_w + 96];
+          let dv_v0: u32 = $w[$rb + dv_w];
+          let dv_v1: u32 = $w[$rb + dv_w + 32];
+          let dv_v2: u32 = $w[$rb + dv_w + 64];
+          let dv_v3: u32 = $w[$rb + dv_w + 96];
+          let dv_y0: u32 = $w[$rc + dv_w];
+          let dv_y1: u32 = $w[$rc + dv_w + 32];
+          let dv_y2: u32 = $w[$rc + dv_w + 64];
+          let dv_y3: u32 = $w[$rc + dv_w + 96];
+          let dv_z0: u32 = $w[$rd + dv_w];
+          let dv_z1: u32 = $w[$rd + dv_w + 32];
+          let dv_z2: u32 = $w[$rd + dv_w + 64];
+          let dv_z3: u32 = $w[$rd + dv_w + 96];
+          let dv_c: i64 = $xo + dv_w * 4;
+          let dv_x00: f32 = $x[dv_c];
+          let dv_x01: f32 = $x[dv_c + 1];
+          let dv_x02: f32 = $x[dv_c + 2];
+          let dv_x03: f32 = $x[dv_c + 3];
+          let dv_x10: f32 = $x[dv_c + 128];
+          let dv_x11: f32 = $x[dv_c + 129];
+          let dv_x12: f32 = $x[dv_c + 130];
+          let dv_x13: f32 = $x[dv_c + 131];
+          let dv_x20: f32 = $x[dv_c + 256];
+          let dv_x21: f32 = $x[dv_c + 257];
+          let dv_x22: f32 = $x[dv_c + 258];
+          let dv_x23: f32 = $x[dv_c + 259];
+          let dv_x30: f32 = $x[dv_c + 384];
+          let dv_x31: f32 = $x[dv_c + 385];
+          let dv_x32: f32 = $x[dv_c + 386];
+          let dv_x33: f32 = $x[dv_c + 387];
+          let dv_s0: f32 = $scales[$sbase + dv_w / 32];
+          let dv_s1: f32 = $scales[$sbase + dv_w / 32 + 1];
+          let dv_s2: f32 = $scales[$sbase + dv_w / 32 + 2];
+          let dv_s3: f32 = $scales[$sbase + dv_w / 32 + 3];
+          let mut dv_p: f32 = 0.0;
+          let mut dv_q: f32 = 0.0;
+          fp8t_pair_word4!(dv_p, dv_q, dv_u0, dv_v0, dv_x00, dv_x01, dv_x02, dv_x03);
+          $sa = fma32!(dv_p, dv_s0, $sa);
+          $sb2 = fma32!(dv_q, dv_s0, $sb2);
+          dv_p = 0.0;
+          dv_q = 0.0;
+          fp8t_pair_word4!(dv_p, dv_q, dv_y0, dv_z0, dv_x00, dv_x01, dv_x02, dv_x03);
+          $sc = fma32!(dv_p, dv_s0, $sc);
+          $sd = fma32!(dv_q, dv_s0, $sd);
+          dv_p = 0.0;
+          dv_q = 0.0;
+          fp8t_pair_word4!(dv_p, dv_q, dv_u1, dv_v1, dv_x10, dv_x11, dv_x12, dv_x13);
+          $sa = fma32!(dv_p, dv_s1, $sa);
+          $sb2 = fma32!(dv_q, dv_s1, $sb2);
+          dv_p = 0.0;
+          dv_q = 0.0;
+          fp8t_pair_word4!(dv_p, dv_q, dv_y1, dv_z1, dv_x10, dv_x11, dv_x12, dv_x13);
+          $sc = fma32!(dv_p, dv_s1, $sc);
+          $sd = fma32!(dv_q, dv_s1, $sd);
+          dv_p = 0.0;
+          dv_q = 0.0;
+          fp8t_pair_word4!(dv_p, dv_q, dv_u2, dv_v2, dv_x20, dv_x21, dv_x22, dv_x23);
+          $sa = fma32!(dv_p, dv_s2, $sa);
+          $sb2 = fma32!(dv_q, dv_s2, $sb2);
+          dv_p = 0.0;
+          dv_q = 0.0;
+          fp8t_pair_word4!(dv_p, dv_q, dv_y2, dv_z2, dv_x20, dv_x21, dv_x22, dv_x23);
+          $sc = fma32!(dv_p, dv_s2, $sc);
+          $sd = fma32!(dv_q, dv_s2, $sd);
+          dv_p = 0.0;
+          dv_q = 0.0;
+          fp8t_pair_word4!(dv_p, dv_q, dv_u3, dv_v3, dv_x30, dv_x31, dv_x32, dv_x33);
+          $sa = fma32!(dv_p, dv_s3, $sa);
+          $sb2 = fma32!(dv_q, dv_s3, $sb2);
+          dv_p = 0.0;
+          dv_q = 0.0;
+          fp8t_pair_word4!(dv_p, dv_q, dv_y3, dv_z3, dv_x30, dv_x31, dv_x32, dv_x33);
+          $sc = fma32!(dv_p, dv_s3, $sc);
+          $sd = fma32!(dv_q, dv_s3, $sd);
+        }
+    };
+}
+
 // fp8_tiles_pair_rows! at true values: rows row and row + 1 of one [rows, cols] matrix.
 macro_rules! fp8t_tiles_pair_rows {
     ($sum:ident, $sum2:ident, $weight:ident, $scales:ident, $x:ident, $row:expr, $rows:expr, $cols:expr, $lane:expr) => {
