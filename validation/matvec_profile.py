@@ -82,6 +82,7 @@ def kernels(fmt, ctx, build, rng, rows, cols, stream):
         hand = ctx.load_ptx(build / 'fp8.ptx').kernel('glm_vx_gpu_fp8_matvec')
         spawn, four, fma, tiles = (SpawnKernel(ctx, build / 'spawn' / f'{n}.ptx')
                                    for n in ('fp8_matvec', 'fp8_matvec4', 'fp8_matvec_fma', 'fp8_matvec_fma_tiles'))
+        cvt_tiles = SpawnKernel(ctx, build / 'spawn' / 'fp8_matvec_cvt_tiles.ptx') if cvt else None
         kernels.fp8 = (x, codes, scales)
         return codes.nbytes + scales.nbytes, {
             'hand': lambda: hand.launch((-(-rows // 8),), (256,), [outs['hand'], weight, d_scales, x, i32(rows), i32(cols)],
@@ -94,8 +95,8 @@ def kernels(fmt, ctx, build, rng, rows, cols, stream):
                                              rows=rows, cols=cols),
             'matvec_fma_tiles': lambda: tiles.launch(stream=stream, out=outs['matvec_fma_tiles'], weight=words,
                                                      scales=d_scales, x=x, rows=rows, cols=cols),
-            **({'matvec_cvt_tiles': lambda: SpawnKernel(ctx, build / 'spawn' / 'fp8_matvec_cvt_tiles.ptx').launch(
-                stream=stream, out=outs['matvec_cvt_tiles'], weight=words, scales=d_scales, x=x, rows=rows, cols=cols)}
+            **({'matvec_cvt_tiles': lambda: cvt_tiles.launch(stream=stream, out=outs['matvec_cvt_tiles'], weight=words,
+                                                             scales=d_scales, x=x, rows=rows, cols=cols)}
                if cvt else {})}, outs
     if fmt == 'bf16':
         bits = (rng.normal(size=rows * cols).astype('f4').view(np.uint32) >> 16).astype(np.uint16)

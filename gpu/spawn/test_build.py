@@ -250,6 +250,34 @@ def test_a_variant_renames_the_entry_and_takes_its_include_and_machine(tmp_path)
     assert run_build(source, tmp_path / 'x.ptx', '_nope').returncode != 0
 
 
+def test_set_maxnreg_puts_the_budget_after_the_entry_parameters():
+    ptx = '.version 8.0\n.target sm_90\n.visible .entry K(\n\t.param .u64 K_param_0\n)\n{\n\tret;\n}\n'
+    out = build.set_maxnreg(ptx, 'K', 96)
+    assert out == ptx.replace(')\n{', ')\n.maxnreg 96\n{')
+    for bad in (lambda: build.set_maxnreg(ptx, 'J', 96), lambda: build.set_maxnreg(out, 'K', 96),
+                lambda: build.set_maxnreg(ptx, 'K', 8), lambda: build.set_maxnreg(ptx, 'K', 256)):
+        with pytest.raises(ValueError):
+            bad()
+
+
+@needs_vxc
+def test_spawn_maxnreg_gives_the_entry_a_register_budget(tmp_path):
+    """fp8_matvec_cvt_tiles' `// spawn-maxnreg: 96` reaches the PTX and the manifest, in each variant;
+    without the line there is no .maxnreg (glm-vx #38)."""
+    source = (HERE / 'fp8_matvec_cvt_tiles.vx').read_text()
+    assert re.search(r'^// spawn-maxnreg: 96\b', source, re.M)
+    for f in ('device.vx', 'fp8_cvt_sm90.vx', 'fp8_cvt_ref.vx', 'machine-sm90.vx'):
+        shutil.copy(HERE / f, tmp_path)
+    (tmp_path / 'with.vx').write_text(source)
+    (tmp_path / 'without.vx').write_text(re.sub(r'^// spawn-maxnreg:.*\n', '', source, flags=re.M))
+    for name, variant, budget in (('with', '-', 96), ('with', '_ref', 96), ('without', '-', None)):
+        out = tmp_path / f'{name}{variant}.ptx'
+        result = run_build(tmp_path / f'{name}.vx', out, variant)
+        assert result.returncode == 0, result.stderr
+        assert re.findall(r'^\.maxnreg (\d+)$', out.read_text(), re.M) == ([str(budget)] if budget else [])
+        assert json.loads(out.with_suffix('.json').read_text())['maxnreg'] == budget
+
+
 @needs_vxc
 def test_spawn_vxc_passes_a_feature_flag(tmp_path):
     """topk_radix's `// spawn-vxc: -fweak-relaxed-atomics` keeps its atomics relaxed: no fence after

@@ -1,0 +1,7 @@
+# Fused MLA decode, 64 heads, rank 512, rope 64. CUDA events, L2 flushed, median of 20.
+
+| selected (splits) | mla_decode_at us | mla_chunks_at us | mla_heads_at us |
+|---|---|---|---|
+| 256 (1) | 432.1 | 146.5 | 152.7 |
+| 1024 (4) | 872.3 | 170.9 | 154.4 |
+| 2048 (8) | 1624.4 | 325.2 | 161.9 |

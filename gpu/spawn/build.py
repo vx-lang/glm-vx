@@ -29,6 +29,12 @@ VXC_FLAG = re.compile(r'^//\s*spawn-vxc:\s*(-f[\w-]+)\s*$', re.M)
 # kernels so: an sm_90 one with Hopper's e4m3x2 -> f16x2 instruction, and a `_ref` one with an exact
 # integer decode that the host tests run and that must give the same bits.
 VARIANT = re.compile(r'^//\s*spawn-variant:\s*(\S+)\s+(\S+)(?:\s+(\S+))?\s*$', re.M)
+# `// spawn-maxnreg: N`: `.maxnreg N` on the entry, a register budget for ptxas. Without one, ptxas
+# picks 64-72 registers for the FP8 conversion kernels and moves their weight loads below the first
+# conversions, so a warp has one or two loads in flight; at 88-104 every load of a tile issues first
+# (glm-vx #38: o_proj 44.6 -> 36.4 us, the routed experts' gate_up 105.5 -> 76.9 us on the H200,
+# the same bits). Vx has no way to say it yet.
+MAXNREG = re.compile(r'^//\s*spawn-maxnreg:\s*(\d+)\b', re.M)
 
 
 def variant_of(source: str, suffix: str):
@@ -106,6 +112,18 @@ def raise_ptx_version(ptx: str, version: str):
     if new < old:
         raise ValueError(f'--ptx-version {version} is older than the {old[0]}.{old[1]} vxc wrote')
     return ptx[:found.start()] + f'.version {version}' + ptx[found.end():], f'{old[0]}.{old[1]}'
+
+
+def set_maxnreg(ptx: str, entry: str, registers: int) -> str:
+    """PTX with `.maxnreg registers` on entry, after its parameter list."""
+    if not 16 <= registers <= 255:
+        raise ValueError(f'spawn-maxnreg {registers} is outside 16..255')
+    found = re.search(rf'^\.visible \.entry {entry}\($.*?^\)$', ptx, re.M | re.S)
+    if not found:
+        raise ValueError(f'no parameter list of .entry {entry} in the PTX')
+    if re.search(r'^\.maxnreg\b', ptx, re.M):
+        raise ValueError('the PTX already has a .maxnreg')
+    return ptx[:found.end()] + f'\n.maxnreg {registers}' + ptx[found.end():]
 
 
 def same_kernel(a: str, b: str) -> bool:
@@ -316,14 +334,19 @@ def main() -> int:
         params = kernel_params(kernels[0]['params'])
         check_params(ptx, name, params)
         dynamic_shared = check_dynamic_shared(ptx, kernels[0].get('dynamic_shared_bytes', 0))
-        vxc_ptx_sha = hashlib.sha256(ptx.encode()).hexdigest()
+        vxc_ptx, vxc_ptx_sha = ptx, hashlib.sha256(ptx.encode()).hexdigest()
         raised = None
         if args.ptx_version:
             ptx, raised = raise_ptx_version(ptx, args.ptx_version)
+        budgets = [int(n) for n in MAXNREG.findall(source)]
+        if len(budgets) > 1:
+            raise ValueError('more than one `// spawn-maxnreg:` line')
+        if budgets:
+            ptx = set_maxnreg(ptx, name, budgets[0])
         args.output.parent.mkdir(parents=True, exist_ok=True)
         evidence = {'schema': 'glm-vx-spawn-v2', 'entry': name, 'params': params, 'vx_params': kernels[0]['params'],
                     'launch': kernels[0].get('launch'), 'dynamic_shared_bytes': dynamic_shared,
-                    'arch': args.arch, 'vxc_flags': flags, 'source_sha256': hashlib.sha256((''.join(included) + source).encode()).hexdigest(),
+                    'arch': args.arch, 'vxc_flags': flags, 'maxnreg': budgets[0] if budgets else None, 'source_sha256': hashlib.sha256((''.join(included) + source).encode()).hexdigest(),
                     'ptx_sha256': hashlib.sha256(ptx.encode()).hexdigest(),
                     'vxc': subprocess.run([args.vxc, '--version'], text=True, stdout=subprocess.PIPE).stdout.strip(),
                     'assembly_validated': False, 'gpu_execution_validated': False}
@@ -338,7 +361,9 @@ def main() -> int:
                     raise ValueError(f'ptxas failed:\n{assembled.stderr}')
                 evidence.update({'assembly_validated': True, 'ptxas_arch': ptxas_arch, 'ptxas_log': assembled.stderr.strip().splitlines()})
         if args.library:
-            evidence.update(build_library(args, ''.join(included) + source, name, params, env, ptx))
+            # vxc builds the library's image itself, so it has no spawn-maxnreg budget: the same kernel
+            # as vxc's PTX, which the launch tests run through Vx's own path.
+            evidence.update(build_library(args, ''.join(included) + source, name, params, env, vxc_ptx))
         args.output.write_text(ptx)
         args.output.with_suffix('.json').write_text(json.dumps(evidence, indent=2) + '\n')
         print(f'{args.output}: {name} ({len(params)} params)')

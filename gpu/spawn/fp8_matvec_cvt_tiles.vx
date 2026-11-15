@@ -9,6 +9,7 @@
 // spawn-include: device.vx
 // spawn-variant: - fp8_cvt_sm90.vx machine-sm90.vx
 // spawn-variant: _ref fp8_cvt_ref.vx
+// spawn-maxnreg: 96 (build.py: ptxas issues all of a tile's loads first; H200 sweep, #38)
 
 pub fn glm_vx_spawn_fp8_matvec_cvt_tiles(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<u32, [?], Memory::HBM>,
                                     scales: &Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,

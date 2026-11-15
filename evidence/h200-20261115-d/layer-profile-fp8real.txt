@@ -1,0 +1,70 @@
+# One decode step, kernel by kernel: fp8, full width, 4 layers, context 1000
+
+ncu, each kernel alone with cold caches; not a step time.
+
+| Group | Kernels | GPU us | DRAM MB | GB/s | % of peak BW | us at peak BW |
+|---|---|---|---|---|---|---|
+| layer 0 | 26 | 595 | 459.6 | 772 | 16 | 95 |
+| layer 1 | 26 | 594 | 457.7 | 770 | 16 | 95 |
+| layer 2 | 26 | 596 | 458.8 | 770 | 16 | 95 |
+| layer 3 | 22 | 611 | 567.8 | 929 | 19 | 118 |
+| head | 2 | 467 | 1906.9 | 4082 | 85 | 396 |
+
+## Layer 0: kernels by GPU time
+
+| Kernel | What | GPU us | DRAM MB | GB/s | DRAM % | SM % | grid x block | regs |
+|---|---|---|---|---|---|---|---|---|
+| mla_partial | attention.attention_core | 294.7 | 2.47 | 8 | 0 | 36 | 256 x 512 | 32 |
+| fp8_moe_cvt_gate_up | mlp.fma_gate_up | 78.9 | 153.85 | 1950 | 41 | 31 | 3072 x 128 | 72 |
+| fp8_matvec_cvt_tiles | self_attn.o_proj | 38.2 | 103.48 | 2710 | 56 | 31 | 768 x 128 | 64 |
+| fp8_matvec_cvt_tiles | mlp.down_proj | 29.6 | 78.29 | 2648 | 55 | 31 | 768 x 128 | 64 |
+| topk_sort | index_core.select | 26.7 | 0.01 | 0 | 0 | 0 | 1 x 1024 | 22 |
+| fp8_matvec_cvt_tiles3 | attention.fma_qkv_a | 14.5 | 16.97 | 1168 | 24 | 16 | 344 x 128 | 94 |
+| fp8_matvec_cvt_tiles | self_attn.q_b_proj | 14.5 | 34.11 | 2348 | 49 | 40 | 2048 x 128 | 64 |
+| index_scores | attention_core.index_core | 14.3 | 0.54 | 37 | 1 | 12 | 251 x 128 | 32 |
+| matvec_heads | attention.attention_core | 13.2 | 34.50 | 2623 | 55 | 30 | 4096 x 128 | 32 |
+| matvec_heads | attention.attention_core | 12.2 | 25.26 | 2067 | 43 | 52 | 8192 x 128 | 32 |
+| residual_rmsnorm | layer.residual_rmsnorm | 7.8 | 0.08 | 11 | 0 | 0 | 1 x 1024 | 32 |
+| fp8_matvec_cvt_tiles | self_attn.indexer.wq_b | 7.2 | 8.41 | 1168 | 24 | 20 | 512 x 128 | 64 |
+| mla_merge | attention.attention_core | 5.0 | 0.54 | 107 | 2 | 4 | 64 x 256 | 32 |
+| matvec_rows | self_attn.indexer.weights_proj | 4.6 | 0.82 | 178 | 4 | 4 | 32 x 1024 | 32 |
+| rmsnorm | layer.rmsnorm | 4.4 | 0.06 | 14 | 0 | 0 | 1 x 1024 | 32 |
+| rmsnorm | attention.rmsnorm | 3.6 | 0.03 | 7 | 0 | 0 | 1 x 1024 | 32 |
+| rmsnorm | attention_core.rmsnorm | 3.5 | 0.01 | 4 | 0 | 0 | 1 x 1024 | 32 |
+| layernorm | attention_core.index_core | 3.5 | 0.03 | 7 | 0 | 0 | 1 x 256 | 32 |
+| add | layer.add | 2.6 | 0.06 | 23 | 0 | 1 | 24 x 256 | 32 |
+| copy | index_core.copy | 2.5 | 0.02 | 10 | 0 | 0 | 16 x 256 | 32 |
+| rope_strided | index_core.rope | 2.5 | 0.01 | 5 | 0 | 0 | 4 x 256 | 32 |
+| rope_strided | attention_core.rope | 2.5 | 0.02 | 8 | 0 | 0 | 8 x 256 | 32 |
+| copy | index_core.copy | 2.3 | 0.01 | 4 | 0 | 0 | 1 x 256 | 32 |
+| rope_strided | index_core.rope | 2.3 | 0.00 | 2 | 0 | 0 | 1 x 256 | 32 |
+| rope_strided | attention_core.rope | 2.2 | 0.00 | 2 | 0 | 0 | 1 x 256 | 32 |
+| scale | attention_core.index_core | 2.1 | 0.01 | 4 | 0 | 0 | 1 x 256 | 32 |
+
+## Layer 3: kernels by GPU time
+
+| Kernel | What | GPU us | DRAM MB | GB/s | DRAM % | SM % | grid x block | regs |
+|---|---|---|---|---|---|---|---|---|
+| mla_partial | attention.attention_core | 294.4 | 2.47 | 8 | 0 | 36 | 256 x 512 | 32 |
+| fp8_moe_cvt_gate_up | mlp.experts | 99.5 | 203.92 | 2050 | 43 | 34 | 4096 x 128 | 72 |
+| fp8_moe_cvt_down | mlp.experts | 46.6 | 103.33 | 2218 | 46 | 49 | 3072 x 256 | 64 |
+| fp8_matvec_cvt_tiles | self_attn.o_proj | 38.6 | 103.13 | 2670 | 56 | 31 | 768 x 128 | 64 |
+| fp8_moe_cvt_gate_up | mlp.fma_gate_up | 21.2 | 25.25 | 1190 | 25 | 19 | 512 x 128 | 72 |
+| fp8_matvec_cvt_tiles3 | attention.fma_qkv_a | 14.7 | 16.18 | 1099 | 23 | 16 | 328 x 128 | 94 |
+| fp8_matvec_cvt_tiles | self_attn.q_b_proj | 14.4 | 34.07 | 2371 | 49 | 40 | 2048 x 128 | 64 |
+| matvec_heads | attention.attention_core | 12.4 | 34.34 | 2766 | 58 | 32 | 4096 x 128 | 32 |
+| matvec_heads | attention.attention_core | 12.2 | 25.25 | 2066 | 43 | 52 | 8192 x 128 | 32 |
+| fp8_matvec_cvt_tiles | mlp.shared_experts.down_proj | 7.9 | 12.61 | 1595 | 33 | 27 | 768 x 128 | 64 |
+| residual_rmsnorm | layer.residual_rmsnorm | 7.8 | 0.09 | 11 | 0 | 0 | 1 x 1024 | 32 |
+| router | feed_forward | 7.2 | 0.01 | 2 | 0 | 0 | 1 x 32 | 40 |
+| matvec_rows | mlp.gate | 5.5 | 6.33 | 1156 | 24 | 25 | 256 x 1024 | 32 |
+| mla_merge | attention.attention_core | 4.8 | 0.54 | 113 | 2 | 4 | 64 x 256 | 32 |
+| rmsnorm | layer.rmsnorm | 4.5 | 0.06 | 13 | 0 | 0 | 1 x 1024 | 32 |
+| rmsnorm | attention.rmsnorm | 3.6 | 0.03 | 8 | 0 | 0 | 1 x 1024 | 32 |
+| rmsnorm | attention_core.rmsnorm | 3.4 | 0.01 | 4 | 0 | 0 | 1 x 1024 | 32 |
+| rope_strided | attention_core.rope | 2.6 | 0.02 | 8 | 0 | 0 | 8 x 256 | 32 |
+| add | feed_forward.add | 2.6 | 0.06 | 23 | 0 | 1 | 24 x 256 | 32 |
+| copy | feed_forward.copy | 2.4 | 0.03 | 13 | 0 | 1 | 24 x 256 | 32 |
+| add | layer.add | 2.4 | 0.06 | 24 | 1 | 1 | 24 x 256 | 32 |
+| rope_strided | attention_core.rope | 2.2 | 0.00 | 2 | 0 | 0 | 1 x 256 | 32 |
+
