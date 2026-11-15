@@ -16,7 +16,7 @@ also cover every pass. A kernel whose rows have a run-time length writes a rank-
 times numbers; `launch.py` passes a rank-2 `DeviceTensor` as its 7-word descriptor. A row's
 index may then be anything, as in topk's `hist[t][digit]`.
 
-All 57 kernels build with Vx main from 12fea615 on; the repo is tested with 243ea31c, which
+All 57 kernels build with Vx main from 12fea615 on; the repo is tested with d75d4c60 (mla_tc_at needs #3490's lanes::copy_rows_async), which
 also builds the CPU library in minutes (950a6f71, Vx #3326). #2979 lets the code after a nest of blocks
 (which the last block to finish runs) keep shared-memory tensors, which topk_radix's per-round
 scan and sort need. 60fea665's atomics take a `&mut` tensor (#2949),
@@ -124,6 +124,7 @@ Two launches use the same PTX:
 | `mla_heads_at.vx` | new: `mla_chunks_at` with four heads a block, each selected latent row read once for them (#33); equal to `mla_chunks_at` bit for bit; buffers per group of four heads; lane 0 keeps each warp's token and scores (Vx a9d832fd) | 32 (sm_80, 36 B spills), 32 (sm_90, 20 B spills; ptxas's choice for a 1024-thread block); #2938 keeps its lane rows in registers, 17.6 KB shared memory |
 | `mla_flash_at.vx` | new: flash decoding (#33): block (group of 16 heads, split), two heads a subgroup; each lane's query, sums and softmax state stay in registers for the whole token loop (Vx #3475, 243ea31c: tiles accessed only at `[w][..][lane]`), and the next token's row is loaded while one is scored; scores equal `mla_chunks_at`'s bit for bit, out to rounding | 128 (`spawn-maxnreg`; ptxas would take 139), no local or shared memory |
 | `mla_flash_merge_at.vx` | new: merges `mla_flash_at`'s splits (at most 64); a subgroup merges 16 splits for four columns a lane in branch-free, constant-length loops, then the block merges the four | 32 |
+| `mla_tc_at.vx`, `mla_q_bf16_at.vx`, `store_row_bf16_at.vx` | new: MLA decode on the tensor cores with a bf16 cache (mla_kernel='tc', #33): 16 heads and one 32-token chunk a block, rows gathered with lanes::copy_rows_async (cp.async), scores and P @ rows with mma.sync, O copied from the mma registers; the queries in bf16 in its tile layout (mla_q_bf16_at) and the bf16 cache rows (store_row_bf16_at); merged by mla_flash_merge_at | 115 (`spawn-maxnreg` 128), 68 KB shared memory |
 | `mla_decode.vx` | new: mla_partial and mla_merge in one launch (Vx #2187 code of a group, #2188 arrival counts) | 31 |
 
 The five expert kernels let a decode step run its MoE without reading the router's ids on the
