@@ -1,0 +1,203 @@
+// MLA decode on the tensor cores with a bf16 cache (#33). Block (group, split) takes heads
+// 16 * group .. + 15 and the 32 selected tokens split * 32 .. + 31 (one chunk: GLM-5.3 selects at
+// most 2048 tokens, so 64 splits cover them). Its eight subgroups:
+//   1. copy the queries (bf16, transposed, from mla_q_bf16_at) and gather the chunk's latent and rope
+//      rows (bf16) into shared memory, subgroup w the latent columns 128 * (w % 4) .. + 127 of tokens
+//      16 * (w / 4) .. + 15;
+//   2. (four of them) compute the scores S[token][head] = row . query with mma.sync, subgroup w
+//      tokens 16 * (w / 2) .. + 15 and heads 8 * (w % 2) .. + 7;
+//   3. for 2 heads each, take the chunk's max m and P[head][token] = exp(score * scale - m) (bf16 for
+//      the next product, f32 for l, its sum);
+//   4. (four of them) compute O = P @ latent rows with mma.sync, subgroup w latent columns
+//      128 * w .. + 127, and write it out, with no rescaling: each block sees one chunk.
+// mla_flash_merge_at then merges the splits: numerator [heads / 16, splits_max, 16 * rank] and stats
+// [heads / 16, splits_max, 32] are laid out as mla_flash_at's.
+//
+// The scores and P @ V are bf16 products with f32 sums, as SGLang's FlashMLA, so out agrees with the
+// f32 kernels to bf16 rounding, not to f32 rounding. Needs heads % 16 == 0, rank == 512, rope_dim
+// == 64, selection_stride 0 and count <= 32 * splits; otherwise, and for splits past step's, it
+// writes nothing, and blocks past step's splits return at once.
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_mla_tc_at(numerator: &mut Tensor<f32, [?, ?, ?], Memory::HBM>, stats: &mut Tensor<f32, [?, ?, ?], Memory::HBM>,
+                              q_t: &Tensor<bf16, [?, ?], Memory::HBM>, qr_t: &Tensor<bf16, [?, ?], Memory::HBM>,
+                              cache_latent: &Tensor<bf16, [?], Memory::HBM>, cache_rope: &Tensor<bf16, [?], Memory::HBM>,
+                              selected: &Tensor<i32, [?], Memory::HBM>, step: &Tensor<i32, [?], Memory::HBM>,
+                              heads: i32, rank: i32, rope_dim: i32, selection_stride: i32, splits_max: i32, scale: f32) -> void {
+  spawn on(Topology::Device) {
+    for hg in 0..heads / 16 across blocks {
+      for split in 0..splits_max across blocks {
+        let tokens: i32 = step[1];
+        let count: i32 = step[2];
+        let splits: i32 = step[3];
+        let ok: bool = split < splits && heads % 16 == 0 && rank == 512 && rope_dim == 64 && selection_stride == 0
+                       && tokens > 0 && count >= 0 && splits > 0 && count <= 32 * splits;
+        // sl[4 * th + c][t][k]: latent element 128 * c + k of token 16 * th + t of the chunk; sr[th] the rope.
+        let mut sl = unsafe { Tensor<bf16, [8, 16, 128], Memory::SMEM>::uninit() };
+        let mut sr = unsafe { Tensor<bf16, [2, 16, 64], Memory::SMEM>::uninit() };
+        // qt[2 * c + hh][k][h]: head 16 * hg + 8 * hh + h's latent query at 128 * c + k (mla_q_bf16_at's
+        // layout); qrt[w] the rope query of heads 8 * (w % 2) .. + 7.
+        let mut qt = unsafe { Tensor<bf16, [8, 128, 8], Memory::SMEM>::uninit() };
+        let mut qrt = unsafe { Tensor<bf16, [8, 64, 8], Memory::SMEM>::uninit() };
+        // s[w]: the scores of tokens 16 * (w / 2) .. + 15 for heads 8 * (w % 2) .. + 7.
+        let mut s = unsafe { Tensor<f32, [4, 16, 8], Memory::SMEM>::uninit() };
+        // p[th][h][t]: P of head h and token 16 * th + t, for the product with the latent rows.
+        let mut p = unsafe { Tensor<bf16, [2, 16, 16], Memory::SMEM>::uninit() };
+        let mut xs = unsafe { Tensor<f32, [8, 2, 32], Memory::SMEM>::uninit() };
+        let mut pf = unsafe { Tensor<f32, [8, 2, 32], Memory::SMEM>::uninit() };
+        let mut o = unsafe { Tensor<f32, [4, 16, 128], Memory::SMEM>::uninit() };
+        let mut ids = unsafe { Tensor<i32, [8, 32], Memory::SMEM>::uninit() };
+        if ok {
+        for w in 0..8 across subgroups {
+          let a0 = lanes::copy_async(&mut qt[w], q_t, [(hg * 8 + w) * 128, 0]);
+          let a1 = lanes::copy_async(&mut qrt[w], qr_t, [(hg * 2 + w % 2) * 64, 0]);
+          // The ids first, lane t token t's (an id out of range reads row 0, whose P is 0), so that the
+          // row loads below need not wait on them one at a time.
+          for t in 0..32 across lanes {
+            let j: i32 = split * 32 + t;
+            let jc: i32 = if j < count { j } else { 0 };
+            let id: i32 = selected[jc];
+            ids[w][t] = if j < count && id >= 0 && id < tokens { id } else { 0 };
+          }
+          // The rows, unrolled, lane t four columns of each, so a row is one 256-byte read.
+          for t in 0..32 across lanes {
+            let r0: i32 = ids[w][(w / 4) * 16 + 0];
+            for kk in 0..4 { sl[w][0][t * 4 + kk] = cache_latent[r0 * 512 + (w % 4) * 128 + t * 4 + kk]; }
+            let r1: i32 = ids[w][(w / 4) * 16 + 1];
+            for kk in 0..4 { sl[w][1][t * 4 + kk] = cache_latent[r1 * 512 + (w % 4) * 128 + t * 4 + kk]; }
+            let r2: i32 = ids[w][(w / 4) * 16 + 2];
+            for kk in 0..4 { sl[w][2][t * 4 + kk] = cache_latent[r2 * 512 + (w % 4) * 128 + t * 4 + kk]; }
+            let r3: i32 = ids[w][(w / 4) * 16 + 3];
+            for kk in 0..4 { sl[w][3][t * 4 + kk] = cache_latent[r3 * 512 + (w % 4) * 128 + t * 4 + kk]; }
+            let r4: i32 = ids[w][(w / 4) * 16 + 4];
+            for kk in 0..4 { sl[w][4][t * 4 + kk] = cache_latent[r4 * 512 + (w % 4) * 128 + t * 4 + kk]; }
+            let r5: i32 = ids[w][(w / 4) * 16 + 5];
+            for kk in 0..4 { sl[w][5][t * 4 + kk] = cache_latent[r5 * 512 + (w % 4) * 128 + t * 4 + kk]; }
+            let r6: i32 = ids[w][(w / 4) * 16 + 6];
+            for kk in 0..4 { sl[w][6][t * 4 + kk] = cache_latent[r6 * 512 + (w % 4) * 128 + t * 4 + kk]; }
+            let r7: i32 = ids[w][(w / 4) * 16 + 7];
+            for kk in 0..4 { sl[w][7][t * 4 + kk] = cache_latent[r7 * 512 + (w % 4) * 128 + t * 4 + kk]; }
+            let r8: i32 = ids[w][(w / 4) * 16 + 8];
+            for kk in 0..4 { sl[w][8][t * 4 + kk] = cache_latent[r8 * 512 + (w % 4) * 128 + t * 4 + kk]; }
+            let r9: i32 = ids[w][(w / 4) * 16 + 9];
+            for kk in 0..4 { sl[w][9][t * 4 + kk] = cache_latent[r9 * 512 + (w % 4) * 128 + t * 4 + kk]; }
+            let r10: i32 = ids[w][(w / 4) * 16 + 10];
+            for kk in 0..4 { sl[w][10][t * 4 + kk] = cache_latent[r10 * 512 + (w % 4) * 128 + t * 4 + kk]; }
+            let r11: i32 = ids[w][(w / 4) * 16 + 11];
+            for kk in 0..4 { sl[w][11][t * 4 + kk] = cache_latent[r11 * 512 + (w % 4) * 128 + t * 4 + kk]; }
+            let r12: i32 = ids[w][(w / 4) * 16 + 12];
+            for kk in 0..4 { sl[w][12][t * 4 + kk] = cache_latent[r12 * 512 + (w % 4) * 128 + t * 4 + kk]; }
+            let r13: i32 = ids[w][(w / 4) * 16 + 13];
+            for kk in 0..4 { sl[w][13][t * 4 + kk] = cache_latent[r13 * 512 + (w % 4) * 128 + t * 4 + kk]; }
+            let r14: i32 = ids[w][(w / 4) * 16 + 14];
+            for kk in 0..4 { sl[w][14][t * 4 + kk] = cache_latent[r14 * 512 + (w % 4) * 128 + t * 4 + kk]; }
+            let r15: i32 = ids[w][(w / 4) * 16 + 15];
+            for kk in 0..4 { sl[w][15][t * 4 + kk] = cache_latent[r15 * 512 + (w % 4) * 128 + t * 4 + kk]; }
+            if w < 2 {
+              let e0: i32 = ids[w][w * 16 + 0];
+              for kk in 0..2 { sr[w][0][t * 2 + kk] = cache_rope[e0 * 64 + t * 2 + kk]; }
+              let e1: i32 = ids[w][w * 16 + 1];
+              for kk in 0..2 { sr[w][1][t * 2 + kk] = cache_rope[e1 * 64 + t * 2 + kk]; }
+              let e2: i32 = ids[w][w * 16 + 2];
+              for kk in 0..2 { sr[w][2][t * 2 + kk] = cache_rope[e2 * 64 + t * 2 + kk]; }
+              let e3: i32 = ids[w][w * 16 + 3];
+              for kk in 0..2 { sr[w][3][t * 2 + kk] = cache_rope[e3 * 64 + t * 2 + kk]; }
+              let e4: i32 = ids[w][w * 16 + 4];
+              for kk in 0..2 { sr[w][4][t * 2 + kk] = cache_rope[e4 * 64 + t * 2 + kk]; }
+              let e5: i32 = ids[w][w * 16 + 5];
+              for kk in 0..2 { sr[w][5][t * 2 + kk] = cache_rope[e5 * 64 + t * 2 + kk]; }
+              let e6: i32 = ids[w][w * 16 + 6];
+              for kk in 0..2 { sr[w][6][t * 2 + kk] = cache_rope[e6 * 64 + t * 2 + kk]; }
+              let e7: i32 = ids[w][w * 16 + 7];
+              for kk in 0..2 { sr[w][7][t * 2 + kk] = cache_rope[e7 * 64 + t * 2 + kk]; }
+              let e8: i32 = ids[w][w * 16 + 8];
+              for kk in 0..2 { sr[w][8][t * 2 + kk] = cache_rope[e8 * 64 + t * 2 + kk]; }
+              let e9: i32 = ids[w][w * 16 + 9];
+              for kk in 0..2 { sr[w][9][t * 2 + kk] = cache_rope[e9 * 64 + t * 2 + kk]; }
+              let e10: i32 = ids[w][w * 16 + 10];
+              for kk in 0..2 { sr[w][10][t * 2 + kk] = cache_rope[e10 * 64 + t * 2 + kk]; }
+              let e11: i32 = ids[w][w * 16 + 11];
+              for kk in 0..2 { sr[w][11][t * 2 + kk] = cache_rope[e11 * 64 + t * 2 + kk]; }
+              let e12: i32 = ids[w][w * 16 + 12];
+              for kk in 0..2 { sr[w][12][t * 2 + kk] = cache_rope[e12 * 64 + t * 2 + kk]; }
+              let e13: i32 = ids[w][w * 16 + 13];
+              for kk in 0..2 { sr[w][13][t * 2 + kk] = cache_rope[e13 * 64 + t * 2 + kk]; }
+              let e14: i32 = ids[w][w * 16 + 14];
+              for kk in 0..2 { sr[w][14][t * 2 + kk] = cache_rope[e14 * 64 + t * 2 + kk]; }
+              let e15: i32 = ids[w][w * 16 + 15];
+              for kk in 0..2 { sr[w][15][t * 2 + kk] = cache_rope[e15 * 64 + t * 2 + kk]; }
+            }
+          }
+          a0.wait();
+          a1.wait();
+        }
+        for w in 0..4 across subgroups {
+          let th: i32 = w / 2;
+          let hh: i32 = w % 2;
+          s[w] = (sl[th * 4] as f32) @ (qt[hh] as f32);
+          s[w] = s[w] + (sl[th * 4 + 1] as f32) @ (qt[2 + hh] as f32);
+          s[w] = s[w] + (sl[th * 4 + 2] as f32) @ (qt[4 + hh] as f32);
+          s[w] = s[w] + (sl[th * 4 + 3] as f32) @ (qt[6 + hh] as f32);
+          s[w] = s[w] + (sr[th] as f32) @ (qrt[hh] as f32);
+        }
+        for w in 0..8 across subgroups {
+          // Heads 2 * w and 2 * w + 1; lane t is token t of the chunk.
+          for t in 0..32 across lanes {
+            let j: i32 = split * 32 + t;
+            let jc: i32 = if j < count { j } else { 0 };
+            let id: i32 = selected[jc];
+            let valid: bool = j < count && id >= 0 && id < tokens;
+            for hq in 0..2 {
+              let h: i32 = w * 2 + hq;
+              let x: f32 = s[(t / 16) * 2 + h / 8][t % 16][h % 8] * scale;
+              xs[w][hq][t] = if valid { x } else { -3.0e38 };
+            }
+          }
+          let m0: f32 = lanes::max(&xs[w][0], 32);
+          let m1: f32 = lanes::max(&xs[w][1], 32);
+          for t in 0..32 across lanes {
+            for hq in 0..2 {
+              let m: f32 = if hq == 0 { m0 } else { m1 };
+              let x: f32 = xs[w][hq][t];
+              let e: f32 = (x - m).fast_exp();
+              pf[w][hq][t] = if x > -1.0e38 { e } else { 0.0 };
+            }
+          }
+          for t in 0..32 across lanes {
+            if t < 16 {
+              for th in 0..2 {
+                for hq in 0..2 {
+                  p[th][w * 2 + hq][t] = pf[w][hq][th * 16 + t] as bf16;
+                }
+              }
+            }
+          }
+          let l0: f32 = lanes::sum(&pf[w][0], 32);
+          let l1: f32 = lanes::sum(&pf[w][1], 32);
+          for t in 0..32 across lanes {
+            if t == 0 {
+              stats[hg][split][w * 4] = m0;
+              stats[hg][split][w * 4 + 1] = l0;
+              stats[hg][split][w * 4 + 2] = m1;
+              stats[hg][split][w * 4 + 3] = l1;
+            }
+          }
+        }
+        for w in 0..4 across subgroups {
+          lanes::fill(&mut o[w], 0.0);
+          o[w] = o[w] + (p[0] as f32) @ (sl[w] as f32);
+          o[w] = o[w] + (p[1] as f32) @ (sl[4 + w] as f32);
+          for t in 0..32 across lanes {
+            for i in 0..16 {
+              for jj in 0..4 {
+                numerator[hg][split][i * 512 + w * 128 + jj * 32 + t] = o[w][i][jj * 32 + t];
+              }
+            }
+          }
+        }
+        }
+      }
+    }
+  }
+  return;
+}

@@ -80,3 +80,27 @@ def test_mla_flash_matches_mla_chunks_through_its_splits(ctx):
             resident.close()
     np.testing.assert_allclose(out['flash'], out['chunks'], rtol=1e-4, atol=1e-4)
     assert (out['flash'].argmax(-1) == out['chunks'].argmax(-1)).all()
+
+
+@pytest.mark.skipif(not (SPAWN / 'mla_tc_at.ptx').exists(), reason='gpu/spawn mla_tc_at not built')
+def test_mla_tc_matches_mla_flash_to_bf16_rounding(ctx):
+    """mla_kernel='tc' (#33): bf16 caches and queries, the products on the tensor cores, against 'flash'
+    (f32) under replay; 600 steps run 1 to 19 splits of 32. The logits agree to bf16 rounding."""
+    steps = 600
+    model = build(seed=101, num_attention_heads=16, num_key_value_heads=16, kv_lora_rank=512, qk_rope_head_dim=64,
+                  qk_head_dim=72, index_head_dim=64, index_topk=1024, max_position_embeddings=1024)
+    tokens = np.random.default_rng(101).integers(0, model.config['vocab_size'], size=steps).tolist()
+    out = {}
+    for kernel in ('tc', 'flash'):
+        resident = ResidentGLM(model, ctx=ctx, max_tokens=steps + 8, device_experts=True, graph=True,
+                               fused_attention=True, mla_kernel=kernel)
+        try:
+            out[kernel] = resident.prefill(tokens)
+            assert resident.replays == steps - 1
+            if kernel == 'tc':
+                assert resident.launches.get('mla_tc_at', 0) > 0 and resident.launches.get('store_row_bf16_at', 0) > 0
+        finally:
+            resident.close()
+    scale = np.abs(out['flash']).max()
+    np.testing.assert_allclose(out['tc'], out['flash'], rtol=0, atol=2e-2 * scale)
+    assert (out['tc'].argmax(-1) == out['flash'].argmax(-1)).mean() > 0.95

@@ -1,0 +1,16 @@
+// The step's new cache row, rounded to bf16, at the position the step buffer holds (#33): the bf16
+// KV cache of mla_kernel='tc' (store_row's job for the f32 caches). cache[step[0]][k] = row[k].
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_store_row_bf16_at(cache: &mut Tensor<bf16, [?, ?], Memory::HBM>, row: &Tensor<f32, [?], Memory::HBM>,
+                                      step: &Tensor<i32, [?], Memory::HBM>, width: i32) -> void {
+  spawn on(Topology::Device) {
+    for b in 0..1 across blocks {
+      for k in 0..width across lanes(256) {
+        let position: i32 = step[0];
+        cache[position][k] = row[k] as bf16;
+      }
+    }
+  }
+  return;
+}

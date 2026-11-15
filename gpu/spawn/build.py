@@ -19,7 +19,7 @@ import argparse, hashlib, json, os, re, subprocess, sys, tempfile
 from pathlib import Path
 
 SCALARS = {'i32': '.u32', 'i64': '.u64', 'f32': '.f32'}
-ELEMENT_BITS = {'f32': 32, 'i32': 32, 'i64': 64, 'u32': 32, 'u16': 16, 'u8': 8}
+ELEMENT_BITS = {'f32': 32, 'i32': 32, 'i64': 64, 'u32': 32, 'u16': 16, 'u8': 8, 'bf16': 16}
 INCLUDE = re.compile(r'^//\s*spawn-include:\s*(\S+)\s*$', re.M)
 # `// spawn-vxc: -fFEATURE`: a vxc feature flag for this kernel only (Vx's -f values).
 VXC_FLAG = re.compile(r'^//\s*spawn-vxc:\s*(-f[\w-]+)\s*$', re.M)
@@ -259,10 +259,10 @@ def check_params(ptx: str, entry: str, params):
             stored.add(p['name'])
         # Element width: loads through this tensor must be as wide as its element in the manifest,
         # which catches a manifest whose read-only tensors of different types are out of place.
-        # vxc may load an i64 as two 32-bit halves, or only the half it uses.
         widths = {int(w) for a in addresses
                   for w in re.findall(rf'ld\.global(?:\.nc)?(?:\.v[24])?\.[bsuf](\d+)\s+(?:%\w+|\{{[^}}]*\}}), \[{re.escape(a)}(?:[+-]\d+)?\]', body)}
-        allowed = {ELEMENT_BITS[p['element']]} | ({32} if p['element'] == 'i64' else set())
+        # vxc may load an i64 as two 32-bit halves, and bf16 as words of two (ld.global.nc.v4.b32).
+        allowed = {ELEMENT_BITS[p['element']]} | ({32} if p['element'] in ('i64', 'bf16') else set())
         if widths - allowed:
             raise ValueError(f'{p["name"]} is {p["element"]} in the manifest but loaded {sorted(widths)} bits wide')
     declared = {p['name'] for p in params if p['kind'] == 'memref' and p['mut']}

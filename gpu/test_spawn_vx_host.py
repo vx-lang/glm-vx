@@ -1371,6 +1371,45 @@ def test_mla_flash_at_matches_mla_chunks_at_and_float64(run, heads, tokens, spli
         np.testing.assert_allclose(out, mla_float64(q, qr, kv, kr, selected, 0, count, tokens, scale), rtol=1e-4, atol=1e-5)
 
 
+def to_bf16(x):
+    """float32 -> bf16 bits, round to nearest even (finite values)."""
+    u = np.asarray(x, F).view(np.uint32).astype(np.uint64)
+    return ((u + 0x7FFF + ((u >> 16) & 1)) >> 16).astype(np.uint16)
+
+
+# mla_q_bf16_at + mla_tc_at + mla_flash_merge_at (#33): the bf16 cache on the tensor cores, one
+# 32-token chunk a split.
+# The products are of bf16 values (the queries and P rounded to bf16) with f32 sums, so out agrees
+# with float64 attention over the bf16 cache and queries to bf16 rounding.
+@pytest.mark.parametrize('heads,tokens,splits_max', [(16, 700, 8), (32, 300, 4)])
+def test_mla_tc_at_matches_float64_on_bf16_values(run, heads, tokens, splits_max):
+    rank, rope = 512, 64
+    rng = np.random.default_rng(heads + tokens + 1)
+    q, qr = rng.normal(size=(heads, rank)).astype(F), rng.normal(size=(heads, rope)).astype(F)
+    kv, kr = to_bf16(rng.normal(size=(tokens, rank))), to_bf16(rng.normal(size=(tokens, rope)))
+    scale = rank ** -0.5
+    common = dict(q_latent=q, q_rope=qr, cache_latent=kv.reshape(-1), cache_rope=kr.reshape(-1), heads=heads, rank=rank,
+                  rope_dim=rope, selection_stride=0, scale=scale, splits_max=splits_max)
+    as_f32 = lambda b: bf16(b)
+    for count in (0, 5, 33, min(32 * splits_max, tokens, 200)):
+        splits = max(1, (count + 31) // 32)
+        selected = rng.integers(0, tokens, size=max(1, 32 * splits)).astype(np.int32)
+        if count > 3:
+            selected[1], selected[count - 1] = -1, tokens + 5  # skipped
+        values = dict(selected=selected, step=np.array([tokens - 1, tokens, count, splits], np.int32), **common)
+        groups = heads // 16
+        qs = run('mla_q_bf16_at', q_t=np.zeros((groups, 1024, 8), np.uint16), qr_t=np.zeros((groups, 128, 8), np.uint16),
+                 q_latent=q, q_rope=qr, heads=heads, rank=rank, rope_dim=rope)
+        tc = {k: v for k, v in values.items() if k not in ('q_latent', 'q_rope')}
+        got = run('mla_tc_at', numerator=np.zeros((groups, splits_max, 16 * rank), F), stats=np.zeros((groups, splits_max, 32), F),
+                  q_t=qs['q_t'].reshape(-1, 8), qr_t=qs['qr_t'].reshape(-1, 8), **tc)
+        assert (got['numerator'][:, splits:] == 0).all() and (got['stats'][:, splits:] == 0).all()
+        out = run('mla_flash_merge_at', out=np.full((heads, rank), 7, F), numerator=got['numerator'], stats=got['stats'],
+                  step=values['step'], heads=heads, rank=rank, splits_max=splits_max)['out']
+        want = mla_float64(as_f32(to_bf16(q)), as_f32(to_bf16(qr)), as_f32(kv), as_f32(kr), selected, 0, count, tokens, scale)
+        np.testing.assert_allclose(out, want, rtol=0, atol=1e-2 * max(1.0, np.abs(want).max()))
+
+
 @pytest.mark.parametrize('heads,rank,rope,stride', [(16, 256, 64, 0), (16, 512, 32, 0), (16, 512, 64, 10), (8, 512, 64, 0)])
 def test_mla_flash_at_writes_nothing_off_its_shape(run, heads, rank, rope, stride):
     rng = np.random.default_rng(rank + rope + stride)

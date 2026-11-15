@@ -130,6 +130,21 @@ def mla_flash_merge_at(rng, heads=16, rank=512, splits=3, splits_max=4):
                 stats=stats, step=np.array([0, 1, 1, splits], 'i4'), heads=heads, rank=rank, splits_max=splits_max)
 
 
+def mla_q_bf16_at(rng, heads=16, rank=512, rope=64):
+    return dict(q_t=np.zeros((heads // 16, 1024, 8), 'u2'), qr_t=np.zeros((heads // 16, 128, 8), 'u2'),
+                q_latent=normal(rng, heads * rank), q_rope=normal(rng, heads * rope), heads=heads, rank=rank, rope_dim=rope)
+
+
+def mla_tc_at(rng, heads=16, rank=512, rope=64, tokens=300, count=37, splits=2, splits_max=4):
+    """mla_flash_at's inputs with a bf16 cache and mla_q_bf16_at's queries."""
+    values = mla_flash_at(rng, heads, rank, rope, tokens, count, splits, splits_max)
+    for name in ('q_latent', 'q_rope'):
+        values.pop(name)
+    values.update(q_t=bf16(rng, heads // 16 * 1024 * 8).reshape(-1, 8), qr_t=bf16(rng, heads // 16 * 128 * 8).reshape(-1, 8),
+                  cache_latent=bf16(rng, tokens * rank), cache_rope=bf16(rng, tokens * rope))
+    return values
+
+
 def expert_weights(rng, fmt, experts, rows, cols):
     """One projection for all experts in `fmt`, named as the expert_matvec kernels name them."""
     if fmt == 'bf16':
@@ -282,6 +297,10 @@ CASES = {
     'mla_heads_at': mla_heads_at,
     'mla_flash_at': mla_flash_at,
     'mla_flash_merge_at': mla_flash_merge_at,
+    'mla_q_bf16_at': mla_q_bf16_at,
+    'mla_tc_at': mla_tc_at,
+    'store_row_bf16_at': lambda r: dict(cache=bf16(r, 9 * 333).reshape(9, 333), row=normal(r, 333),
+                                        step=np.array([4, 5, 0, 0], 'i4'), width=333),
     'expert_scaled_add': lambda r: dict(out=normal(r, 333), x=normal(r, 333), weights=normal(r, 8),
                                         ids=moe_ids(r, 256, 8), k=8, slot=3, n=333),
     **{f'{p}expert_matvec': expert_matvec(f) for p, f in (('', 'f32'), ('bf16_', 'bf16'), ('fp8_', 'fp8'), ('int4_', 'int4'))},

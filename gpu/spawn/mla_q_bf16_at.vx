@@ -1,0 +1,40 @@
+// The decode step's MLA queries in bf16, laid out as mla_tc_at's shared tiles (#33), so that each of
+// its blocks copies them with lanes::copy_async instead of converting 16 heads' queries itself.
+// q_t[g][(c * 2 + hh) * 128 + k][h] is head 16 * g + 8 * hh + h's latent query at 128 * c + k, and
+// qr_t[g][hh * 64 + k][h] its rope query at k ([heads / 16, 1024, 8] and [heads / 16, 128, 8]; mla_tc_at
+// reads them as [heads / 16 * 1024, 8] and [heads / 16 * 128, 8]). Block (g, hh, h) does one head, a
+// lane one column of each 128, so that its loads go out together. Needs heads % 16 == 0, rank == 512
+// and rope_dim == 64; otherwise it writes nothing.
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_mla_q_bf16_at(q_t: &mut Tensor<bf16, [?, ?, ?], Memory::HBM>, qr_t: &mut Tensor<bf16, [?, ?, ?], Memory::HBM>,
+                                  q_latent: &Tensor<f32, [?], Memory::HBM>, q_rope: &Tensor<f32, [?], Memory::HBM>,
+                                  heads: i32, rank: i32, rope_dim: i32) -> void {
+  spawn on(Topology::Device) {
+    for g in 0..heads / 16 across blocks {
+      for hh in 0..2 across blocks {
+        for h in 0..8 across blocks {
+          for k in 0..128 across lanes(128) {
+            if heads % 16 == 0 && rank == 512 && rope_dim == 64 {
+              let head: i32 = g * 16 + hh * 8 + h;
+              let v0: f32 = q_latent[head * 512 + k];
+              let v1: f32 = q_latent[head * 512 + 128 + k];
+              let v2: f32 = q_latent[head * 512 + 256 + k];
+              let v3: f32 = q_latent[head * 512 + 384 + k];
+              q_t[g][hh * 128 + k][h] = v0 as bf16;
+              q_t[g][(2 + hh) * 128 + k][h] = v1 as bf16;
+              q_t[g][(4 + hh) * 128 + k][h] = v2 as bf16;
+              q_t[g][(6 + hh) * 128 + k][h] = v3 as bf16;
+            }
+          }
+          for k in 0..64 across lanes(128) {
+            if heads % 16 == 0 && rank == 512 && rope_dim == 64 {
+              qr_t[g][hh * 64 + k][h] = q_rope[(g * 16 + hh * 8 + h) * 64 + k] as bf16;
+            }
+          }
+        }
+      }
+    }
+  }
+  return;
+}
