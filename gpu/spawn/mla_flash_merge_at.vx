@@ -1,0 +1,89 @@
+// Merges mla_flash_at's splits (#33): out[h][t] = sum over splits s of exp(m_s - m) * numerator_s[t]
+// over the sum of exp(m_s - m) * l_s, m the largest m_s of the splits that saw a token, as mla_merge.
+// Block (h, c) writes head h's columns c * 128 .. + 127. Its subgroup w merges splits 16 * w .. + 15
+// the same way, for four columns a lane, into its own max, sum and denominator; the block then merges
+// the four. numerator [heads / 16, splits_max, 16 * rank] and stats [heads / 16, splits_max, 32] are
+// mla_flash_at's; splits comes from the step buffer. The split loops are branch-free and of constant
+// length, so their loads are issued together. Needs heads % 16 == 0, rank == 512 and
+// 0 < splits <= min(splits_max, 64); otherwise it writes nothing.
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_mla_flash_merge_at(out: &mut Tensor<f32, [?, ?], Memory::HBM>, numerator: &Tensor<f32, [?, ?, ?], Memory::HBM>,
+                                       stats: &Tensor<f32, [?, ?, ?], Memory::HBM>, step: &Tensor<i32, [?], Memory::HBM>,
+                                       heads: i32, rank: i32, splits_max: i32) -> void {
+  spawn on(Topology::Device) {
+    for h in 0..heads across blocks {
+      for c in 0..4 across blocks {
+        let splits: i32 = step[3];
+        let ok: bool = splits > 0 && splits <= splits_max && splits <= 64 && heads % 16 == 0 && rank == 512;
+        let hg: i32 = if ok { h / 16 } else { 0 };
+        let g: i32 = h % 16;
+        // ps[w][j][lane]: subgroup w's sum at column c * 128 + j * 32 + lane; pm, pd: its max and
+        // denominator (the same in every lane).
+        let mut ps = unsafe { Tensor<f32, [4, 4, 32], Memory::SMEM>::uninit() };
+        let mut pm = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
+        let mut pd = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
+        for w in 0..4 across subgroups {
+          for lane in 0..32 across lanes {
+            let n: i32 = if ok { splits } else { 1 };
+            // Split s reads split min(s, n - 1) and counts only when s < n and its l > 0.
+            let mut m: f32 = -3.0e38;
+            for i in 0..16 {
+              let s: i32 = w * 16 + i;
+              let r: i32 = if s < n { s } else { n - 1 };
+              let v: f32 = stats[hg][r][g * 2];
+              let l: f32 = stats[hg][r][g * 2 + 1];
+              m = if s < n && l > 0.0 && v > m { v } else { m };
+            }
+            let mut s0: f32 = 0.0;
+            let mut s1: f32 = 0.0;
+            let mut s2: f32 = 0.0;
+            let mut s3: f32 = 0.0;
+            let mut d: f32 = 0.0;
+            let base: i32 = g * 512 + c * 128 + lane;
+            for i in 0..16 {
+              let s: i32 = w * 16 + i;
+              let r: i32 = if s < n { s } else { n - 1 };
+              let l: f32 = stats[hg][r][g * 2 + 1];
+              let e: f32 = (stats[hg][r][g * 2] - m).fast_exp();
+              let factor: f32 = if s < n && l > 0.0 { e } else { 0.0 };
+              s0 = s0 + numerator[hg][r][base] * factor;
+              s1 = s1 + numerator[hg][r][base + 32] * factor;
+              s2 = s2 + numerator[hg][r][base + 64] * factor;
+              s3 = s3 + numerator[hg][r][base + 96] * factor;
+              d = d + l * factor;
+            }
+            ps[w][0][lane] = s0;
+            ps[w][1][lane] = s1;
+            ps[w][2][lane] = s2;
+            ps[w][3][lane] = s3;
+            pm[w][lane] = m;
+            pd[w][lane] = d;
+          }
+        }
+        for t in 0..128 across lanes {
+          if ok {
+            let j: i32 = t / 32;
+            let k: i32 = t % 32;
+            let mut m: f32 = -3.0e38;
+            for w in 0..4 {
+              m = if pd[w][k] > 0.0 && pm[w][k] > m { pm[w][k] } else { m };
+            }
+            let mut sum: f32 = 0.0;
+            let mut denominator: f32 = 0.0;
+            for w in 0..4 {
+              let e: f32 = (pm[w][k] - m).fast_exp();
+              let factor: f32 = if pd[w][k] > 0.0 { e } else { 0.0 };
+              sum = sum + ps[w][j][k] * factor;
+              denominator = denominator + pd[w][k] * factor;
+            }
+            let mut result: f32 = 0.0;
+            if denominator > 0.0 { result = sum / denominator; }
+            out[h][c * 128 + t] = result;
+          }
+        }
+      }
+    }
+  }
+  return;
+}

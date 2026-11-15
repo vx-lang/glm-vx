@@ -1,0 +1,150 @@
+// MLA decode with each lane's query and sums in registers for the whole loop over tokens (#33): block
+// (group, split) takes heads 16 * group .. + 15, two a subgroup, and the split's tokens
+// j = split + q * splits, as mla_chunks_at. Each lane keeps its elements e * 32 + lane of the two
+// heads' queries (16 of the latent, 2 of the rope), of their sums of weighted latent rows (16 each), and
+// the online softmax's max and sum of each head. For each token the lane dots its 18 elements of the
+// token's rows with the two queries, sums each across the subgroup, folds the score into the softmax,
+// and adds the same latent elements, weighted, to the sums. A head's sums are scaled only when its max
+// rises. While a token is scored the lane loads the next token's elements, and the id two tokens on,
+// so the loop does not wait on memory once a token. mla_flash_merge_at then merges the splits.
+//
+// The score of a token is mla_chunks_at's bit for bit (the same products and sums in the same order);
+// the softmax folds one token at a time instead of 32, so out agrees with it to rounding.
+//
+// The tiles below are in shared memory as written, but every access is the lane's own element, so
+// Vx keeps them in registers (vx-lang/Vx#3469, PR #3475, Vx 243ea31c): without that the kernel reads
+// its queries and sums from shared memory for every token. ptxas would take 139 registers, one
+// 256-thread block an SM; 128 lets two run (H200, 2048 tokens in 64 splits: 29 us against 44).
+//
+// numerator [heads / 16, splits_max, 16 * rank] and stats [heads / 16, splits_max, 32] (m, l of each
+// head) are per group of 16 heads. tokens, count and splits come from the step buffer. Needs
+// heads % 16 == 0, rank == 512, rope_dim == 64 (GLM-5.3's) and selection_stride 0; otherwise, and for
+// splits past step's, it writes nothing.
+// spawn-maxnreg: 128 (build.py)
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_mla_flash_at(numerator: &mut Tensor<f32, [?, ?, ?], Memory::HBM>, stats: &mut Tensor<f32, [?, ?, ?], Memory::HBM>,
+                                 q_latent: &Tensor<f32, [?], Memory::HBM>, q_rope: &Tensor<f32, [?], Memory::HBM>,
+                                 cache_latent: &Tensor<f32, [?], Memory::HBM>, cache_rope: &Tensor<f32, [?], Memory::HBM>,
+                                 selected: &Tensor<i32, [?], Memory::HBM>, step: &Tensor<i32, [?], Memory::HBM>,
+                                 heads: i32, rank: i32, rope_dim: i32, selection_stride: i32, splits_max: i32, scale: f32) -> void {
+  spawn on(Topology::Device) {
+    for hg in 0..heads / 16 across blocks {
+      for split in 0..splits_max across blocks {
+        let tokens: i32 = step[1];
+        let count: i32 = step[2];
+        let splits: i32 = step[3];
+        let ok: bool = split < splits && heads % 16 == 0 && rank == 512 && rope_dim == 64 && selection_stride == 0
+                       && tokens >= 0 && count >= 0 && splits > 0;
+        // This split's tokens are j = split + q * splits for q below n.
+        let n: i32 = if ok { (count - split + splits - 1) / splits } else { 0 };
+        // qr[w][h][e][lane]: head 16 * hg + 2 * w + h's query at e * 32 + lane (e < 16 latent, else rope).
+        let mut qr = unsafe { Tensor<f32, [8, 2, 18, 32], Memory::SMEM>::uninit() };
+        // acc[w][h][e][lane]: that head's sum of weighted latent rows at e * 32 + lane.
+        let mut acc = unsafe { Tensor<f32, [8, 2, 16, 32], Memory::SMEM>::uninit() };
+        // st[w][h][0 / 1][lane]: that head's running max and sum of weights (the same in every lane).
+        let mut st = unsafe { Tensor<f32, [8, 2, 2, 32], Memory::SMEM>::uninit() };
+        let mut row = unsafe { Tensor<f32, [8, 18, 32], Memory::SMEM>::uninit() };
+        // nx[w][e][lane]: the next token's row, loaded while this one is scored.
+        let mut nx = unsafe { Tensor<f32, [8, 18, 32], Memory::SMEM>::uninit() };
+        // tok[w][0 / 1 / 2][lane]: the tokens q, q + 1 and q + 2 (q + 2's id is loaded a step ahead of its row).
+        let mut tok = unsafe { Tensor<i32, [8, 3, 32], Memory::SMEM>::uninit() };
+        let mut part = unsafe { Tensor<f32, [8, 2, 32], Memory::SMEM>::uninit() };
+        for w in 0..8 across subgroups {
+          for lane in 0..32 across lanes {
+            let h0: i32 = hg * 16 + w * 2;
+            // Off its shape the block writes nothing, so it may read row 0 instead.
+            let hq: i32 = if ok { h0 } else { 0 };
+            for h in 0..2 {
+              for e in 0..16 {
+                qr[w][h][e][lane] = q_latent[(hq + h) * 512 + e * 32 + lane];
+                acc[w][h][e][lane] = 0.0;
+              }
+              for e in 0..2 {
+                qr[w][h][16 + e][lane] = q_rope[(hq + h) * 64 + e * 32 + lane];
+              }
+              st[w][h][0][lane] = 0.0;
+              st[w][h][1][lane] = 0.0;
+            }
+            // Tokens past n are never used; they read the split's last token (or selected[0]).
+            let last: i32 = if n > 0 { n - 1 } else { 0 };
+            let s0: i32 = if ok { split } else { 0 };
+            let t0: i32 = selected[s0];
+            let q1: i32 = if 1 < last { 1 } else { last };
+            let q2: i32 = if 2 < last { 2 } else { last };
+            let t1: i32 = selected[s0 + q1 * splits];
+            tok[w][0][lane] = t0;
+            tok[w][1][lane] = t1;
+            tok[w][2][lane] = selected[s0 + q2 * splits];
+            let k0: i32 = if t0 >= 0 && t0 < tokens { t0 } else { 0 };
+            for e in 0..16 { row[w][e][lane] = cache_latent[k0 * 512 + e * 32 + lane]; }
+            for e in 0..2 { row[w][16 + e][lane] = cache_rope[k0 * 64 + e * 32 + lane]; }
+          }
+          for q in 0..n {
+            for lane in 0..32 across lanes {
+              for h in 0..2 {
+                let mut p: f32 = 0.0;
+                for e in 0..16 {
+                  p = p + qr[w][h][e][lane] * row[w][e][lane];
+                }
+                for e in 0..2 {
+                  p = p + qr[w][h][16 + e][lane] * row[w][16 + e][lane];
+                }
+                part[w][h][lane] = p;
+              }
+              // Start the next token's row and the id after it.
+              let t1: i32 = tok[w][1][lane];
+              let k1: i32 = if t1 >= 0 && t1 < tokens { t1 } else { 0 };
+              for e in 0..16 { nx[w][e][lane] = cache_latent[k1 * 512 + e * 32 + lane]; }
+              for e in 0..2 { nx[w][16 + e][lane] = cache_rope[k1 * 64 + e * 32 + lane]; }
+            }
+            let x0: f32 = lanes::sum(&part[w][0], 32);
+            let x1: f32 = lanes::sum(&part[w][1], 32);
+            for lane in 0..32 across lanes {
+              let token: i32 = tok[w][0][lane];
+              if token >= 0 && token < tokens {
+                for h in 0..2 {
+                  let d: f32 = if h == 0 { x0 } else { x1 };
+                  let x: f32 = d * scale;
+                  let m0: f32 = st[w][h][0][lane];
+                  let l0: f32 = st[w][h][1][lane];
+                  let mut m1: f32 = x;
+                  if l0 > 0.0 && m0 > x { m1 = m0; }
+                  let weight: f32 = (x - m1).fast_exp();
+                  let mut alpha: f32 = 1.0;
+                  if l0 > 0.0 && m1 > m0 {
+                    alpha = (m0 - m1).fast_exp();
+                    for e in 0..16 { acc[w][h][e][lane] = acc[w][h][e][lane] * alpha; }
+                  }
+                  st[w][h][0][lane] = m1;
+                  st[w][h][1][lane] = l0 * alpha + weight;
+                  for e in 0..16 { acc[w][h][e][lane] = fma32!(weight, row[w][e][lane], acc[w][h][e][lane]); }
+                }
+              }
+              for e in 0..18 { row[w][e][lane] = nx[w][e][lane]; }
+              let last: i32 = n - 1;
+              let q3: i32 = if q + 3 < last { q + 3 } else { last };
+              tok[w][0][lane] = tok[w][1][lane];
+              tok[w][1][lane] = tok[w][2][lane];
+              tok[w][2][lane] = selected[split + q3 * splits];
+            }
+          }
+          for lane in 0..32 across lanes {
+            if ok {
+              for h in 0..2 {
+                for e in 0..16 {
+                  numerator[hg][split][(w * 2 + h) * 512 + e * 32 + lane] = acc[w][h][e][lane];
+                }
+                if lane == 0 {
+                  stats[hg][split][(w * 2 + h) * 2] = st[w][h][0][lane];
+                  stats[hg][split][(w * 2 + h) * 2 + 1] = st[w][h][1][lane];
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return;
+}

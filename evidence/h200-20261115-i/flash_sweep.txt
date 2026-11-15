@@ -1,0 +1,45 @@
+## 256 selected tokens
+chunks 64/split               101.8 us   max|diff vs chunks| 0.00e+00   rel err vs f64 3.24e-07
+heads 64/split                 52.4 us   max|diff vs chunks| 0.00e+00   rel err vs f64 3.24e-07
+chunks 128/split              104.7 us   max|diff vs chunks| 2.38e-07   rel err vs f64 6.42e-07
+heads 128/split                84.2 us   max|diff vs chunks| 2.38e-07   rel err vs f64 6.42e-07
+chunks 256/split              154.6 us   max|diff vs chunks| 4.77e-07   rel err vs f64 8.05e-07
+heads 256/split               152.8 us   max|diff vs chunks| 4.77e-07   rel err vs f64 8.05e-07
+flash_at 8/split (32)          32.7 us   max|diff vs chunks| 1.79e-07   rel err vs f64 2.96e-07
+flash2_at 8/split (32)         32.7 us   max|diff vs chunks| 1.79e-07   rel err vs f64 2.96e-07
+flash_at 16/split (16)         33.6 us   max|diff vs chunks| 1.49e-07   rel err vs f64 2.92e-07
+flash2_at 16/split (16)        32.2 us   max|diff vs chunks| 1.49e-07   rel err vs f64 2.92e-07
+flash_at 32/split (8)          45.1 us   max|diff vs chunks| 1.79e-07   rel err vs f64 3.21e-07
+flash2_at 32/split (8)         43.6 us   max|diff vs chunks| 1.79e-07   rel err vs f64 3.21e-07
+flash_at 64/split (4)          70.7 us   max|diff vs chunks| 1.19e-07   rel err vs f64 3.16e-07
+flash2_at 64/split (4)         67.2 us   max|diff vs chunks| 1.19e-07   rel err vs f64 3.16e-07
+## 1000 selected tokens
+chunks 64/split               209.8 us   max|diff vs chunks| 0.00e+00   rel err vs f64 4.75e-07
+heads 64/split                 81.5 us   max|diff vs chunks| 0.00e+00   rel err vs f64 4.75e-07
+chunks 128/split              209.5 us   max|diff vs chunks| 1.04e-07   rel err vs f64 3.70e-07
+heads 128/split                96.7 us   max|diff vs chunks| 1.04e-07   rel err vs f64 3.70e-07
+chunks 256/split              211.6 us   max|diff vs chunks| 1.49e-07   rel err vs f64 5.38e-07
+heads 256/split               153.9 us   max|diff vs chunks| 1.49e-07   rel err vs f64 5.38e-07
+flash_at 8/split (64)          57.6 us   max|diff vs chunks| 1.19e-07   rel err vs f64 4.01e-07
+flash2_at 8/split (64)         56.6 us   max|diff vs chunks| 1.19e-07   rel err vs f64 4.01e-07
+flash_at 16/split (63)         57.8 us   max|diff vs chunks| 1.34e-07   rel err vs f64 4.61e-07
+flash2_at 16/split (63)        56.2 us   max|diff vs chunks| 1.34e-07   rel err vs f64 4.61e-07
+flash_at 32/split (32)         57.8 us   max|diff vs chunks| 1.64e-07   rel err vs f64 3.83e-07
+flash2_at 32/split (32)        56.1 us   max|diff vs chunks| 1.64e-07   rel err vs f64 3.83e-07
+flash_at 64/split (16)         82.3 us   max|diff vs chunks| 8.94e-08   rel err vs f64 4.50e-07
+flash2_at 64/split (16)        79.1 us   max|diff vs chunks| 8.94e-08   rel err vs f64 4.50e-07
+## 2048 selected tokens
+chunks 64/split               352.5 us   max|diff vs chunks| 0.00e+00   rel err vs f64 2.41e-07
+heads 64/split                120.0 us   max|diff vs chunks| 0.00e+00   rel err vs f64 2.41e-07
+chunks 128/split              352.3 us   max|diff vs chunks| 0.00e+00   rel err vs f64 2.41e-07
+heads 128/split               119.6 us   max|diff vs chunks| 0.00e+00   rel err vs f64 2.41e-07
+chunks 256/split              359.0 us   max|diff vs chunks| 1.04e-07   rel err vs f64 3.38e-07
+heads 256/split               170.8 us   max|diff vs chunks| 1.04e-07   rel err vs f64 3.38e-07
+flash_at 8/split (64)          76.1 us   max|diff vs chunks| 1.19e-07   rel err vs f64 3.37e-07
+flash2_at 8/split (64)         74.5 us   max|diff vs chunks| 1.19e-07   rel err vs f64 3.37e-07
+flash_at 16/split (64)         75.8 us   max|diff vs chunks| 1.19e-07   rel err vs f64 3.37e-07
+flash2_at 16/split (64)        73.8 us   max|diff vs chunks| 1.19e-07   rel err vs f64 3.37e-07
+flash_at 32/split (64)         75.9 us   max|diff vs chunks| 1.19e-07   rel err vs f64 3.37e-07
+flash2_at 32/split (64)        74.0 us   max|diff vs chunks| 1.19e-07   rel err vs f64 3.37e-07
+flash_at 64/split (32)         92.8 us   max|diff vs chunks| 8.94e-08   rel err vs f64 3.50e-07
+flash2_at 64/split (32)        89.5 us   max|diff vs chunks| 8.94e-08   rel err vs f64 3.50e-07

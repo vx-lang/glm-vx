@@ -1337,6 +1337,52 @@ def test_mla_heads_at_equals_mla_chunks_at(run, heads, rank, rope, tokens, split
                                    rtol=1e-4, atol=1e-5)
 
 
+# mla_flash_at + mla_flash_merge_at (#33): each lane's query and sums in registers, one token at a time;
+# out agrees with mla_chunks_at to rounding (the softmax folds one token at a time, not 32) and with
+# float64 attention. Ids out of range are skipped; splits past step's write nothing.
+def flash(run, heads, splits_max, values):
+    groups, rank = heads // 16, values['rank']
+    got = run('mla_flash_at', numerator=np.zeros((groups, splits_max, 16 * rank), F), stats=np.zeros((groups, splits_max, 32), F),
+              **{k: v for k, v in values.items() if k not in ('threads',)})
+    out = run('mla_flash_merge_at', out=np.full((heads, rank), 7, F), numerator=got['numerator'], stats=got['stats'],
+              step=values['step'], heads=heads, rank=rank, splits_max=splits_max)['out']
+    return got, out
+
+
+@pytest.mark.parametrize('heads,tokens,splits_max', [(16, 700, 3), (32, 300, 16)])
+def test_mla_flash_at_matches_mla_chunks_at_and_float64(run, heads, tokens, splits_max):
+    rank, rope = 512, 64
+    rng = np.random.default_rng(heads + tokens)
+    q, qr = rng.normal(size=(heads, rank)).astype(F), rng.normal(size=(heads, rope)).astype(F)
+    kv, kr = rng.normal(size=(tokens, rank)).astype(F), rng.normal(size=(tokens, rope)).astype(F)
+    scale = rank ** -0.5
+    common = dict(q_latent=q, q_rope=qr, cache_latent=kv, cache_rope=kr, heads=heads, rank=rank, rope_dim=rope,
+                  selection_stride=0, scale=scale, splits_max=splits_max)
+    for count, splits in ((0, 1), (5, 1), (33, 2), (min(200, tokens), min(3, splits_max))):
+        selected = rng.integers(0, tokens, size=max(1, count)).astype(np.int32)
+        if count > 3:
+            selected[1], selected[-1] = -1, tokens + 5  # skipped
+        values = dict(selected=selected, step=np.array([tokens - 1, tokens, count, splits], np.int32), **common)
+        got, out = flash(run, heads, splits_max, values)
+        assert (got['numerator'][:, splits:] == 0).all() and (got['stats'][:, splits:] == 0).all()
+        want = run('mla_chunks_at', out=np.full((heads, rank), 7, F), numerator=np.zeros((heads, splits_max, rank), F),
+                   stats=np.zeros((heads, splits_max, 2), F), arrivals=np.zeros(heads, np.int32), threads=64, **values)['out']
+        np.testing.assert_allclose(out, want, rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(out, mla_float64(q, qr, kv, kr, selected, 0, count, tokens, scale), rtol=1e-4, atol=1e-5)
+
+
+@pytest.mark.parametrize('heads,rank,rope,stride', [(16, 256, 64, 0), (16, 512, 32, 0), (16, 512, 64, 10), (8, 512, 64, 0)])
+def test_mla_flash_at_writes_nothing_off_its_shape(run, heads, rank, rope, stride):
+    rng = np.random.default_rng(rank + rope + stride)
+    tokens, groups = 50, max(1, heads // 16)
+    values = dict(q_latent=rng.normal(size=heads * rank).astype(F), q_rope=rng.normal(size=heads * rope).astype(F),
+                  cache_latent=rng.normal(size=tokens * rank).astype(F), cache_rope=rng.normal(size=tokens * rope).astype(F),
+                  selected=np.arange(heads * 10, dtype=np.int32), step=np.array([tokens - 1, tokens, 10, 1], np.int32),
+                  heads=heads, rank=rank, rope_dim=rope, selection_stride=stride, splits_max=2, scale=0.1)
+    got = run('mla_flash_at', numerator=np.zeros((groups, 2, 16 * rank), F), stats=np.zeros((groups, 2, 32), F), **values)
+    assert (got['numerator'] == 0).all() and (got['stats'] == 0).all()
+
+
 def test_mla_heads_at_writes_nothing_for_per_head_selections(run):
     heads, rank, rope, tokens = 4, 32, 4, 50
     rng = np.random.default_rng(3)

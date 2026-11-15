@@ -230,7 +230,7 @@ def test_every_kernel_has_a_launch_shape_that_launch_reads(tmp_path):
             manifest = json.loads(out.with_suffix('.json').read_text())
             launch = manifest['launch']
             assert launch, (source.stem, variant)
-            values = {p['name']: 3 for p in manifest['params'] if p['kind'] == 'scalar'}
+            values = {p['name']: 64 for p in manifest['params'] if p['kind'] == 'scalar'}  # 64: heads / 16 >= 1
             for size in launch['grid'] + [launch['block']]:
                 assert launch_size(size, values) >= 1, (source.stem, variant, size)
 

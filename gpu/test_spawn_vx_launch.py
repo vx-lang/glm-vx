@@ -113,6 +113,23 @@ def mla_heads_at(rng, heads=8, rank=64, rope=64, tokens=300, count=37, splits=2,
     return values
 
 
+def mla_flash_at(rng, heads=16, rank=512, rope=64, tokens=300, count=37, splits=2, splits_max=4):
+    """mla_heads_at's inputs at GLM-5.3's rank and rope, the buffers per group of 16 heads."""
+    values = mla_decode_at(rng, heads, rank, rope, tokens, count, splits, splits_max, stride=0)
+    for name in ('out', 'arrivals', 'threads'):
+        values.pop(name, None)
+    values.update(numerator=np.zeros((heads // 16, splits_max, 16 * rank), 'f4'), stats=np.zeros((heads // 16, splits_max, 32), 'f4'))
+    return values
+
+
+def mla_flash_merge_at(rng, heads=16, rank=512, splits=3, splits_max=4):
+    stats = np.zeros((heads // 16, splits_max, 32), 'f4')
+    stats[:, :, 0::2] = rng.normal(size=(heads // 16, splits_max, 16))
+    stats[:, :, 1::2] = rng.uniform(0.5, 2, size=(heads // 16, splits_max, 16))
+    return dict(out=np.full((heads, rank), 7, 'f4'), numerator=normal(rng, heads // 16 * splits_max * 16 * rank).reshape(heads // 16, splits_max, 16 * rank),
+                stats=stats, step=np.array([0, 1, 1, splits], 'i4'), heads=heads, rank=rank, splits_max=splits_max)
+
+
 def expert_weights(rng, fmt, experts, rows, cols):
     """One projection for all experts in `fmt`, named as the expert_matvec kernels name them."""
     if fmt == 'bf16':
@@ -263,6 +280,8 @@ CASES = {
     'mla_decode_at': mla_decode_at,
     'mla_chunks_at': mla_decode_at,
     'mla_heads_at': mla_heads_at,
+    'mla_flash_at': mla_flash_at,
+    'mla_flash_merge_at': mla_flash_merge_at,
     'expert_scaled_add': lambda r: dict(out=normal(r, 333), x=normal(r, 333), weights=normal(r, 8),
                                         ids=moe_ids(r, 256, 8), k=8, slot=3, n=333),
     **{f'{p}expert_matvec': expert_matvec(f) for p, f in (('', 'f32'), ('bf16_', 'bf16'), ('fp8_', 'fp8'), ('int4_', 'int4'))},
