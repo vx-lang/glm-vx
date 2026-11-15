@@ -122,6 +122,27 @@ def parse(csv_text):
     return [r for r in rows[1:] if r.get('Kernel Name')]
 
 
+def with_library_kernels(launches, rows):
+    """launches with an entry for each kernel ncu saw that is not ours (not glm_vx_*): a library's,
+    such as cuBLASLt's matmul and its split-K reduction (fp8_kernels='cublaslt', #29), which the
+    step's launch record does not see. Each takes the layer and projection of our launch before it
+    (that projection's fp8_quant_groups) and its own short name. Unchanged if a glm_vx_* row is not
+    the next recorded launch, so the count check reports it."""
+    out, i = [], 0
+    for row in rows:
+        if row['Kernel Name'].startswith('glm_vx_'):
+            if i >= len(launches):
+                return launches
+            out.append(launches[i])
+            i += 1
+        elif out:
+            name = row['Kernel Name'].removeprefix('void ').split('<')[0].split('(')[0].split('::')[-1]
+            out.append([name, out[-1][1], out[-1][2]])
+        else:
+            return launches
+    return out if i == len(launches) else launches
+
+
 def number(value):
     return float(str(value).replace(',', '')) if value not in (None, '', 'n/a') else 0.0
 
@@ -132,6 +153,8 @@ def report(info, rows, peak_gbs):
     if not counted:
         rows = [{'gpu__time_duration.sum': us * 1e3, 'launch__grid_size': '', 'launch__block_size': '',
                  'launch__registers_per_thread': '', 'Kernel Name': name} for us, (name, *_) in zip(info['us'], launches)]
+    if counted:
+        launches = with_library_kernels(launches, rows)
     if len(rows) != len(launches):
         raise SystemExit(f'ncu profiled {len(rows)} kernels, the step launched {len(launches)}')
     kernels = []
