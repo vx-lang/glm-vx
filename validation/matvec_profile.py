@@ -3,8 +3,8 @@
 #30, for --format fp8 (the default), bf16 or int4: the hand kernel (gpu/fp8.vx, bf16.vx, int4.vx),
 gpu/spawn's kernel of the same order through Vx's own path (fp8_matvec, bf16_matvec, int4_matvec), and
 gpu/spawn's kernel that reads four u32 words a lane step, one 16-byte load (fp8_matvec4,
-bf16_matvec4, int4_matvec4). For fp8 also fp8_matvec_fma ('matvec_fma': fp8_matvec4's layout with one
-fma a code, which ncu on an H200 suggested; the others are instruction-bound). Each launch is timed with CUDA events after a 512 MB copy that evicts L2
+bf16_matvec4, int4_matvec4). For fp8 also fp8_matvec_fma and fp8_matvec_fma_tiles ('matvec_fma',
+'matvec_fma_tiles': one fma a code, two rows a warp, #30). Each launch is timed with CUDA events after a 512 MB copy that evicts L2
 and keeps the GPU busy while it is queued (moe_profile.l2_flush), the median of --repeats. The report
 gives GPU time, GB/s for the weight bytes and scales, and the share of the device's peak DRAM
 bandwidth. The three outputs are checked to agree to 1e-4 relative (their summation orders differ);
@@ -70,7 +70,7 @@ def kernels(fmt, ctx, build, rng, rows, cols, stream):
     from gpu.spawn.launch import SpawnKernel
     up = lambda a: ctx.tensor(a.shape, str(a.dtype), a.tobytes())
     i32 = C.c_int32
-    outs = {k: ctx.tensor((rows,)) for k in ('hand', 'spawn', 'matvec4') + (('matvec_fma',) if fmt == 'fp8' else ())}
+    outs = {k: ctx.tensor((rows,)) for k in ('hand', 'spawn', 'matvec4') + (('matvec_fma', 'matvec_fma_tiles') if fmt == 'fp8' else ())}
     x = up(rng.normal(size=cols).astype('f4'))
     if fmt == 'fp8':
         codes = rng.integers(0, 256, size=rows * cols, dtype=np.uint8)
@@ -79,8 +79,8 @@ def kernels(fmt, ctx, build, rng, rows, cols, stream):
         weight, d_scales = up(codes), up(scales)
         words = weight.view((rows * cols // 4,), 'uint32')  # the same bytes, four codes an element
         hand = ctx.load_ptx(build / 'fp8.ptx').kernel('glm_vx_gpu_fp8_matvec')
-        spawn, four, fma = (SpawnKernel(ctx, build / 'spawn' / f'{n}.ptx')
-                            for n in ('fp8_matvec', 'fp8_matvec4', 'fp8_matvec_fma'))
+        spawn, four, fma, tiles = (SpawnKernel(ctx, build / 'spawn' / f'{n}.ptx')
+                                   for n in ('fp8_matvec', 'fp8_matvec4', 'fp8_matvec_fma', 'fp8_matvec_fma_tiles'))
         kernels.fp8 = (x, codes, scales)
         return codes.nbytes + scales.nbytes, {
             'hand': lambda: hand.launch((-(-rows // 8),), (256,), [outs['hand'], weight, d_scales, x, i32(rows), i32(cols)],
@@ -90,7 +90,9 @@ def kernels(fmt, ctx, build, rng, rows, cols, stream):
             'matvec4': lambda: four.launch(stream=stream, out=outs['matvec4'], weight=words, scales=d_scales, x=x,
                                            rows=rows, cols=cols),
             'matvec_fma': lambda: fma.launch(stream=stream, out=outs['matvec_fma'], weight=words, scales=d_scales, x=x,
-                                             rows=rows, cols=cols)}, outs
+                                             rows=rows, cols=cols),
+            'matvec_fma_tiles': lambda: tiles.launch(stream=stream, out=outs['matvec_fma_tiles'], weight=words,
+                                                     scales=d_scales, x=x, rows=rows, cols=cols)}, outs
     if fmt == 'bf16':
         bits = (rng.normal(size=rows * cols).astype('f4').view(np.uint32) >> 16).astype(np.uint16)
         weight = up(bits)

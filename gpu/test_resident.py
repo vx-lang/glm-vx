@@ -260,7 +260,8 @@ def test_fp8_fma_kernels_match_the_hand_kernels():
     (hand, _), (fma, launches) = runs['hand'], runs['fma']
     np.testing.assert_allclose(fma, hand, rtol=1e-4, atol=1e-4)
     assert (fma.argmax(-1) == hand.argmax(-1)).all()
-    assert launches.get('fp8_matvec_fma', 0) > 0 and launches.get('fp8_moe4_gate_up', 0) > 0
+    # hidden_size 144 is below FMA_LONG_ROWS, so the dense Linears take fp8_matvec_fma_tiles.
+    assert launches.get('fp8_matvec_fma_tiles', 0) > 0 and launches.get('fp8_moe4_gate_up', 0) > 0
     assert 'fp8_matvec4' not in launches
 
 

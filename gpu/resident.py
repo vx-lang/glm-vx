@@ -74,10 +74,11 @@ load. Their summation order differs from the hand kernels', so the logits are cl
 path's, not equal; each kernel's own order is pinned by gpu/test_spawn_vx_host.py. Widths that are
 not a multiple of 16 keep the default kernels.
 
-``fp8_kernels='fma'`` is 'x4' with the dense FP8 Linears through fp8_matvec_fma instead of
-fp8_matvec4 (#30): the same layout, one fma a code (fp8_matvec4 spends two multiplies and an add), so
-not fp8_matvec4's bits; it is within 2e-6 of the float64 sum of the dequantized weights and float32
-activations, closer than fp8_matvec4. The routed experts and forward_many keep the x4 kernels.
+``fp8_kernels='fma'`` is 'x4' with the dense FP8 Linears through fp8_matvec_fma (input width
+FMA_LONG_ROWS or more) or fp8_matvec_fma_tiles (#30): one fma a code (fp8_matvec4 spends two
+multiplies and an add) and two rows a warp, so not fp8_matvec4's bits; each is within 2e-6 of the
+float64 sum of the dequantized weights and float32 activations, closer than fp8_matvec4. The routed
+experts and forward_many keep the x4 kernels.
 
 ``fp8_kernels='cublaslt'`` runs the dense FP8 Linears whose input width is a multiple of 128 through
 cuBLASLt's block-scaled FP8 matmul (gpu/cublaslt.py, #29): x quantized to e4m3 per 128 columns
@@ -116,6 +117,9 @@ _ELEMENTWISE_BLOCK = 256
 MATVEC_ROWS_MAX = 1024
 MATVEC_ROWS_COLS = 8192  # matvec_rows.vx's shared floats
 TOPK_SORT_TOKENS = 2048  # gpu/spawn/topk_sort.vx sorts contexts up to this many tokens (#32)
+# fp8_kernels='fma': the input width from which fp8_matvec_fma beats fp8_matvec_fma_tiles (H200: o_proj's
+# 16384 and mlp.down's 12288; at 6144 and below, fp8_matvec_fma_tiles).
+FMA_LONG_ROWS = 12288
 MANY_TOKENS = 4  # forward_many's limit: fp8_matvec4_rows takes up to four vectors (#16)
 TOPK_CHUNK = 2048  # past it, topk_chunks sorts chunks of this many, topk_merge merges them (#32)
 _MAX_GRID = 65535
@@ -555,7 +559,9 @@ class ResidentGLM:
             if self.fp8_kernels in ('x4', 'fma') and cols % 16 == 0:
                 if out.shape != (rows,) or x.shape != (cols,):
                     raise ValueError(f'{prefix}: FP8 weight is {rows}x{cols}, got x {x.shape} -> out {out.shape}')
-                self._spawn('fp8_matvec_fma' if self.fp8_kernels == 'fma' else 'fp8_matvec4', out=out, weight=codes.view((rows * cols // 4,), 'uint32'),
+                kernel = 'fp8_matvec4' if self.fp8_kernels == 'x4' else (
+                    'fp8_matvec_fma' if cols >= FMA_LONG_ROWS else 'fp8_matvec_fma_tiles')
+                self._spawn(kernel, out=out, weight=codes.view((rows * cols // 4,), 'uint32'),
                             scales=scales.view((int(np.prod(scales.shape)),)), x=x, rows=rows, cols=cols)
                 return out
             args = [codes, scales, x, I(rows), I(cols)]

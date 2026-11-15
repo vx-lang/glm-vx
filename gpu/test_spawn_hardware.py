@@ -203,17 +203,18 @@ def test_spawn_fp8_matvec4_matches_its_order(context, rows, cols):
     np.testing.assert_array_equal(download(out).view(np.uint32), np.asarray(expected, 'f4').view(np.uint32))
 
 
-# fp8_matvec_fma (#30, one fma a code) on the device: within gpu/test_spawn_vx_host's FMA_TOLERANCE of
+# fp8_matvec_fma and fp8_matvec_fma_tiles (#30, one fma a code) on the device: within gpu/test_spawn_vx_host's FMA_TOLERANCE of
 # the float64 sums at GLM-5.3's widths, and for tiny activations.
-@pytest.mark.skipif(not (BUILD / 'spawn/fp8_matvec_fma.ptx').exists(), reason='fp8_matvec_fma not built (gpu/spawn/build.sh)')
+@pytest.mark.skipif(not (BUILD / 'spawn/fp8_matvec_fma_tiles.ptx').exists(), reason='fp8_matvec_fma* not built (gpu/spawn/build.sh)')
+@pytest.mark.parametrize('kernel', ['fp8_matvec_fma', 'fp8_matvec_fma_tiles'])
 @pytest.mark.parametrize('rows,cols,x_scale', [(5, 144, 1.0), (300, 1008, 1.0), (6144, 16384, 1.0), (2048, 6144, 1.0),
                                                (130, 6144, 1e-9)])
-def test_spawn_fp8_matvec_fma_within_its_tolerance(context, rows, cols, x_scale):
+def test_spawn_fp8_matvec_fma_within_its_tolerance(context, kernel, rows, cols, x_scale):
     from gpu.test_spawn_vx_host import assert_fma_close, fp8_matvec4_case
     weight, scales, x, _ = fp8_matvec4_case(rows, cols, rows * 13 + cols)
     x = (x * np.float32(x_scale)).astype('f4')
     out = context.tensor((rows,))
-    SpawnKernel(context, BUILD / 'spawn/fp8_matvec_fma.ptx').launch(
+    SpawnKernel(context, BUILD / f'spawn/{kernel}.ptx').launch(
         rows=rows, cols=cols, weight=upload(context, weight.view(np.uint32).reshape(-1)),
         scales=upload(context, scales.reshape(-1)), x=upload(context, x), out=out)
     context.synchronize()

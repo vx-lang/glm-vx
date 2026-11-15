@@ -382,3 +382,65 @@ macro_rules! int4_row_dot {
         }
     };
 }
+
+// --- One fma a code (fp8_matvec_fma, fp8_matvec_fma_tiles, #30) ---
+
+// 2^40, which x is multiplied by as it is read, and 2^80, which a step's sum is multiplied by with
+// its scale: from_bits(fp8_bits(code)) is code * 2^-120, so a product is code * x * 2^-80.
+macro_rules! X_SCALE { () => { f32::from_bits(1400897536u32) }; }
+macro_rules! STEP_SCALE { () => { f32::from_bits(1736441856u32) }; }
+
+// fp8_matvec_fma and fp8_matvec_fma_tiles (#30). Sixteen codes of one lane step at 2^-80 scale: the sum of from_bits(fp8_bits(code)) * (x[col + i] *
+// 2^40), one fma each, in column order. No code may be a NaN (fp8_fast4! said so).
+macro_rules! fp8_step_fma {
+    ($w0:expr, $w1:expr, $w2:expr, $w3:expr, $x:ident, $col:expr) => {
+        unsafe {
+          let mut dv_p: f32 = 0.0;
+          let mut dv_j: i32 = 0;
+          while dv_j < 4 {
+            dv_p = fma32!(f32::from_bits(fp8_bits!($w0, dv_j)), $x[$col + (dv_j as i64)] * X_SCALE!(), dv_p);
+            dv_j = dv_j + 1;
+          }
+          dv_j = 0;
+          while dv_j < 4 {
+            dv_p = fma32!(f32::from_bits(fp8_bits!($w1, dv_j)), $x[$col + 4 + (dv_j as i64)] * X_SCALE!(), dv_p);
+            dv_j = dv_j + 1;
+          }
+          dv_j = 0;
+          while dv_j < 4 {
+            dv_p = fma32!(f32::from_bits(fp8_bits!($w2, dv_j)), $x[$col + 8 + (dv_j as i64)] * X_SCALE!(), dv_p);
+            dv_j = dv_j + 1;
+          }
+          dv_j = 0;
+          while dv_j < 4 {
+            dv_p = fma32!(f32::from_bits(fp8_bits!($w3, dv_j)), $x[$col + 12 + (dv_j as i64)] * X_SCALE!(), dv_p);
+            dv_j = dv_j + 1;
+          }
+          dv_p
+        }
+    };
+}
+
+// One lane step of sixteen codes into $sum: the fma path, or the exact one for a NaN code or a
+// scale of 256 or more.
+macro_rules! fp8_step_into {
+    ($sum:expr, $w0:expr, $w1:expr, $w2:expr, $w3:expr, $scale:expr, $x:ident, $col:expr) => {
+        unsafe {
+          let mut dv_s: f32 = $sum;
+          if fp8_fast4!($w0, $w1, $w2, $w3, $scale) {
+            let dv_step: f32 = fp8_step_fma!($w0, $w1, $w2, $w3, $x, $col);
+            dv_s = fma32!(dv_step, $scale * STEP_SCALE!(), dv_s);
+          } else {
+            let dv_i0: i32 = $w0 as i32;
+            let dv_i1: i32 = $w1 as i32;
+            let dv_i2: i32 = $w2 as i32;
+            let dv_i3: i32 = $w3 as i32;
+            dv_s = fp8_word_terms!(dv_s, dv_i0, $scale, $x, $col);
+            dv_s = fp8_word_terms!(dv_s, dv_i1, $scale, $x, $col + 4);
+            dv_s = fp8_word_terms!(dv_s, dv_i2, $scale, $x, $col + 8);
+            dv_s = fp8_word_terms!(dv_s, dv_i3, $scale, $x, $col + 12);
+          }
+          dv_s
+        }
+    };
+}
