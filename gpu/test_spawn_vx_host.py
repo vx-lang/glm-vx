@@ -702,6 +702,28 @@ def test_fp8_moe4_equals_fp8_matvec4_per_expert(run, experts, k, inter, hidden):
     bits_equal(got, expected)
 
 
+# fp8_matvec_fma_tiles3 (#30): q_a, kv_a and the indexer's wk in one launch. Each matrix's rows are
+# fp8_matvec_fma_tiles' for it, bit for bit, in one out with each matrix from a multiple of 8;
+# rows_c = 0 leaves C's place unwritten.
+@pytest.mark.parametrize('rows_a,rows_b,rows_c,cols', [(20, 9, 5, 640), (16, 13, 0, 144), (256, 72, 16, 1024)])
+def test_fp8_matvec_fma_tiles3_is_tiles_per_matrix(run, rows_a, rows_b, rows_c, cols):
+    pad = lambda n: -(-n // 8) * 8
+    mats = [fp8_matvec4_case(r, cols, r * 3 + cols)[:2] for r in (rows_a, rows_b, max(rows_c, 1))]
+    x = np.random.default_rng(cols).normal(size=cols).astype(F)
+    words = lambda w: w.view(np.uint32).reshape(-1)
+    out = np.full(pad(rows_a) + pad(rows_b) + pad(rows_c), 7.0, F)
+    got = run('fp8_matvec_fma_tiles3', out=out, x=x, cols=cols,
+              weight_a=words(mats[0][0]), scales_a=mats[0][1].reshape(-1), rows_a=rows_a,
+              weight_b=words(mats[1][0]), scales_b=mats[1][1].reshape(-1), rows_b=rows_b,
+              weight_c=words(mats[2][0]), scales_c=mats[2][1].reshape(-1), rows_c=rows_c)['out']
+    starts = (0, pad(rows_a), pad(rows_a) + pad(rows_b))
+    for (w, sc), rows, at in zip(mats, (rows_a, rows_b, rows_c), starts):
+        want = run('fp8_matvec_fma_tiles', out=np.zeros(rows, F), weight=words(w), scales=sc.reshape(-1), x=x,
+                   rows=rows, cols=cols)['out'] if rows else np.zeros(0, F)
+        bits_equal(got[at:at + rows], want)
+        bits_equal(got[at + rows:at + pad(rows)], np.full(pad(rows) - rows, 7.0, F))  # padding untouched
+
+
 def dequantized(w, e):
     """Expert e's [rows, cols] fp8 matrix in float64, its scales applied."""
     codes, scales = w['weight'][e], w['scales'][e]

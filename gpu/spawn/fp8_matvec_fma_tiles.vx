@@ -35,29 +35,7 @@ pub fn glm_vx_spawn_fp8_matvec_fma_tiles(out: &mut Tensor<f32, [?], Memory::HBM>
           let row: i64 = (rb * 8 + w * 2) as i64;
           let mut sum: f32 = 0.0;
           let mut sum2: f32 = 0.0;
-          if row < (rows as i64) && cols % 16 == 0 {
-            let n: i64 = cols as i64;
-            let tiles: i64 = (n + 127) / 128;
-            let words: i64 = n / 4;
-            let rw: i64 = (n / 16) * 4;
-            let ra: i64 = row * rw;
-            // A missing row r + 1 reads row r again and its sum is dropped.
-            let rb2: i64 = if row + 1 < (rows as i64) { ra + rw } else { ra };
-            let scale_base: i64 = (row / 128) * tiles;
-            let mut word: i64 = lane as i64;
-            // Whole tiles: word + 96 is the tile's last group of this lane.
-            while word + 96 < words {
-              fp8_pair_tile!(sum, sum2, weight, scales, weight, scales, x, 0, ra, rb2, scale_base, scale_base, word);
-              word = word + 128;
-            }
-            while word < words {
-              fp8_pair_group!(sum, sum2, weight, scales, weight, scales, x, 0, ra, rb2, scale_base, scale_base, word, words);
-              fp8_pair_group!(sum, sum2, weight, scales, weight, scales, x, 0, ra, rb2, scale_base, scale_base, word + 32, words);
-              fp8_pair_group!(sum, sum2, weight, scales, weight, scales, x, 0, ra, rb2, scale_base, scale_base, word + 64, words);
-              fp8_pair_group!(sum, sum2, weight, scales, weight, scales, x, 0, ra, rb2, scale_base, scale_base, word + 96, words);
-              word = word + 128;
-            }
-          }
+          fp8_tiles_pair_rows!(sum, sum2, weight, scales, x, row, rows, cols, lane);
           a[w * 2][lane] = sum;
           a[w * 2 + 1][lane] = sum2;
         }

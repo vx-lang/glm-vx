@@ -91,7 +91,7 @@ extern "C" void vx_gpu_mma_tf32_m16n8k8(float* out, int32_t offset,
     w.sync.arrive_and_wait();
 }
 extern "C" int32_t simt_launch(void (*entry)(void*),void* arg,int32_t grid,int32_t block){
-    if(grid<1||block<32||block%32||block>256)return -1;
+    if(grid<1||block<32||block%32||block>1024)return -1;  // CUDA's limit: one OS thread a lane
     for(int b=0;b<grid;b++){
         std::barrier<> barrier(block);
         float shared[8192]{};  // matvec_rows: a row of up to 8192 products

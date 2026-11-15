@@ -264,6 +264,27 @@ def test_fp8_fma_kernels_match_the_hand_kernels():
     assert launches.get('fp8_matvec_fma_tiles', 0) > 0 and launches.get('fp8_moe_fma_gate_up', 0) > 0
     assert launches.get('fp8_moe_fma_down', 0) > 0
     assert 'fp8_matvec4' not in launches and 'fp8_moe4_gate_up' not in launches
+    # Dense and shared-expert gate/up run as one fp8_moe_fma_gate_up with the activation in it, and
+    # q_a, kv_a and the indexer's wk as one fp8_matvec_fma_tiles3.
+    assert 'swiglu' not in launches
+    assert launches.get('fp8_matvec_fma_tiles3', 0) > 0
+
+
+def test_norm_block_1024_is_close_to_256_and_other_sizes_are_refused():
+    # norm_block (#29): RMSNorm with 1024 threads reads a row in one batch of loads; each thread sums
+    # other squares, so the logits are near the 256-thread ones (which the hybrid backend matches
+    # bit for bit), not equal.
+    model, _ = fp8_model(31, hidden_size=144, moe_intermediate_size=144)
+    runs = {}
+    for block in (256, 1024):
+        resident = ResidentGLM(model, ctx=Context(), max_tokens=32, device_experts=True, norm_block=block)
+        try:
+            runs[block] = np.stack([resident.forward(t) for t in TOKENS[:4]])
+        finally:
+            resident.close()
+    np.testing.assert_allclose(runs[1024], runs[256], rtol=1e-5, atol=1e-5)
+    with pytest.raises(ValueError, match='norm_block'):
+        ResidentGLM(model, ctx=Context(), norm_block=300)
 
 
 def test_fp8_cublaslt_projection_is_its_quantized_sum():

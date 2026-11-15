@@ -154,7 +154,8 @@ class ResidentGLM:
 
     def __init__(self, model, *, max_tokens=4096, ptx_dir=None, device=0, ctx=None, max_weight_bytes=None,
                  device_topk=True, device_experts=False, fused_attention=False, graph=False, fp8_kernels='hand',
-                 topk='auto', long_topk='merge', mla_kernel='decode', matvec_kernels='hand', mtp=False):
+                 topk='auto', long_topk='merge', mla_kernel='decode', matvec_kernels='hand', mtp=False,
+                 norm_block=256):
         if getattr(model, 'packed_weights', False):
             raise NotImplementedError('ResidentGLM supports expanded float32 weights only')
         if getattr(model, 'expert_placement', None) is not None:
@@ -177,6 +178,12 @@ class ResidentGLM:
         if matvec_kernels not in ('hand', 'spawn', 'x4'):
             raise ValueError("matvec_kernels must be 'hand', 'spawn' or 'x4'")
         self.matvec_kernels = matvec_kernels
+        # Threads of each RMSNorm block. 256 is the hybrid backend's, so the float32 path matches it bit
+        # for bit; 1024 reads a 6144-wide row in one batch of loads where 256 takes three (a thread's
+        # sum of squares then covers other elements, so other bits).
+        if norm_block not in (256, 512, 1024):
+            raise ValueError('norm_block must be 256, 512 or 1024')
+        self.norm_block = norm_block
         if topk not in ('auto', 'sort', 'radix'):
             raise ValueError("topk must be 'auto', 'sort' or 'radix'")
         self._topk_choice = topk
@@ -213,6 +220,9 @@ class ResidentGLM:
             self._formats = {}
             self._check_quantization(model.config.get('quantization_config'))
             self.stream = self.ctx.stream()
+            # fp8_kernels='fma': the one expert id (0) that runs a dense gate/up through fp8_moe_fma_gate_up.
+            self._expert_zero = (self._tensor((1,), 'int32', np.zeros(1, np.int32).tobytes())
+                                 if fp8_kernels == 'fma' else None)
             self._kernels = {}
             self._spawn_kernels = {}
             self._lt, self._lt_matmuls, self._lt_inputs, self._lt_outputs = None, {}, {}, {}  # fp8_kernels='cublaslt'
@@ -458,6 +468,15 @@ class ResidentGLM:
         self.heads_out = t((self.heads * self.value_dim,))
         self.iq, self.iq_rot = t((self.index_heads * self.index_dim,)), t((self.index_heads * self.index_dim,))
         self.ik, self.ik_norm = t((self.index_dim,)), t((self.index_dim,))
+        if self.fp8_kernels == 'fma':
+            # One buffer for q_a, kv_a and the indexer's wk outputs, as fp8_matvec_fma_tiles3 writes
+            # them (each matrix's rows from a multiple of 8): one launch for all three (#30).
+            pad = lambda n: -(-n // 8) * 8
+            spans = (q_rank, self.rank + self.rot, self.index_dim)
+            self._qkv_a = t((sum(pad(n) for n in spans),))
+            self.q_a = self._qkv_a.view((q_rank,))
+            self.compressed = self._qkv_a.view((spans[1],), offset=pad(q_rank) * 4)
+            self.ik = self._qkv_a.view((self.index_dim,), offset=(pad(q_rank) + pad(spans[1])) * 4)
         self.head_weights_raw, self.head_weights = t((self.index_heads,)), t((self.index_heads,))
         self.scores = t((cap,))
         self.selected = t((self.index_topk,), 'int32')
@@ -706,7 +725,14 @@ class ResidentGLM:
 
     def _rmsnorm(self, x, weight, out, eps):
         n = x.shape[0]
-        self._launch('rmsnorm', 1, 256, [out, x, weight, I(n), F(_f32(eps, 'epsilon', True))])
+        self._launch('rmsnorm', 1, self.norm_block, [out, x, weight, I(n), F(_f32(eps, 'epsilon', True))])
+
+    def _residual_rmsnorm(self, x, residual, weight, out, residual_out, eps):
+        """residual_out = x + residual and out = RMSNorm(residual_out) in one launch: the same bits as
+        _add then _rmsnorm (each thread sums the same squares in the same order)."""
+        n = x.shape[0]
+        self._launch('residual_rmsnorm', 1, self.norm_block,
+                     [out, residual_out, x, residual, weight, I(1), I(n), F(_f32(eps, 'epsilon', True))])
 
     def _swiglu(self, gate, up, out, n):
         self._launch('swiglu', self._grid(n), _ELEMENTWISE_BLOCK, [out, gate, up, I(n)])
@@ -732,10 +758,28 @@ class ResidentGLM:
         """down(SwiGLU(gate(x), up(x))) with both projections and the activation resident."""
         width = self._out_features(prefix + '.gate_proj')
         gate, up, act = (t.view((width,)) for t in (self.gate, self.up, self.act))
-        self._project(prefix + '.gate_proj', x, gate)
-        self._project(prefix + '.up_proj', x, up)
-        self._swiglu(gate, up, act, width)
+        if not self._fma_gate_up(prefix, x, act, width):
+            self._project(prefix + '.gate_proj', x, gate)
+            self._project(prefix + '.up_proj', x, up)
+            self._swiglu(gate, up, act, width)
         self._project(prefix + '.down_proj', act, out)
+
+    def _fma_gate_up(self, prefix, x, act, width):
+        """act = SwiGLU(gate(x), up(x)) in one launch for fp8_kernels='fma' (#30): fp8_moe_fma_gate_up
+        with one expert, so each x is read once for both projections and the activation needs no
+        launch of its own. False (nothing launched) for other kernels, formats or widths."""
+        gate_p, up_p = prefix + '.gate_proj', prefix + '.up_proj'
+        if self.fp8_kernels != 'fma' or self._format(gate_p) != 'fp8' or self._format(up_p) != 'fp8':
+            return False
+        (g_codes, g_scales, (rows, cols)), (u_codes, u_scales, up_shape) = self._fp8_weight(gate_p), self._fp8_weight(up_p)
+        if (rows, cols) != tuple(up_shape) or rows != width or cols % 16 or x.shape != (cols,):
+            return False
+        words = lambda t: t.view((int(np.prod(t.shape)) // 4,), 'uint32')
+        flat = lambda t: t.view((int(np.prod(t.shape)),))
+        self._spawn('fp8_moe_fma_gate_up', act=act, gate=words(g_codes), gate_scales=flat(g_scales), up=words(u_codes),
+                    up_scales=flat(u_scales), x=x, ids=self._expert_zero, k=1, experts=1, inter=rows, up_row=0,
+                    stride=rows, cols=cols)
+        return True
 
     def _fused_experts(self, base):
         try:
@@ -852,11 +896,39 @@ class ResidentGLM:
                     cols=inter, **down_args, **common)
 
     # ---------------------------------------------------------------- blocks
-    def _index_project(self, prefix, x, q_res, iq, ik, head_weights_raw):
-        """The indexer's three projections: its queries from q_res, its key and head weights from x."""
+    def _index_project(self, prefix, x, q_res, iq, ik, head_weights_raw, key_done=False):
+        """The indexer's three projections: its queries from q_res, its key and head weights from x.
+        key_done: ik is already written (_fma_qkv_a)."""
         self._linear(prefix + '.wq_b', q_res, iq)
-        self._linear(prefix + '.wk', x, ik)
+        if not key_done:
+            self._linear(prefix + '.wk', x, ik)
         self._linear(prefix + '.weights_proj', x, head_weights_raw)
+
+    def _fma_qkv_a(self, prefix, x, full):
+        """q_a, kv_a and, for a layer whose indexer runs, the indexer's wk of x in one launch for
+        fp8_kernels='fma' (fp8_matvec_fma_tiles3 into self._qkv_a, whose views self.q_a,
+        self.compressed and self.ik are; each row fp8_matvec_fma_tiles'). False, nothing launched, for
+        other kernels, formats or widths."""
+        if self.fp8_kernels != 'fma':
+            return False
+        names = [prefix + '.q_a_proj', prefix + '.kv_a_proj_with_mqa'] + ([prefix + '.indexer.wk'] if full else [])
+        if any(self._format(n) != 'fp8' for n in names):
+            return False
+        mats = [self._fp8_weight(n) for n in names]
+        cols = mats[0][2][1]
+        rows = [m[2][0] for m in mats]
+        if any(m[2][1] != cols for m in mats) or cols % 16 or x.shape != (cols,):
+            return False
+        if rows[0] != self.q_a.shape[0] or rows[1] != self.compressed.shape[0] or (full and rows[2] != self.ik.shape[0]):
+            return False
+        words = lambda t: t.view((int(np.prod(t.shape)) // 4,), 'uint32')
+        flat = lambda t: t.view((int(np.prod(t.shape)),))
+        third = mats[2] if full else mats[1]  # rows_c = 0: never read
+        self._spawn('fp8_matvec_fma_tiles3', out=self._qkv_a, x=x, cols=cols,
+                    weight_a=words(mats[0][0]), scales_a=flat(mats[0][1]), rows_a=rows[0],
+                    weight_b=words(mats[1][0]), scales_b=flat(mats[1][1]), rows_b=rows[1],
+                    weight_c=words(third[0]), scales_c=flat(third[1]), rows_c=rows[2] if full else 0)
+        return True
 
     def _index_core(self, layer, prefix, position, iq, ik, head_weights_raw):
         """The indexer after its projections: the key row, the rotated queries, scores, top-k."""
@@ -926,13 +998,17 @@ class ResidentGLM:
     def _attention(self, layer, x, position, shared_ok, reuse_selection=False):
         prefix = f'model.layers.{layer}.self_attn'
         bias = bool(self.config.get('attention_bias', False))
-        self._linear(prefix + '.q_a_proj', x, self.q_a, bias)
+        full = self.model.indexer_type(layer) == 'full' and not reuse_selection
+        stacked = not bias and self._fma_qkv_a(prefix, x, full)
+        if not stacked:
+            self._linear(prefix + '.q_a_proj', x, self.q_a, bias)
         self._rmsnorm(self.q_a, self._weight(prefix + '.q_a_layernorm.weight'), self.q_res, 1e-6)
         self._linear(prefix + '.q_b_proj', self.q_res, self.query)
-        self._linear(prefix + '.kv_a_proj_with_mqa', x, self.compressed, bias)
-        full = self.model.indexer_type(layer) == 'full' and not reuse_selection
+        if not stacked:
+            self._linear(prefix + '.kv_a_proj_with_mqa', x, self.compressed, bias)
         if full:
-            self._index_project(prefix + '.indexer', x, self.q_res, self.iq, self.ik, self.head_weights_raw)
+            self._index_project(prefix + '.indexer', x, self.q_res, self.iq, self.ik, self.head_weights_raw,
+                                key_done=stacked)
         self._attention_core(layer, position, shared_ok, self.query, self.compressed,
                              (self.iq, self.ik, self.head_weights_raw) if full else None)
         self._linear(prefix + '.o_proj', self.heads_out, self.attn_out, bias)
@@ -1123,9 +1199,9 @@ class ResidentGLM:
         prefix = f'model.layers.{layer}'
         self._rmsnorm(self.x, self._weight(prefix + '.input_layernorm.weight'), self.norm, m.eps)
         self._attention(layer, self.norm, position, have_selection or reuse_selection, reuse_selection)
-        self._add(self.x_next, self.x, self.attn_out, self.hidden)
+        self._residual_rmsnorm(self.attn_out, self.x, self._weight(prefix + '.post_attention_layernorm.weight'),
+                               self.norm, self.x_next, m.eps)
         self.x, self.x_next = self.x_next, self.x
-        self._rmsnorm(self.x, self._weight(prefix + '.post_attention_layernorm.weight'), self.norm, m.eps)
         self._feed_forward(layer, self.norm)
         self._add(self.x_next, self.x, self.ffn_out, self.hidden)
         self.x, self.x_next = self.x_next, self.x

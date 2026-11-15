@@ -69,7 +69,7 @@ def child(args):
     from validation.gpu_vs_official import full_geometry, random_weights
     from validation.moe_profile import l2_flush
     from validation.resident_compare import bf16_source, fp8_source, int4_source
-    config = full_geometry(args.layers)
+    config = full_geometry(args.layers, topk=args.index_topk)
     weights = random_weights(config, args.seed)
     if args.format == 'fp8':
         source = fp8_source(weights, bf16_head=args.bf16_head)
@@ -78,7 +78,7 @@ def child(args):
     model = GlmMoeDsaModel(config, source, NumpyBackend())
     tokens = [int(t) for t in np.random.default_rng(args.seed).integers(0, config['vocab_size'], args.context + 1)]
     resident = ResidentGLM(model, max_tokens=len(tokens) + 1, device_experts=True, fp8_kernels=args.fp8_kernels,
-                           matvec_kernels=args.matvec_kernels)
+                           matvec_kernels=args.matvec_kernels, norm_block=args.norm_block)
     for t in tokens[:-1]:
         resident.forward(t, logits=False)
     resident.forward(tokens[-1])  # every kernel loaded and weight uploaded before the profiled step
@@ -115,7 +115,7 @@ def child(args):
     Path(args.launches).write_text(json.dumps(dict(
         launches=launches, format=args.format, layers=args.layers, context=args.context, hidden=config['hidden_size'],
         weights_gib=resident.weight_bytes / 1024 ** 3, timer=args.timer, fp8_kernels=args.fp8_kernels, matvec_kernels=args.matvec_kernels,
-        bf16_head=getattr(args, 'bf16_head', False),
+        bf16_head=getattr(args, 'bf16_head', False), norm_block=args.norm_block, index_topk=args.index_topk,
         us=[start.elapsed_ms(end) * 1e3 for start, end in events] or None)))
     resident.close()
 
@@ -234,6 +234,10 @@ def main():
     p.add_argument('--context', type=int, default=64, help='tokens before the profiled step (above index_topk=16)')
     p.add_argument('--seed', type=int, default=1)
     p.add_argument('--timer', choices=['ncu', 'events'], default='ncu', help='events: no ncu (see above)')
+    p.add_argument('--index-topk', type=int, default=16,
+                   help="the indexer's top-k (GLM-5.3: 2048; 16 keeps the earlier profiles' selection)")
+    p.add_argument('--norm-block', type=int, choices=[256, 512, 1024], default=256,
+                   help="ResidentGLM's norm_block: threads of each RMSNorm block")
     p.add_argument('--bf16-head', action='store_true',
                    help="with --format fp8: lm_head in bfloat16, as FP8 checkpoints store it (else float32)")
     p.add_argument('--fp8-kernels', choices=['hand', 'x4', 'fma', 'cublaslt'], default='hand',
@@ -256,7 +260,9 @@ def main():
                sys.executable, '-m', 'validation.layer_profile', '--output', str(args.output), '--format', args.format,
                '--layers', str(args.layers), '--context', str(args.context), '--seed', str(args.seed),
                '--fp8-kernels', args.fp8_kernels, '--matvec-kernels', args.matvec_kernels,
-               *(['--bf16-head'] if args.bf16_head else []), '--launches', str(launches)]
+               '--norm-block', str(args.norm_block), '--index-topk', str(args.index_topk),
+               *(['--bf16-head'] if args.bf16_head else []),
+               '--launches', str(launches)]
     rows = None
     if args.timer == 'ncu' and (os.path.exists(ncu) or shutil.which(ncu)):
         done = subprocess.run(command)
