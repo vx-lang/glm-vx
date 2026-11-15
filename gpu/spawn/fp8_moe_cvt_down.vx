@@ -1,0 +1,91 @@
+// fp8_moe_fma_down with the codes at their true values (glm-vx #38): out[r] = sum over the k routed
+// experts, in ascending id order, of weight * (down . act[s * cols ..]); two output rows a block, each
+// subgroup dotting both rows of its expert (device.vx's fp8t_pair_tile!). The sm_90 build decodes with
+// Hopper's e4m3x2 -> f16x2 conversion; `_ref` with integers, the same bits. Arguments as
+// fp8_moe_fma_down (an id outside 0..experts adds a zero term; cols % 16 != 0 makes every term zero).
+// spawn-include: device.vx
+// spawn-variant: - fp8_cvt_sm90.vx machine-sm90.vx
+// spawn-variant: _ref fp8_cvt_ref.vx
+
+pub fn glm_vx_spawn_fp8_moe_cvt_down(out: &mut Tensor<f32, [?], Memory::HBM>, down: &Tensor<u32, [?], Memory::HBM>, scales: &Tensor<f32, [?], Memory::HBM>,
+                                     act: &Tensor<f32, [?], Memory::HBM>, weights: &Tensor<f32, [?], Memory::HBM>,
+                                     ids: &Tensor<i32, [?], Memory::HBM>, k: i32, experts: i32, rows: i32, cols: i32) -> void {
+  spawn on(Topology::Device) {
+    for rp in 0..(rows - 1) / 2 + 1 across blocks {
+      let mut ranks = unsafe { Tensor<i32, [8, 32], Memory::SMEM>::uninit() };
+      let mut a = unsafe { Tensor<f32, [8, 32], Memory::SMEM>::uninit() };
+      let mut b = unsafe { Tensor<f32, [8, 32], Memory::SMEM>::uninit() };
+      let mut part = unsafe { Tensor<f32, [8, 4, 32], Memory::SMEM>::uninit() };
+      let mut part2 = unsafe { Tensor<f32, [8, 4, 32], Memory::SMEM>::uninit() };
+      for w in 0..8 across subgroups {
+        for lane in 0..32 across lanes {
+          ranks[w][lane] = id_rank!(ids, k, lane);
+        }
+        for i in 0..(k + 7) / 8 {
+          let s: i32 = i * 8 + w;
+          for lane in 0..32 across lanes {
+            let mut sa: f32 = 0.0;
+            let mut sb: f32 = 0.0;
+            if s < k {
+              let expert: i32 = ids[slot_of_rank!(ranks, w, k, s)];
+              let row: i64 = (rp * 2) as i64;
+              if expert >= 0 && expert < experts && cols % 16 == 0 {
+                let n: i64 = cols as i64;
+                let tiles: i64 = (n + 127) / 128;
+                let words: i64 = n / 4;
+                let rw: i64 = (n / 16) * 4;
+                let e: i64 = expert as i64;
+                let srows: i64 = ((rows as i64) + 127) / 128;
+                let ra: i64 = (e * (rows as i64) + row) * rw;
+                let rb2: i64 = if row + 1 < (rows as i64) { ra + rw } else { ra };
+                let sbase: i64 = (e * srows + row / 128) * tiles;
+                // act's offset s * cols, written with its factor 4 for the 16-byte loads.
+                let xo: i64 = (s as i64) * ((cols as i64) / 4) * 4;
+                let mut word: i64 = lane as i64;
+                while word + 96 < words {
+                  fp8t_pair_tile!(sa, sb, down, scales, down, scales, act, xo, ra, rb2, sbase, sbase, word);
+                  word = word + 128;
+                }
+                while word < words {
+                  fp8t_pair_group!(sa, sb, down, scales, down, scales, act, xo, ra, rb2, sbase, sbase, word, words);
+                  fp8t_pair_group!(sa, sb, down, scales, down, scales, act, xo, ra, rb2, sbase, sbase, word + 32, words);
+                  fp8t_pair_group!(sa, sb, down, scales, down, scales, act, xo, ra, rb2, sbase, sbase, word + 64, words);
+                  fp8t_pair_group!(sa, sb, down, scales, down, scales, act, xo, ra, rb2, sbase, sbase, word + 96, words);
+                  word = word + 128;
+                }
+              }
+            }
+            a[w][lane] = sa;
+            b[w][lane] = sb;
+          }
+          let total: f32 = lanes::sum(&a[w], 32);
+          let total2: f32 = lanes::sum(&b[w], 32);
+          for lane in 0..32 across lanes {
+            let mut weighted: f32 = 0.0;
+            let mut weighted2: f32 = 0.0;
+            if s < k {
+              let wt: f32 = weights[slot_of_rank!(ranks, w, k, s)];
+              weighted = total * wt;
+              weighted2 = total2 * wt;
+            }
+            part[w][i][lane] = weighted;
+            part2[w][i][lane] = weighted2;
+          }
+        }
+      }
+      for t in 0..1 across lanes {
+        let mut acc: f32 = 0.0;
+        let mut acc2: f32 = 0.0;
+        let mut s: i32 = 0;
+        while s < k {
+          acc = acc + part[s % 8][s / 8][t];
+          acc2 = acc2 + part2[s % 8][s / 8][t];
+          s = s + 1;
+        }
+        if cols >= 0 { out[rp * 2] = acc; }
+        if rp * 2 + 1 < rows && cols >= 0 { out[rp * 2 + 1] = acc2; }
+      }
+    }
+  }
+  return;
+}

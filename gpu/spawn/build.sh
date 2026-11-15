@@ -17,9 +17,20 @@ if [[ -n "${PTXAS:-}" ]]; then extra+=(--ptxas "$PTXAS" ${PTXAS_ARCH:+--ptxas-ar
 library=${VX_DISPATCH_LIB:+yes}
 for source in gpu/spawn/*.vx; do
   name=$(basename "$source" .vx)
-  [[ $name == machine || $name == device ]] && continue
+  # Only files with a kernel entry: not machine*.vx, device.vx or the variant includes (fp8_cvt_*.vx).
+  grep -q "^pub fn glm_vx_spawn_" "$source" || continue
   [[ -n ${KERNELS:-} && " $KERNELS " != *" $name "* ]] && continue
-  lib=()
-  if [[ -n $library ]]; then lib=(--library "$OUT/lib$name.so"); fi
-  "$PYTHON" gpu/spawn/build.py --source "$source" --output "$OUT/$name.ptx" "${extra[@]}" "${lib[@]}"
+  # `// spawn-variant: SUFFIX INCLUDE [MACHINE]` lines (build.py): one build each, <name><SUFFIX>.
+  variants=$(sed -n 's|^//[[:space:]]*spawn-variant:[[:space:]]*\([^[:space:]]*\).*|\1|p' "$source")
+  for suffix in ${variants:-none}; do
+    out=$name
+    args=()
+    if [[ $suffix != none ]]; then
+      args=(--variant "$suffix")
+      [[ $suffix != - ]] && out=$name$suffix
+    fi
+    lib=()
+    if [[ -n $library ]]; then lib=(--library "$OUT/lib$out.so"); fi
+    "$PYTHON" gpu/spawn/build.py --source "$source" --output "$OUT/$out.ptx" "${extra[@]}" "${lib[@]}" "${args[@]}"
+  done
 done

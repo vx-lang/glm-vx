@@ -240,7 +240,7 @@ def main():
                    help="ResidentGLM's norm_block: threads of each RMSNorm block")
     p.add_argument('--bf16-head', action='store_true',
                    help="with --format fp8: lm_head in bfloat16, as FP8 checkpoints store it (else float32)")
-    p.add_argument('--fp8-kernels', choices=['hand', 'x4', 'fma', 'cublaslt'], default='hand',
+    p.add_argument('--fp8-kernels', choices=['hand', 'x4', 'fma', 'cvt', 'cublaslt'], default='hand',
                    help="ResidentGLM's fp8_kernels (#30, #31; cublaslt: activations to e4m3, cuBLASLt, #29)")
     p.add_argument('--matvec-kernels', choices=['hand', 'spawn', 'x4'], default='hand',
                    help="ResidentGLM's matvec_kernels: INT4 and BF16 Linears through gpu/spawn "

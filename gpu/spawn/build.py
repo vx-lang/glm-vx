@@ -23,6 +23,30 @@ ELEMENT_BITS = {'f32': 32, 'i32': 32, 'i64': 64, 'u32': 32, 'u16': 16, 'u8': 8}
 INCLUDE = re.compile(r'^//\s*spawn-include:\s*(\S+)\s*$', re.M)
 # `// spawn-vxc: -fFEATURE`: a vxc feature flag for this kernel only (Vx's -f values).
 VXC_FLAG = re.compile(r'^//\s*spawn-vxc:\s*(-f[\w-]+)\s*$', re.M)
+# `// spawn-variant: SUFFIX INCLUDE [MACHINE]`: one build of the source per line (--variant SUFFIX), with
+# INCLUDE pasted after the spawn-includes, the entry renamed <entry>SUFFIX (`-`: no suffix), and
+# MACHINE (relative to the source) in place of --machine. glm-vx #38 builds the FP8 conversion
+# kernels so: an sm_90 one with Hopper's e4m3x2 -> f16x2 instruction, and a `_ref` one with an exact
+# integer decode that the host tests run and that must give the same bits.
+VARIANT = re.compile(r'^//\s*spawn-variant:\s*(\S+)\s+(\S+)(?:\s+(\S+))?\s*$', re.M)
+
+
+def variant_of(source: str, suffix: str):
+    """(include, machine or None) of the source's `spawn-variant` line for suffix."""
+    for found in VARIANT.finditer(source):
+        if found[1] == suffix:
+            return found[2], found[3]
+    raise ValueError(f'no `// spawn-variant: {suffix} ...` line in the source')
+
+
+def rename_entry(source: str, suffix: str) -> str:
+    """The source with its `pub fn glm_vx_spawn_...(` entry renamed <entry><suffix> (`-`: unchanged)."""
+    if suffix == '-':
+        return source
+    renamed, count = re.subn(r'\bpub fn (glm_vx_spawn_\w+)\(', lambda m: f'pub fn {m[1]}{suffix}(', source, count=1)
+    if not count:
+        raise ValueError('no `pub fn glm_vx_spawn_...(` entry to rename')
+    return renamed
 
 
 def split_top(text: str):
@@ -240,6 +264,7 @@ def main() -> int:
     parser.add_argument('--library', type=Path, help='also build this shared library for Vx to launch from')
     parser.add_argument('--dispatch-lib', default=os.environ.get('VX_DISPATCH_LIB'))
     parser.add_argument('--cc', default=os.environ.get('CC', 'cc'))
+    parser.add_argument('--variant', help="build the source's `// spawn-variant: SUFFIX ...` line SUFFIX (`-`: no suffix)")
     parser.add_argument('--ptx-version', help="raise the PTX's .version to this (vxc pins sm_90a to 8.0; "
                         'fence.proxy.tensormap needs 8.3). Not with --library: Vx would load the 8.0 image')
     args = parser.parse_args()
@@ -251,12 +276,23 @@ def main() -> int:
         env.pop('VX_GPU_CHIP', None)
         if args.arch:
             env['VX_GPU_CHIP'] = args.arch
-        args.arch = args.arch or machine_chip(args.machine) or 'sm_80'
-        ptxas_arch = ptxas_target(args.arch, args.ptxas_arch)
         source = args.source.read_text()
+        extra = []
+        if args.variant:
+            include, machine = variant_of(source, args.variant)
+            extra = [(args.source.parent / include).read_text()]
+            if machine:
+                args.machine = args.source.parent / machine
+            source = rename_entry(source, args.variant)
+        args.arch = args.arch or machine_chip(args.machine) or 'sm_80'
+        ptxas_requested = args.ptxas_arch
+        if args.variant and ptxas_requested and ptxas_target(ptxas_requested, None) and \
+                int(re.fullmatch(r'sm_(\d+)a?', ptxas_requested)[1]) < int(re.fullmatch(r'sm_(\d+)a?', args.arch)[1]):
+            ptxas_requested = args.arch  # a variant newer than the device (sm_90 on an A100 pod): check it for itself
+        ptxas_arch = ptxas_target(args.arch, ptxas_requested)
         # `// spawn-include: FILE` pastes FILE (relative to SOURCE's directory, so probes/ can
         # name ../device.vx) in front: shared device helpers.
-        included = [(args.source.parent / f).read_text() for f in INCLUDE.findall(source)]
+        included = [(args.source.parent / f).read_text() for f in INCLUDE.findall(source)] + extra
         with tempfile.TemporaryDirectory(prefix='vx-spawn-src-') as temp:
             combined = Path(temp, args.source.name)
             combined.write_text(''.join(included) + source)

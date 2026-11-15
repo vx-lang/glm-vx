@@ -1,0 +1,15 @@
+// fp8_word_f32x4!(word, a, b, c, d) for the `_ref` builds of the FP8 conversion kernels (glm-vx #38):
+// codes 0 .. 3 of a u32 word (byte j is code j) as their exact float32 values, NaN codes NaN, by
+// device.vx's fp8_decode!. Runs on the host and on any GPU. fp8_cvt_sm90.vx gives the same values
+// with Hopper's conversion instruction, so a `_ref` kernel and its sm_90 build give the same bits.
+macro_rules! fp8_word_f32x4 {
+    ($word:expr, $a:ident, $b:ident, $c:ident, $d:ident) => {
+        unsafe {
+          let dv_cw: i32 = ($word) as i32;
+          $a = fp8_decode!(dv_cw);
+          $b = fp8_decode!(dv_cw >> 8);
+          $c = fp8_decode!(dv_cw >> 16);
+          $d = fp8_decode!(dv_cw >> 24);
+        }
+    };
+}

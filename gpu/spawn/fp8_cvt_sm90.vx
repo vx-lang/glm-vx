@@ -1,0 +1,66 @@
+// fp8_word_f32x4!(word, a, b, c, d) for the sm_90 builds of the FP8 conversion kernels (glm-vx #38):
+// codes 0 .. 3 of a u32 word as float32, through Hopper's e4m3x2 -> f16x2 conversion (PTX
+// cvt.rn.f16x2.e4m3x2, SASS F2FP.F16.E4M3.UNPACK_B: two codes an instruction), then each half to
+// float32. Every e4m3 value, NaN included, is a half exactly, so these are fp8_cvt_ref.vx's values.
+// An LLVM intrinsic, not inline PTX; it needs sm_89+ PTX (machine-sm90.vx), and has no host lowering.
+macro_rules! fp8_pair_f16x2 {
+    ($bits:expr) => {
+        unsafe {
+          let dv_pb: i32 = $bits;
+          let dv_px: i32 = mlir!( inputs : (%w = dv_pb : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
+            %t = llvm.trunc %w : i32 to i16
+            %h = llvm.call_intrinsic "llvm.nvvm.e4m3x2.to.f16x2.rn"(%t) : (i16) -> vector<2xf16>
+            %r = llvm.bitcast %h : vector<2xf16> to i32
+            macro.yield %r : i32
+          };
+          dv_px
+        }
+    };
+}
+
+// The half in bits 0 .. 15 (lo) or 16 .. 31 (hi) of $h as float32.
+macro_rules! f16_lo_f32 {
+    ($h:expr) => {
+        unsafe {
+          let dv_hl: i32 = $h;
+          let dv_fl: f32 = mlir!( inputs : (%w = dv_hl : i32), returns : f32, dialects : ["llvm"], ensures : [writes_only()]) {
+            %t = llvm.trunc %w : i32 to i16
+            %h = llvm.bitcast %t : i16 to f16
+            %f = llvm.fpext %h : f16 to f32
+            macro.yield %f : f32
+          };
+          dv_fl
+        }
+    };
+}
+
+macro_rules! f16_hi_f32 {
+    ($h:expr) => {
+        unsafe {
+          let dv_hh: i32 = $h;
+          let dv_fh: f32 = mlir!( inputs : (%w = dv_hh : i32), returns : f32, dialects : ["llvm"], ensures : [writes_only()]) {
+            %s = llvm.mlir.constant(16 : i32) : i32
+            %u = llvm.lshr %w, %s : i32
+            %t = llvm.trunc %u : i32 to i16
+            %h = llvm.bitcast %t : i16 to f16
+            %f = llvm.fpext %h : f16 to f32
+            macro.yield %f : f32
+          };
+          dv_fh
+        }
+    };
+}
+
+macro_rules! fp8_word_f32x4 {
+    ($word:expr, $a:ident, $b:ident, $c:ident, $d:ident) => {
+        unsafe {
+          let dv_cw: i32 = ($word) as i32;
+          let dv_lo: i32 = fp8_pair_f16x2!(dv_cw);
+          let dv_hi: i32 = fp8_pair_f16x2!(dv_cw >> 16);
+          $a = f16_lo_f32!(dv_lo);
+          $b = f16_hi_f32!(dv_lo);
+          $c = f16_lo_f32!(dv_hi);
+          $d = f16_hi_f32!(dv_hi);
+        }
+    };
+}

@@ -1,0 +1,68 @@
+// fp8_moe_fma_gate_up with the codes at their true values (glm-vx #38): for each of the k routed experts
+// and each of its `inter` rows, act[s * inter + i] = silu(gate . x) * (up . x), s the expert's place in
+// ascending id order. Each warp's gate and up rows are device.vx's fp8t_pair_tile! rows a and b. The
+// sm_90 build decodes with Hopper's e4m3x2 -> f16x2 conversion; `_ref` with integers, the same bits.
+// Layout and arguments as fp8_moe_fma_gate_up (stride, up_row for the fused [E, 2 * inter, cols]
+// layout; an id outside 0..experts or cols % 16 != 0 gives zeros; k <= 32).
+// spawn-include: device.vx
+// spawn-variant: - fp8_cvt_sm90.vx machine-sm90.vx
+// spawn-variant: _ref fp8_cvt_ref.vx
+
+pub fn glm_vx_spawn_fp8_moe_cvt_gate_up(act: &mut Tensor<f32, [?], Memory::HBM>, gate: &Tensor<u32, [?], Memory::HBM>, gate_scales: &Tensor<f32, [?], Memory::HBM>,
+                                        up: &Tensor<u32, [?], Memory::HBM>, up_scales: &Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                                        ids: &Tensor<i32, [?], Memory::HBM>, k: i32, experts: i32, inter: i32,
+                                        up_row: i32, stride: i32, cols: i32) -> void {
+  spawn on(Topology::Device) {
+    for rb in 0..(k * inter - 1) / 4 + 1 across blocks {
+      let mut ranks = unsafe { Tensor<i32, [4, 32], Memory::SMEM>::uninit() };
+      let mut g = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
+      let mut u = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
+      for w in 0..4 across subgroups {
+        for lane in 0..32 across lanes {
+          ranks[w][lane] = id_rank!(ids, k, lane);
+        }
+        for lane in 0..32 across lanes {
+          let at: i32 = rb * 4 + w;
+          let s: i32 = at / inter;
+          let row: i64 = (at - s * inter) as i64;
+          let mut gs: f32 = 0.0;
+          let mut us: f32 = 0.0;
+          if at < k * inter {
+            let expert: i32 = ids[slot_of_rank!(ranks, w, k, s)];
+            if expert >= 0 && expert < experts && cols % 16 == 0 {
+              let n: i64 = cols as i64;
+              let tiles: i64 = (n + 127) / 128;
+              let words: i64 = n / 4;
+              let rw: i64 = (n / 16) * 4;
+              let e: i64 = expert as i64;
+              let srows: i64 = ((stride as i64) + 127) / 128;
+              let urow: i64 = (up_row as i64) + row;
+              let ga: i64 = (e * (stride as i64) + row) * rw;
+              let ub: i64 = (e * (stride as i64) + urow) * rw;
+              let gsb: i64 = (e * srows + row / 128) * tiles;
+              let usb: i64 = (e * srows + urow / 128) * tiles;
+              let mut word: i64 = lane as i64;
+              while word + 96 < words {
+                fp8t_pair_tile!(gs, us, gate, gate_scales, up, up_scales, x, 0, ga, ub, gsb, usb, word);
+                word = word + 128;
+              }
+              while word < words {
+                fp8t_pair_group!(gs, us, gate, gate_scales, up, up_scales, x, 0, ga, ub, gsb, usb, word, words);
+                fp8t_pair_group!(gs, us, gate, gate_scales, up, up_scales, x, 0, ga, ub, gsb, usb, word + 32, words);
+                fp8t_pair_group!(gs, us, gate, gate_scales, up, up_scales, x, 0, ga, ub, gsb, usb, word + 64, words);
+                fp8t_pair_group!(gs, us, gate, gate_scales, up, up_scales, x, 0, ga, ub, gsb, usb, word + 96, words);
+                word = word + 128;
+              }
+            }
+          }
+          g[w][lane] = gs;
+          u[w][lane] = us;
+        }
+        let gt: f32 = lanes::sum(&g[w], 32);
+        let ut: f32 = lanes::sum(&u[w], 32);
+        if rb * 4 + w < k * inter && cols >= 0 { act[rb * 4 + w] = gt * sigmoid!(gt) * ut; }
+      }
+    }
+  }
+  return;
+}

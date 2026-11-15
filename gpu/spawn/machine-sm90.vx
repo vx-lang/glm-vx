@@ -1,0 +1,16 @@
+// H100 / H200 (compute capability 9.0) as Vx's own GPU path sees it: gpu/spawn/machine.vx with
+// `chip: sm_90`, for the kernels that need sm_89+ PTX (glm-vx #38: Hopper's e4m3x2 -> f16x2
+// conversion, cvt.rn.f16x2.e4m3x2, which LLVM cannot select for sm_80). Capacity and bandwidth
+// are an H100 SXM's; the kernels do not depend on them.
+Memory HBM { capacity: 80 GiB, bandwidth: 3350 GB/s, managed: explicit, alignment: 16 B, scope: device }
+Memory SMEM { within: Memory::HBM, capacity: 228 KiB, bandwidth: 128 B/cyc, granule: 1 KiB, managed: explicit, scope: sm }
+Topology Device {
+  arch: nvptx64,
+  chip: sm_90,
+  levels: [blocks(max_lanes: 1024, memory: cta), subgroups(lanes: 32), lanes(memory: thread)],
+  memory: Memory::HBM,
+  visible: [Memory::CPU_DRAM, Memory::HBM, Memory::SMEM],
+  transfer Memory::CPU_DRAM -> Memory::HBM : 63 GB/s,
+  transfer Memory::HBM -> Memory::CPU_DRAM : 63 GB/s,
+  transfer Memory::HBM -> Memory::SMEM
+}

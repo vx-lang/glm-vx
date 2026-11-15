@@ -166,6 +166,9 @@ step resident-fp8x4-full$LAYERS $PYTHON -m validation.resident_compare --fp8 --f
 # fp8_matvec_fma for the dense Linears (#30, one fma a code): x4's gate.
 step resident-fp8fma-full$LAYERS $PYTHON -m validation.resident_compare --fp8 --fp8-kernels fma --geometry full \
   --layers "$LAYERS" --tokens "$TOKENS" --output "$out/resident-fp8fma-full$LAYERS.json"
+# fp8_kernels cvt (glm-vx #38): the sm_90 builds on Hopper, x4's gate.
+step resident-fp8cvt-full$LAYERS $PYTHON -m validation.resident_compare --fp8 --fp8-kernels cvt --geometry full \
+  --layers "$LAYERS" --tokens "$TOKENS" --output "$out/resident-fp8cvt-full$LAYERS.json"
 # cuBLASLt on e4m3 activations (#29): near the float32-activation logits, not equal (SGLang's w8a8).
 step resident-fp8lt-full$LAYERS $PYTHON -m validation.resident_compare --fp8 --fp8-kernels cublaslt --geometry full \
   --layers "$LAYERS" --tokens "$TOKENS" --output "$out/resident-fp8lt-full$LAYERS.json"
@@ -188,10 +191,11 @@ step layer-profile-fp8x4 $PYTHON -m validation.layer_profile --format fp8 --fp8-
 step layer-profile-fp8fma $PYTHON -m validation.layer_profile --format fp8 --fp8-kernels fma --timer "$TIMER" \
   --output "$out/layer-profile-fp8fma.json"
 # What an FP8 checkpoint runs: its lm_head is BF16 (bf16_matvec4 with matvec_kernels x4), every FP8 Linear
-# and routed expert one fma a code (q_a/kv_a/wk and gate/up fused), RMSNorm with 1024 threads. Context
+# and routed expert at the codes' true values (fp8_kernels cvt: Hopper's conversion, glm-vx #38; q_a/kv_a/wk
+# and gate/up fused), RMSNorm with 1024 threads. Context
 # 1000 and GLM-5.3's index_topk 2048, as SGLang's batch-1 profile (pod_sglang.sh PROFILE_INPUTS), so the
 # indexer and MLA attend to what SGLang's do (every token, below the top-k).
-step layer-profile-fp8real $PYTHON -m validation.layer_profile --format fp8 --fp8-kernels fma --matvec-kernels x4 \
+step layer-profile-fp8real $PYTHON -m validation.layer_profile --format fp8 --fp8-kernels cvt --matvec-kernels x4 \
   --bf16-head --norm-block 1024 --context 1000 --index-topk 2048 --timer "$TIMER" --output "$out/layer-profile-fp8real.json"
 # The dense FP8 Linears through cuBLASLt on e4m3 activations (#29), the rest as fp8x4.
 step layer-profile-fp8lt $PYTHON -m validation.layer_profile --format fp8 --fp8-kernels cublaslt --timer "$TIMER" \

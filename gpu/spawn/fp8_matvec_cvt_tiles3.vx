@@ -1,0 +1,48 @@
+// fp8_matvec_fma_tiles3 with the codes at their true values (glm-vx #38): q_a, kv_a and the indexer's wk
+// of one x in one launch, into one out (A's rows from 0, B's from 8 * ceil(rows_a / 8), C's after),
+// each row fp8_matvec_cvt_tiles' for its matrix, bit for bit. The sm_90 build uses Hopper's e4m3x2 ->
+// f16x2 conversion; `_ref` the exact integer decode, with the same bits.
+// spawn-include: device.vx
+// spawn-variant: - fp8_cvt_sm90.vx machine-sm90.vx
+// spawn-variant: _ref fp8_cvt_ref.vx
+
+pub fn glm_vx_spawn_fp8_matvec_cvt_tiles3(out: &mut Tensor<f32, [?], Memory::HBM>,
+                                          weight_a: &Tensor<u32, [?], Memory::HBM>, scales_a: &Tensor<f32, [?], Memory::HBM>, rows_a: i32,
+                                          weight_b: &Tensor<u32, [?], Memory::HBM>, scales_b: &Tensor<f32, [?], Memory::HBM>, rows_b: i32,
+                                          weight_c: &Tensor<u32, [?], Memory::HBM>, scales_c: &Tensor<f32, [?], Memory::HBM>, rows_c: i32,
+                                          x: &Tensor<f32, [?], Memory::HBM>, cols: i32) -> void {
+  spawn on(Topology::Device) {
+    for rb in 0..(rows_a + 7) / 8 + (rows_b + 7) / 8 + (rows_c + 7) / 8 across blocks {
+      let mut a = unsafe { Tensor<f32, [8, 32], Memory::SMEM>::uninit() };
+      let blocks_a: i32 = (rows_a + 7) / 8;
+      let blocks_b: i32 = (rows_b + 7) / 8;
+      for w in 0..4 across subgroups {
+        for lane in 0..32 across lanes {
+          let mut sum: f32 = 0.0;
+          let mut sum2: f32 = 0.0;
+          if rb < blocks_a {
+            let row: i64 = (rb * 8 + w * 2) as i64;
+            fp8t_tiles_pair_rows!(sum, sum2, weight_a, scales_a, x, row, rows_a, cols, lane);
+          } else if rb < blocks_a + blocks_b {
+            let row: i64 = ((rb - blocks_a) * 8 + w * 2) as i64;
+            fp8t_tiles_pair_rows!(sum, sum2, weight_b, scales_b, x, row, rows_b, cols, lane);
+          } else {
+            let row: i64 = ((rb - blocks_a - blocks_b) * 8 + w * 2) as i64;
+            fp8t_tiles_pair_rows!(sum, sum2, weight_c, scales_c, x, row, rows_c, cols, lane);
+          }
+          a[w * 2][lane] = sum;
+          a[w * 2 + 1][lane] = sum2;
+        }
+        let total: f32 = lanes::sum(&a[w * 2], 32);
+        let total2: f32 = lanes::sum(&a[w * 2 + 1], 32);
+        // Row j of this block's matrix, its index there, and whether it exists.
+        let first: i32 = if rb < blocks_a { rb * 8 } else if rb < blocks_a + blocks_b { (rb - blocks_a) * 8 }
+                         else { (rb - blocks_a - blocks_b) * 8 };
+        let count: i32 = if rb < blocks_a { rows_a } else if rb < blocks_a + blocks_b { rows_b } else { rows_c };
+        if first + w * 2 < count && cols >= 0 { out[rb * 8 + w * 2] = total; }
+        if first + w * 2 + 1 < count && cols >= 0 { out[rb * 8 + w * 2 + 1] = total2; }
+      }
+    }
+  }
+  return;
+}

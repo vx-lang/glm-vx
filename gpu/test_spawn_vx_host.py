@@ -450,7 +450,9 @@ def assert_fma_close(got, weight, scales, x, rows=None):
     assert worst <= FMA_TOLERANCE, f'{worst:.1e} of the largest output'
 
 
-FMA_KERNELS = ['fp8_matvec_fma', 'fp8_matvec_fma_tiles']
+# fp8_matvec_cvt_tiles_ref (glm-vx #38): the codes at their true values, the integer-decode build of the
+# kernel whose sm_90 build uses Hopper's conversion (the same bits; gpu/test_spawn_hardware.py).
+FMA_KERNELS = ['fp8_matvec_fma', 'fp8_matvec_fma_tiles', 'fp8_matvec_cvt_tiles_ref']
 
 
 # Odd row counts leave a warp one row (1, 17) or a block a partial group (6); widths below 512 or not
@@ -705,20 +707,22 @@ def test_fp8_moe4_equals_fp8_matvec4_per_expert(run, experts, k, inter, hidden):
 # fp8_matvec_fma_tiles3 (#30): q_a, kv_a and the indexer's wk in one launch. Each matrix's rows are
 # fp8_matvec_fma_tiles' for it, bit for bit, in one out with each matrix from a multiple of 8;
 # rows_c = 0 leaves C's place unwritten.
+@pytest.mark.parametrize('three,one', [('fp8_matvec_fma_tiles3', 'fp8_matvec_fma_tiles'),
+                                       ('fp8_matvec_cvt_tiles3_ref', 'fp8_matvec_cvt_tiles_ref')])
 @pytest.mark.parametrize('rows_a,rows_b,rows_c,cols', [(20, 9, 5, 640), (16, 13, 0, 144), (256, 72, 16, 1024)])
-def test_fp8_matvec_fma_tiles3_is_tiles_per_matrix(run, rows_a, rows_b, rows_c, cols):
+def test_fp8_matvec_fma_tiles3_is_tiles_per_matrix(run, three, one, rows_a, rows_b, rows_c, cols):
     pad = lambda n: -(-n // 8) * 8
     mats = [fp8_matvec4_case(r, cols, r * 3 + cols)[:2] for r in (rows_a, rows_b, max(rows_c, 1))]
     x = np.random.default_rng(cols).normal(size=cols).astype(F)
     words = lambda w: w.view(np.uint32).reshape(-1)
     out = np.full(pad(rows_a) + pad(rows_b) + pad(rows_c), 7.0, F)
-    got = run('fp8_matvec_fma_tiles3', out=out, x=x, cols=cols,
+    got = run(three, out=out, x=x, cols=cols,
               weight_a=words(mats[0][0]), scales_a=mats[0][1].reshape(-1), rows_a=rows_a,
               weight_b=words(mats[1][0]), scales_b=mats[1][1].reshape(-1), rows_b=rows_b,
               weight_c=words(mats[2][0]), scales_c=mats[2][1].reshape(-1), rows_c=rows_c)['out']
     starts = (0, pad(rows_a), pad(rows_a) + pad(rows_b))
     for (w, sc), rows, at in zip(mats, (rows_a, rows_b, rows_c), starts):
-        want = run('fp8_matvec_fma_tiles', out=np.zeros(rows, F), weight=words(w), scales=sc.reshape(-1), x=x,
+        want = run(one, out=np.zeros(rows, F), weight=words(w), scales=sc.reshape(-1), x=x,
                    rows=rows, cols=cols)['out'] if rows else np.zeros(0, F)
         bits_equal(got[at:at + rows], want)
         bits_equal(got[at + rows:at + pad(rows)], np.full(pad(rows) - rows, 7.0, F))  # padding untouched
@@ -731,6 +735,13 @@ def dequantized(w, e):
     return fp8(codes).astype(np.float64) * scales[np.arange(rows)[:, None] // 128, np.arange(cols)[None, :] // 128]
 
 
+MOE_FMA = ['fp8_moe_fma_', 'fp8_moe_cvt_']  # + gate_up / down; the cvt family through its _ref builds
+
+
+def moe_kernel(family, half):
+    return family + half + ('_ref' if family == 'fp8_moe_cvt_' else '')
+
+
 # fp8_moe_fma_gate_up and fp8_moe_fma_down (#31): fp8_matvec_fma_tiles' dot products, so not
 # fp8_moe4's bits. act must be within FMA_TOLERANCE of silu(g) * u from float64 g and u (of its
 # largest |act|), and the down sum within it of the float64 sum over the experts of weight * (W x)
@@ -738,17 +749,18 @@ def dequantized(w, e):
 # partial tiles.
 @pytest.mark.parametrize('experts,k,inter,hidden', [(1, 1, 16, 16), (12, 8, 16, 144), (256, 8, 144, 304),
                                                     (40, 13, 16, 144), (64, 32, 16, 80), (256, 8, 1024, 2048)])
-def test_fp8_moe_fma_within_tolerance(run, experts, k, inter, hidden):
+@pytest.mark.parametrize('family', MOE_FMA)
+def test_fp8_moe_fma_within_tolerance(run, family, experts, k, inter, hidden):
     rng = np.random.default_rng(experts * 7 + inter)
     (gate, _), (up, _), (down, _) = (moe_weights(rng, 'fp8', experts, r, c) for r, c in
                                      ((inter, hidden), (inter, hidden), (hidden, inter)))
     x, ids = rng.normal(size=hidden).astype(F), expert_ids(rng, experts, k)
     weights = rng.uniform(0.01, 1, size=k).astype(F)
     words = lambda w: w['weight'].view(np.uint32).reshape(-1)
-    act = run('fp8_moe_fma_gate_up', act=np.full(k * inter, 7, F), gate=words(gate), gate_scales=gate['scales'].reshape(-1),
+    act = run(moe_kernel(family, 'gate_up'), act=np.full(k * inter, 7, F), gate=words(gate), gate_scales=gate['scales'].reshape(-1),
               up=words(up), up_scales=up['scales'].reshape(-1), x=x, ids=ids, k=k, experts=experts, inter=inter,
               up_row=0, stride=inter, cols=hidden)['act']
-    got = run('fp8_moe_fma_down', out=np.full(hidden, 7, F), down=words(down), scales=down['scales'].reshape(-1), act=act,
+    got = run(moe_kernel(family, 'down'), out=np.full(hidden, 7, F), down=words(down), scales=down['scales'].reshape(-1), act=act,
               weights=weights, ids=ids, k=k, experts=experts, rows=hidden, cols=inter)['out']
     want_act, want = np.zeros(k * inter), np.zeros(hidden)
     for s, slot in enumerate(np.argsort(ids, kind='stable')):
@@ -760,14 +772,15 @@ def test_fp8_moe_fma_within_tolerance(run, experts, k, inter, hidden):
     assert np.abs(got - want).max() <= FMA_TOLERANCE * np.abs(want).max()
 
 
-def test_fp8_moe_fma_down_odd_rows_and_out_of_range_ids(run):
+@pytest.mark.parametrize('family', MOE_FMA)
+def test_fp8_moe_fma_down_odd_rows_and_out_of_range_ids(run, family):
     # A last block with one row (rows odd), and an id past the experts adding nothing.
     rng = np.random.default_rng(3)
     experts, rows, cols = 6, 145, 144
     (down, _) = moe_weights(rng, 'fp8', experts, rows, cols)
     ids, weights = np.array([4, 9, 1], np.int32), np.array([0.5, 0.25, 2.0], F)
     act = rng.normal(size=3 * cols).astype(F)
-    got = run('fp8_moe_fma_down', out=np.full(rows, 7, F), down=down['weight'].view(np.uint32).reshape(-1),
+    got = run(moe_kernel(family, 'down'), out=np.full(rows, 7, F), down=down['weight'].view(np.uint32).reshape(-1),
               scales=down['scales'].reshape(-1), act=act, weights=weights, ids=ids, k=3, experts=experts, rows=rows,
               cols=cols)['out']
     # Ascending ids: 1 (slot 2) has rank 0, 4 (slot 0) rank 1, 9 (slot 1) rank 2 and is out of range.
@@ -776,7 +789,8 @@ def test_fp8_moe_fma_down_odd_rows_and_out_of_range_ids(run):
     assert np.abs(got - want).max() <= FMA_TOLERANCE * np.abs(want).max()
 
 
-def test_fp8_moe_fma_gate_up_reads_the_fused_layout(run):
+@pytest.mark.parametrize('family', MOE_FMA)
+def test_fp8_moe_fma_gate_up_reads_the_fused_layout(run, family):
     # gate_up as one [E, 2 * inter, cols] matrix (stride 2 * inter, up rows from inter), as GLM's
     # checkpoints may store it: the same act as the two halves passed separately.
     rng = np.random.default_rng(11)
@@ -785,7 +799,7 @@ def test_fp8_moe_fma_gate_up_reads_the_fused_layout(run):
     x, ids = rng.normal(size=hidden).astype(F), expert_ids(rng, experts, k)
     words = lambda a: np.ascontiguousarray(a).view(np.uint32).reshape(-1)
     common = dict(act=np.zeros(k * inter, F), x=x, ids=ids, k=k, experts=experts, inter=inter, cols=hidden)
-    fused = run('fp8_moe_fma_gate_up', gate=words(both['weight']), gate_scales=both['scales'].reshape(-1),
+    fused = run(moe_kernel(family, 'gate_up'), gate=words(both['weight']), gate_scales=both['scales'].reshape(-1),
                 up=words(both['weight']), up_scales=both['scales'].reshape(-1), up_row=inter, stride=2 * inter,
                 **common)['act']
     # Rows inter.. start a new 128-row scale block only when inter % 128 == 0: 144 is not, so cut

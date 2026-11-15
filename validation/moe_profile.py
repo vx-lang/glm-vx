@@ -38,9 +38,10 @@ HIDDEN, INTER, EXPERTS = 6144, 2048, 256
 KERNELS = {'f32': ('moe_gate_up', 'moe_down'), 'bf16': ('bf16_moe_gate_up', 'bf16_moe_down'),
            'fp8': ('fp8_moe_gate_up', 'fp8_moe_down'), 'fp8x4': ('fp8_moe4_gate_up', 'fp8_moe4_down'),
            'fp8fma': ('fp8_moe_fma_gate_up', 'fp8_moe_fma_down'),
+           'fp8cvt': ('fp8_moe_cvt_gate_up', 'fp8_moe_cvt_down'),  # sm_90 (Hopper's conversion, glm-vx #38)
            'int4': ('int4_moe_gate_up', 'int4_moe_down')}
-ELEMENT = {'f32': 4.0, 'bf16': 2.0, 'fp8': 1.0, 'fp8x4': 1.0, 'fp8fma': 1.0, 'int4': 0.5}
-FP8 = ('fp8', 'fp8x4', 'fp8fma')  # one copy of the FP8 weights; fp8x4 and fp8fma view the codes as u32
+ELEMENT = {'f32': 4.0, 'bf16': 2.0, 'fp8': 1.0, 'fp8x4': 1.0, 'fp8fma': 1.0, 'fp8cvt': 1.0, 'int4': 0.5}
+FP8 = ('fp8', 'fp8x4', 'fp8fma', 'fp8cvt')  # one copy of the FP8 weights; fp8x4 and fp8fma view the codes as u32
 
 
 def scale_bytes(fmt, rows, cols):
@@ -120,6 +121,8 @@ def child(args):
     out = ctx.tensor((HIDDEN,), 'float32')
     fp8 = None  # the FP8 formats share one copy of the FP8 weights (fp8x4, fp8fma: a u32 view): all six
     for fmt in args.formats:  # formats at once would not fit in 80 GB
+        if fmt == 'fp8cvt' and tuple(ctx.compute_capability) < (8, 9):
+            continue  # sm_90 PTX (Hopper's e4m3x2 -> f16x2 conversion)
         if fmt in FP8 and fp8 is not None:
             codes = EXPERTS * INTER * HIDDEN  # each projection's code bytes
             gate, up, down = ({**w, 'weight': w['weight'].view((codes // 4,), 'uint32') if fmt != 'fp8'
@@ -168,7 +171,7 @@ def child(args):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--output', type=Path, required=True)
-    p.add_argument('--formats', nargs='+', choices=list(KERNELS), default=['f32', 'bf16', 'fp8', 'fp8x4', 'fp8fma', 'int4'])
+    p.add_argument('--formats', nargs='+', choices=list(KERNELS), default=['f32', 'bf16', 'fp8', 'fp8x4', 'fp8fma', 'fp8cvt', 'int4'])
     p.add_argument('--k', nargs='+', type=int, default=[1, 2, 4, 8])
     p.add_argument('--seed', type=int, default=1)
     p.add_argument('--timer', choices=['ncu', 'events'], default='ncu', help='events: no ncu (see above)')

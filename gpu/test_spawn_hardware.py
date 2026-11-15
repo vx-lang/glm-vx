@@ -254,6 +254,72 @@ def test_spawn_fp8_moe_fma_within_its_tolerance(context, experts, k, inter, hidd
     assert np.abs(got - want).max() <= FMA_TOLERANCE * np.abs(want).max()
 
 
+# The FP8 conversion kernels (glm-vx #38): each sm_90 build (Hopper's e4m3x2 -> f16x2 conversion) must
+# give its _ref build's bits (the exact integer decode), which the host tests check against float64.
+CVT_PAIRS = {
+    'fp8_matvec_cvt_tiles': lambda rng: _cvt_matvec_args(rng, 2048, 6144),
+    'fp8_matvec_cvt_tiles3': lambda rng: _cvt_tiles3_args(rng),
+    'fp8_moe_cvt_gate_up': lambda rng: _cvt_moe_args(rng, 'gate_up'),
+    'fp8_moe_cvt_down': lambda rng: _cvt_moe_args(rng, 'down'),
+}
+
+
+def _codes(rng, n, nan=False):
+    codes = rng.integers(0, 256, size=n, dtype=np.uint8)
+    if not nan:
+        codes[(codes & 0x7F) == 0x7F] = 0
+    return codes
+
+
+def _cvt_matvec_args(rng, rows, cols):
+    return dict(rows=rows, cols=cols, out=np.zeros(rows, 'f4'), weight=_codes(rng, rows * cols).view(np.uint32),
+                scales=rng.uniform(0.001, 0.1, size=-(-rows // 128) * -(-cols // 128)).astype('f4'),
+                x=rng.normal(size=cols).astype('f4'))
+
+
+def _cvt_tiles3_args(rng):
+    cols, rows = 6144, (2048, 576, 128)
+    args = dict(cols=cols, x=rng.normal(size=cols).astype('f4'), out=np.zeros(2048 + 576 + 128, 'f4'))
+    for tag, r in zip('abc', rows):
+        args.update({f'weight_{tag}': _codes(rng, r * cols).view(np.uint32), f'rows_{tag}': r,
+                     f'scales_{tag}': rng.uniform(0.001, 0.1, size=-(-r // 128) * 48).astype('f4')})
+    return args
+
+
+def _cvt_moe_args(rng, half):
+    experts, k, inter, hidden = 256, 8, 2048, 6144
+    ids = rng.choice(experts, size=k, replace=False).astype(np.int32)
+    if half == 'gate_up':
+        n = experts * inter * hidden
+        return dict(act=np.zeros(k * inter, 'f4'), gate=_codes(rng, n).view(np.uint32), up=_codes(rng, n).view(np.uint32),
+                    gate_scales=rng.uniform(0.001, 0.1, size=experts * 16 * 48).astype('f4'),
+                    up_scales=rng.uniform(0.001, 0.1, size=experts * 16 * 48).astype('f4'),
+                    x=rng.normal(size=hidden).astype('f4'), ids=ids, k=k, experts=experts, inter=inter, up_row=0,
+                    stride=inter, cols=hidden)
+    return dict(out=np.zeros(hidden, 'f4'), down=_codes(rng, experts * hidden * inter).view(np.uint32),
+                scales=rng.uniform(0.001, 0.1, size=experts * 48 * 16).astype('f4'),
+                act=rng.normal(size=k * inter).astype('f4'), weights=rng.uniform(0.01, 1, size=k).astype('f4'), ids=ids,
+                k=k, experts=experts, rows=hidden, cols=inter)
+
+
+@pytest.mark.parametrize('name', sorted(CVT_PAIRS))
+def test_spawn_cvt_sm90_gives_the_ref_bits(context, name):
+    if not (BUILD / f'spawn/{name}.ptx').exists():
+        pytest.skip(f'{name} not built (gpu/spawn/build.sh)')
+    if tuple(context.compute_capability) < (8, 9):
+        pytest.skip(f'{name} is sm_90 PTX (Hopper conversion); this GPU is {context.compute_capability}')
+    args = CVT_PAIRS[name](np.random.default_rng(len(name)))
+    out_name = next(k for k in ('out', 'act') if k in args)
+    results = []
+    for kernel in (name, name + '_ref'):
+        device = {k: upload(context, v) if isinstance(v, np.ndarray) else v for k, v in args.items()}
+        SpawnKernel(context, BUILD / f'spawn/{kernel}.ptx').launch(**device)
+        context.synchronize()
+        results.append(download(device[out_name]))
+    np.testing.assert_array_equal(results[0].view(np.uint32), results[1].view(np.uint32))
+    assert np.isfinite(results[0]).all() and np.abs(results[0]).max() > 0
+
+
 # fp8_matvec4_rows (MTP verification, #16): each of m vectors gets fp8_matvec4's bits on the device,
 # at GLM-5.3's widest projections, so verifying k + 1 tokens at once gives decoding's logits.
 @pytest.mark.skipif(not (BUILD / 'spawn/fp8_matvec4_rows.ptx').exists(), reason='fp8_matvec4_rows not built (gpu/spawn/build.sh)')

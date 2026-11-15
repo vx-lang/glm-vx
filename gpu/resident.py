@@ -81,6 +81,12 @@ float64 sum of the dequantized weights and float32 activations, closer than fp8_
 experts take fp8_moe_fma_gate_up and fp8_moe_fma_down (#31), the same dot products for each
 expert's rows; forward_many keeps the x4 kernels.
 
+``fp8_kernels='cvt'`` is 'fma' with the codes at their true values (glm-vx #38): the dense Linears
+through fp8_matvec_cvt_tiles, q_a/kv_a/wk through fp8_matvec_cvt_tiles3, gate/up and the routed
+experts through fp8_moe_cvt_*. On compute capability 8.9 and up they are the sm_90 builds, which
+decode two codes an instruction with Hopper's e4m3x2 -> f16x2 conversion; elsewhere (an A100, the
+test context) their _ref builds, an exact integer decode with the same bits.
+
 ``fp8_kernels='cublaslt'`` runs the dense FP8 Linears whose input width is a multiple of 128 through
 cuBLASLt's block-scaled FP8 matmul (gpu/cublaslt.py, #29): x quantized to e4m3 per 128 columns
 (gpu/fp8_quant.vx), the checkpoint's 128x128 weight scales, float32 accumulation. That is SGLang's
@@ -172,8 +178,8 @@ class ResidentGLM:
         self.device_experts = bool(device_experts)
         self.fused_attention = bool(fused_attention)
         self.graph = bool(graph)
-        if fp8_kernels not in ('hand', 'x4', 'fma', 'cublaslt'):
-            raise ValueError("fp8_kernels must be 'hand', 'x4', 'fma' or 'cublaslt'")
+        if fp8_kernels not in ('hand', 'x4', 'fma', 'cvt', 'cublaslt'):
+            raise ValueError("fp8_kernels must be 'hand', 'x4', 'fma', 'cvt' or 'cublaslt'")
         self.fp8_kernels = fp8_kernels
         if matvec_kernels not in ('hand', 'spawn', 'x4'):
             raise ValueError("matvec_kernels must be 'hand', 'spawn' or 'x4'")
@@ -220,9 +226,12 @@ class ResidentGLM:
             self._formats = {}
             self._check_quantization(model.config.get('quantization_config'))
             self.stream = self.ctx.stream()
-            # fp8_kernels='fma': the one expert id (0) that runs a dense gate/up through fp8_moe_fma_gate_up.
+            # fp8_kernels='fma'/'cvt': the one expert id (0) that runs a dense gate/up through the MoE kernel.
             self._expert_zero = (self._tensor((1,), 'int32', np.zeros(1, np.int32).tobytes())
-                                 if fp8_kernels == 'fma' else None)
+                                 if fp8_kernels in ('fma', 'cvt') else None)
+            # fp8_kernels='cvt': the sm_90 builds (Hopper's conversion) from compute capability 8.9, else _ref.
+            capability = tuple(getattr(self.ctx, 'compute_capability', None) or (0, 0))
+            self._cvt_suffix = '' if capability >= (8, 9) else '_ref'
             self._kernels = {}
             self._spawn_kernels = {}
             self._lt, self._lt_matmuls, self._lt_inputs, self._lt_outputs = None, {}, {}, {}  # fp8_kernels='cublaslt'
@@ -468,7 +477,7 @@ class ResidentGLM:
         self.heads_out = t((self.heads * self.value_dim,))
         self.iq, self.iq_rot = t((self.index_heads * self.index_dim,)), t((self.index_heads * self.index_dim,))
         self.ik, self.ik_norm = t((self.index_dim,)), t((self.index_dim,))
-        if self.fp8_kernels == 'fma':
+        if self.fp8_kernels in ('fma', 'cvt'):
             # One buffer for q_a, kv_a and the indexer's wk outputs, as fp8_matvec_fma_tiles3 writes
             # them (each matrix's rows from a multiple of 8): one launch for all three (#30).
             pad = lambda n: -(-n // 8) * 8
@@ -576,11 +585,14 @@ class ResidentGLM:
             if self.fp8_kernels == 'cublaslt' and cols % 128 == 0:
                 self._check_shape(prefix, fmt, rows, cols, x, out)
                 return self._fp8_cublaslt(prefix, codes, rows, cols, x, out)
-            if self.fp8_kernels in ('x4', 'fma') and cols % 16 == 0:
+            if self.fp8_kernels in ('x4', 'fma', 'cvt') and cols % 16 == 0:
                 if out.shape != (rows,) or x.shape != (cols,):
                     raise ValueError(f'{prefix}: FP8 weight is {rows}x{cols}, got x {x.shape} -> out {out.shape}')
-                kernel = 'fp8_matvec4' if self.fp8_kernels == 'x4' else (
-                    'fp8_matvec_fma' if cols >= FMA_LONG_ROWS else 'fp8_matvec_fma_tiles')
+                if self.fp8_kernels == 'cvt':
+                    kernel = 'fp8_matvec_cvt_tiles' + self._cvt_suffix
+                else:
+                    kernel = 'fp8_matvec4' if self.fp8_kernels == 'x4' else (
+                        'fp8_matvec_fma' if cols >= FMA_LONG_ROWS else 'fp8_matvec_fma_tiles')
                 self._spawn(kernel, out=out, weight=codes.view((rows * cols // 4,), 'uint32'),
                             scales=scales.view((int(np.prod(scales.shape)),)), x=x, rows=rows, cols=cols)
                 return out
@@ -769,14 +781,15 @@ class ResidentGLM:
         with one expert, so each x is read once for both projections and the activation needs no
         launch of its own. False (nothing launched) for other kernels, formats or widths."""
         gate_p, up_p = prefix + '.gate_proj', prefix + '.up_proj'
-        if self.fp8_kernels != 'fma' or self._format(gate_p) != 'fp8' or self._format(up_p) != 'fp8':
+        if self.fp8_kernels not in ('fma', 'cvt') or self._format(gate_p) != 'fp8' or self._format(up_p) != 'fp8':
             return False
         (g_codes, g_scales, (rows, cols)), (u_codes, u_scales, up_shape) = self._fp8_weight(gate_p), self._fp8_weight(up_p)
         if (rows, cols) != tuple(up_shape) or rows != width or cols % 16 or x.shape != (cols,):
             return False
         words = lambda t: t.view((int(np.prod(t.shape)) // 4,), 'uint32')
         flat = lambda t: t.view((int(np.prod(t.shape)),))
-        self._spawn('fp8_moe_fma_gate_up', act=act, gate=words(g_codes), gate_scales=flat(g_scales), up=words(u_codes),
+        kernel = 'fp8_moe_cvt_gate_up' + self._cvt_suffix if self.fp8_kernels == 'cvt' else 'fp8_moe_fma_gate_up'
+        self._spawn(kernel, act=act, gate=words(g_codes), gate_scales=flat(g_scales), up=words(u_codes),
                     up_scales=flat(u_scales), x=x, ids=self._expert_zero, k=1, experts=1, inter=rows, up_row=0,
                     stride=rows, cols=cols)
         return True
@@ -881,18 +894,20 @@ class ResidentGLM:
         common = dict(ids=self.route_ids, k=k, experts=experts, **gate[3])
         gate_args = dict(gate=gate[1][0], up=up[1][0])
         down_args = dict(down=down[1][0])
-        if fmt == 'fp8' and self.fp8_kernels in ('x4', 'fma', 'cublaslt') and hidden % 16 == 0 and inter % 16 == 0:
-            # the codes as u32: sixteen a lane step (#31), or one fma a code for fp8_kernels='fma'
-            kernel = 'fp8_moe_fma_' if self.fp8_kernels == 'fma' else 'fp8_moe4_'
+        suffix = ''
+        if fmt == 'fp8' and self.fp8_kernels in ('x4', 'fma', 'cvt', 'cublaslt') and hidden % 16 == 0 and inter % 16 == 0:
+            # the codes as u32: sixteen a lane step (#31), one fma a code ('fma'), the codes' true values ('cvt')
+            kernel = {'fma': 'fp8_moe_fma_', 'cvt': 'fp8_moe_cvt_'}.get(self.fp8_kernels, 'fp8_moe4_')
+            suffix = self._cvt_suffix if self.fp8_kernels == 'cvt' else ''
             words = lambda t: t.view((int(np.prod(t.shape)) // 4,), 'uint32')
             gate_args, down_args = dict(gate=words(gate[1][0]), up=words(up[1][0])), dict(down=words(down[1][0]))
         if fmt in ('int4', 'fp8'):
             gate_args.update(gate_scales=gate[1][1], up_scales=up[1][1])
             down_args.update(scales=down[1][1])
         act = self.moe_act.view((k * inter,))
-        self._spawn(kernel + 'gate_up', act=act, x=x, inter=inter, up_row=up_row, stride=stride, cols=hidden,
+        self._spawn(kernel + 'gate_up' + suffix, act=act, x=x, inter=inter, up_row=up_row, stride=stride, cols=hidden,
                     **gate_args, **common)
-        self._spawn(kernel + 'down', out=self.moe_sum, act=act, weights=self.route_weights, rows=hidden,
+        self._spawn(kernel + 'down' + suffix, out=self.moe_sum, act=act, weights=self.route_weights, rows=hidden,
                     cols=inter, **down_args, **common)
 
     # ---------------------------------------------------------------- blocks
@@ -909,7 +924,7 @@ class ResidentGLM:
         fp8_kernels='fma' (fp8_matvec_fma_tiles3 into self._qkv_a, whose views self.q_a,
         self.compressed and self.ik are; each row fp8_matvec_fma_tiles'). False, nothing launched, for
         other kernels, formats or widths."""
-        if self.fp8_kernels != 'fma':
+        if self.fp8_kernels not in ('fma', 'cvt'):
             return False
         names = [prefix + '.q_a_proj', prefix + '.kv_a_proj_with_mqa'] + ([prefix + '.indexer.wk'] if full else [])
         if any(self._format(n) != 'fp8' for n in names):
@@ -924,7 +939,8 @@ class ResidentGLM:
         words = lambda t: t.view((int(np.prod(t.shape)) // 4,), 'uint32')
         flat = lambda t: t.view((int(np.prod(t.shape)),))
         third = mats[2] if full else mats[1]  # rows_c = 0: never read
-        self._spawn('fp8_matvec_fma_tiles3', out=self._qkv_a, x=x, cols=cols,
+        kernel = 'fp8_matvec_cvt_tiles3' + self._cvt_suffix if self.fp8_kernels == 'cvt' else 'fp8_matvec_fma_tiles3'
+        self._spawn(kernel, out=self._qkv_a, x=x, cols=cols,
                     weight_a=words(mats[0][0]), scales_a=flat(mats[0][1]), rows_a=rows[0],
                     weight_b=words(mats[1][0]), scales_b=flat(mats[1][1]), rows_b=rows[1],
                     weight_c=words(third[0]), scales_c=flat(third[1]), rows_c=rows[2] if full else 0)
@@ -1474,7 +1490,7 @@ class ResidentGLM:
         """out[i] = W x[i] for i < count, each row what _linear(prefix, x[i], out[i], bias) writes."""
         fmt = self._format(prefix)
         rows, cols = out.shape[1], x.shape[1]
-        if fmt == 'fp8' and self.fp8_kernels in ('x4', 'fma', 'cublaslt') and cols % 16 == 0:
+        if fmt == 'fp8' and self.fp8_kernels in ('x4', 'fma', 'cvt', 'cublaslt') and cols % 16 == 0:
             codes, scales, shape = self._fp8_weight(prefix)
             if tuple(shape) != (rows, cols):
                 raise ValueError(f'{prefix}: FP8 weight is {shape[0]}x{shape[1]}, got x [{cols}] -> out [{rows}]')

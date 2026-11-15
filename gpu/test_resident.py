@@ -270,6 +270,25 @@ def test_fp8_fma_kernels_match_the_hand_kernels():
     assert launches.get('fp8_matvec_fma_tiles3', 0) > 0
 
 
+def test_fp8_cvt_kernels_match_the_hand_kernels():
+    # fp8_kernels='cvt' (glm-vx #38): the codes at their true values. The test context has no compute
+    # capability, so the _ref builds run (the sm_90 builds give their bits on Hopper).
+    model, _ = fp8_model(31, hidden_size=144, moe_intermediate_size=144)
+    runs = {}
+    for kernels in ('hand', 'cvt'):
+        resident = ResidentGLM(model, ctx=Context(), max_tokens=32, device_experts=True, fp8_kernels=kernels)
+        try:
+            runs[kernels] = (np.stack([resident.forward(t) for t in TOKENS[:8]]), dict(resident.launches))
+        finally:
+            resident.close()
+    (hand, _), (cvt, launches) = runs['hand'], runs['cvt']
+    np.testing.assert_allclose(cvt, hand, rtol=1e-4, atol=1e-4)
+    assert (cvt.argmax(-1) == hand.argmax(-1)).all()
+    for name in ('fp8_matvec_cvt_tiles_ref', 'fp8_matvec_cvt_tiles3_ref', 'fp8_moe_cvt_gate_up_ref', 'fp8_moe_cvt_down_ref'):
+        assert launches.get(name, 0) > 0, name
+    assert not any('fma' in k or 'matvec4' in k or k == 'swiglu' for k in launches), launches
+
+
 def test_norm_block_1024_is_close_to_256_and_other_sizes_are_refused():
     # norm_block (#29): RMSNorm with 1024 threads reads a row in one batch of loads; each thread sums
     # other squares, so the logits are near the 256-thread ones (which the hybrid backend matches

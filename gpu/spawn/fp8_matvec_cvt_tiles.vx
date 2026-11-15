@@ -1,0 +1,36 @@
+// fp8_matvec_fma_tiles with the codes at their true values (glm-vx #38): out[r] = sum over columns of
+// decode(w[r, c]) * scale[r / 128, c / 128] * x[c], two rows a warp, lane l on columns tile * 512 +
+// j * 128 + 4l .. + 3 (device.vx's fp8t_tiles_pair_rows!). The sm_90 build decodes two codes an
+// instruction with Hopper's e4m3x2 -> f16x2 conversion; `_ref` (fp8_matvec_cvt_tiles_ref) decodes
+// with integers and runs anywhere, the host included. Both give each code's exact float32 value, so
+// the two give the same bits. No fast-path check or x scaling: a code times x is one fma, a group's
+// sum times its scale another, and a NaN code makes its row NaN. Other widths (cols % 16 != 0) write
+// zeros.
+// spawn-include: device.vx
+// spawn-variant: - fp8_cvt_sm90.vx machine-sm90.vx
+// spawn-variant: _ref fp8_cvt_ref.vx
+
+pub fn glm_vx_spawn_fp8_matvec_cvt_tiles(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<u32, [?], Memory::HBM>,
+                                    scales: &Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                                     rows: i32, cols: i32) -> void {
+  spawn on(Topology::Device) {
+    for rb in 0..(rows - 1) / 8 + 1 across blocks {
+      let mut a = unsafe { Tensor<f32, [8, 32], Memory::SMEM>::uninit() };
+      for w in 0..4 across subgroups {
+        for lane in 0..32 across lanes {
+          let row: i64 = (rb * 8 + w * 2) as i64;
+          let mut sum: f32 = 0.0;
+          let mut sum2: f32 = 0.0;
+          fp8t_tiles_pair_rows!(sum, sum2, weight, scales, x, row, rows, cols, lane);
+          a[w * 2][lane] = sum;
+          a[w * 2 + 1][lane] = sum2;
+        }
+        let total: f32 = lanes::sum(&a[w * 2], 32);
+        let total2: f32 = lanes::sum(&a[w * 2 + 1], 32);
+        if rb * 8 + w * 2 < rows && cols >= 0 { out[rb * 8 + w * 2] = total; }
+        if rb * 8 + w * 2 + 1 < rows && cols >= 0 { out[rb * 8 + w * 2 + 1] = total2; }
+      }
+    }
+  }
+  return;
+}

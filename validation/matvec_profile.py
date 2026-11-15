@@ -70,7 +70,8 @@ def kernels(fmt, ctx, build, rng, rows, cols, stream):
     from gpu.spawn.launch import SpawnKernel
     up = lambda a: ctx.tensor(a.shape, str(a.dtype), a.tobytes())
     i32 = C.c_int32
-    outs = {k: ctx.tensor((rows,)) for k in ('hand', 'spawn', 'matvec4') + (('matvec_fma', 'matvec_fma_tiles') if fmt == 'fp8' else ())}
+    cvt = ('matvec_cvt_tiles',) if fmt == 'fp8' and tuple(ctx.compute_capability) >= (8, 9) else ()
+    outs = {k: ctx.tensor((rows,)) for k in ('hand', 'spawn', 'matvec4') + (('matvec_fma', 'matvec_fma_tiles') + cvt if fmt == 'fp8' else ())}
     x = up(rng.normal(size=cols).astype('f4'))
     if fmt == 'fp8':
         codes = rng.integers(0, 256, size=rows * cols, dtype=np.uint8)
@@ -92,7 +93,10 @@ def kernels(fmt, ctx, build, rng, rows, cols, stream):
             'matvec_fma': lambda: fma.launch(stream=stream, out=outs['matvec_fma'], weight=words, scales=d_scales, x=x,
                                              rows=rows, cols=cols),
             'matvec_fma_tiles': lambda: tiles.launch(stream=stream, out=outs['matvec_fma_tiles'], weight=words,
-                                                     scales=d_scales, x=x, rows=rows, cols=cols)}, outs
+                                                     scales=d_scales, x=x, rows=rows, cols=cols),
+            **({'matvec_cvt_tiles': lambda: SpawnKernel(ctx, build / 'spawn' / 'fp8_matvec_cvt_tiles.ptx').launch(
+                stream=stream, out=outs['matvec_cvt_tiles'], weight=words, scales=d_scales, x=x, rows=rows, cols=cols)}
+               if cvt else {})}, outs
     if fmt == 'bf16':
         bits = (rng.normal(size=rows * cols).astype('f4').view(np.uint32) >> 16).astype(np.uint16)
         weight = up(bits)

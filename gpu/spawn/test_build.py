@@ -3,6 +3,7 @@ integration tests compile real Vx and run only when VXC points at a vxc with --e
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -169,9 +170,10 @@ VXC = os.environ.get('VXC')
 needs_vxc = pytest.mark.skipif(not VXC or not shutil.which(VXC), reason='set VXC to a vxc with --emit-ptx')
 
 
-def run_build(source, output):
+def run_build(source, output, variant=None):
     return subprocess.run([sys.executable, str(HERE / 'build.py'), '--source', str(source),
-                           '--machine', str(HERE / 'machine.vx'), '--output', str(output)], text=True, capture_output=True)
+                           '--machine', str(HERE / 'machine.vx'), '--output', str(output),
+                           *(['--variant', variant] if variant else [])], text=True, capture_output=True)
 
 
 @needs_vxc
@@ -216,18 +218,36 @@ def test_refuses_two_kernels_in_one_file(tmp_path):
 @needs_vxc
 def test_every_kernel_has_a_launch_shape_that_launch_reads(tmp_path):
     from gpu.spawn.launch import launch_size
+    from gpu.spawn.build import VARIANT
     for source in sorted(HERE.glob('*.vx')):
-        if source.stem in ('machine', 'device'):
-            continue
-        out = tmp_path / f'{source.stem}.ptx'
-        result = run_build(source, out)
+        text = source.read_text()
+        if not re.search(r'^pub fn glm_vx_spawn_', text, re.M):
+            continue  # machine*.vx, device.vx and the variant includes, as build.sh skips them
+        for variant in [v[1] for v in VARIANT.finditer(text)] or [None]:
+            out = tmp_path / f'{source.stem}{variant or ""}.ptx'
+            result = run_build(source, out, variant)
+            assert result.returncode == 0, result.stderr
+            manifest = json.loads(out.with_suffix('.json').read_text())
+            launch = manifest['launch']
+            assert launch, (source.stem, variant)
+            values = {p['name']: 3 for p in manifest['params'] if p['kind'] == 'scalar'}
+            for size in launch['grid'] + [launch['block']]:
+                assert launch_size(size, values) >= 1, (source.stem, variant, size)
+
+
+@needs_vxc
+def test_a_variant_renames_the_entry_and_takes_its_include_and_machine(tmp_path):
+    # glm-vx #38: fp8_matvec_cvt_tiles builds as sm_90 (Hopper's conversion) and as _ref (sm_80, integers).
+    source = HERE / 'fp8_matvec_cvt_tiles.vx'
+    for variant, entry, target in (('-', 'glm_vx_spawn_fp8_matvec_cvt_tiles', 'sm_90'),
+                                   ('_ref', 'glm_vx_spawn_fp8_matvec_cvt_tiles_ref', 'sm_80')):
+        out = tmp_path / f'v{variant}.ptx'
+        result = run_build(source, out, variant)
         assert result.returncode == 0, result.stderr
-        manifest = json.loads(out.with_suffix('.json').read_text())
-        launch = manifest['launch']
-        assert launch, source.stem
-        values = {p['name']: 3 for p in manifest['params'] if p['kind'] == 'scalar'}
-        for size in launch['grid'] + [launch['block']]:
-            assert launch_size(size, values) >= 1, (source.stem, size)
+        ptx = out.read_text()
+        assert f'.entry {entry}(' in ptx and re.search(rf'^\.target {target}\b', ptx, re.M)
+        assert ('cvt.rn.f16x2.e4m3x2' in ptx) == (target == 'sm_90')
+    assert run_build(source, tmp_path / 'x.ptx', '_nope').returncode != 0
 
 
 @needs_vxc
