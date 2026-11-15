@@ -246,6 +246,24 @@ def test_fp8_x4_kernels_match_the_hand_kernels(graph):
         ResidentGLM(model, ctx=Context(), fp8_kernels='fast')
 
 
+def test_fp8_fma_kernels_match_the_hand_kernels():
+    # fp8_kernels='fma' (#30): x4 with fp8_matvec_fma for the dense Linears, one fma a code, so close to
+    # the default path rather than equal; the same argmax. The routed experts stay fp8_moe4_*.
+    model, _ = fp8_model(31, hidden_size=144, moe_intermediate_size=144)
+    runs = {}
+    for kernels in ('hand', 'fma'):
+        resident = ResidentGLM(model, ctx=Context(), max_tokens=32, device_experts=True, fp8_kernels=kernels)
+        try:
+            runs[kernels] = (np.stack([resident.forward(t) for t in TOKENS[:8]]), dict(resident.launches))
+        finally:
+            resident.close()
+    (hand, _), (fma, launches) = runs['hand'], runs['fma']
+    np.testing.assert_allclose(fma, hand, rtol=1e-4, atol=1e-4)
+    assert (fma.argmax(-1) == hand.argmax(-1)).all()
+    assert launches.get('fp8_matvec_fma', 0) > 0 and launches.get('fp8_moe4_gate_up', 0) > 0
+    assert 'fp8_matvec4' not in launches
+
+
 def test_fp8_cublaslt_projection_is_its_quantized_sum():
     # fp8_kernels='cublaslt' (#29): x to e4m3 per 128 columns (gpu/fp8_quant.vx, run here), then the
     # block-scaled FP8 matmul (here the test context's float64 stand-in for cuBLASLt). The output is

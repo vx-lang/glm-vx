@@ -207,7 +207,7 @@ def main():
     p.add_argument('--context', type=int, default=64, help='tokens before the profiled step (above index_topk=16)')
     p.add_argument('--seed', type=int, default=1)
     p.add_argument('--timer', choices=['ncu', 'events'], default='ncu', help='events: no ncu (see above)')
-    p.add_argument('--fp8-kernels', choices=['hand', 'x4', 'cublaslt'], default='hand',
+    p.add_argument('--fp8-kernels', choices=['hand', 'x4', 'fma', 'cublaslt'], default='hand',
                    help="ResidentGLM's fp8_kernels (#30, #31; cublaslt: activations to e4m3, cuBLASLt, #29)")
     p.add_argument('--matvec-kernels', choices=['hand', 'spawn', 'x4'], default='hand',
                    help="ResidentGLM's matvec_kernels: INT4 and BF16 Linears through gpu/spawn "

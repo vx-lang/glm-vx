@@ -73,6 +73,26 @@ macro_rules! fp8_decode {
     };
 }
 
+// $a * $b + $c rounded once (math.fma, PTX fma.rn.f32). Vx writes every other float op with its own
+// rounding (.rn), so ptxas never fuses a multiply and an add; this is the only way to get FFMA. The
+// block says writes_only(), so an `across` loop may hold it (Vx #2552); a call to f32::mul_add may
+// not (E6032).
+macro_rules! fma32 {
+    ($a:expr, $b:expr, $c:expr) => {
+        unsafe {
+          let dv_fa: f32 = $a;
+          let dv_fb: f32 = $b;
+          let dv_fc: f32 = $c;
+          let dv_fr: f32 = mlir!( inputs : (%x = dv_fa : f32, %y = dv_fb : f32, %z = dv_fc : f32), returns : f32,
+                                  dialects : ["math"], ensures : [writes_only()]) {
+            %r = math.fma %x, %y, %z : f32
+            macro.yield %r : f32
+          };
+          dv_fr
+        }
+    };
+}
+
 // The hand kernels' vxk_sigmoid: the exp argument is never positive, so it cannot overflow.
 // exp is f32::fast_exp (libdevice's expf), not the hand kernels' ex2.approx.ftz(x * log2 e):
 // that one needs an `mlir!` block, which an `across` loop takes only from Vx #2076 D1-D3 on.

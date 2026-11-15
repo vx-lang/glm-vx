@@ -426,6 +426,86 @@ def test_fp8_matvec4_decodes_every_code(run):
     bits_equal(got, F(0) + fp8(codes))  # a sum starts at +0, so code 0x80 (-0) comes out +0
 
 
+# fp8_matvec_fma (#30): fp8_matvec4's layout with one fma a code, so not its bits. Rows must be within
+# 2e-6 of the largest |output| of the float64 sum. Both kernels measure 1e-7 to 5e-7 on the host at
+# these shapes, at any activation size from 1 down to 1e-9 (the kernel reads x at 2^40 so that no step
+# falls to denormals); an error of 1e-4 fails.
+FMA_TOLERANCE = 2e-6
+
+
+def fp8_reference(weight, scales, x):
+    """(float64 row sums, rows whose terms are all finite)."""
+    rows, cols = weight.shape
+    per_col = scales[np.arange(rows)[:, None] // 128, np.arange(cols)[None, :] // 128].astype(np.float64)
+    terms = fp8(weight).astype(np.float64) * per_col * x.astype(np.float64)
+    return terms.sum(axis=1), np.isfinite(terms).all(axis=1)
+
+
+def assert_fma_close(got, weight, scales, x, rows=None):
+    want, finite = fp8_reference(weight, scales, x)
+    keep = finite if rows is None else finite & rows
+    err = np.abs(np.asarray(got, np.float64) - want)[keep]
+    worst = float(err.max() / np.abs(want[keep]).max())
+    assert worst <= FMA_TOLERANCE, f'{worst:.1e} of the largest output'
+
+
+# (8, 2048) and the GLM widths take the two-steps-a-turn loop; (5, 144) and (2, 576) only the tail.
+@pytest.mark.parametrize('rows,cols', [(5, 144), (300, 1008), (130, 6144), (4, 16384), (3, 640), (2, 576), (8, 2048)])
+def test_fp8_matvec_fma(run, rows, cols):
+    weight, scales, x, _ = fp8_matvec4_case(rows, cols, rows * 13 + cols)
+    words = weight.view(np.uint32).reshape(-1)
+    got = run('fp8_matvec_fma', out=np.zeros(rows, F), weight=words, scales=scales.reshape(-1), x=x, rows=rows,
+              cols=cols)['out']
+    assert_fma_close(got, weight, scales, x)
+    four = run('fp8_matvec4', out=np.zeros(rows, F), weight=words, scales=scales.reshape(-1), x=x, rows=rows,
+               cols=cols)['out']
+    assert_fma_close(four, weight, scales, x)  # fp8_matvec4 is within it too
+
+
+# Steps off the fma path: scales of 256 and more, subnormal and zero scales, and NaN codes (that
+# step goes code by code, and the row is NaN). (130, 2304) puts them in both halves of a turn.
+@pytest.mark.parametrize('rows,cols', [(5, 1008), (130, 1152), (130, 2304)])
+def test_fp8_matvec_fma_exact_steps(run, rows, cols):
+    nan_rows = [r for r in NAN_ROWS if r < rows]
+    weight, scales, x, _ = fp8_matvec4_case(rows, cols, rows + cols, EDGE_SCALES, nan_rows)
+    got = run('fp8_matvec_fma', out=np.zeros(rows, F), weight=weight.view(np.uint32).reshape(-1),
+              scales=scales.reshape(-1), x=x, rows=rows, cols=cols)['out']
+    nan = np.isin(np.arange(rows), nan_rows)
+    assert np.isnan(got[nan]).all()
+    assert_fma_close(got, weight, scales, x, rows=~nan)
+
+
+@pytest.mark.parametrize('size', [1e-5, 1e-9])
+def test_fp8_matvec_fma_keeps_its_precision_for_small_activations(run, size):
+    # Read at 2^-120 scale, as from_bits gives the codes, these steps would be denormals (7e-5
+    # relative error at 1e-7); x at 2^40 keeps them normal.
+    rows, cols = 130, 6144
+    weight, scales, x, _ = fp8_matvec4_case(rows, cols, 7)
+    x = (x * F(size)).astype(F)
+    got = run('fp8_matvec_fma', out=np.zeros(rows, F), weight=weight.view(np.uint32).reshape(-1),
+              scales=scales.reshape(-1), x=x, rows=rows, cols=cols)['out']
+    assert np.abs(got).max() > 0
+    assert_fma_close(got, weight, scales, x)
+
+
+def test_fp8_matvec_fma_decodes_every_code(run):
+    # As test_fp8_matvec4_decodes_every_code: one code a row, scale 1, x 1. Every product and
+    # rounding is exact here (code * 2^-80 is a normal float32), so the bits are the code's.
+    codes = np.array([c for c in range(256) if c & 0x7F != 0x7F] + [0, 0], np.uint8)
+    rows, cols = 256, 256
+    weight = np.zeros((rows, cols), np.uint8)
+    weight[np.arange(rows), np.arange(cols)] = codes
+    got = run('fp8_matvec_fma', out=np.zeros(rows, F), weight=weight.view(np.uint32).reshape(-1),
+              scales=np.ones(4, F), x=np.ones(cols, F), rows=rows, cols=cols)['out']
+    bits_equal(got, F(0) + fp8(codes))
+
+
+def test_fp8_matvec_fma_writes_zeros_for_other_widths(run):
+    got = run('fp8_matvec_fma', out=np.full(3, 7.0, F), weight=np.zeros(3 * 100 // 4 + 1, np.uint32),
+              scales=np.ones(2, F), x=np.ones(100, F), rows=3, cols=100)['out']
+    bits_equal(got, np.zeros(3, F))
+
+
 # --- Routed experts chosen on the device ---------------------------------------------------
 # Each *_expert_matvec reads the router's ids and runs the slot-th expert in ascending id order,
 # so it must equal the plain kernel on that expert's slice, bit for bit.

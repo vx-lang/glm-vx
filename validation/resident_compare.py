@@ -127,9 +127,10 @@ def quantized_main(args, config, weights, tokens, fmt):
     baseline.weights = lambda name: baseline_source(name)  # hides the packed formats: float32 path
     # --fp8-kernels x4 runs fp8_matvec4 and, with the routed experts chosen on the device in both
     # runs, fp8_moe4_* (#30, #31).
+    # --fp8-kernels fma is x4 with fp8_matvec_fma for the dense Linears: the same gate as x4.
     # --fp8-kernels cublaslt also quantizes the dense Linears' activations to e4m3 for cuBLASLt (#29).
     kernels = getattr(args, 'fp8_kernels', 'hand')
-    options = dict(fp8_kernels=kernels, device_experts=True) if kernels in ('x4', 'cublaslt') else {}
+    options = dict(fp8_kernels=kernels, device_experts=True) if kernels in ('x4', 'fma', 'cublaslt') else {}
     got, got_s, got_warm, got_gib, launches = timed_resident(candidate, tokens, **options)
     expected, exp_s, exp_warm, exp_gib, _ = timed_resident(baseline, tokens, **{k: v for k, v in options.items() if k == 'device_experts'})
     diff = np.abs(got - expected)
@@ -143,6 +144,7 @@ def quantized_main(args, config, weights, tokens, fmt):
         **{f'{fmt}_weights_gib_uploaded': got_gib}, f32_weights_gib_uploaded=exp_gib,
         **{f'{fmt}_matvec_launches': launches.get(f'{fmt}_matvec', 0)},
         **({'fp8_kernels': kernels, 'fp8_matvec4_launches': launches.get('fp8_matvec4', 0),
+            'fp8_matvec_fma_launches': launches.get('fp8_matvec_fma', 0),
             'fp8_moe4_launches': launches.get('fp8_moe4_gate_up', 0),
             'cublaslt_launches': launches.get('cublaslt_fp8', 0)} if options else {}),
         note=f'single run, synthetic {fmt.upper()} encoding of random weights; kv_b_proj is dequantized to float32 in both; lazy uploads; not a benchmark')
@@ -169,8 +171,9 @@ def main():
     quant.add_argument('--int4', action='store_true', help='INT4 resident vs float32 resident on the dequantized weights')
     quant.add_argument('--fp8', action='store_true', help='block-FP8 resident vs float32 resident on the dequantized weights')
     quant.add_argument('--bf16', action='store_true', help='BF16 resident vs float32 resident on the same bf16 values')
-    p.add_argument('--fp8-kernels', choices=['hand', 'x4', 'cublaslt'], default='hand',
-                   help="with --fp8: x4 runs gpu/spawn's fp8_matvec4 and fp8_moe4_* (#30, #31); cublaslt "
+    p.add_argument('--fp8-kernels', choices=['hand', 'x4', 'fma', 'cublaslt'], default='hand',
+                   help="with --fp8: x4 runs gpu/spawn's fp8_matvec4 and fp8_moe4_* (#30, #31); fma is x4 with "
+                        "fp8_matvec_fma for the dense Linears; cublaslt "
                         "also runs the dense Linears through cuBLASLt on e4m3 activations (#29)")
     args = p.parse_args()
     if args.fp8_kernels != 'hand' and not args.fp8:

@@ -197,6 +197,8 @@ CASES = {
                                  weight=fp8(r, 300 * 6144), x=normal(r, 6144), out=np.zeros(300, 'f4')),
     'fp8_matvec4': lambda r: dict(rows=300, cols=6144, scales=r.uniform(0.001, 0.1, size=3 * 48).astype('f4'),
                                   weight=fp8(r, 300 * 6144).view('u4'), x=normal(r, 6144), out=np.zeros(300, 'f4')),
+    'fp8_matvec_fma': lambda r: dict(rows=300, cols=6144, scales=r.uniform(0.001, 0.1, size=3 * 48).astype('f4'),
+                                     weight=fp8(r, 300 * 6144).view('u4'), x=normal(r, 6144), out=np.zeros(300, 'f4')),
     'fp8_matvec4_rows': lambda r: dict(rows=300, cols=6144, m=3, scales=r.uniform(0.001, 0.1, size=3 * 48).astype('f4'),
                                        weight=fp8(r, 300 * 6144).view('u4'), x=normal(r, 4 * 6144),
                                        out=np.zeros((4, 300), 'f4')),

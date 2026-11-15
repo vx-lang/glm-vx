@@ -203,6 +203,23 @@ def test_spawn_fp8_matvec4_matches_its_order(context, rows, cols):
     np.testing.assert_array_equal(download(out).view(np.uint32), np.asarray(expected, 'f4').view(np.uint32))
 
 
+# fp8_matvec_fma (#30, one fma a code) on the device: within gpu/test_spawn_vx_host's FMA_TOLERANCE of
+# the float64 sums at GLM-5.3's widths, and for tiny activations.
+@pytest.mark.skipif(not (BUILD / 'spawn/fp8_matvec_fma.ptx').exists(), reason='fp8_matvec_fma not built (gpu/spawn/build.sh)')
+@pytest.mark.parametrize('rows,cols,x_scale', [(5, 144, 1.0), (300, 1008, 1.0), (6144, 16384, 1.0), (2048, 6144, 1.0),
+                                               (130, 6144, 1e-9)])
+def test_spawn_fp8_matvec_fma_within_its_tolerance(context, rows, cols, x_scale):
+    from gpu.test_spawn_vx_host import assert_fma_close, fp8_matvec4_case
+    weight, scales, x, _ = fp8_matvec4_case(rows, cols, rows * 13 + cols)
+    x = (x * np.float32(x_scale)).astype('f4')
+    out = context.tensor((rows,))
+    SpawnKernel(context, BUILD / 'spawn/fp8_matvec_fma.ptx').launch(
+        rows=rows, cols=cols, weight=upload(context, weight.view(np.uint32).reshape(-1)),
+        scales=upload(context, scales.reshape(-1)), x=upload(context, x), out=out)
+    context.synchronize()
+    assert_fma_close(download(out), weight, scales, x)
+
+
 # fp8_matvec4_rows (MTP verification, #16): each of m vectors gets fp8_matvec4's bits on the device,
 # at GLM-5.3's widest projections, so verifying k + 1 tokens at once gives decoding's logits.
 @pytest.mark.skipif(not (BUILD / 'spawn/fp8_matvec4_rows.ptx').exists(), reason='fp8_matvec4_rows not built (gpu/spawn/build.sh)')

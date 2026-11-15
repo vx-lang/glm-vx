@@ -163,6 +163,9 @@ step resident-fp8x4-small $PYTHON -m validation.resident_compare --fp8 --fp8-ker
   --output "$out/resident-fp8x4-small.json"
 step resident-fp8x4-full$LAYERS $PYTHON -m validation.resident_compare --fp8 --fp8-kernels x4 --geometry full \
   --layers "$LAYERS" --tokens "$TOKENS" --output "$out/resident-fp8x4-full$LAYERS.json"
+# fp8_matvec_fma for the dense Linears (#30, one fma a code): x4's gate.
+step resident-fp8fma-full$LAYERS $PYTHON -m validation.resident_compare --fp8 --fp8-kernels fma --geometry full \
+  --layers "$LAYERS" --tokens "$TOKENS" --output "$out/resident-fp8fma-full$LAYERS.json"
 # cuBLASLt on e4m3 activations (#29): near the float32-activation logits, not equal (SGLang's w8a8).
 step resident-fp8lt-full$LAYERS $PYTHON -m validation.resident_compare --fp8 --fp8-kernels cublaslt --geometry full \
   --layers "$LAYERS" --tokens "$TOKENS" --output "$out/resident-fp8lt-full$LAYERS.json"
@@ -181,6 +184,9 @@ for mode in f32 int4 fp8 bf16; do
 done
 step layer-profile-fp8x4 $PYTHON -m validation.layer_profile --format fp8 --fp8-kernels x4 --timer "$TIMER" \
   --output "$out/layer-profile-fp8x4.json"
+# The dense FP8 Linears through fp8_matvec_fma (#30), the rest as fp8x4.
+step layer-profile-fp8fma $PYTHON -m validation.layer_profile --format fp8 --fp8-kernels fma --timer "$TIMER" \
+  --output "$out/layer-profile-fp8fma.json"
 # The dense FP8 Linears through cuBLASLt on e4m3 activations (#29), the rest as fp8x4.
 step layer-profile-fp8lt $PYTHON -m validation.layer_profile --format fp8 --fp8-kernels cublaslt --timer "$TIMER" \
   --output "$out/layer-profile-fp8lt.json"

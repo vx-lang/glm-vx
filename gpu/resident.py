@@ -74,6 +74,11 @@ load. Their summation order differs from the hand kernels', so the logits are cl
 path's, not equal; each kernel's own order is pinned by gpu/test_spawn_vx_host.py. Widths that are
 not a multiple of 16 keep the default kernels.
 
+``fp8_kernels='fma'`` is 'x4' with the dense FP8 Linears through fp8_matvec_fma instead of
+fp8_matvec4 (#30): the same layout, one fma a code (fp8_matvec4 spends two multiplies and an add), so
+not fp8_matvec4's bits; it is within 2e-6 of the float64 sum of the dequantized weights and float32
+activations, closer than fp8_matvec4. The routed experts and forward_many keep the x4 kernels.
+
 ``fp8_kernels='cublaslt'`` runs the dense FP8 Linears whose input width is a multiple of 128 through
 cuBLASLt's block-scaled FP8 matmul (gpu/cublaslt.py, #29): x quantized to e4m3 per 128 columns
 (gpu/fp8_quant.vx), the checkpoint's 128x128 weight scales, float32 accumulation. That is SGLang's
@@ -161,8 +166,8 @@ class ResidentGLM:
         self.device_experts = bool(device_experts)
         self.fused_attention = bool(fused_attention)
         self.graph = bool(graph)
-        if fp8_kernels not in ('hand', 'x4', 'cublaslt'):
-            raise ValueError("fp8_kernels must be 'hand', 'x4' or 'cublaslt'")
+        if fp8_kernels not in ('hand', 'x4', 'fma', 'cublaslt'):
+            raise ValueError("fp8_kernels must be 'hand', 'x4', 'fma' or 'cublaslt'")
         self.fp8_kernels = fp8_kernels
         if matvec_kernels not in ('hand', 'spawn', 'x4'):
             raise ValueError("matvec_kernels must be 'hand', 'spawn' or 'x4'")
@@ -547,10 +552,10 @@ class ResidentGLM:
             if self.fp8_kernels == 'cublaslt' and cols % 128 == 0:
                 self._check_shape(prefix, fmt, rows, cols, x, out)
                 return self._fp8_cublaslt(prefix, codes, rows, cols, x, out)
-            if self.fp8_kernels == 'x4' and cols % 16 == 0:
+            if self.fp8_kernels in ('x4', 'fma') and cols % 16 == 0:
                 if out.shape != (rows,) or x.shape != (cols,):
                     raise ValueError(f'{prefix}: FP8 weight is {rows}x{cols}, got x {x.shape} -> out {out.shape}')
-                self._spawn('fp8_matvec4', out=out, weight=codes.view((rows * cols // 4,), 'uint32'),
+                self._spawn('fp8_matvec_fma' if self.fp8_kernels == 'fma' else 'fp8_matvec4', out=out, weight=codes.view((rows * cols // 4,), 'uint32'),
                             scales=scales.view((int(np.prod(scales.shape)),)), x=x, rows=rows, cols=cols)
                 return out
             args = [codes, scales, x, I(rows), I(cols)]
@@ -825,7 +830,7 @@ class ResidentGLM:
         common = dict(ids=self.route_ids, k=k, experts=experts, **gate[3])
         gate_args = dict(gate=gate[1][0], up=up[1][0])
         down_args = dict(down=down[1][0])
-        if fmt == 'fp8' and self.fp8_kernels in ('x4', 'cublaslt') and hidden % 16 == 0 and inter % 16 == 0:
+        if fmt == 'fp8' and self.fp8_kernels in ('x4', 'fma', 'cublaslt') and hidden % 16 == 0 and inter % 16 == 0:
             kernel = 'fp8_moe4_'  # the codes as u32, sixteen a lane step (#31)
             words = lambda t: t.view((int(np.prod(t.shape)) // 4,), 'uint32')
             gate_args, down_args = dict(gate=words(gate[1][0]), up=words(up[1][0])), dict(down=words(down[1][0]))
@@ -1385,7 +1390,7 @@ class ResidentGLM:
         """out[i] = W x[i] for i < count, each row what _linear(prefix, x[i], out[i], bias) writes."""
         fmt = self._format(prefix)
         rows, cols = out.shape[1], x.shape[1]
-        if fmt == 'fp8' and self.fp8_kernels in ('x4', 'cublaslt') and cols % 16 == 0:
+        if fmt == 'fp8' and self.fp8_kernels in ('x4', 'fma', 'cublaslt') and cols % 16 == 0:
             codes, scales, shape = self._fp8_weight(prefix)
             if tuple(shape) != (rows, cols):
                 raise ValueError(f'{prefix}: FP8 weight is {shape[0]}x{shape[1]}, got x [{cols}] -> out [{rows}]')
