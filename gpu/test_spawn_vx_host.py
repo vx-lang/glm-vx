@@ -1388,7 +1388,7 @@ def test_mla_tc_at_matches_float64_on_bf16_values(run, heads, tokens, splits_max
     q, qr = rng.normal(size=(heads, rank)).astype(F), rng.normal(size=(heads, rope)).astype(F)
     kv, kr = to_bf16(rng.normal(size=(tokens, rank))), to_bf16(rng.normal(size=(tokens, rope)))
     scale = rank ** -0.5
-    common = dict(q_latent=q, q_rope=qr, cache_latent=kv.reshape(-1), cache_rope=kr.reshape(-1), heads=heads, rank=rank,
+    common = dict(q_latent=q, q_rope=qr, cache_latent=kv, cache_rope=kr, heads=heads, rank=rank,
                   rope_dim=rope, selection_stride=0, scale=scale, splits_max=splits_max)
     as_f32 = lambda b: bf16(b)
     for count in (0, 5, 33, min(32 * splits_max, tokens, 200)):
@@ -1401,8 +1401,9 @@ def test_mla_tc_at_matches_float64_on_bf16_values(run, heads, tokens, splits_max
         qs = run('mla_q_bf16_at', q_t=np.zeros((groups, 1024, 8), np.uint16), qr_t=np.zeros((groups, 128, 8), np.uint16),
                  q_latent=q, q_rope=qr, heads=heads, rank=rank, rope_dim=rope)
         tc = {k: v for k, v in values.items() if k not in ('q_latent', 'q_rope')}
-        got = run('mla_tc_at', numerator=np.zeros((groups, splits_max, 16 * rank), F), stats=np.zeros((groups, splits_max, 32), F),
+        got = run('mla_tc_at', numerator=np.zeros((groups * splits_max * 16, rank), F), stats=np.zeros((groups * splits_max, 32), F),
                   q_t=qs['q_t'].reshape(-1, 8), qr_t=qs['qr_t'].reshape(-1, 8), **tc)
+        got = dict(numerator=got['numerator'].reshape(groups, splits_max, 16 * rank), stats=got['stats'].reshape(groups, splits_max, 32))
         assert (got['numerator'][:, splits:] == 0).all() and (got['stats'][:, splits:] == 0).all()
         out = run('mla_flash_merge_at', out=np.full((heads, rank), 7, F), numerator=got['numerator'], stats=got['stats'],
                   step=values['step'], heads=heads, rank=rank, splits_max=splits_max)['out']

@@ -1085,9 +1085,10 @@ class ResidentGLM:
             stats = self.stats.view((groups, self.splits_max, 32))
             self._spawn('mla_q_bf16_at', q_t=self.q_t, qr_t=self.qr_t, q_latent=self.latent_q, q_rope=self.rot_q,
                         heads=self.heads, rank=self.rank, rope_dim=self.rot)
-            self._spawn('mla_tc_at', numerator=numerator, stats=stats, q_t=self.q_t.view((groups * 1024, 8)),
-                        qr_t=self.qr_t.view((groups * 128, 8)), cache_latent=self.latents[layer].view((self.max_tokens * self.rank,)),
-                        cache_rope=self.rope_keys[layer].view((self.max_tokens * self.rot,)), selected=self.selected, step=self.step,
+            self._spawn('mla_tc_at', numerator=numerator.view((groups * self.splits_max * 16, self.rank)),
+                        stats=stats.view((groups * self.splits_max, 32)), q_t=self.q_t.view((groups * 1024, 8)),
+                        qr_t=self.qr_t.view((groups * 128, 8)), cache_latent=self.latents[layer],
+                        cache_rope=self.rope_keys[layer], selected=self.selected, step=self.step,
                         heads=self.heads, rank=self.rank, rope_dim=self.rot, selection_stride=0, splits_max=self.splits_max,
                         scale=scale.value)
             self._spawn('mla_flash_merge_at', out=self.attended, numerator=numerator, stats=stats, step=self.step,

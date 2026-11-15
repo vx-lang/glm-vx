@@ -140,8 +140,9 @@ def mla_tc_at(rng, heads=16, rank=512, rope=64, tokens=300, count=37, splits=2, 
     values = mla_flash_at(rng, heads, rank, rope, tokens, count, splits, splits_max)
     for name in ('q_latent', 'q_rope'):
         values.pop(name)
-    values.update(q_t=bf16(rng, heads // 16 * 1024 * 8).reshape(-1, 8), qr_t=bf16(rng, heads // 16 * 128 * 8).reshape(-1, 8),
-                  cache_latent=bf16(rng, tokens * rank), cache_rope=bf16(rng, tokens * rope))
+    values.update(numerator=np.zeros((heads // 16 * splits_max * 16, rank), 'f4'), stats=np.zeros((heads // 16 * splits_max, 32), 'f4'),
+                  q_t=bf16(rng, heads // 16 * 1024 * 8).reshape(-1, 8), qr_t=bf16(rng, heads // 16 * 128 * 8).reshape(-1, 8),
+                  cache_latent=bf16(rng, tokens * rank).reshape(tokens, rank), cache_rope=bf16(rng, tokens * rope).reshape(tokens, rope))
     return values
 
 
