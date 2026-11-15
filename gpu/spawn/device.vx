@@ -444,3 +444,140 @@ macro_rules! fp8_step_into {
         }
     };
 }
+
+// --- Two rows against one x, whole-sector loads (fp8_matvec_fma_tiles, fp8_moe_fma_*, #30, #31) ---
+
+// Word $u of row r and word $v of row r + 1 (four codes each) against x0 .. x3, already read:
+// two partials of four fmas each.
+macro_rules! fp8_pair_word4 {
+    ($p:ident, $q:ident, $u:expr, $v:expr, $x0:expr, $x1:expr, $x2:expr, $x3:expr) => {
+        unsafe {
+          let dv_a: f32 = $x0 * X_SCALE!();
+          let dv_b: f32 = $x1 * X_SCALE!();
+          let dv_c: f32 = $x2 * X_SCALE!();
+          let dv_d: f32 = $x3 * X_SCALE!();
+          $p = fma32!(f32::from_bits(fp8_bits!($u, 0)), dv_a, $p);
+          $q = fma32!(f32::from_bits(fp8_bits!($v, 0)), dv_a, $q);
+          $p = fma32!(f32::from_bits(fp8_bits!($u, 1)), dv_b, $p);
+          $q = fma32!(f32::from_bits(fp8_bits!($v, 1)), dv_b, $q);
+          $p = fma32!(f32::from_bits(fp8_bits!($u, 2)), dv_c, $p);
+          $q = fma32!(f32::from_bits(fp8_bits!($v, 2)), dv_c, $q);
+          $p = fma32!(f32::from_bits(fp8_bits!($u, 3)), dv_d, $p);
+          $q = fma32!(f32::from_bits(fp8_bits!($v, 3)), dv_d, $q);
+        }
+    };
+}
+
+// Group j of a 512-column tile for row a (word offset $ra in $wa, scales from $sca[$sba ..]) and
+// row b ($rb in $wb, $scb[$sbb ..]), both against x[$xo ..]: lane l's word tile * 128 + j * 32 + l
+// of each row (codes at columns tile * 512 + j * 128 + 4l .. + 3, in scale block tile * 4 + j).
+// The rows may be of one matrix (fp8_matvec_fma_tiles) or two (fp8_moe_fma_gate_up's gate and up).
+// $xo must be a multiple of 4, written so, for x's 16-byte loads.
+macro_rules! fp8_pair_group {
+    ($sa:ident, $sb:ident, $wa:ident, $sca:ident, $wb:ident, $scb:ident, $x:ident, $xo:expr, $ra:expr, $rb:expr, $sba:expr, $sbb:expr, $word:expr, $words:expr) => {
+        unsafe {
+          let dv_w: i64 = $word;
+          if dv_w < $words {
+            let dv_u: u32 = $wa[$ra + dv_w];
+            let dv_v: u32 = $wb[$rb + dv_w];
+            let dv_scale: f32 = $sca[$sba + dv_w / 32];
+            let dv_scale_b: f32 = $scb[$sbb + dv_w / 32];
+            let dv_col: i64 = $xo + dv_w * 4;
+            // The four x of these columns in one 16-byte load, read before the branch.
+            let dv_x0: f32 = $x[dv_col];
+            let dv_x1: f32 = $x[dv_col + 1];
+            let dv_x2: f32 = $x[dv_col + 2];
+            let dv_x3: f32 = $x[dv_col + 3];
+            if fp8_no_nan4!(dv_u, dv_v, 0u32, 0u32) && dv_scale < 256.0 && dv_scale > -256.0
+               && dv_scale_b < 256.0 && dv_scale_b > -256.0 {
+              let mut dv_p: f32 = 0.0;
+              let mut dv_q: f32 = 0.0;
+              fp8_pair_word4!(dv_p, dv_q, dv_u, dv_v, dv_x0, dv_x1, dv_x2, dv_x3);
+              $sa = fma32!(dv_p, dv_scale * STEP_SCALE!(), $sa);
+              $sb = fma32!(dv_q, dv_scale_b * STEP_SCALE!(), $sb);
+            } else {
+              let dv_iu: i32 = dv_u as i32;
+              let dv_iv: i32 = dv_v as i32;
+              $sa = fp8_word_terms!($sa, dv_iu, dv_scale, $x, dv_col);
+              $sb = fp8_word_terms!($sb, dv_iv, dv_scale_b, $x, dv_col);
+            }
+          }
+        }
+    };
+}
+
+// A whole 512-column tile of rows a and b (fp8_pair_group!'s), every load first: lane l's words
+// tile * 128 + j * 32 + l of both rows, the four x of each group, both rows' four scales; then the
+// fmas, or group by group the exact terms where a code is NaN or a scale 256 or more.
+macro_rules! fp8_pair_tile {
+    ($sa:ident, $sb:ident, $wa:ident, $sca:ident, $wb:ident, $scb:ident, $x:ident, $xo:expr, $ra:expr, $rb:expr, $sba:expr, $sbb:expr, $word:expr) => {
+        unsafe {
+          let dv_w: i64 = $word;
+          let dv_u0: u32 = $wa[$ra + dv_w];
+          let dv_u1: u32 = $wa[$ra + dv_w + 32];
+          let dv_u2: u32 = $wa[$ra + dv_w + 64];
+          let dv_u3: u32 = $wa[$ra + dv_w + 96];
+          let dv_v0: u32 = $wb[$rb + dv_w];
+          let dv_v1: u32 = $wb[$rb + dv_w + 32];
+          let dv_v2: u32 = $wb[$rb + dv_w + 64];
+          let dv_v3: u32 = $wb[$rb + dv_w + 96];
+          let dv_c: i64 = $xo + dv_w * 4;
+          let dv_x00: f32 = $x[dv_c];
+          let dv_x01: f32 = $x[dv_c + 1];
+          let dv_x02: f32 = $x[dv_c + 2];
+          let dv_x03: f32 = $x[dv_c + 3];
+          let dv_x10: f32 = $x[dv_c + 128];
+          let dv_x11: f32 = $x[dv_c + 129];
+          let dv_x12: f32 = $x[dv_c + 130];
+          let dv_x13: f32 = $x[dv_c + 131];
+          let dv_x20: f32 = $x[dv_c + 256];
+          let dv_x21: f32 = $x[dv_c + 257];
+          let dv_x22: f32 = $x[dv_c + 258];
+          let dv_x23: f32 = $x[dv_c + 259];
+          let dv_x30: f32 = $x[dv_c + 384];
+          let dv_x31: f32 = $x[dv_c + 385];
+          let dv_x32: f32 = $x[dv_c + 386];
+          let dv_x33: f32 = $x[dv_c + 387];
+          let dv_s0: f32 = $sca[$sba + dv_w / 32];
+          let dv_s1: f32 = $sca[$sba + dv_w / 32 + 1];
+          let dv_s2: f32 = $sca[$sba + dv_w / 32 + 2];
+          let dv_s3: f32 = $sca[$sba + dv_w / 32 + 3];
+          let dv_t0: f32 = $scb[$sbb + dv_w / 32];
+          let dv_t1: f32 = $scb[$sbb + dv_w / 32 + 1];
+          let dv_t2: f32 = $scb[$sbb + dv_w / 32 + 2];
+          let dv_t3: f32 = $scb[$sbb + dv_w / 32 + 3];
+          if fp8_no_nan4!(dv_u0, dv_u1, dv_u2, dv_u3) && fp8_no_nan4!(dv_v0, dv_v1, dv_v2, dv_v3)
+             && dv_s0 < 256.0 && dv_s0 > -256.0 && dv_s1 < 256.0 && dv_s1 > -256.0
+             && dv_s2 < 256.0 && dv_s2 > -256.0 && dv_s3 < 256.0 && dv_s3 > -256.0
+             && dv_t0 < 256.0 && dv_t0 > -256.0 && dv_t1 < 256.0 && dv_t1 > -256.0
+             && dv_t2 < 256.0 && dv_t2 > -256.0 && dv_t3 < 256.0 && dv_t3 > -256.0 {
+            let mut dv_p: f32 = 0.0;
+            let mut dv_q: f32 = 0.0;
+            fp8_pair_word4!(dv_p, dv_q, dv_u0, dv_v0, dv_x00, dv_x01, dv_x02, dv_x03);
+            $sa = fma32!(dv_p, dv_s0 * STEP_SCALE!(), $sa);
+            $sb = fma32!(dv_q, dv_t0 * STEP_SCALE!(), $sb);
+            dv_p = 0.0;
+            dv_q = 0.0;
+            fp8_pair_word4!(dv_p, dv_q, dv_u1, dv_v1, dv_x10, dv_x11, dv_x12, dv_x13);
+            $sa = fma32!(dv_p, dv_s1 * STEP_SCALE!(), $sa);
+            $sb = fma32!(dv_q, dv_t1 * STEP_SCALE!(), $sb);
+            dv_p = 0.0;
+            dv_q = 0.0;
+            fp8_pair_word4!(dv_p, dv_q, dv_u2, dv_v2, dv_x20, dv_x21, dv_x22, dv_x23);
+            $sa = fma32!(dv_p, dv_s2 * STEP_SCALE!(), $sa);
+            $sb = fma32!(dv_q, dv_t2 * STEP_SCALE!(), $sb);
+            dv_p = 0.0;
+            dv_q = 0.0;
+            fp8_pair_word4!(dv_p, dv_q, dv_u3, dv_v3, dv_x30, dv_x31, dv_x32, dv_x33);
+            $sa = fma32!(dv_p, dv_s3 * STEP_SCALE!(), $sa);
+            $sb = fma32!(dv_q, dv_t3 * STEP_SCALE!(), $sb);
+          } else {
+            let dv_words: i64 = dv_w + 128;
+            fp8_pair_group!($sa, $sb, $wa, $sca, $wb, $scb, $x, $xo, $ra, $rb, $sba, $sbb, dv_w, dv_words);
+            fp8_pair_group!($sa, $sb, $wa, $sca, $wb, $scb, $x, $xo, $ra, $rb, $sba, $sbb, dv_w + 32, dv_words);
+            fp8_pair_group!($sa, $sb, $wa, $sca, $wb, $scb, $x, $xo, $ra, $rb, $sba, $sbb, dv_w + 64, dv_words);
+            fp8_pair_group!($sa, $sb, $wa, $sca, $wb, $scb, $x, $xo, $ra, $rb, $sba, $sbb, dv_w + 96, dv_words);
+          }
+        }
+    };
+}

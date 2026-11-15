@@ -222,7 +222,8 @@ class BlockFP8Weights:
     SafetensorsCheckpoint. ``linears`` maps a Linear prefix to (E4M3FN codes uint8 [N, K], scale
     multipliers float32 [ceil(N/128), ceil(K/128)]); ``base`` (a dict or a callable) supplies every
     other tensor. ``prefix.weight`` reads back as the exact float32 dequantization (code * scale),
-    which is what the NumPy reference model computes with."""
+    which is what the NumPy reference model computes with. A base that is a BF16Weights keeps its
+    BF16 Linears (is_bf16/bf16), as an FP8 checkpoint's BF16 lm_head is."""
 
     def __init__(self, base, linears, block=(128, 128)):
         self.base, self.linears, self.block = base, dict(linears), tuple(block)
@@ -230,6 +231,13 @@ class BlockFP8Weights:
 
     def is_block_fp8(self, prefix):
         return prefix in self.linears
+
+    def is_bf16(self, prefix):
+        is_bf16 = getattr(self.base, 'is_bf16', None)
+        return prefix not in self.linears and bool(is_bf16 and is_bf16(prefix))
+
+    def bf16(self, prefix):
+        return self.base.bf16(prefix)
 
     def block_fp8(self, prefix):
         codes, scales = self.linears[prefix]

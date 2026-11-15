@@ -33,17 +33,20 @@ import numpy as np
 from validation.layer_profile import METRICS, number, parse, peak_bandwidth
 
 HIDDEN, INTER, EXPERTS = 6144, 2048, 256
-# fp8x4: the same FP8 weights through fp8_moe4_* (sixteen codes a lane step, #31).
+# fp8x4: the same FP8 weights through fp8_moe4_* (sixteen codes a lane step, #31); fp8fma through
+# fp8_moe_fma_* (one fma a code, x read once for gate and up, two down rows a block).
 KERNELS = {'f32': ('moe_gate_up', 'moe_down'), 'bf16': ('bf16_moe_gate_up', 'bf16_moe_down'),
            'fp8': ('fp8_moe_gate_up', 'fp8_moe_down'), 'fp8x4': ('fp8_moe4_gate_up', 'fp8_moe4_down'),
+           'fp8fma': ('fp8_moe_fma_gate_up', 'fp8_moe_fma_down'),
            'int4': ('int4_moe_gate_up', 'int4_moe_down')}
-ELEMENT = {'f32': 4.0, 'bf16': 2.0, 'fp8': 1.0, 'fp8x4': 1.0, 'int4': 0.5}
+ELEMENT = {'f32': 4.0, 'bf16': 2.0, 'fp8': 1.0, 'fp8x4': 1.0, 'fp8fma': 1.0, 'int4': 0.5}
+FP8 = ('fp8', 'fp8x4', 'fp8fma')  # one copy of the FP8 weights; fp8x4 and fp8fma view the codes as u32
 
 
 def scale_bytes(fmt, rows, cols):
     """Bytes of one expert matrix's scales: fp8 one f32 per 128x128 block, int4 one 16-bit value
     per 128 columns of a row."""
-    if fmt in ('fp8', 'fp8x4'):
+    if fmt in FP8:
         return 4 * -(-rows // 128) * -(-cols // 128)
     if fmt == 'int4':
         return 2 * rows * -(-cols // 128)
@@ -67,7 +70,7 @@ def weights(ctx, rng, fmt, rows, cols):
     if fmt == 'bf16':
         bits = (rng.standard_normal(n, dtype=np.float32).view(np.uint32) >> 16).astype(np.uint16)
         return dict(weight=ctx.tensor((n,), 'uint16', bits.tobytes()))
-    if fmt in ('fp8', 'fp8x4'):
+    if fmt in FP8:
         codes = rng.integers(0, 256, size=n, dtype=np.uint8)
         codes[(codes & 0x7F) == 0x7F] = 0  # no NaN codes
         scales = rng.uniform(0.001, 0.1, size=EXPERTS * -(-rows // 128) * -(-cols // 128)).astype(np.float32)
@@ -115,15 +118,15 @@ def child(args):
     plan, measured = [], []
     x = ctx.tensor((HIDDEN,), 'float32', rng.standard_normal(HIDDEN, dtype=np.float32).tobytes())
     out = ctx.tensor((HIDDEN,), 'float32')
-    fp8 = None  # fp8 and fp8x4 share one copy of the FP8 weights (fp8x4 as a u32 view): all five
+    fp8 = None  # the FP8 formats share one copy of the FP8 weights (fp8x4, fp8fma: a u32 view): all six
     for fmt in args.formats:  # formats at once would not fit in 80 GB
-        if fmt in ('fp8', 'fp8x4') and fp8 is not None:
+        if fmt in FP8 and fp8 is not None:
             codes = EXPERTS * INTER * HIDDEN  # each projection's code bytes
-            gate, up, down = ({**w, 'weight': w['weight'].view((codes // 4,), 'uint32') if fmt == 'fp8x4'
+            gate, up, down = ({**w, 'weight': w['weight'].view((codes // 4,), 'uint32') if fmt != 'fp8'
                                else w['weight'].view((codes,), 'uint8')} for w in fp8)
         else:
             gate, up, down = (weights(ctx, rng, fmt, r, c) for r, c in ((INTER, HIDDEN), (INTER, HIDDEN), (HIDDEN, INTER)))
-            if fmt in ('fp8', 'fp8x4'):
+            if fmt in FP8:
                 fp8 = (dict(gate), dict(up), dict(down))
         extra = {'scale_kind': gate.pop('scale_kind')} if fmt == 'int4' else {}
         up.pop('scale_kind', None)
@@ -165,7 +168,7 @@ def child(args):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--output', type=Path, required=True)
-    p.add_argument('--formats', nargs='+', choices=list(KERNELS), default=['f32', 'bf16', 'fp8', 'fp8x4', 'int4'])
+    p.add_argument('--formats', nargs='+', choices=list(KERNELS), default=['f32', 'bf16', 'fp8', 'fp8x4', 'fp8fma', 'int4'])
     p.add_argument('--k', nargs='+', type=int, default=[1, 2, 4, 8])
     p.add_argument('--seed', type=int, default=1)
     p.add_argument('--timer', choices=['ncu', 'events'], default='ncu', help='events: no ncu (see above)')

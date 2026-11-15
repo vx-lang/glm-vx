@@ -187,6 +187,10 @@ step layer-profile-fp8x4 $PYTHON -m validation.layer_profile --format fp8 --fp8-
 # The dense FP8 Linears through fp8_matvec_fma (#30), the rest as fp8x4.
 step layer-profile-fp8fma $PYTHON -m validation.layer_profile --format fp8 --fp8-kernels fma --timer "$TIMER" \
   --output "$out/layer-profile-fp8fma.json"
+# What an FP8 checkpoint runs: its lm_head is BF16 (bf16_matvec4 with matvec_kernels x4), every FP8 Linear
+# and routed expert one fma a code.
+step layer-profile-fp8real $PYTHON -m validation.layer_profile --format fp8 --fp8-kernels fma --matvec-kernels x4 \
+  --bf16-head --timer "$TIMER" --output "$out/layer-profile-fp8real.json"
 # The dense FP8 Linears through cuBLASLt on e4m3 activations (#29), the rest as fp8x4.
 step layer-profile-fp8lt $PYTHON -m validation.layer_profile --format fp8 --fp8-kernels cublaslt --timer "$TIMER" \
   --output "$out/layer-profile-fp8lt.json"

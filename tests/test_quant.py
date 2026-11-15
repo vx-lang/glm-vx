@@ -104,3 +104,22 @@ def test_quantization_noise_on_a_model():
             assert np.all(np.isfinite(out))
             error[fmt] = float(np.linalg.norm(out - exact) / np.linalg.norm(exact))
         assert error['fp8'] < error['int4']
+
+
+def test_block_fp8_weights_keep_a_bf16_base_linear():
+    # An FP8 checkpoint's lm_head is BF16: over a BF16Weights base, BlockFP8Weights reports it as
+    # BF16 (so ResidentGLM uploads 16-bit bits, not float32) and its FP8 Linears as FP8 only.
+    from glm_vx.quant import BF16Weights, BlockFP8Weights
+    from validation.resident_compare import fp8_source
+    rng = np.random.default_rng(0)
+    head = rng.normal(size=(8, 128)).astype(np.float32)
+    weights = {'lm_head.weight': head, 'model.layers.0.self_attn.o_proj.weight': rng.normal(size=(128, 128)).astype(np.float32),
+               'model.norm.weight': np.ones(128, np.float32)}
+    plain, real = fp8_source(dict(weights)), fp8_source(dict(weights), bf16_head=True)
+    assert not plain.is_bf16('lm_head') and real.is_bf16('lm_head')
+    assert not real.is_bf16('model.layers.0.self_attn.o_proj') and real.is_block_fp8('model.layers.0.self_attn.o_proj')
+    bits, shape = real.bf16('lm_head')
+    assert bits.dtype == np.uint16 and tuple(shape) == (8, 128)
+    np.testing.assert_array_equal(real('lm_head.weight'), (bits.astype(np.uint32) << 16).view(np.float32))
+    assert isinstance(real.base, BF16Weights) and isinstance(real, BlockFP8Weights)
+    np.testing.assert_array_equal(real('model.norm.weight'), weights['model.norm.weight'])

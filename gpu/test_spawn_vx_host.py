@@ -702,6 +702,80 @@ def test_fp8_moe4_equals_fp8_matvec4_per_expert(run, experts, k, inter, hidden):
     bits_equal(got, expected)
 
 
+def dequantized(w, e):
+    """Expert e's [rows, cols] fp8 matrix in float64, its scales applied."""
+    codes, scales = w['weight'][e], w['scales'][e]
+    rows, cols = codes.shape
+    return fp8(codes).astype(np.float64) * scales[np.arange(rows)[:, None] // 128, np.arange(cols)[None, :] // 128]
+
+
+# fp8_moe_fma_gate_up and fp8_moe_fma_down (#31): fp8_matvec_fma_tiles' dot products, so not
+# fp8_moe4's bits. act must be within FMA_TOLERANCE of silu(g) * u from float64 g and u (of its
+# largest |act|), and the down sum within it of the float64 sum over the experts of weight * (W x)
+# from the kernel's own act. (256, 8, 1024, 2048) takes the whole-tile loads; the others end in
+# partial tiles.
+@pytest.mark.parametrize('experts,k,inter,hidden', [(1, 1, 16, 16), (12, 8, 16, 144), (256, 8, 144, 304),
+                                                    (40, 13, 16, 144), (64, 32, 16, 80), (256, 8, 1024, 2048)])
+def test_fp8_moe_fma_within_tolerance(run, experts, k, inter, hidden):
+    rng = np.random.default_rng(experts * 7 + inter)
+    (gate, _), (up, _), (down, _) = (moe_weights(rng, 'fp8', experts, r, c) for r, c in
+                                     ((inter, hidden), (inter, hidden), (hidden, inter)))
+    x, ids = rng.normal(size=hidden).astype(F), expert_ids(rng, experts, k)
+    weights = rng.uniform(0.01, 1, size=k).astype(F)
+    words = lambda w: w['weight'].view(np.uint32).reshape(-1)
+    act = run('fp8_moe_fma_gate_up', act=np.full(k * inter, 7, F), gate=words(gate), gate_scales=gate['scales'].reshape(-1),
+              up=words(up), up_scales=up['scales'].reshape(-1), x=x, ids=ids, k=k, experts=experts, inter=inter,
+              up_row=0, stride=inter, cols=hidden)['act']
+    got = run('fp8_moe_fma_down', out=np.full(hidden, 7, F), down=words(down), scales=down['scales'].reshape(-1), act=act,
+              weights=weights, ids=ids, k=k, experts=experts, rows=hidden, cols=inter)['out']
+    want_act, want = np.zeros(k * inter), np.zeros(hidden)
+    for s, slot in enumerate(np.argsort(ids, kind='stable')):
+        e = int(ids[slot])
+        g, u = dequantized(gate, e) @ x.astype(np.float64), dequantized(up, e) @ x.astype(np.float64)
+        want_act[s * inter:(s + 1) * inter] = g * (0.5 + 0.5 * np.tanh(g / 2)) * u
+        want += float(weights[slot]) * (dequantized(down, e) @ act[s * inter:(s + 1) * inter].astype(np.float64))
+    assert np.abs(act - want_act).max() <= FMA_TOLERANCE * np.abs(want_act).max()
+    assert np.abs(got - want).max() <= FMA_TOLERANCE * np.abs(want).max()
+
+
+def test_fp8_moe_fma_down_odd_rows_and_out_of_range_ids(run):
+    # A last block with one row (rows odd), and an id past the experts adding nothing.
+    rng = np.random.default_rng(3)
+    experts, rows, cols = 6, 145, 144
+    (down, _) = moe_weights(rng, 'fp8', experts, rows, cols)
+    ids, weights = np.array([4, 9, 1], np.int32), np.array([0.5, 0.25, 2.0], F)
+    act = rng.normal(size=3 * cols).astype(F)
+    got = run('fp8_moe_fma_down', out=np.full(rows, 7, F), down=down['weight'].view(np.uint32).reshape(-1),
+              scales=down['scales'].reshape(-1), act=act, weights=weights, ids=ids, k=3, experts=experts, rows=rows,
+              cols=cols)['out']
+    # Ascending ids: 1 (slot 2) has rank 0, 4 (slot 0) rank 1, 9 (slot 1) rank 2 and is out of range.
+    want = 2.0 * (dequantized(down, 1) @ act[:cols].astype(np.float64)) \
+        + 0.5 * (dequantized(down, 4) @ act[cols:2 * cols].astype(np.float64))
+    assert np.abs(got - want).max() <= FMA_TOLERANCE * np.abs(want).max()
+
+
+def test_fp8_moe_fma_gate_up_reads_the_fused_layout(run):
+    # gate_up as one [E, 2 * inter, cols] matrix (stride 2 * inter, up rows from inter), as GLM's
+    # checkpoints may store it: the same act as the two halves passed separately.
+    rng = np.random.default_rng(11)
+    experts, k, inter, hidden = 12, 8, 144, 640
+    (both, _) = moe_weights(rng, 'fp8', experts, 2 * inter, hidden)
+    x, ids = rng.normal(size=hidden).astype(F), expert_ids(rng, experts, k)
+    words = lambda a: np.ascontiguousarray(a).view(np.uint32).reshape(-1)
+    common = dict(act=np.zeros(k * inter, F), x=x, ids=ids, k=k, experts=experts, inter=inter, cols=hidden)
+    fused = run('fp8_moe_fma_gate_up', gate=words(both['weight']), gate_scales=both['scales'].reshape(-1),
+                up=words(both['weight']), up_scales=both['scales'].reshape(-1), up_row=inter, stride=2 * inter,
+                **common)['act']
+    # Rows inter.. start a new 128-row scale block only when inter % 128 == 0: 144 is not, so cut
+    # the scales row-wise from the dequantized values instead of slicing the blocks.
+    want = np.zeros(k * inter)
+    for s, slot in enumerate(np.argsort(ids, kind='stable')):
+        m = dequantized(both, int(ids[slot])) @ x.astype(np.float64)
+        g, u = m[:inter], m[inter:]
+        want[s * inter:(s + 1) * inter] = g * (0.5 + 0.5 * np.tanh(g / 2)) * u
+    assert np.abs(fused - want).max() <= FMA_TOLERANCE * np.abs(want).max()
+
+
 def test_fused_moe_gate_up_reads_the_fused_layout(run):
     """gate_up as one [E, 2 * inter, cols] tensor (stride 2 * inter, up rows from inter) equals
     separate gate and up projections cut from it."""

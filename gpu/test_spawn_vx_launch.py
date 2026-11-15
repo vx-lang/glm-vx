@@ -265,6 +265,8 @@ CASES = {
     **{f'{p}moe_down': moe_down(f) for p, f in (('', 'f32'), ('bf16_', 'bf16'), ('fp8_', 'fp8'), ('int4_', 'int4'))},
     'fp8_moe4_gate_up': moe_gate_up('fp8x4', cols=272),
     'fp8_moe4_down': moe_down('fp8x4', cols=144),
+    'fp8_moe_fma_gate_up': moe_gate_up('fp8x4', cols=272),
+    'fp8_moe_fma_down': moe_down('fp8x4', cols=144),
 }
 
 

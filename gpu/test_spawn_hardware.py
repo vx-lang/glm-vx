@@ -221,6 +221,39 @@ def test_spawn_fp8_matvec_fma_within_its_tolerance(context, kernel, rows, cols, 
     assert_fma_close(download(out), weight, scales, x)
 
 
+# fp8_moe_fma_gate_up and fp8_moe_fma_down (#31) on the device at GLM-5.3's expert shapes (top-8 of 256,
+# 6144 x 2048): within gpu/test_spawn_vx_host's FMA_TOLERANCE of float64 sums, as on the host.
+@pytest.mark.skipif(not (BUILD / 'spawn/fp8_moe_fma_down.ptx').exists(), reason='fp8_moe_fma_* not built (gpu/spawn/build.sh)')
+@pytest.mark.parametrize('experts,k,inter,hidden', [(256, 8, 2048, 6144), (12, 8, 144, 640)])
+def test_spawn_fp8_moe_fma_within_its_tolerance(context, experts, k, inter, hidden):
+    from gpu.test_spawn_vx_host import FMA_TOLERANCE, dequantized, expert_ids, moe_weights
+    rng = np.random.default_rng(experts + inter)
+    (gate, _), (up, _), (down, _) = (moe_weights(rng, 'fp8', experts, r, c) for r, c in
+                                     ((inter, hidden), (inter, hidden), (hidden, inter)))
+    x, ids = rng.normal(size=hidden).astype('f4'), expert_ids(rng, experts, k)
+    weights = rng.uniform(0.01, 1, size=k).astype('f4')
+    words = lambda w: upload(context, w['weight'].view(np.uint32).reshape(-1))
+    act, out = context.tensor((k * inter,)), context.tensor((hidden,))
+    ids_t = upload(context, ids)
+    SpawnKernel(context, BUILD / 'spawn/fp8_moe_fma_gate_up.ptx').launch(
+        act=act, gate=words(gate), gate_scales=upload(context, gate['scales'].reshape(-1)), up=words(up),
+        up_scales=upload(context, up['scales'].reshape(-1)), x=upload(context, x), ids=ids_t, k=k, experts=experts,
+        inter=inter, up_row=0, stride=inter, cols=hidden)
+    SpawnKernel(context, BUILD / 'spawn/fp8_moe_fma_down.ptx').launch(
+        out=out, down=words(down), scales=upload(context, down['scales'].reshape(-1)), act=act,
+        weights=upload(context, weights), ids=ids_t, k=k, experts=experts, rows=hidden, cols=inter)
+    context.synchronize()
+    got_act, got = download(act), download(out)
+    want_act, want = np.zeros(k * inter), np.zeros(hidden)
+    for s, slot in enumerate(np.argsort(ids, kind='stable')):
+        e = int(ids[slot])
+        g, u = dequantized(gate, e) @ x.astype(np.float64), dequantized(up, e) @ x.astype(np.float64)
+        want_act[s * inter:(s + 1) * inter] = g * (0.5 + 0.5 * np.tanh(g / 2)) * u
+        want += float(weights[slot]) * (dequantized(down, e) @ got_act[s * inter:(s + 1) * inter].astype(np.float64))
+    assert np.abs(got_act - want_act).max() <= FMA_TOLERANCE * np.abs(want_act).max()
+    assert np.abs(got - want).max() <= FMA_TOLERANCE * np.abs(want).max()
+
+
 # fp8_matvec4_rows (MTP verification, #16): each of m vectors gets fp8_matvec4's bits on the device,
 # at GLM-5.3's widest projections, so verifying k + 1 tokens at once gives decoding's logits.
 @pytest.mark.skipif(not (BUILD / 'spawn/fp8_matvec4_rows.ptx').exists(), reason='fp8_matvec4_rows not built (gpu/spawn/build.sh)')

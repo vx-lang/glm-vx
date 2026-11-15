@@ -78,7 +78,8 @@ not a multiple of 16 keep the default kernels.
 FMA_LONG_ROWS or more) or fp8_matvec_fma_tiles (#30): one fma a code (fp8_matvec4 spends two
 multiplies and an add) and two rows a warp, so not fp8_matvec4's bits; each is within 2e-6 of the
 float64 sum of the dequantized weights and float32 activations, closer than fp8_matvec4. The routed
-experts and forward_many keep the x4 kernels.
+experts take fp8_moe_fma_gate_up and fp8_moe_fma_down (#31), the same dot products for each
+expert's rows; forward_many keeps the x4 kernels.
 
 ``fp8_kernels='cublaslt'`` runs the dense FP8 Linears whose input width is a multiple of 128 through
 cuBLASLt's block-scaled FP8 matmul (gpu/cublaslt.py, #29): x quantized to e4m3 per 128 columns
@@ -837,7 +838,8 @@ class ResidentGLM:
         gate_args = dict(gate=gate[1][0], up=up[1][0])
         down_args = dict(down=down[1][0])
         if fmt == 'fp8' and self.fp8_kernels in ('x4', 'fma', 'cublaslt') and hidden % 16 == 0 and inter % 16 == 0:
-            kernel = 'fp8_moe4_'  # the codes as u32, sixteen a lane step (#31)
+            # the codes as u32: sixteen a lane step (#31), or one fma a code for fp8_kernels='fma'
+            kernel = 'fp8_moe_fma_' if self.fp8_kernels == 'fma' else 'fp8_moe4_'
             words = lambda t: t.view((int(np.prod(t.shape)) // 4,), 'uint32')
             gate_args, down_args = dict(gate=words(gate[1][0]), up=words(up[1][0])), dict(down=words(down[1][0]))
         if fmt in ('int4', 'fp8'):
