@@ -1,0 +1,149 @@
+// spawn-include: device.vx
+
+// 2^40, which x is multiplied by as it is read, and 2^80, which a step's sum is multiplied by with
+// its scale: from_bits(fp8_bits(code)) is code * 2^-120, so a product is code * x * 2^-80.
+macro_rules! X_SCALE { () => { f32::from_bits(1400897536u32) }; }
+macro_rules! STEP_SCALE { () => { f32::from_bits(1736441856u32) }; }
+
+// Sixteen codes of one lane step at 2^-80 scale: the sum of from_bits(fp8_bits(code)) * (x[col + i] *
+// 2^40), one fma each, in column order. No code may be a NaN (fp8_fast4! said so).
+macro_rules! fp8_step_fma {
+    ($w0:expr, $w1:expr, $w2:expr, $w3:expr, $x:ident, $col:expr) => {
+        unsafe {
+          let mut dv_p: f32 = 0.0;
+          let mut dv_j: i32 = 0;
+          while dv_j < 4 {
+            dv_p = fma32!(f32::from_bits(fp8_bits!($w0, dv_j)), $x[$col + (dv_j as i64)] * X_SCALE!(), dv_p);
+            dv_j = dv_j + 1;
+          }
+          dv_j = 0;
+          while dv_j < 4 {
+            dv_p = fma32!(f32::from_bits(fp8_bits!($w1, dv_j)), $x[$col + 4 + (dv_j as i64)] * X_SCALE!(), dv_p);
+            dv_j = dv_j + 1;
+          }
+          dv_j = 0;
+          while dv_j < 4 {
+            dv_p = fma32!(f32::from_bits(fp8_bits!($w2, dv_j)), $x[$col + 8 + (dv_j as i64)] * X_SCALE!(), dv_p);
+            dv_j = dv_j + 1;
+          }
+          dv_j = 0;
+          while dv_j < 4 {
+            dv_p = fma32!(f32::from_bits(fp8_bits!($w3, dv_j)), $x[$col + 12 + (dv_j as i64)] * X_SCALE!(), dv_p);
+            dv_j = dv_j + 1;
+          }
+          dv_p
+        }
+    };
+}
+
+// One lane step of sixteen codes into $sum: the fma path, or the exact one for a NaN code or a
+// scale of 256 or more.
+macro_rules! fp8_step_into {
+    ($sum:expr, $w0:expr, $w1:expr, $w2:expr, $w3:expr, $scale:expr, $x:ident, $col:expr) => {
+        unsafe {
+          let mut dv_s: f32 = $sum;
+          if fp8_fast4!($w0, $w1, $w2, $w3, $scale) {
+            let dv_step: f32 = fp8_step_fma!($w0, $w1, $w2, $w3, $x, $col);
+            dv_s = fma32!(dv_step, $scale * STEP_SCALE!(), dv_s);
+          } else {
+            let dv_i0: i32 = $w0 as i32;
+            let dv_i1: i32 = $w1 as i32;
+            let dv_i2: i32 = $w2 as i32;
+            let dv_i3: i32 = $w3 as i32;
+            dv_s = fp8_word_terms!(dv_s, dv_i0, $scale, $x, $col);
+            dv_s = fp8_word_terms!(dv_s, dv_i1, $scale, $x, $col + 4);
+            dv_s = fp8_word_terms!(dv_s, dv_i2, $scale, $x, $col + 8);
+            dv_s = fp8_word_terms!(dv_s, dv_i3, $scale, $x, $col + 12);
+          }
+          dv_s
+        }
+    };
+}
+
+
+// Codes j of word $u (row r) and of word $v (row r + 1) against one x: two fmas, one read of x.
+macro_rules! fp8_pair_word {
+    ($p:ident, $q:ident, $u:expr, $v:expr, $x:ident, $col:expr) => {
+        unsafe {
+          let mut dv_j: i32 = 0;
+          while dv_j < 4 {
+            let dv_x: f32 = $x[$col + (dv_j as i64)] * X_SCALE!();
+            $p = fma32!(f32::from_bits(fp8_bits!($u, dv_j)), dv_x, $p);
+            $q = fma32!(f32::from_bits(fp8_bits!($v, dv_j)), dv_x, $q);
+            dv_j = dv_j + 1;
+          }
+        }
+    };
+}
+
+pub fn glm_vx_spawn_fp8_matvec_fma2(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<u32, [?], Memory::HBM>,
+                                    scales: &Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                                    rows: i32, cols: i32) -> void {
+  spawn on(Topology::Device) {
+    for rb in 0..(rows - 1) / 8 + 1 across blocks {
+      let mut a = unsafe { Tensor<f32, [8, 32], Memory::SMEM>::uninit() };
+      for w in 0..4 across subgroups {
+        for lane in 0..32 across lanes {
+          let row: i64 = (rb * 8 + w * 2) as i64;
+          let mut sum: f32 = 0.0;
+          let mut sum2: f32 = 0.0;
+          if row < (rows as i64) && cols % 16 == 0 {
+            let n: i64 = cols as i64;
+            let tiles: i64 = (n + 127) / 128;
+            let words: i64 = n / 4;
+            let row_words: i64 = row * (n / 16) * 4;
+            let next_words: i64 = row_words + (n / 16) * 4;
+            // row is even, so row + 1 is in row's 128-row scale block.
+            let scale_base: i64 = (row / 128) * tiles;
+            let mut at: i64 = (lane as i64) * 4;
+            if row + 1 < (rows as i64) {
+              while at < words {
+                let u0: u32 = weight[row_words + at];
+                let u1: u32 = weight[row_words + at + 1];
+                let u2: u32 = weight[row_words + at + 2];
+                let u3: u32 = weight[row_words + at + 3];
+                let v0: u32 = weight[next_words + at];
+                let v1: u32 = weight[next_words + at + 1];
+                let v2: u32 = weight[next_words + at + 2];
+                let v3: u32 = weight[next_words + at + 3];
+                let scale: f32 = scales[scale_base + at / 32];
+                let col: i64 = at * 4;
+                if fp8_fast4!(u0, u1, u2, u3, scale) && fp8_fast4!(v0, v1, v2, v3, scale) {
+                  let mut p: f32 = 0.0;
+                  let mut q: f32 = 0.0;
+                  fp8_pair_word!(p, q, u0, v0, x, col);
+                  fp8_pair_word!(p, q, u1, v1, x, col + 4);
+                  fp8_pair_word!(p, q, u2, v2, x, col + 8);
+                  fp8_pair_word!(p, q, u3, v3, x, col + 12);
+                  sum = fma32!(p, scale * STEP_SCALE!(), sum);
+                  sum2 = fma32!(q, scale * STEP_SCALE!(), sum2);
+                } else {
+                  sum = fp8_step_into!(sum, u0, u1, u2, u3, scale, x, col);
+                  sum2 = fp8_step_into!(sum2, v0, v1, v2, v3, scale, x, col);
+                }
+                at = at + 128;
+              }
+            } else {
+              while at < words {
+                let u0: u32 = weight[row_words + at];
+                let u1: u32 = weight[row_words + at + 1];
+                let u2: u32 = weight[row_words + at + 2];
+                let u3: u32 = weight[row_words + at + 3];
+                let scale: f32 = scales[scale_base + at / 32];
+                sum = fp8_step_into!(sum, u0, u1, u2, u3, scale, x, at * 4);
+                at = at + 128;
+              }
+            }
+          }
+          a[w * 2][lane] = sum;
+          a[w * 2 + 1][lane] = sum2;
+        }
+        let total: f32 = lanes::sum(&a[w * 2], 32);
+        let total2: f32 = lanes::sum(&a[w * 2 + 1], 32);
+        if rb * 8 + w * 2 < rows && cols >= 0 { out[rb * 8 + w * 2] = total; }
+        if rb * 8 + w * 2 + 1 < rows && cols >= 0 { out[rb * 8 + w * 2 + 1] = total2; }
+      }
+    }
+  }
+  return;
+}

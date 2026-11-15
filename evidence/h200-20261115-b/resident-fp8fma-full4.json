@@ -1,0 +1,23 @@
+{
+  "mode": "fp8-vs-f32-dequantized",
+  "geometry": "full",
+  "layers": 4,
+  "hidden": 6144,
+  "tokens": 48,
+  "fp8_linears": 806,
+  "bitwise_equal": false,
+  "max_abs_diff": 8.58306884765625e-06,
+  "max_abs_logit": 5.602207183837891,
+  "top1_equal": true,
+  "fp8_seconds_per_token": 0.008611572812500393,
+  "f32_seconds_per_token": 0.005936414687501686,
+  "fp8_weights_gib_uploaded": 14.121892273426056,
+  "f32_weights_gib_uploaded": 44.880374908447266,
+  "fp8_matvec_launches": 0,
+  "fp8_kernels": "fma",
+  "fp8_matvec4_launches": 0,
+  "fp8_matvec_fma_launches": 3264,
+  "fp8_moe4_launches": 96,
+  "cublaslt_launches": 0,
+  "note": "single run, synthetic FP8 encoding of random weights; kv_b_proj is dequantized to float32 in both; lazy uploads; not a benchmark"
+}

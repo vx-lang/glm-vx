@@ -1,0 +1,10 @@
+......................................................s...s...s...s...s. [ 96%]
+..s                                                                      [100%]
+=========================== short test summary info ============================
+SKIPPED [1] gpu/test_cublaslt_hardware.py:98: cublasLtMatmulAlgoGetHeuristic (m=1, n=576, k=6144, weights_b, uint16): CUBLAS_STATUS_NOT_SUPPORTED (15)
+SKIPPED [1] gpu/test_cublaslt_hardware.py:98: cublasLtMatmulAlgoGetHeuristic (m=1, n=2048, k=6144, weights_b, uint16): CUBLAS_STATUS_NOT_SUPPORTED (15)
+SKIPPED [1] gpu/test_cublaslt_hardware.py:98: cublasLtMatmulAlgoGetHeuristic (m=1, n=6144, k=2048, weights_b, uint16): CUBLAS_STATUS_NOT_SUPPORTED (15)
+SKIPPED [1] gpu/test_cublaslt_hardware.py:98: cublasLtMatmulAlgoGetHeuristic (m=2, n=2048, k=6144, weights_b, uint16): CUBLAS_STATUS_NOT_SUPPORTED (15)
+SKIPPED [1] gpu/test_cublaslt_hardware.py:98: cublasLtMatmulAlgoGetHeuristic (m=4, n=2048, k=6144, weights_b, uint16): CUBLAS_STATUS_NOT_SUPPORTED (15)
+SKIPPED [1] gpu/test_cublaslt_hardware.py:98: cublasLtMatmulAlgoGetHeuristic (m=1, n=200, k=384, weights_b, uint16): CUBLAS_STATUS_NOT_SUPPORTED (15)
+69 passed, 6 skipped in 8.73s

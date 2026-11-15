@@ -54,6 +54,8 @@ REPO=$PWD
 : "${SGLANG_CACHE_DIR:=/workspace/sglang-cache}"
 export SGLANG_CACHE_DIR
 PY=$SGLANG_VENV/bin/python
+# SGLang's JIT kernels build with ninja, which the venv's bin holds (the image has none: Nebius H200).
+export PATH=$SGLANG_VENV/bin:$PATH
 SERVER_PID='' STEP_PID=''
 
 mkdir -p "$OUT"/{logs,bench,server,profile}
@@ -112,6 +114,7 @@ check_gpu() {
 do_install() {
   if [[ -x $PY ]] && "$PY" -I -c "import importlib.metadata as m, sys; sys.exit(m.version('sglang') != '$SGLANG_VERSION')" 2> /dev/null; then
     echo "sglang $SGLANG_VERSION already installed in $SGLANG_VENV"
+    [[ -x $SGLANG_VENV/bin/ninja ]] || "$PY" -m pip install -q ninja
     return 0
   fi
   python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))' || die "SGLang needs Python >= 3.11; got $(python3 --version)"
@@ -123,7 +126,7 @@ do_install() {
   "$PY" -m pip install -q --upgrade pip uv
   # --prerelease=allow: some dependencies only publish pre-releases; older uv otherwise falls back
   # to SGLang 0.5.9 without saying so (SGLang install docs).
-  "$SGLANG_VENV/bin/uv" pip install --python "$PY" --prerelease=allow "sglang==$SGLANG_VERSION"
+  "$SGLANG_VENV/bin/uv" pip install --python "$PY" --prerelease=allow "sglang==$SGLANG_VERSION" ninja
   "$PY" -I -c "import importlib.metadata as m, sys; v = m.version('sglang'); print('sglang', v); sys.exit(v != '$SGLANG_VERSION')"
 }
 

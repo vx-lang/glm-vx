@@ -1,0 +1,1 @@
+ncu profiled 175 kernels, the step launched 121
