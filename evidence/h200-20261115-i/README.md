@@ -39,3 +39,9 @@ ncu, before the merge rewrite:
 SGLang's FlashMLA takes 13.9 us for this step (evidence/h200-20261115-sglang). What remains is the
 separate merge launch, which reads the 8 MB f32 numerator back, and the flash kernel's chain of
 dependent steps for each token.
+
+`mla-profile.md` / `.json` come from `validation/mla_profile.py` (vxc 243ea31c built on the pod,
+`~/glm-h200/vxtc-243e`). Each kernel runs at ResidentGLM's split policy for it: 16 splits of 256
+tokens for the others, 64 of 8 for flash, which takes 21 to 40 us against `mla_heads_at`'s 149 to
+172. The same tree passed `gpu/test_resident_graph_hardware.py` on this H200 (8 passed), including
+`mla_kernel='flash'` against `'chunks'` through 600 replayed steps, and `gpu/test_spawn_vx_launch.py -k mla`.

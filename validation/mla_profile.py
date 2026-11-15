@@ -1,11 +1,13 @@
 """The fused MLA decode kernels at GLM-5.3's attention shape (#33).
 
 gpu/spawn's mla_decode_at (one token at a time per block), mla_chunks_at (32 tokens a chunk) and
-mla_heads_at (mla_chunks_at with four heads a block, each latent row read once for them),
+mla_heads_at (mla_chunks_at with four heads a block, each latent row read once for them) and
+mla_flash_at + mla_flash_merge_at (flash decoding, each lane's state in registers; timed together),
 64 heads, rank 512, rope 64, 4096 cached tokens, for 256, 1024 and 2048 selected tokens with
-splits as ResidentGLM picks them (splits_max 16). Each launch is timed with CUDA events after a
-512 MB copy (moe_profile.l2_flush), the median of --repeats; mla_chunks_at must agree with
-mla_decode_at to 1e-4, mla_heads_at must equal mla_chunks_at, and the arrival counts return to zero.
+splits as ResidentGLM picks them (splits_max 16 of 256 tokens; for flash 64 of 8). Each launch is
+timed with CUDA events after a 512 MB copy (moe_profile.l2_flush), the median of --repeats;
+mla_chunks_at must agree with mla_decode_at to 1e-4, mla_heads_at must equal mla_chunks_at, flash
+must agree with mla_chunks_at to 1e-5, and the arrival counts return to zero.
 
   python -m validation.mla_profile --output run/mla.json
 """
@@ -17,7 +19,7 @@ import numpy as np
 
 from validation.moe_profile import event_us
 
-HEADS, RANK, ROPE, TOKENS, SPLITS_MAX = 64, 512, 64, 4096, 16
+HEADS, RANK, ROPE, TOKENS, SPLITS_MAX, FLASH_SPLITS_MAX = 64, 512, 64, 4096, 16, 64
 KERNELS = ('mla_decode_at', 'mla_chunks_at', 'mla_heads_at')
 
 
@@ -36,6 +38,7 @@ def main():
     rng = np.random.default_rng(1)
     up = lambda a: ctx.tensor(a.shape, str(a.dtype), a.tobytes())
     kernels = {name: SpawnKernel(ctx, spawn / f'{name}.ptx') for name in KERNELS}
+    flash, merge = (SpawnKernel(ctx, spawn / f'{name}.ptx') for name in ('mla_flash_at', 'mla_flash_merge_at'))
     common = dict(q_latent=up(rng.normal(size=HEADS * RANK).astype('f4')),
                   q_rope=up(rng.normal(size=HEADS * ROPE).astype('f4')),
                   cache_latent=up(rng.normal(size=TOKENS * RANK).astype('f4')),
@@ -62,6 +65,23 @@ def main():
             if np.frombuffer(values['arrivals'].download(), 'i4').any():
                 raise SystemExit(f'{name} at {count}: arrival counts not back at zero')
             results.append(dict(kernel=name, count=count, splits=splits, us=us))
+        # Flash: about 8 tokens a split, at most 64 (ResidentGLM._splits); buffers per group of 16 heads.
+        fsplits = min(FLASH_SPLITS_MAX, max(1, (count + 7) // 8))
+        fstep = up(np.array([TOKENS - 1, TOKENS, count, fsplits], 'i4'))
+        numerator = ctx.tensor((HEADS // 16, FLASH_SPLITS_MAX, 16 * RANK))
+        stats = ctx.tensor((HEADS // 16, FLASH_SPLITS_MAX, 32))
+        fv = {k: v for k, v in common.items() if k != 'threads'}
+        fv.update(numerator=numerator, stats=stats, selected=selected, step=fstep, splits_max=FLASH_SPLITS_MAX)
+        mv = dict(out=ctx.tensor((HEADS, RANK)), numerator=numerator, stats=stats, step=fstep, heads=HEADS, rank=RANK,
+                  splits_max=FLASH_SPLITS_MAX)
+        both = lambda: (flash.launch(stream=stream, **fv), merge.launch(stream=stream, **mv))
+        both()
+        stream.synchronize()
+        outs['mla_flash_at'] = np.frombuffer(mv['out'].download(), 'f4')
+        results.append(dict(kernel='mla_flash_at', count=count, splits=fsplits,
+                            us=event_us(ctx, stream, spawn, both, args.repeats)))
+        if not np.allclose(outs['mla_flash_at'], outs['mla_chunks_at'], rtol=1e-5, atol=1e-6):
+            raise SystemExit(f'count {count}: mla_flash_at disagrees with mla_chunks_at')
         if not np.allclose(outs['mla_chunks_at'], outs['mla_decode_at'], rtol=1e-4, atol=1e-5):
             raise SystemExit(f'count {count}: mla_chunks_at disagrees with mla_decode_at')
         if not np.array_equal(outs['mla_heads_at'].view('u4'), outs['mla_chunks_at'].view('u4')):
@@ -71,10 +91,11 @@ def main():
     args.output.write_text(json.dumps(dict(heads=HEADS, rank=RANK, rope=ROPE, tokens=TOKENS, results=results), indent=2) + '\n')
     by = {(r['kernel'], r['count']): r for r in results}
     lines = [f'# Fused MLA decode, {HEADS} heads, rank {RANK}, rope {ROPE}. CUDA events, L2 flushed, median of '
-             f'{args.repeats}.', '', '| selected (splits) | mla_decode_at us | mla_chunks_at us | mla_heads_at us |',
-             '|---|---|---|---|']
+             f'{args.repeats}.', '', '| selected (splits) | mla_decode_at us | mla_chunks_at us | mla_heads_at us | '
+             'mla_flash_at + merge us (splits) |', '|---|---|---|---|---|']
     lines += [f"| {c} ({by[('mla_decode_at', c)]['splits']}) | {by[('mla_decode_at', c)]['us']:.1f} | "
-              f"{by[('mla_chunks_at', c)]['us']:.1f} | {by[('mla_heads_at', c)]['us']:.1f} |" for c in (256, 1024, 2048)]
+              f"{by[('mla_chunks_at', c)]['us']:.1f} | {by[('mla_heads_at', c)]['us']:.1f} | "
+              f"{by[('mla_flash_at', c)]['us']:.1f} ({by[('mla_flash_at', c)]['splits']}) |" for c in (256, 1024, 2048)]
     text = '\n'.join(lines) + '\n'
     args.output.with_suffix('.md').write_text(text)
     print(text)

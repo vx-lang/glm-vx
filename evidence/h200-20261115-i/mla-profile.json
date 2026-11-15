@@ -1,0 +1,80 @@
+{
+  "heads": 64,
+  "rank": 512,
+  "rope": 64,
+  "tokens": 4096,
+  "results": [
+    {
+      "kernel": "mla_decode_at",
+      "count": 256,
+      "splits": 1,
+      "us": 406.76799416542053
+    },
+    {
+      "kernel": "mla_chunks_at",
+      "count": 256,
+      "splits": 1,
+      "us": 134.09599661827087
+    },
+    {
+      "kernel": "mla_heads_at",
+      "count": 256,
+      "splits": 1,
+      "us": 149.24800395965576
+    },
+    {
+      "kernel": "mla_flash_at",
+      "count": 256,
+      "splits": 32,
+      "us": 21.344000473618507
+    },
+    {
+      "kernel": "mla_decode_at",
+      "count": 1024,
+      "splits": 4,
+      "us": 429.55200374126434
+    },
+    {
+      "kernel": "mla_chunks_at",
+      "count": 1024,
+      "splits": 4,
+      "us": 159.90400314331055
+    },
+    {
+      "kernel": "mla_heads_at",
+      "count": 1024,
+      "splits": 4,
+      "us": 161.5999937057495
+    },
+    {
+      "kernel": "mla_flash_at",
+      "count": 1024,
+      "splits": 64,
+      "us": 28.68800051510334
+    },
+    {
+      "kernel": "mla_decode_at",
+      "count": 2048,
+      "splits": 8,
+      "us": 863.4719848632812
+    },
+    {
+      "kernel": "mla_chunks_at",
+      "count": 2048,
+      "splits": 8,
+      "us": 307.3920011520386
+    },
+    {
+      "kernel": "mla_heads_at",
+      "count": 2048,
+      "splits": 8,
+      "us": 171.88800126314163
+    },
+    {
+      "kernel": "mla_flash_at",
+      "count": 2048,
+      "splits": 64,
+      "us": 39.9360004812479
+    }
+  ]
+}
