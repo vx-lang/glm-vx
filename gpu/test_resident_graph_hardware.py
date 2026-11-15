@@ -56,3 +56,27 @@ def test_graph_replay_with_fused_attention_through_several_splits(ctx):
     np.testing.assert_array_equal(np.frombuffer(graph.arrivals.download(), np.int32), 0)
     assert graph.replays == steps - 1
 
+
+
+@pytest.mark.skipif(not (SPAWN / 'mla_flash_at.ptx').exists(), reason='gpu/spawn mla_flash_at not built')
+def test_mla_flash_matches_mla_chunks_through_its_splits(ctx):
+    """mla_kernel='flash' (#33) against 'chunks' under replay: the same scores, the softmax folded a
+    token at a time, so close with the same argmax. GLM-5.3's MLA shape (16 heads, rank 512, rope 64)
+    on a small model; 600 steps select up to 600 tokens, so the steps run 1 to 64 splits of 8."""
+    steps = 600
+    model = build(seed=97, num_attention_heads=16, num_key_value_heads=16, kv_lora_rank=512, qk_rope_head_dim=64,
+                  qk_head_dim=72, index_head_dim=64, index_topk=1024, max_position_embeddings=1024)
+    tokens = np.random.default_rng(97).integers(0, model.config['vocab_size'], size=steps).tolist()
+    out = {}
+    for kernel in ('flash', 'chunks'):
+        resident = ResidentGLM(model, ctx=ctx, max_tokens=steps + 8, device_experts=True, graph=True,
+                               fused_attention=True, mla_kernel=kernel)
+        try:
+            out[kernel] = resident.prefill(tokens)
+            assert resident.replays == steps - 1
+            if kernel == 'flash':
+                assert resident.launches.get('mla_flash_merge_at', 0) > 0 and 'mla_chunks_at' not in resident.launches
+        finally:
+            resident.close()
+    np.testing.assert_allclose(out['flash'], out['chunks'], rtol=1e-4, atol=1e-4)
+    assert (out['flash'].argmax(-1) == out['chunks'].argmax(-1)).all()

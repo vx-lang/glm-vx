@@ -90,6 +90,14 @@ def test_mla_heads_equals_mla_chunks_under_replay():
                     mla_kernel='heads')
 
 
+def test_mla_flash_needs_glm_shape():
+    # mla_kernel='flash' (#33) needs 16 heads a group, rank 512 and rope 64; the logits test is
+    # gpu/test_resident_graph_hardware.py's (that shape is too large for the CPU emulator).
+    with pytest.raises(ValueError, match='multiple of 16 heads, rank 512 and rope 64'):
+        ResidentGLM(expert_models('float32'), ctx=Context(), graph=True, device_experts=True, fused_attention=True,
+                    mla_kernel='flash')
+
+
 @needs_spawn
 def test_mla_chunks_matches_mla_decode_under_replay():
     # mla_kernel='chunks' (#33): another order of the attention sums, so close, with the same argmax.

@@ -66,7 +66,11 @@ the second, and gives what the eager kernels give bit for bit.
 mla_chunks_at (#33): 32 tokens a chunk, equal to mla_decode_at to rounding. ``mla_kernel='heads'``
 runs mla_heads_at instead: four heads a block, so each selected latent row is read once for four
 heads; each head's arithmetic is mla_chunks_at's, so the logits equal 'chunks' bit for bit. It needs
-a head count that is a multiple of 4.
+a head count that is a multiple of 4. ``mla_kernel='flash'`` runs mla_flash_at then
+mla_flash_merge_at: flash decoding with each lane's query and sums in registers for the whole loop
+over tokens (Vx #3475), up to 64 splits of about 8 tokens. Its scores are mla_chunks_at's bit for bit
+and its softmax folds one token at a time, so the logits are close to 'chunks', not equal. It needs
+GLM-5.3's MLA shape: heads a multiple of 16, rank 512 and rope 64.
 
 ``fp8_kernels='x4'`` runs FP8 Linears through gpu/spawn's fp8_matvec4 and, with ``device_experts``,
 the routed experts through fp8_moe4_gate_up/down (#30, #31): sixteen codes a lane step, one 16-byte
@@ -196,8 +200,8 @@ class ResidentGLM:
         if long_topk not in ('merge', 'select'):
             raise ValueError("long_topk must be 'merge' or 'select'")
         self.long_topk = long_topk
-        if mla_kernel not in ('decode', 'chunks', 'heads'):
-            raise ValueError("mla_kernel must be 'decode', 'chunks' or 'heads'")
+        if mla_kernel not in ('decode', 'chunks', 'heads', 'flash'):
+            raise ValueError("mla_kernel must be 'decode', 'chunks', 'heads' or 'flash'")
         self.mla_kernel = mla_kernel
         if mla_kernel != 'decode' and not (self.graph and self.fused_attention):
             raise ValueError(f"mla_kernel={mla_kernel!r} needs graph=True and fused_attention=True")
@@ -420,6 +424,9 @@ class ResidentGLM:
         self.hidden, self.heads = m.hidden, m.heads
         if self.mla_kernel == 'heads' and self.heads % 4:
             raise ValueError(f"mla_kernel='heads' needs a multiple of 4 heads, the model has {self.heads}")
+        if self.mla_kernel == 'flash' and (self.heads % 16 or m.rank != 512 or m.rot != 64):
+            raise ValueError(f"mla_kernel='flash' needs a multiple of 16 heads, rank 512 and rope 64; the model has "
+                             f"{self.heads} heads, rank {m.rank}, rope {m.rot}")
         self.rank, self.nope, self.rot, self.value_dim = m.rank, m.nope, m.rot, m.value_dim
         self.index_heads, self.index_dim, self.index_topk = m.index_heads, m.index_dim, m.index_topk
         qk = self.nope + self.rot
@@ -468,7 +475,8 @@ class ResidentGLM:
         self.query = t((self.heads * qk,))
         self.compressed = t((self.rank + self.rot,))
         self.latent_q, self.rot_q = t((self.heads, self.rank)), t((self.heads, self.rot))
-        self.splits_max = 16
+        # mla_flash_at takes up to 64 splits of about 8 tokens (evidence/h200-20261115-i); the others 16 of 256.
+        self.splits_max = 64 if self.mla_kernel == 'flash' else 16
         self.numerator = t((self.heads, self.splits_max, self.rank))
         self.stats = t((self.heads, self.splits_max, 2))
         self.attended = t((self.heads, self.rank))
@@ -1056,11 +1064,22 @@ class ResidentGLM:
         self._rope(self.rot_q, query.view((self.heads * qk - self.nope,), offset=self.nope * 4),
                    self.heads, self.rot, qk, self.rot)
         count = self.selected_count
-        splits = min(self.splits_max, max(1, (count + 255) // 256))
+        splits = self._splits(count)
         block = ((self.rank + 31) // 32) * 32
         scale = F(_f32(qk ** -0.5, 'MLA scale', True))
         tokens = position + 1
-        if self.fused_attention and self.graph and self.mla_kernel == 'heads':
+        if self.fused_attention and self.graph and self.mla_kernel == 'flash':
+            # The per-head buffers viewed per group of 16 heads (mla_flash_at.vx).
+            groups = self.heads // 16
+            numerator = self.numerator.view((groups, self.splits_max, 16 * self.rank))
+            stats = self.stats.view((groups, self.splits_max, 32))
+            self._spawn('mla_flash_at', numerator=numerator, stats=stats, q_latent=self.latent_q, q_rope=self.rot_q,
+                        cache_latent=self.latents[layer], cache_rope=self.rope_keys[layer], selected=self.selected,
+                        step=self.step, heads=self.heads, rank=self.rank, rope_dim=self.rot, selection_stride=0,
+                        splits_max=self.splits_max, scale=scale.value)
+            self._spawn('mla_flash_merge_at', out=self.attended, numerator=numerator, stats=stats, step=self.step,
+                        heads=self.heads, rank=self.rank, splits_max=self.splits_max)
+        elif self.fused_attention and self.graph and self.mla_kernel == 'heads':
             # The per-head buffers viewed per group of four heads (mla_heads_at.vx).
             groups = self.heads // 4
             self._spawn('mla_heads_at', out=self.attended.view((groups, 4 * self.rank)),
@@ -1176,9 +1195,15 @@ class ResidentGLM:
         self._project(head, self.norm, self.logits)
         return np.frombuffer(self.logits.download(), dtype=np.float32).copy()
 
+    def _splits(self, count):
+        """The MLA splits of a step that selects `count` tokens: about 8 tokens a split for mla_flash_at,
+        256 for the others, at most splits_max."""
+        per = 8 if self.mla_kernel == 'flash' else 256
+        return min(self.splits_max, max(1, (count + per - 1) // per))
+
     def _step_buffer(self, position, count):
         """The step buffer the *_at kernels read, [position, tokens, count, splits], as float32 bits."""
-        splits = min(self.splits_max, max(1, (count + 255) // 256))
+        splits = self._splits(count)
         return np.array([position, position + 1, count, splits], np.int32).view(np.float32)
 
     def _rope_inputs(self, position):
