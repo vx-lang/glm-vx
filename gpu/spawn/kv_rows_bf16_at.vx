@@ -1,0 +1,36 @@
+// The step's two MLA cache rows for mla_kernel='tc' under graph replay, in one launch (#39,
+// ResidentGLM(fuse_glue=True)): the normalized latent row into the bf16 latent cache, and the rope
+// key, RoPE'd from kv_a's last `rot` values, into the bf16 rope cache, both at the step's position
+// step[0]. It replaces store_row_bf16_at, rope_strided and store_row_bf16_at with their bits: the
+// rope's arithmetic is glm_vx_gpu_rope_strided's (packed [rotated even, rotated odd], one rounding
+// an operation), then `as bf16` as store_row_bf16_at.
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_kv_rows_bf16_at(latents: &mut Tensor<bf16, [?, ?], Memory::HBM>, rope_keys: &mut Tensor<bf16, [?, ?], Memory::HBM>,
+                                    latent_row: &Tensor<f32, [?], Memory::HBM>, rope_x: &Tensor<f32, [?], Memory::HBM>,
+                                    cosine: &Tensor<f32, [?], Memory::HBM>, sine: &Tensor<f32, [?], Memory::HBM>,
+                                    step: &Tensor<i32, [?], Memory::HBM>, rank: i32, rot: i32) -> void {
+  spawn on(Topology::Device) {
+    for b in 0..1 across blocks {
+      for k in 0..rank across lanes(256) {
+        let position: i32 = step[0];
+        latents[position][k] = latent_row[k] as bf16;
+      }
+      for j in 0..rot across lanes(256) {
+        let position: i32 = step[0];
+        let pairs: i32 = rot / 2;
+        if pairs > 0 && rot % 2 == 0 {
+          let p: i32 = j % pairs;
+          let a: f32 = rope_x[p * 2];
+          let bb: f32 = rope_x[p * 2 + 1];
+          let c: f32 = cosine[p];
+          let s: f32 = sine[p];
+          let mut v: f32 = a * c - bb * s;
+          if j >= pairs { v = bb * c + a * s; }
+          rope_keys[position][j] = v as bf16;
+        }
+      }
+    }
+  }
+  return;
+}

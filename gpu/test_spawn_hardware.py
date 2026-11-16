@@ -461,6 +461,30 @@ def test_spawn_topk_radix_matches_stable_argsort(context, tokens, k, ties):
         assert not download(hist).any() and not download(count).any() and not download(arrivals).any()
 
 
+# topk_select (#32): the stable top-k's set in position order, by one block's radix select in
+# shared memory (atomic counts, whose order depends on timing; the ids must not), twice each.
+@pytest.mark.skipif(not (BUILD / 'spawn/topk_select.ptx').exists(), reason='topk_select not built (gpu/spawn/build.sh)')
+@pytest.mark.parametrize('tokens,k,ties', [(2049, 2048, True), (3001, 2048, False), (8192, 2048, False), (70000, 2048, True),
+                                           (1 << 20, 2048, False), (9000, 16, True), (100000, 2048, 'equal'),
+                                           (5000, 2048, 'few')])
+def test_spawn_topk_select_is_the_stable_set_in_position_order(context, tokens, k, ties):
+    rng = np.random.default_rng(tokens * 7 + k)
+    if ties == 'equal':
+        scores = np.zeros(tokens, 'f4')
+    elif ties == 'few':
+        scores = rng.integers(0, 2, size=tokens).astype('f4')
+    else:
+        scores = rng.integers(-50, 50, size=tokens).astype('f4') if ties else rng.normal(size=tokens).astype('f4')
+    scores[[3, 5, 7, 9]] = np.nan, -np.inf, -0.0, np.inf
+    out, d_scores = context.tensor((k,), 'int32'), upload(context, scores.view(np.int32))
+    kernel = SpawnKernel(context, BUILD / 'spawn/topk_select.ptx')
+    want = np.sort(np.argsort(-scores, kind='stable')[:k])
+    for _ in range(2):
+        kernel.launch(out_ids=out, scores=d_scores, tokens=tokens, k=k)
+        context.synchronize()
+        np.testing.assert_array_equal(download(out), want)
+
+
 # topk_sort (#32): one shared-memory bitonic sort for up to 2048 tokens, against the host's rule.
 @pytest.mark.skipif(not (BUILD / 'spawn/topk_sort.ptx').exists(), reason='topk_sort not built (gpu/spawn/build.sh)')
 @pytest.mark.parametrize('tokens,k,ties', [(1, 1, False), (64, 2048, False), (300, 64, True), (2048, 2048, True),
@@ -903,3 +927,61 @@ def test_spawn_mla_decode_at_equals_mla_decode_for_each_splits(context, heads, r
         np.testing.assert_array_equal(got_num.ravel(), np.frombuffer(download(num), 'u4'))
         np.testing.assert_array_equal(got_stats.ravel(), np.frombuffer(download(stats), 'u4'))
         np.testing.assert_array_equal(np.frombuffer(download(a_out), 'u4'), np.frombuffer(download(out), 'u4'))
+
+
+# Glue fusions (#39, ResidentGLM(fuse_glue=True)): on the GPU each gives the bits of the launches it
+# replaces, at GLM-5.3's widths.
+def test_glue_fusions_give_the_bits_of_the_launches_they_replace(context):
+    rng = np.random.default_rng(39)
+    hand = context.load_ptx(BUILD / 'kernels.ptx')
+    f32 = lambda *a: [C.c_float(v) for v in a]
+    i32 = lambda *a: [C.c_int32(v) for v in a]
+    grid = lambda n: (n + 255) // 256
+
+    def launch(name, g, block, args):
+        hand.kernel('glm_vx_gpu_' + name).launch((g,), (block,), args)
+
+    # residual_rmsnorm8 against residual_rmsnorm, and against add then rmsnorm, hidden 6144.
+    dim = 6144
+    x, r, w = (upload(context, rng.normal(size=dim).astype('f4')) for _ in range(3))
+    outs = [context.tensor((dim,)) for _ in range(6)]
+    launch('residual_rmsnorm', 1, 1024, [outs[0], outs[1], x, r, w] + i32(1, dim) + f32(1e-6))
+    launch('add', grid(dim), 256, [outs[2], x, r] + i32(dim))
+    launch('rmsnorm', 1, 1024, [outs[3], outs[2], w] + i32(dim) + f32(1e-6))
+    launch('residual_rmsnorm8', 1, 1024, [outs[4], outs[5], x, r, w] + i32(dim) + f32(1e-6))
+    # rmsnorm_pair against two rmsnorms: q_a (2048) and the latent (512).
+    xa, wa = (upload(context, rng.normal(size=2048).astype('f4')) for _ in range(2))
+    xb, wb = (upload(context, rng.normal(size=512).astype('f4')) for _ in range(2))
+    pair = [context.tensor((2048,)), context.tensor((512,)), context.tensor((2048,)), context.tensor((512,))]
+    launch('rmsnorm', 1, 1024, [pair[0], xa, wa] + i32(2048) + f32(1e-6))
+    launch('rmsnorm', 1, 1024, [pair[1], xb, wb] + i32(512) + f32(1e-6))
+    launch('rmsnorm_pair', 2, 1024, [pair[2], xa, wa] + i32(2048) + [pair[3], xb, wb] + i32(512) + f32(1e-6))
+    # index_key_at against layernorm, copy, rope_strided and store_row: index_dim 128, rot 64.
+    angle = rng.normal(size=32).astype('f4')
+    cosine, sine = upload(context, np.cos(angle)), upload(context, np.sin(angle))
+    step = upload(context, np.array([3, 4, 4, 1], np.int32))
+    ik, kw, kb = (upload(context, rng.normal(size=128).astype('f4')) for _ in range(3))
+    normed, row = context.tensor((128,)), context.tensor((128,))
+    keys = [upload(context, np.full((6, 128), np.nan, 'f4')) for _ in range(2)]
+    launch('layernorm', 1, 256, [normed, ik, kw, kb] + i32(1, 128) + f32(1e-6))
+    launch('copy', 1, 256, [row, normed] + i32(128))
+    launch('rope_strided', 1, 256, [row, normed, cosine, sine] + i32(1, 64, 64, 64))
+    launch('store_row', 1, 256, [keys[0], row, step] + i32(128))
+    launch('index_key_at', 1, 256, [keys[1], ik, kw, kb, cosine, sine, step] + i32(128, 64) + f32(1e-6))
+    # kv_rows_bf16_at against store_row_bf16_at, rope_strided and store_row_bf16_at: rank 512, rot 64.
+    latent, rope_x = upload(context, rng.normal(size=512).astype('f4')), upload(context, rng.normal(size=64).astype('f4'))
+    rope_row = context.tensor((64,))
+    caches = [upload(context, np.zeros((6, n), np.uint16)) for n in (512, 64, 512, 64)]
+    store = SpawnKernel(context, BUILD / 'spawn/store_row_bf16_at.ptx')
+    store.launch(cache=caches[0], row=latent, step=step, width=512)
+    launch('rope_strided', 1, 256, [rope_row, rope_x, cosine, sine] + i32(1, 64, 64, 64))
+    store.launch(cache=caches[1], row=rope_row, step=step, width=64)
+    SpawnKernel(context, BUILD / 'spawn/kv_rows_bf16_at.ptx').launch(
+        latents=caches[2], rope_keys=caches[3], latent_row=latent, rope_x=rope_x, cosine=cosine, sine=sine, step=step,
+        rank=512, rot=64)
+    context.synchronize()
+    bits = lambda t: download(t).view(np.uint32) if download(t).dtype == np.float32 else download(t)
+    for a, b in ((outs[1], outs[5]), (outs[0], outs[4]), (outs[2], outs[5]), (outs[3], outs[4]), (pair[0], pair[2]),
+                 (pair[1], pair[3]), (keys[0], keys[1]), (caches[0], caches[2]), (caches[1], caches[3])):
+        np.testing.assert_array_equal(bits(a), bits(b))
+    assert not np.isnan(download(keys[1])[3]).any() and np.isnan(download(keys[1])[[0, 1, 2, 4, 5]]).all()

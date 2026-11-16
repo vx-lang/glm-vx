@@ -32,6 +32,9 @@ not a CPU-callable library interface. All pointers refer to device memory.
 | `softmax` | One vector, stable single-vector ABI | 256 | 1 |
 | `softmax_rows` | One row per block, cooperative maximum and sum | 256 | rows |
 | `router` | One warp selects up to 8 experts from at most 256 | **32 required** | 1 |
+| `residual_rmsnorm8` | `residual_rmsnorm` of one row held in registers, eight values a thread (`fuse_glue`, #39) | 1024 (dim <= 8*block) | 1 |
+| `rmsnorm_pair` | Two `rmsnorm` rows, one a block (`fuse_glue`, #39) | 256 | 2 |
+| `index_key_at` | The indexer key row: `layernorm`, `rope_strided`, `store_row` (`fuse_glue`, #39) | **256 required** | 1 |
 
 For empty elementwise work, skip the launch or use a positive grid: a zero-sized
 CUDA launch is not valid. Reduction blocks must contain whole warps and have

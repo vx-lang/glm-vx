@@ -1,0 +1,173 @@
+// The indexer's top-k past index_topk without a sort (#32): out_ids[0 .. min(k, tokens)) gets the
+// set np.argsort(-scores, kind='stable')[:k], the stable top-k, in ascending position order (the
+// order the short contexts' selection already has, #43). topk_select_at.vx is this kernel with
+// tokens read from the step buffer.
+//
+// out_ids[0 .. kk), kk = min(k, tokens), gets the set np.argsort(-scores, kind='stable')[:kk] in
+// ascending position order: one block of 1024 lanes, no sort, 32-bit integers throughout.
+//   - Four rounds find the threshold key K (topk_key32: bigger score, bigger key; NaN is 0), one byte
+//     a round from the top: the keys whose bytes above match K's so far are counted into a shared
+//     histogram (one of four, so none needs clearing), suffix sums by doubling give above[d], and
+//     one lane takes the largest d with above[d] >= the number still to select. After round 3,
+//     K is the kk-th largest key and `left` the number of keys equal to K to take, the lowest
+//     positions first (the stable order's tie rule).
+//   - Each lane counts, over its run of positions (ceil(tokens / 1024) of them), the keys above K
+//     and those equal to it; a scan of both by doubling gives each run's first output slot.
+//   - Lane r finds slot r: a binary search over the scan for its run, then a walk along the run.
+//     Each slot is written by the lane of its index, so the writes are linear in r.
+// Scores arrive as raw float32 bits in an i32 tensor.
+// spawn-include: device.vx
+// spawn-vxc: -fweak-relaxed-atomics
+import core::sync::atomic;
+
+// Order-preserving map from float32 bits to [0, 2^32): bigger key == bigger score; NaN is 0, and
+// -0.0 is +0.0's key.
+macro_rules! topk_key32 {
+    ($bits:expr) => {
+        unsafe {
+          let dv_b: u32 = $bits as u32;
+          let mut dv_key: u32 = dv_b ^ 2147483648u32;
+          if dv_b >= 2147483648u32 { dv_key = 4294967295u32 - dv_b; }
+          if dv_b == 2147483648u32 { dv_key = 2147483648u32; }
+          if (dv_b & 2147483647u32) > 2139095040u32 { dv_key = 0u32; }
+          dv_key
+        }
+    };
+}
+
+pub fn glm_vx_spawn_topk_select(out_ids: &mut Tensor<i32, [?], Memory::HBM>, scores: &Tensor<i32, [?], Memory::HBM>,
+                                 tokens: i32, k: i32) -> void {
+  spawn on(Topology::Device) {
+    for blk in 0..1 across blocks {
+      if tokens > 0 && k > 0 {
+        let hist = Tensor<u32, [1024], Memory::SMEM>::fill(0u32);
+        let mut above_a = unsafe { Tensor<i32, [256], Memory::SMEM>::uninit() };
+        let mut above_b = unsafe { Tensor<i32, [256], Memory::SMEM>::uninit() };
+        let mut sel = unsafe { Tensor<u32, [2], Memory::SMEM>::uninit() };
+        let mut runs_a = unsafe { Tensor<i32, [2048], Memory::SMEM>::uninit() };
+        let mut runs_b = unsafe { Tensor<i32, [2048], Memory::SMEM>::uninit() };
+        for l in 0..1 across lanes(1024) {
+          sel[0] = 0u32;
+          sel[1] = k.min(tokens) as u32;
+        }
+        for r in 0..4 {
+          for l in 0..1024 across lanes {
+            let prefix: u32 = sel[0];
+            let shift: u32 = (24 - 8 * r) as u32;
+            let mut i: i32 = l;
+            while i < tokens {
+              let key: u32 = topk_key32!(scores[i]);
+              if r == 0 || (key >> (shift + 8u32)) == (prefix >> (shift + 8u32)) {
+                let _o = atomic_fetch_add_u32(&hist, r * 256 + (((key >> shift) & 255u32) as i32), 1u32,
+                                              AtomicOrdering::Relaxed);
+              }
+              i = i + 1024;
+            }
+          }
+          for l in 0..256 across lanes(1024) { above_a[l] = hist[r * 256 + l] as i32; }
+          for s in 0..4 {
+            for l in 0..256 across lanes(1024) {
+              let mut v: i32 = above_a[l];
+              if l + (1 << (s * 2)) < 256 { v = v + above_a[l + (1 << (s * 2))]; }
+              above_b[l] = v;
+            }
+            for l in 0..256 across lanes(1024) {
+              let mut v: i32 = above_b[l];
+              if l + (2 << (s * 2)) < 256 { v = v + above_b[l + (2 << (s * 2))]; }
+              above_a[l] = v;
+            }
+          }
+          for l in 0..1 across lanes(1024) {
+            let prefix: u32 = sel[0];
+            let needed: i32 = sel[1] as i32;
+            let shift: u32 = (24 - 8 * r) as u32;
+            // The largest d with above[d] >= needed; above[0] >= needed always.
+            let mut lo: i32 = 0;
+            let mut hi: i32 = 255;
+            while lo < hi {
+              let mid: i32 = (lo + hi + 1) / 2;
+              if above_a[mid] >= needed { lo = mid; } else { hi = mid - 1; }
+            }
+            let mut over: i32 = 0;
+            if lo < 255 { over = above_a[lo + 1]; }
+            sel[0] = prefix + ((lo as u32) << shift);
+            sel[1] = (needed - over) as u32;
+          }
+        }
+        // Each run's keys above K (runs[l]) and equal to K (runs[1024 + l]), then inclusive sums of
+        // both by doubling, ten steps.
+        for l in 0..1024 across lanes {
+          let key_k: u32 = sel[0];
+          let seg: i32 = (tokens + 1023) / 1024;
+          let start: i32 = l * seg;
+          let end: i32 = tokens.min(start + seg);
+          let mut above: i32 = 0;
+          let mut ties: i32 = 0;
+          let mut i: i32 = start;
+          while i < end {
+            let key: u32 = topk_key32!(scores[i]);
+            if key > key_k { above = above + 1; }
+            if key == key_k { ties = ties + 1; }
+            i = i + 1;
+          }
+          runs_a[l] = above;
+          runs_a[1024 + l] = ties;
+        }
+        for s in 0..5 {
+          for l in 0..2048 across lanes(1024) {
+            let mut v: i32 = runs_a[l];
+            if l % 1024 >= (1 << (s * 2)) { v = v + runs_a[l - (1 << (s * 2))]; }
+            runs_b[l] = v;
+          }
+          for l in 0..2048 across lanes(1024) {
+            let mut v: i32 = runs_b[l];
+            if l % 1024 >= (2 << (s * 2)) { v = v + runs_b[l - (2 << (s * 2))]; }
+            runs_a[l] = v;
+          }
+        }
+        // Lane r finds slot r: the run holding it by binary search over the sums (the largest l whose
+        // first slot, above + min(ties, left) before it, is <= r), then a walk along that run.
+        for r in 0..k.min(tokens) across lanes(1024) {
+          let key_k: u32 = sel[0];
+          let left: i32 = sel[1] as i32;
+          let mut lo: i32 = 0;
+          let mut hi: i32 = 1023;
+          while lo < hi {
+            let mid: i32 = (lo + hi + 1) / 2;
+            let mut t: i32 = runs_a[1024 + mid - 1];
+            if t > left { t = left; }
+            if runs_a[mid - 1] + t <= r { lo = mid; } else { hi = mid - 1; }
+          }
+          let mut above: i32 = 0;
+          let mut ties: i32 = 0;
+          if lo > 0 {
+            above = runs_a[lo - 1];
+            ties = runs_a[1024 + lo - 1];
+          }
+          let seg: i32 = (tokens + 1023) / 1024;
+          let mut i: i32 = lo * seg;
+          let end: i32 = tokens.min(i + seg);
+          let mut found: i32 = -1;
+          while i < end && found < 0 {
+            let key: u32 = topk_key32!(scores[i]);
+            let mut slot: i32 = -1;
+            if key > key_k {
+              let mut t: i32 = ties;
+              if t > left { t = left; }
+              slot = above + t;
+              above = above + 1;
+            }
+            if key == key_k {
+              if ties < left { slot = above + ties; }
+              ties = ties + 1;
+            }
+            if slot == r { found = i; }
+            i = i + 1;
+          }
+          out_ids[r] = found;
+        }
+      }
+    }
+  }
+  return;
+}

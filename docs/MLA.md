@@ -15,9 +15,12 @@ For each layer and decode step, after the projections:
 2. The DSA indexer selects up to `index_topk` (2048) cached tokens, the step's `selected` ids.
    While the context fits in `index_topk`, every cached token is selected. They are taken in position
    order, as SGLang's top-k does (its `trivial_transform`), and the indexer only stores its key row:
-   no scores or top-k run (#43). `GlmMoeDsaModel._index` does the same, so ResidentGLM still matches
-   it bit for bit. The set of tokens is the official one; only the order of the attention sums
-   differs from `torch.topk`'s.
+   no scores or top-k run (#43), and its query projections (`wq_b`, `weights_proj`) do not run either.
+   Past index_topk the stable top-k set is selected, also in position order, with one
+   `topk_select_at` launch (#32, `long_topk='position'`, the default); `long_topk='merge'` gives it
+   in score order, as `torch.topk` does, for an A/B. `GlmMoeDsaModel._index` and the expanded oracles
+   take the same position order, so ResidentGLM still matches the reference bit for bit. The set of
+   tokens is the official one; only the order of the attention sums differs from `torch.topk`'s.
 3. Each head's query is absorbed into the latent space: a 512-wide latent query and a 64-wide rope
    query, 64 heads. With `fp8_kernels='cvt'` and an FP8 `kv_b_proj`, this and step 5's value absorb read
    its FP8 codes as stored (#42): `fp8_matvec_cols_cvt` sums each head's 192 nope rows down the 512
@@ -119,6 +122,10 @@ the rope queries. It runs on 64 blocks, one per head (group, head half, head), o
 Writes the new cache row in bf16 at the step buffer's position. With `'tc'`, the latent and rope
 caches are uint16 tensors that hold bf16 bits.
 
+With `ResidentGLM(fuse_glue=True)` (#39) the latent row and the rope key go to the caches in one
+`kv_rows_bf16_at` launch (store, RoPE, store, with their bits), the latent's RMSNorm runs with q_a's
+in one `rmsnorm_pair`, and the indexer's key row is one `index_key_at` (LayerNorm, RoPE, store).
+
 ### `mla_flash_merge_at`
 
 Merges the splits of `'flash'` and `'tc'`. Block (head, 128 columns):
@@ -164,7 +171,16 @@ were 11.5 + 11.7 us (float32) and context 1000 ran scores (10.5 us) and top-k (2
 |---|---|---|
 | absorb matvecs (#42: `fp8_matvec_cols_cvt` + `fp8_matvec_heads_cvt`) | **5.4 + 6.3 us** | 5.9 + 6.5 us |
 | indexer scores | **none** (#43) (11.4 us) | 3.6 (3.7) us |
-| indexer top-k (#32) | **none** (#43) (0.9 + 51.0 + 5.8 us) | 1.7 (6.0) us |
+| indexer top-k (#32) | **none** (#43) (0.9 + 51.0 + 5.8 us; `long_topk='position'`: **13.2 us**) | 1.7 (6.0) us |
+
+With `long_topk='position'` (now the default) the dense layer at 3001 tokens is 226.5 us (270.5 with
+`'merge'`), at 8192 tokens 240.8 (291.2); at context 1000 it is 185.3 us, without the indexer's query
+projections (#32, evidence/h200-20261116-m to -q). `fuse_glue` (#39, evidence/h200-20261116-r) takes
+about 10 us more off a layer, the same bits: 186.1 -> 175.4 us at context 1000, 224.3 -> 215.1 at 3001
+tokens, 243.1 -> 231.4 at 8192, and 425.9 -> 400.1 for a dense layer and a MoE layer together, where
+a layer boundary's add and next RMSNorm are one launch and the MoE output is not copied. At 131072 tokens the one-block `topk_select_at` takes 270 us against
+the chunk sort and merge's 91: long contexts need it over more blocks. The scores, 11.4 us at 3001
+tokens and 75 at 32768, are the other gap: a warp a token, about 13 instructions a multiply-add.
 
 Where `'tc'`'s 26.2 us goes at 2048 tokens:
 

@@ -1,0 +1,2 @@
+gpu/build/spawn/topk_select.ptx: glm_vx_spawn_topk_select (4 params)
+gpu/build/spawn/topk_select_at.ptx: glm_vx_spawn_topk_select_at (4 params)

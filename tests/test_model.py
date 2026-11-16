@@ -136,7 +136,9 @@ def expanded_batch_oracle(c, w, tokens):
             head_scores = np.maximum(np.einsum('shd,td->sht', iq, ik) / np.sqrt(c['index_head_dim']), 0)
             weights = linear(ip + '.weights_proj', z) / np.sqrt(c['index_n_heads'])
             scores = np.einsum('sh,sht->st', weights, head_scores)
-            selections = [np.argsort(-scores[t, :t+1], kind='stable')[:min(t+1, c['index_topk'])] for t in range(n)]
+            # The stable top-k set in position order (#32, #43), as the official traces record it.
+            selections = [np.sort(np.argsort(-scores[t, :t+1], kind='stable')[:min(t+1, c['index_topk'])])
+                          for t in range(n)]
         all_selections.append([s.copy() for s in selections])
         out = np.zeros((n, h, v), np.float32)
         for t in range(n):

@@ -104,3 +104,34 @@ def test_mla_tc_matches_mla_flash_to_bf16_rounding(ctx):
     scale = np.abs(out['flash']).max()
     np.testing.assert_allclose(out['tc'], out['flash'], rtol=0, atol=2e-2 * scale)
     assert (out['tc'].argmax(-1) == out['flash'].argmax(-1)).mean() > 0.95
+
+
+@pytest.mark.skipif(not (SPAWN / 'kv_rows_bf16_at.ptx').exists(), reason='gpu/spawn kv_rows_bf16_at not built')
+@pytest.mark.parametrize('kind', ['float32', 'fp8'])
+def test_fused_glue_gives_the_same_bits_on_the_gpu(ctx, kind):
+    """fuse_glue (#39) under replay with mla_kernel='tc': residual_rmsnorm8, rmsnorm_pair, index_key_at
+    and kv_rows_bf16_at give the bits of the launches they replace, past index_topk too (fp8: the cvt
+    kernels' stacked q_a, kv_a and wk)."""
+    steps = 40
+    if kind == 'fp8':
+        from gpu.test_resident import fp8_model
+        model = fp8_model(103, num_attention_heads=16, num_key_value_heads=16, kv_lora_rank=512, qk_rope_head_dim=64,
+                          qk_head_dim=72, index_head_dim=64, index_topk=16, hidden_size=144)[0]
+        options = dict(fp8_kernels='cvt')
+    else:
+        model = build(seed=103, num_attention_heads=16, num_key_value_heads=16, kv_lora_rank=512, qk_rope_head_dim=64,
+                      qk_head_dim=72, index_head_dim=64, index_topk=16)
+        options = {}
+    tokens = np.random.default_rng(103).integers(0, model.config['vocab_size'], size=steps).tolist()
+    out, launches = {}, {}
+    for fuse in (False, True):
+        resident = ResidentGLM(model, ctx=ctx, max_tokens=steps + 8, device_experts=True, graph=True, fused_attention=True,
+                               mla_kernel='tc', norm_block=1024, fuse_glue=fuse, **options)
+        try:
+            out[fuse], launches[fuse] = resident.prefill(tokens), dict(resident.launches)
+        finally:
+            resident.close()
+    np.testing.assert_array_equal(out[True], out[False])
+    assert launches[True]['kv_rows_bf16_at'] > 0 and 'store_row_bf16_at' not in launches[True]
+    assert launches[True]['index_key_at'] > 0 and 'layernorm' not in launches[True]
+    assert launches[True]['rmsnorm_pair'] > 0 and 'residual_rmsnorm' not in launches[True]

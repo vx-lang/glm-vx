@@ -1,0 +1,4 @@
+total    215.1 ->    214.7 us (2 traces)
+   71.1 x4      72.2 x4   glm_vx_spawn_fp8_matvec_cvt_tiles
+   13.6 x1      13.9 x1   glm_vx_spawn_mla_tc_at
+    5.4 x1       3.1 x1   glm_vx_gpu_residual_rmsnorm8

@@ -470,14 +470,22 @@ fn vxk_block_max(value: f32) -> f32 {
 // Standalone batched-row forms for compatibility with existing model operators.
 fn vxk_rmsnorm_rows(out: *mut f32, x: *const f32, weight: *const f32, rows: i32, dim: i32, eps: f32) -> void {
   if rows <= 0 { return; }
+  unsafe {
+    let row: i32 = vx_gpu_block_idx_x();
+    if row >= rows { return; }
+    vxk_rmsnorm_row(out, x, weight, row * dim, dim, eps);
+    return;
+  }
+}
+
+// One block's RMSNorm of the row at x[base ..] into out[base ..] (vxk_rmsnorm_rows' row, and each
+// of glm_vx_gpu_rmsnorm_pair's two).
+fn vxk_rmsnorm_row(out: *mut f32, x: *const f32, weight: *const f32, base: i32, dim: i32, eps: f32) -> void {
   if dim <= 0 { return; }
   if eps <= 0.0 { return; }
   unsafe {
     let tid: i32 = vx_gpu_thread_idx_x();
     let block: i32 = vx_gpu_block_dim_x();
-    let row: i32 = vx_gpu_block_idx_x();
-    if row >= rows { return; }
-    let base: i32 = row * dim;
     if block < 32 { return; }
     if block > 1024 { return; }
     if block % 32 != 0 { return; }
@@ -755,6 +763,142 @@ pub fn glm_vx_gpu_store_row(cache: *mut f32, row: *const f32, step: *const i32, 
     for iteration in 0..((width + stride - 1) / stride) {
       if i < width { cache[base + i] = row[i]; }
       i = i + stride;
+    }
+    return;
+  }
+}
+
+// ---- Glue fusions (#39, ResidentGLM(fuse_glue=True)) -------------------------------------
+// Each gives the bits of the launches it replaces: the same sums in the same order through
+// vxk_block_sum, the same per-element arithmetic.
+
+// glm_vx_gpu_residual_rmsnorm with its loads first, eight a thread a batch, and the sums kept in
+// registers for the second pass (it read residual_out back from memory); the weights are loaded
+// before the block sum too (5.1 -> 3.1 us on the H200 at hidden 6144): residual_out = x +
+// residual, out = RMSNorm(residual_out). ss adds the same squares in the same order (a square past
+// the row is +0.0), so the bits are residual_rmsnorm's, and add then rmsnorm's.
+pub fn glm_vx_gpu_residual_rmsnorm8(out: *mut f32, residual_out: *mut f32, x: *const f32, residual: *const f32, weight: *const f32, dim: i32, eps: f32) -> void {
+  if dim <= 0 { return; }
+  if eps <= 0.0 { return; }
+  unsafe {
+    let tid: i32 = vx_gpu_thread_idx_x();
+    let block: i32 = vx_gpu_block_dim_x();
+    if vx_gpu_block_idx_x() != 0 { return; }
+    if block < 32 { return; }
+    if block > 1024 { return; }
+    if block % 32 != 0 { return; }
+    if dim > 8 * block { return; }
+    let d: i32 = tid;
+    let v0: f32 = if d < dim { x[d] + residual[d] } else { 0.0 };
+    let v1: f32 = if d + 1 * block < dim { x[d + 1 * block] + residual[d + 1 * block] } else { 0.0 };
+    let v2: f32 = if d + 2 * block < dim { x[d + 2 * block] + residual[d + 2 * block] } else { 0.0 };
+    let v3: f32 = if d + 3 * block < dim { x[d + 3 * block] + residual[d + 3 * block] } else { 0.0 };
+    let v4: f32 = if d + 4 * block < dim { x[d + 4 * block] + residual[d + 4 * block] } else { 0.0 };
+    let v5: f32 = if d + 5 * block < dim { x[d + 5 * block] + residual[d + 5 * block] } else { 0.0 };
+    let v6: f32 = if d + 6 * block < dim { x[d + 6 * block] + residual[d + 6 * block] } else { 0.0 };
+    let v7: f32 = if d + 7 * block < dim { x[d + 7 * block] + residual[d + 7 * block] } else { 0.0 };
+    if d < dim { residual_out[d] = v0; }
+    if d + 1 * block < dim { residual_out[d + 1 * block] = v1; }
+    if d + 2 * block < dim { residual_out[d + 2 * block] = v2; }
+    if d + 3 * block < dim { residual_out[d + 3 * block] = v3; }
+    if d + 4 * block < dim { residual_out[d + 4 * block] = v4; }
+    if d + 5 * block < dim { residual_out[d + 5 * block] = v5; }
+    if d + 6 * block < dim { residual_out[d + 6 * block] = v6; }
+    if d + 7 * block < dim { residual_out[d + 7 * block] = v7; }
+    let w0: f32 = if d + 0 * block < dim { weight[d + 0 * block] } else { 0.0 };
+    let w1: f32 = if d + 1 * block < dim { weight[d + 1 * block] } else { 0.0 };
+    let w2: f32 = if d + 2 * block < dim { weight[d + 2 * block] } else { 0.0 };
+    let w3: f32 = if d + 3 * block < dim { weight[d + 3 * block] } else { 0.0 };
+    let w4: f32 = if d + 4 * block < dim { weight[d + 4 * block] } else { 0.0 };
+    let w5: f32 = if d + 5 * block < dim { weight[d + 5 * block] } else { 0.0 };
+    let w6: f32 = if d + 6 * block < dim { weight[d + 6 * block] } else { 0.0 };
+    let w7: f32 = if d + 7 * block < dim { weight[d + 7 * block] } else { 0.0 };
+    let mut ss: f32 = 0.0;
+    ss = ss + v0 * v0;
+    ss = ss + v1 * v1;
+    ss = ss + v2 * v2;
+    ss = ss + v3 * v3;
+    ss = ss + v4 * v4;
+    ss = ss + v5 * v5;
+    ss = ss + v6 * v6;
+    ss = ss + v7 * v7;
+    let total: f32 = vxk_block_sum(ss);
+    let inv: f32 = 1.0 / sqrtf(total / (dim as f32) + eps);
+    if d < dim { out[d] = v0 * inv * w0; }
+    if d + 1 * block < dim { out[d + 1 * block] = v1 * inv * w1; }
+    if d + 2 * block < dim { out[d + 2 * block] = v2 * inv * w2; }
+    if d + 3 * block < dim { out[d + 3 * block] = v3 * inv * w3; }
+    if d + 4 * block < dim { out[d + 4 * block] = v4 * inv * w4; }
+    if d + 5 * block < dim { out[d + 5 * block] = v5 * inv * w5; }
+    if d + 6 * block < dim { out[d + 6 * block] = v6 * inv * w6; }
+    if d + 7 * block < dim { out[d + 7 * block] = v7 * inv * w7; }
+    return;
+  }
+}
+
+// Two RMSNorms in one launch of two blocks: block 0 normalizes a (dim_a) into out_a, block 1 b
+// into out_b, each as glm_vx_gpu_rmsnorm does (vxk_rmsnorm_rows' loop and sums), so the same bits.
+// The attention's q_a and kv_a norms, which both read only q_a + kv_a's projection.
+pub fn glm_vx_gpu_rmsnorm_pair(out_a: *mut f32, x_a: *const f32, weight_a: *const f32, dim_a: i32, out_b: *mut f32, x_b: *const f32, weight_b: *const f32, dim_b: i32, eps: f32) -> void {
+  unsafe {
+    if vx_gpu_block_idx_x() == 0 {
+      vxk_rmsnorm_row(out_a, x_a, weight_a, 0, dim_a, eps);
+    } else {
+      vxk_rmsnorm_row(out_b, x_b, weight_b, 0, dim_b, eps);
+    }
+    return;
+  }
+}
+
+// The DSA indexer's key row in one launch of one block, for graph replay: LayerNorm with bias (as
+// glm_vx_gpu_layernorm), RoPE on its first `rot` values (as glm_vx_gpu_rope_strided: packed
+// [rotated even, rotated odd]), and the row stored at the step's position, cache[step[0] * dim + d]
+// (as glm_vx_gpu_store_row). Thread d writes value d past rot; thread p < rot / 2 computes the
+// normalized pair (2p, 2p + 1) with the same arithmetic and writes its two rotated values.
+// No `eps <= 0.0` guard (the caller passes 1e-6): with it, Vx 4f966fd6's prover hands z3 a real
+// comparison in an integer logic when it checks the two writes below, and panics (vx-lang/Vx#3145,
+// fixed by vx-lang/Vx#3517: put the guard back once the tested Vx has it).
+pub fn glm_vx_gpu_index_key_at(cache: *mut f32, x: *const f32, weight: *const f32, bias: *const f32, cosine: *const f32, sine: *const f32, step: *const i32, dim: i32, rot: i32, eps: f32) -> void {
+  if dim <= 0 { return; }
+  if rot < 0 { return; }
+  if rot > dim { return; }
+  if rot % 2 != 0 { return; }
+  unsafe {
+    let tid: i32 = vx_gpu_thread_idx_x();
+    let block: i32 = vx_gpu_block_dim_x();
+    if vx_gpu_block_idx_x() != 0 { return; }
+    if block < 32 { return; }
+    if block > 1024 { return; }
+    if block % 32 != 0 { return; }
+    if rot / 2 > block { return; }
+    let base: i32 = step[0] * dim;
+    let mut s: f32 = 0.0;
+    let mut d: i32 = tid;
+    for iteration in 0..((dim + block - 1) / block) {
+      d = tid + iteration * block;
+      if d < dim { s = s + x[d]; }
+    }
+    let mean: f32 = vxk_block_sum(s) / (dim as f32);
+    let mut ss: f32 = 0.0;
+    for iteration in 0..((dim + block - 1) / block) {
+      d = tid + iteration * block;
+      if d < dim {
+        let c: f32 = x[d] - mean;
+        ss = ss + c * c;
+      }
+    }
+    let inv: f32 = 1.0 / sqrtf(vxk_block_sum(ss) / (dim as f32) + eps);
+    for iteration in 0..((dim + block - 1) / block) {
+      d = tid + iteration * block;
+      if d < dim && d >= rot { cache[base + d] = (x[d] - mean) * inv * weight[d] + bias[d]; }
+    }
+    let pairs: i32 = rot / 2;
+    if tid < pairs {
+      let e: i32 = tid * 2;
+      let a: f32 = (x[e] - mean) * inv * weight[e] + bias[e];
+      let b: f32 = (x[e + 1] - mean) * inv * weight[e + 1] + bias[e + 1];
+      cache[base + tid] = a * cosine[tid] - b * sine[tid];
+      cache[base + pairs + tid] = b * cosine[tid] + a * sine[tid];
     }
     return;
   }

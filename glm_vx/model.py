@@ -207,11 +207,13 @@ class GlmMoeDsaModel:
             # of the attention sums differs from torch.topk's.
             return np.arange(count, dtype=np.int64)
         # Stable tie breaking by position. Torch topk does not specify tie order;
-        # untied scores agree, and all selected tokens remain causal.
+        # untied scores agree, and all selected tokens remain causal. The set is returned in position
+        # order, as ResidentGLM's one-launch top-k gives it (long_topk='position', #32) and as the short
+        # contexts above: the attention is a sum over the set, so only its rounding depends on the order.
         topk = getattr(b, 'topk', None)
         if callable(topk):
-            return np.asarray(topk(scores, count), dtype=np.int64)
-        return np.argsort(-scores, kind='stable')[:count].astype(np.int64)
+            return np.sort(np.asarray(topk(scores, count), dtype=np.int64))
+        return np.sort(np.argsort(-scores, kind='stable')[:count]).astype(np.int64)
 
     def _attention(self, layer, x, position, state, previous_selection, reuse_selection=False):
         b, c = self.backend, self.config

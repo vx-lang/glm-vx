@@ -230,7 +230,8 @@ def test_every_kernel_has_a_launch_shape_that_launch_reads(tmp_path):
             manifest = json.loads(out.with_suffix('.json').read_text())
             launch = manifest['launch']
             assert launch, (source.stem, variant)
-            values = {p['name']: 64 for p in manifest['params'] if p['kind'] == 'scalar'}  # 64: heads / 16 >= 1
+            # 128: heads / 16 >= 1, and fp8_matvec_cols_cvt's cols / 128 (a block a 128 column block).
+            values = {p['name']: 128 for p in manifest['params'] if p['kind'] == 'scalar'}
             for size in launch['grid'] + [launch['block']]:
                 assert launch_size(size, values) >= 1, (source.stem, variant, size)
 

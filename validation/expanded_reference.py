@@ -107,7 +107,9 @@ def expanded_batch_oracle(c, w, tokens, trace=None, *, numerical_mode='f32-v2',
             selections = []
             for t in range(n):
                 emit(t, istage + '.scores', scores[t, :t+1])
-                selections.append(np.argsort(-scores[t, :t+1], kind='stable')[:min(t+1, c['index_topk'])])
+                # The stable top-k set in position order, as the official traces record it (np.sort of
+                # the causal slots) and as the model selects (#32, #43); the attention is a sum over it.
+                selections.append(np.sort(np.argsort(-scores[t, :t+1], kind='stable')[:min(t+1, c['index_topk'])]))
         if selections is None:
             raise ValueError('shared-layer replay requires initial_selections')
         all_selections.append([s.copy() for s in selections])

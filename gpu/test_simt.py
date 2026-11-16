@@ -48,6 +48,54 @@ def test_residual_rmsnorm_multiwarp(simt):
     expected=(x+r)/np.sqrt(np.mean((x+r)**2,axis=1,keepdims=True)+1e-5)*w
     np.testing.assert_allclose(out,expected,rtol=2e-6,atol=2e-6)
 
+# --- Glue fusions (#39, ResidentGLM(fuse_glue=True)): each gives the bits of the launches it replaces.
+
+@pytest.mark.parametrize('dim,block',[(67,32),(333,64),(512,64),(6144,1024),(2048,256)])
+def test_residual_rmsnorm8_is_residual_rmsnorm_bit_for_bit(simt,dim,block):
+    rng=np.random.default_rng(dim);x=rng.normal(size=dim).astype('f4');r=rng.normal(size=dim).astype('f4');w=rng.normal(size=dim).astype('f4')
+    want=np.full(dim,np.nan,'f4');want_res=want.copy();got=want.copy();got_res=want.copy()
+    simt.run('glm_vx_gpu_residual_rmsnorm',want,want_res,x,r,w,1,dim,1e-6,grid=1,block=block)
+    simt.run('glm_vx_gpu_residual_rmsnorm8',got,got_res,x,r,w,dim,1e-6,grid=1,block=block)
+    np.testing.assert_array_equal(got_res,want_res)
+    np.testing.assert_array_equal(got,want)
+    # add then rmsnorm (the layer boundary it replaces): the same bits.
+    added=np.full(dim,np.nan,'f4');normed=added.copy()
+    simt.run('glm_vx_gpu_add',added,x,r,dim,grid=(dim+255)//256,block=256)
+    simt.run('glm_vx_gpu_rmsnorm',normed,added,w,dim,1e-6,grid=1,block=block)
+    np.testing.assert_array_equal(got_res,added)
+    np.testing.assert_array_equal(got,normed)
+
+def test_residual_rmsnorm8_writes_nothing_past_eight_a_thread(simt):
+    x=np.ones(257,'f4');out=np.full(257,np.nan,'f4');res=out.copy()
+    simt.run('glm_vx_gpu_residual_rmsnorm8',out,res,x,x,x,257,1e-6,grid=1,block=32)
+    assert np.isnan(out).all() and np.isnan(res).all()
+
+@pytest.mark.parametrize('dims,block',[((2048,512),1024),((67,333),64),((1536,512),256)])
+def test_rmsnorm_pair_is_two_rmsnorms_bit_for_bit(simt,dims,block):
+    rng=np.random.default_rng(sum(dims));xa,xb,wa,wb=(rng.normal(size=d).astype('f4') for d in dims+dims)
+    want_a=np.empty(dims[0],'f4');want_b=np.empty(dims[1],'f4');got_a=np.full(dims[0],np.nan,'f4');got_b=np.full(dims[1],np.nan,'f4')
+    simt.run('glm_vx_gpu_rmsnorm',want_a,xa,wa,dims[0],1e-6,grid=1,block=block)
+    simt.run('glm_vx_gpu_rmsnorm',want_b,xb,wb,dims[1],1e-6,grid=1,block=block)
+    simt.run('glm_vx_gpu_rmsnorm_pair',got_a,xa,wa,dims[0],got_b,xb,wb,dims[1],1e-6,grid=2,block=block)
+    np.testing.assert_array_equal(got_a,want_a)
+    np.testing.assert_array_equal(got_b,want_b)
+
+@pytest.mark.parametrize('dim,rot',[(128,64),(64,16),(40,0),(300,64)])
+def test_index_key_at_is_layernorm_rope_and_store_row_bit_for_bit(simt,dim,rot):
+    rng=np.random.default_rng(dim+rot);x,w,b=(rng.normal(size=dim).astype('f4') for _ in range(3))
+    angle=rng.normal(size=max(rot//2,1)).astype('f4');co=np.cos(angle);si=np.sin(angle)
+    step=np.array([3,4,4,1],np.int32)
+    normed=np.empty(dim,'f4');row=np.empty(dim,'f4')
+    simt.run('glm_vx_gpu_layernorm',normed,x,w,b,1,dim,1e-6,grid=1,block=256)
+    simt.run('glm_vx_gpu_copy',row,normed,dim,grid=1,block=256)
+    if rot:
+        simt.run('glm_vx_gpu_rope_strided',row,normed,co,si,1,rot,rot,rot,grid=1,block=256)
+    want=np.full((6,dim),np.nan,'f4');got=want.copy()
+    simt.run('glm_vx_gpu_store_row',want,row,step,dim,grid=(dim+255)//256,block=256)
+    simt.run('glm_vx_gpu_index_key_at',got,x,w,b,co,si,step,dim,rot,1e-6,grid=1,block=256)
+    np.testing.assert_array_equal(got,want)
+    assert np.isnan(got[[0,1,2,4,5]]).all()
+
 def test_rope_and_swiglu_tail(simt):
     rng=np.random.default_rng(23);x=rng.normal(size=(3,8)).astype('f4');angle=np.array([.2,.3,.5,.7],dtype='f4');co=np.cos(angle);si=np.sin(angle);out=np.empty_like(x)
     simt.run('glm_vx_gpu_rope_glm',out,x,co,si,3,8,block=32)
