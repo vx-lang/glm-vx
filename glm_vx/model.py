@@ -200,6 +200,12 @@ class GlmMoeDsaModel:
             scores = b.matvec(np.stack(scores_by_head).T, head_weights)
         self._trace(position, stage + '.scores', scores)
         count = min(self.index_topk, len(state.index_keys))
+        if count == len(state.index_keys):
+            # Every cached token is selected: in position order, as SGLang's DSA top-k does
+            # (topk_v2.cuh, trivial_transform when seq_len <= topk) and as ResidentGLM does without
+            # running the indexer's scores or top-k (#43). The set is the official one; only the order
+            # of the attention sums differs from torch.topk's.
+            return np.arange(count, dtype=np.int64)
         # Stable tie breaking by position. Torch topk does not specify tie order;
         # untied scores agree, and all selected tokens remain causal.
         topk = getattr(b, 'topk', None)

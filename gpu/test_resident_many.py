@@ -136,8 +136,10 @@ def test_graph_steps_are_forward_under_graph(options):
     model = build(seed=3)
     want, got = graph_run(model, False, **options), graph_run(model, True, **options)
     assert_same([want[:3] + ({},), got[:3] + ({},)])
-    # PREFIX: one eager step, a capture, four replays; then counts 2 (eager, capture, replay) and 3 (eager).
-    assert got[3] == len(PREFIX) - 1 + 2
+    # PREFIX: positions 0-3 fit in index_topk 4, the short step graph (#43): eager, a capture, two
+    # replays; positions 4-5 the long one: eager, a capture. Then counts 2 (eager, capture, replay) and 3
+    # (eager).
+    assert got[3] == len(PREFIX) - 2 + 2
 
 
 def test_graph_fp8_x4_steps_are_forward_under_graph():

@@ -211,7 +211,9 @@ class ResidentGLM:
             raise ValueError(f"mla_kernel={mla_kernel!r} needs graph=True and fused_attention=True")
         if self.graph and not (self.device_topk and self.device_experts):
             raise ValueError('graph=True needs device_topk and device_experts: a captured step cannot read device memory')
-        self._step_graph, self._warm = None, False
+        # The step graph, one for steps whose every cached token is selected (no indexer scores or
+        # top-k, #43) and one for longer contexts: each runs eagerly first, is captured the second time.
+        self._step_graphs, self._step_warm = {}, set()
         # forward_many's graphs by token count, mtp_step's by reuse_selection: run eagerly the first
         # time, captured the second, replayed after (_replay).
         self._graphs, self._warmed = {}, set()
@@ -505,6 +507,8 @@ class ResidentGLM:
         self.head_weights_raw, self.head_weights = t((self.index_heads,)), t((self.index_heads,))
         self.scores = t((cap,))
         self.selected = t((self.index_topk,), 'int32')
+        # 0, 1, ..., index_topk - 1: the selection while the context fits in index_topk (#43).
+        self.positions = t((self.index_topk,), 'int32', np.arange(self.index_topk, dtype=np.int32))
         if self.device_topk:
             from .topk import scratch_ints
             self.topk_scratch = t((scratch_ints(cap, self.index_topk),), 'int32')
@@ -974,6 +978,14 @@ class ResidentGLM:
         self._copy(row, self.ik_norm, self.index_dim)
         self._rope(row, self.ik_norm, 1, self.rot, self.rot, self.rot)
         self._store_row(self.index_keys[layer], row, self.index_dim)
+        if tokens <= self.index_topk:
+            # Every cached token is selected, in position order, as SGLang's DSA top-k does (topk_v2.cuh,
+            # trivial_transform when seq_len <= topk) and GlmMoeDsaModel._index too (#43): the key row is
+            # stored for later steps, but no scores or top-k run.
+            self._copy(self.selected.view((self.index_topk,), 'float32'), self.positions.view((self.index_topk,), 'float32'),
+                       self.index_topk)
+            self.selected_count = tokens
+            return
         self._copy(self.iq_rot, iq, self.index_heads * self.index_dim)
         self._rope(self.iq_rot, iq, self.index_heads, self.rot, self.index_dim, self.index_dim)
         self._launch('scale', self._grid(self.index_heads), _ELEMENTWISE_BLOCK,
@@ -1193,18 +1205,20 @@ class ResidentGLM:
         cosine, sine = (np.ascontiguousarray(v, dtype=np.float32) for v in (cosine, sine))
         if self.graph:
             count = min(self.index_topk, position + 1)
+            short = position + 1 <= self.index_topk  # every cached token selected: no scores or top-k (#43)
             self.step_inputs.upload(np.concatenate([embedding, cosine, sine, self._step_buffer(position, count)]))
-            if self._step_graph is not None:
-                self._step_graph.launch(self.stream)
+            graph = self._step_graphs.get(short)
+            if graph is not None:
+                graph.launch(self.stream)
                 self.replays += 1
                 self.selected_count = count
-            elif not self._warm:
+            elif short not in self._step_warm:
                 self._layers(position)  # uploads every weight and loads every kernel the capture needs
-                self._warm = True
+                self._step_warm.add(short)
             else:
                 with self.stream.capture() as graph:
                     self._layers(position)
-                self._step_graph = graph
+                self._step_graphs[short] = graph
                 graph.launch(self.stream)
                 self.replays += 1
         else:
@@ -1403,7 +1417,8 @@ class ResidentGLM:
                 self._copy(self.mtp_hidden, device_hidden, self.hidden)
             else:
                 self._inputs.upload(np.concatenate(inputs + [hidden]))
-            self._replay(('mtp', reuse_selection), lambda: self._mtp_layer(position, reuse_selection))
+            short = None if reuse_selection else position + 1 <= self.index_topk  # #43
+            self._replay(('mtp', reuse_selection, short), lambda: self._mtp_layer(position, reuse_selection))
             self.selected_count = count
         else:
             self.x.upload(embedding)
@@ -1483,7 +1498,8 @@ class ResidentGLM:
                 steps[i, :2 * len(cosine) + 4] = np.concatenate(
                     [cosine, sine, self._step_buffer(start + i, min(self.index_topk, start + i + 1))])
             self._many_inputs.upload(np.concatenate([embeddings.ravel(), steps.ravel()]))
-            self._replay(('many', count), lambda: self._layers_many(start, count))
+            shorts = tuple(start + i + 1 <= self.index_topk for i in range(count))  # #43
+            self._replay(('many', count, shorts), lambda: self._layers_many(start, count))
             self.selected_count = min(self.index_topk, start + count)
         else:
             x.upload(embeddings)

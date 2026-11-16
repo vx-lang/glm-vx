@@ -32,7 +32,7 @@ def both(ctx, model, tokens, max_tokens, **kwargs):
 def test_graph_replay_equals_the_per_launch_path_on_the_gpu(ctx, kind):
     got, want, graph = both(ctx, expert_models(kind), TOKENS, 32)
     np.testing.assert_array_equal(got, want)
-    assert graph.replays == len(TOKENS) - 1
+    assert graph.replays == len(TOKENS) - 2  # a short and a long step graph (#43)
 
 
 def test_graph_replay_through_several_mla_splits(ctx):

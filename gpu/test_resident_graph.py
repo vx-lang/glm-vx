@@ -143,14 +143,16 @@ def test_graph_replay_equals_the_per_launch_path(kind):
     got, graph = run(model, TOKENS, graph=True)
     want, _ = run(model, TOKENS)
     np.testing.assert_array_equal(got, want)
-    # The first step eagerly, the second captured, then every step a replay of that graph.
-    assert graph.replays == len(TOKENS) - 1
+    # Two step graphs (#43): while the context fits in index_topk (4 here) every cached token is
+    # selected and no scores or top-k run; past it, the indexer selects. Each graph runs eagerly
+    # first, is captured the second time, and every later step replays it.
+    assert graph.replays == len(TOKENS) - 2
     full = sum(t == 'full' for t in model.indexer_types)
-    # topk_sort_at (#32) and the radix select past its 2048 tokens are both captured.
+    # topk_sort_at (#32) and the radix select past its 2048 tokens are both captured, in the long graph.
     assert graph.launches['index_scores_at'] == graph.launches['topk_sort_at'] == 2 * full
     assert graph.launches['topk_stable_long_at'] == 2 * full and 'topk_stable_at' not in graph.launches
-    assert graph.launches['mla_partial_at'] == graph.launches['mla_merge_at'] == 2 * model.n_layers
-    assert graph.launches['store_row'] == 2 * (2 * model.n_layers + full)
+    assert graph.launches['mla_partial_at'] == graph.launches['mla_merge_at'] == 4 * model.n_layers
+    assert graph.launches['store_row'] == 4 * (2 * model.n_layers + full)
     assert not {'index_scores', 'topk_stable', 'mla_partial', 'mla_merge'} & set(graph.launches)
 
 
@@ -164,11 +166,14 @@ def test_graph_steps_without_logits_and_after_reset_replay_the_same_graph():
             assert resident.forward(t, logits=False) is None
             plain.forward(t, logits=False)
         np.testing.assert_array_equal(resident.forward(TOKENS[5]), plain.forward(TOKENS[5]))
-        graph = resident._step_graph
+        graphs = dict(resident._step_graphs)
         resident.reset()
         plain.reset()
         np.testing.assert_array_equal(resident.prefill(TOKENS[:7]), plain.prefill(TOKENS[:7]))
-        assert resident._step_graph is graph and resident.replays == 5 + 7
+        # Positions 0-3 fit in index_topk 4 (#43): the short graph replays 3 of them, the long one 1
+        # of positions 4-5; after the reset both replay every step.
+        assert resident._step_graphs == graphs and set(graphs) == {True, False}
+        assert all(resident._step_graphs[k] is g for k, g in graphs.items()) and resident.replays == 4 + 7
     finally:
         resident.close()
         plain.close()
@@ -183,7 +188,8 @@ def test_graph_replay_with_fused_attention_equals_fused_per_launch():
     got, graph = run(model, TOKENS, graph=True, fused_attention=True)
     want, _ = run(model, TOKENS, fused_attention=True)
     np.testing.assert_array_equal(got, want)
-    assert graph.launches['mla_decode_at'] == 2 * model.n_layers and 'mla_decode' not in graph.launches
+    # Run eagerly and captured once in each of the short and long step graphs (#43).
+    assert graph.launches['mla_decode_at'] == 4 * model.n_layers and 'mla_decode' not in graph.launches
 
 
 def test_graph_needs_device_reads_only():

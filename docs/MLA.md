@@ -13,6 +13,11 @@ For each layer and decode step, after the projections:
 1. The new token's latent row (rank 512, RMSNorm'd) and rope key (64) are written into the layer's
    caches.
 2. The DSA indexer selects up to `index_topk` (2048) cached tokens, the step's `selected` ids.
+   While the context fits in `index_topk`, every cached token is selected. They are taken in position
+   order, as SGLang's top-k does (its `trivial_transform`), and the indexer only stores its key row:
+   no scores or top-k run (#43). `GlmMoeDsaModel._index` does the same, so ResidentGLM still matches
+   it bit for bit. The set of tokens is the official one; only the order of the attention sums
+   differs from `torch.topk`'s.
 3. Each head's query is absorbed into the latent space (`matvec_heads`): a 512-wide latent query and
    a 64-wide rope query, 64 heads.
 4. **MLA decode.** For each head:
