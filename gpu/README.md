@@ -44,6 +44,9 @@ completion. The compatibility model uses fused compressed MLA across heads, but 
 and uploads the selected KV rows on each attention call. Direct FP8 projection
 is currently a resident API, not integrated into checkpoint serving.
 
+The MLA decode kernels (`mla_kernel='flash'` on the f32 cache, `'tc'` on a bf16 cache with the tensor
+cores) and their numbers against SGLang are described in [../docs/MLA.md](../docs/MLA.md).
+
 `--backend vx-gpu-resident` serves through `gpu/resident.py` (`ResidentGLM`) instead: weights,
 activations and the MLA / indexer caches stay on the device, and block-FP8 / INT4 / BF16 Linears
 stay packed. It holds one sequence's caches, so it serves one request at a time (`--max-sequences`
