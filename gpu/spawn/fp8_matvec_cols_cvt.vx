@@ -1,0 +1,137 @@
+// A block-FP8 matrix's rows multiplied in row groups and summed down the columns (#42): for group g,
+//   out[g * cols + c] = sum over d < depth of decode(w[p, c]) * scale[p / 128, c / 128] * x[g * x_stride + d],
+//   p = g * period + offset + d,
+// on the matrix as stored, row-major, cols columns. GLM's MLA query absorb, q_latent[h] = W_k[h]^T q_nope[h],
+// straight from kv_b_proj's FP8 codes: group = head, depth = nope, period = nope + value, offset 0,
+// x = the query at stride qk. No transposed copy, and a scale block that holds two heads (GLM-5.3's heads
+// are 448 rows) needs nothing special: each row reads its own.
+// A block takes one group's 128 columns; each lane one word (4 columns) of them; the 16 subgroups the
+// rows d = w, w + 16, ..., twelve at a time with their loads first (GLM-5.3's 192 nope rows in one step:
+// the most loads in flight was the fastest on the H200, 8.4 us for GLM-5.3's 64 heads, graph and L2
+// flush included, against 10.9 for 8 subgroups of four rows). Then the block sums the 16 partials.
+// cols % 128 == 0 and period >= offset + depth, or it writes nothing. The sm_90 build decodes with
+// Hopper's e4m3x2 -> f16x2 conversion, `_ref` with integers; both give each code's exact value, so the
+// same bits.
+// spawn-include: device.vx
+// spawn-variant: - fp8_cvt_sm90.vx machine-sm90.vx
+// spawn-variant: _ref fp8_cvt_ref.vx
+
+macro_rules! cols_row4 {
+    ($a0:ident, $a1:ident, $a2:ident, $a3:ident, $u:expr, $t:expr) => {
+        unsafe {
+          let mut dv_c0: f32 = 0.0;
+          let mut dv_c1: f32 = 0.0;
+          let mut dv_c2: f32 = 0.0;
+          let mut dv_c3: f32 = 0.0;
+          fp8_word_f32x4!($u, dv_c0, dv_c1, dv_c2, dv_c3);
+          $a0 = fma32!(dv_c0, $t, $a0);
+          $a1 = fma32!(dv_c1, $t, $a1);
+          $a2 = fma32!(dv_c2, $t, $a2);
+          $a3 = fma32!(dv_c3, $t, $a3);
+        }
+    };
+}
+
+pub fn glm_vx_spawn_fp8_matvec_cols_cvt(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<u32, [?], Memory::HBM>,
+                                        scales: &Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                                        groups: i32, cols: i32, depth: i32, period: i32, offset: i32, x_stride: i32) -> void {
+  spawn on(Topology::Device) {
+    for b in 0..groups * (cols / 128) across blocks {
+      let mut part = unsafe { Tensor<f32, [16, 4, 32], Memory::SMEM>::uninit() };
+      for w in 0..16 across subgroups {
+        for lane in 0..32 across lanes {
+          let ok: bool = cols % 128 == 0 && cols > 0 && depth >= 0 && offset >= 0 && period >= offset + depth && x_stride >= 0;
+          let chunks: i32 = if ok { cols / 128 } else { 1 };
+          let g: i64 = (b / chunks) as i64;
+          let cb: i64 = (b % chunks) as i64;
+          let rw: i64 = (chunks * 32) as i64;
+          let sc: i64 = chunks as i64;
+          let word: i64 = cb * 32 + (lane as i64);
+          let base: i64 = g * (period as i64) + (offset as i64);
+          let xb: i64 = g * (x_stride as i64);
+          let n: i64 = if ok { depth as i64 } else { 0 };
+          let mut a0: f32 = 0.0;
+          let mut a1: f32 = 0.0;
+          let mut a2: f32 = 0.0;
+          let mut a3: f32 = 0.0;
+          let mut d: i64 = w as i64;
+          while d + 176 < n {
+            let p: i64 = base + d;
+            let u0: u32 = weight[p * rw + word];
+            let s0: f32 = scales[(p / 128) * sc + cb];
+            let x0: f32 = x[xb + d];
+            let u1: u32 = weight[(p + 16) * rw + word];
+            let s1: f32 = scales[((p + 16) / 128) * sc + cb];
+            let x1: f32 = x[xb + d + 16];
+            let u2: u32 = weight[(p + 32) * rw + word];
+            let s2: f32 = scales[((p + 32) / 128) * sc + cb];
+            let x2: f32 = x[xb + d + 32];
+            let u3: u32 = weight[(p + 48) * rw + word];
+            let s3: f32 = scales[((p + 48) / 128) * sc + cb];
+            let x3: f32 = x[xb + d + 48];
+            let u4: u32 = weight[(p + 64) * rw + word];
+            let s4: f32 = scales[((p + 64) / 128) * sc + cb];
+            let x4: f32 = x[xb + d + 64];
+            let u5: u32 = weight[(p + 80) * rw + word];
+            let s5: f32 = scales[((p + 80) / 128) * sc + cb];
+            let x5: f32 = x[xb + d + 80];
+            let u6: u32 = weight[(p + 96) * rw + word];
+            let s6: f32 = scales[((p + 96) / 128) * sc + cb];
+            let x6: f32 = x[xb + d + 96];
+            let u7: u32 = weight[(p + 112) * rw + word];
+            let s7: f32 = scales[((p + 112) / 128) * sc + cb];
+            let x7: f32 = x[xb + d + 112];
+            let u8: u32 = weight[(p + 128) * rw + word];
+            let s8: f32 = scales[((p + 128) / 128) * sc + cb];
+            let x8: f32 = x[xb + d + 128];
+            let u9: u32 = weight[(p + 144) * rw + word];
+            let s9: f32 = scales[((p + 144) / 128) * sc + cb];
+            let x9: f32 = x[xb + d + 144];
+            let u10: u32 = weight[(p + 160) * rw + word];
+            let s10: f32 = scales[((p + 160) / 128) * sc + cb];
+            let x10: f32 = x[xb + d + 160];
+            let u11: u32 = weight[(p + 176) * rw + word];
+            let s11: f32 = scales[((p + 176) / 128) * sc + cb];
+            let x11: f32 = x[xb + d + 176];
+            cols_row4!(a0, a1, a2, a3, u0, x0 * s0);
+            cols_row4!(a0, a1, a2, a3, u1, x1 * s1);
+            cols_row4!(a0, a1, a2, a3, u2, x2 * s2);
+            cols_row4!(a0, a1, a2, a3, u3, x3 * s3);
+            cols_row4!(a0, a1, a2, a3, u4, x4 * s4);
+            cols_row4!(a0, a1, a2, a3, u5, x5 * s5);
+            cols_row4!(a0, a1, a2, a3, u6, x6 * s6);
+            cols_row4!(a0, a1, a2, a3, u7, x7 * s7);
+            cols_row4!(a0, a1, a2, a3, u8, x8 * s8);
+            cols_row4!(a0, a1, a2, a3, u9, x9 * s9);
+            cols_row4!(a0, a1, a2, a3, u10, x10 * s10);
+            cols_row4!(a0, a1, a2, a3, u11, x11 * s11);
+            d = d + 192;
+          }
+          while d < n {
+            let p: i64 = base + d;
+            let u0: u32 = weight[p * rw + word];
+            let s0: f32 = scales[(p / 128) * sc + cb];
+            let x0: f32 = x[xb + d];
+            cols_row4!(a0, a1, a2, a3, u0, x0 * s0);
+            d = d + 16;
+          }
+          part[w][0][lane] = a0;
+          part[w][1][lane] = a1;
+          part[w][2][lane] = a2;
+          part[w][3][lane] = a3;
+        }
+      }
+      for t in 0..128 across lanes {
+        let ok: bool = cols % 128 == 0 && cols > 0 && depth >= 0 && offset >= 0 && period >= offset + depth && x_stride >= 0;
+        let l: i32 = t / 4;
+        let q: i32 = t % 4;
+        let mut sum: f32 = 0.0;
+        for s in 0..16 {
+          sum = sum + part[s][q][l];
+        }
+        if ok { out[b * 128 + t] = sum; }
+      }
+    }
+  }
+  return;
+}

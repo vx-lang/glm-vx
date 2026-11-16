@@ -18,8 +18,12 @@ For each layer and decode step, after the projections:
    no scores or top-k run (#43). `GlmMoeDsaModel._index` does the same, so ResidentGLM still matches
    it bit for bit. The set of tokens is the official one; only the order of the attention sums
    differs from `torch.topk`'s.
-3. Each head's query is absorbed into the latent space (`matvec_heads`): a 512-wide latent query and
-   a 64-wide rope query, 64 heads.
+3. Each head's query is absorbed into the latent space: a 512-wide latent query and a 64-wide rope
+   query, 64 heads. With `fp8_kernels='cvt'` and an FP8 `kv_b_proj`, this and step 5's value absorb read
+   its FP8 codes as stored (#42): `fp8_matvec_cols_cvt` sums each head's 192 nope rows down the 512
+   latent columns, and `fp8_matvec_heads_cvt` takes each head's 256 value rows. A head is 448 rows, so a
+   128-row block of scales can hold two heads; both kernels read each row's own scale. Otherwise
+   `matvec_heads` on a float32 copy.
 4. **MLA decode.** For each head:
    - score = (latent query · latent row + rope query · rope row) × scale, for each selected token;
    - then softmax over the scores;
@@ -152,13 +156,15 @@ middle one alone.
 | 1000 | 1.9 + 12.2 + 4.4 = **18.5 us** | 14.3 + 6.5 = 20.8 us | 3.3 + 14.4 + 5.8 = **23.5 us** |
 | 2048 | 1.8 + 13.7 + 6.7 = **22.2 us** | 24.4 + 6.4 = 30.8 us | 3.2 + 16.1 + 5.9 = **25.2 us** |
 
-The rest of the attention block is where the gap now is (context 1000, with 2048 in brackets):
+The rest of the attention block, at context 1000 (in brackets: past index_topk, our 3001 tokens,
+SGLang's 2048), from evidence/h200-20261116-k (2026-11-16: after #42 and #43). Before them the absorbs
+were 11.5 + 11.7 us (float32) and context 1000 ran scores (10.5 us) and top-k (25.6 us):
 
 | kernel | ours | SGLang |
 |---|---|---|
-| absorb matvecs (#42) | 11.5 + 11.7 us | 5.9 + 6.5 us |
-| indexer scores | 10.5 (10.9) us | 3.6 (3.7) us |
-| indexer top-k (#32) | 25.6 (50.7 + 5.7) us | 1.7 (6.0) us |
+| absorb matvecs (#42: `fp8_matvec_cols_cvt` + `fp8_matvec_heads_cvt`) | **5.4 + 6.3 us** | 5.9 + 6.5 us |
+| indexer scores | **none** (#43) (11.4 us) | 3.6 (3.7) us |
+| indexer top-k (#32) | **none** (#43) (0.9 + 51.0 + 5.8 us) | 1.7 (6.0) us |
 
 Where `'tc'`'s 26.2 us goes at 2048 tokens:
 

@@ -1,0 +1,11 @@
+26 kernels; total 193.2 us
+    1.4  glm_vx_spawn_store_row_bf16_at
+    1.4  glm_vx_gpu_rope_strided
+    1.2  glm_vx_spawn_store_row_bf16_at
+    1.2  glm_vx_gpu_rope_strided
+    1.2  glm_vx_gpu_store_row
+    1.7  glm_vx_gpu_rope_strided
+    1.8  glm_vx_spawn_mla_q_bf16_at
+   12.0  glm_vx_spawn_mla_tc_at
+    4.5  glm_vx_spawn_mla_flash_merge_at
+    6.3  glm_vx_spawn_fp8_matvec_heads_cvt
