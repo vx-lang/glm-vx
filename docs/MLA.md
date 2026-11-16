@@ -127,15 +127,33 @@ about 10.8 us (4.6 M warp instructions) to about 3-7 us in the step.
 From `evidence/h200-20261116/graph_split.py`: one CUDA graph a step, CUDA events after an L2 flush,
 median of 50. An almost empty graph takes 3.1 us.
 
-| selected tokens | `'heads'` (event-timed) | `'flash'` | `'tc'` | SGLang flash decode + combine |
-|---|---|---|---|---|
-| 256 | 149 | 15.6 | 19.0 | |
-| 1000 | 162 | 24.2 | 22.2 | 19.7 (context 1000) |
-| 2048 | 172 | 35.9 | 26.2 | |
+| selected tokens | `'heads'` (event-timed) | `'flash'` | `'tc'` |
+|---|---|---|---|
+| 256 | 149 | 15.6 | 19.0 |
+| 1000 | 162 | 24.2 | 22.2 |
+| 2048 | 172 | 35.9 | 26.2 |
 
-SGLang's 13.9 us, quoted before, is its flash-decode kernel alone. Its combine adds 5.8 us, and both
-are nsys durations in a warm decode step. Our column includes the graph floor and a cold L2. A
-like-for-like profile is #40.
+These include the graph floor and a cold L2.
+
+### Against SGLang, like for like (#40)
+
+Both sides are nsys kernel durations inside a real batch-1 decode step (warm cache), from
+`evidence/h200-20261116/step-profile`. SGLang's attention is three kernels: `prepare_varlen_num_blocks`
+(split scheduling), `FlashAttnFwdSm90` and `FlashAttnFwdCombine`. The 13.9 us quoted before was the
+middle one alone.
+
+| context | ours `'tc'` (bf16) | ours `'flash'` (f32) | SGLang |
+|---|---|---|---|
+| 1000 | 1.9 + 12.2 + 4.4 = **18.5 us** | 14.3 + 6.5 = 20.8 us | 3.3 + 14.4 + 5.8 = **23.5 us** |
+| 2048 | 1.8 + 13.7 + 6.7 = **22.2 us** | 24.4 + 6.4 = 30.8 us | 3.2 + 16.1 + 5.9 = **25.2 us** |
+
+The rest of the attention block is where the gap now is (context 1000, with 2048 in brackets):
+
+| kernel | ours | SGLang |
+|---|---|---|
+| absorb matvecs (#42) | 11.5 + 11.7 us | 5.9 + 6.5 us |
+| indexer scores | 10.5 (10.9) us | 3.6 (3.7) us |
+| indexer top-k (#32) | 25.6 (50.7 + 5.7) us | 1.7 (6.0) us |
 
 Where `'tc'`'s 26.2 us goes at 2048 tokens:
 

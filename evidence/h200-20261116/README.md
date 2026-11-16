@@ -46,3 +46,32 @@ Tried on the way:
 | mla_q_bf16_at | about 1.6 |
 | mla_tc_at | about 14.6 (11.3 at 256 tokens) |
 | mla_flash_merge_at | about 7 |
+
+## Like-for-like with SGLang (#40): nsys kernel durations inside a decode step
+
+`step-profile/` holds both sides' traces. Both are nsys kernel durations in a real batch-1 decode
+step (graph replay, warm cache, no L2 flush) at GLM-5.3's full width.
+
+- **Ours:** `mla_step_profile.py`, one dense layer, FP8 Linears, index_topk 2048, after 1000 or
+  2048 tokens; `trace_mla.py` lists the attention block's kernels.
+- **SGLang 0.5.22:** `scripts/pod_sglang.sh profile` on the 9-layer FP8 proxy, `--input-len` 1000 or
+  2048, `*_cuda_gpu_kern_sum.csv`. Averages over its layers: 9 attention layers and 4 full indexers.
+
+MLA decode attention:
+
+| context | ours `'tc'` (bf16): mla_q_bf16_at + mla_tc_at + merge | ours `'flash'` (f32) | SGLang: prepare_varlen_num_blocks + FlashAttnFwdSm90 + FlashAttnFwdCombine |
+|---|---|---|---|
+| 1000 | 1.9 + 12.2 + 4.4 = **18.5 us** | 14.3 + 6.5 = 20.8 | 3.3 + 14.4 + 5.8 = **23.5 us** |
+| 2048 | 1.8 + 13.7 + 6.7 = **22.2 us** | 24.4 + 6.4 = 30.8 | 3.2 + 16.1 + 5.9 = **25.2 us** |
+
+The rest of the attention block, at context 1000 (2048):
+
+| kernel | ours | SGLang |
+|---|---|---|
+| absorb matvecs (`matvec_heads`, #42) | 11.5 + 11.7 | 5.9 + 6.5 |
+| indexer scores (`index_scores_at` vs `sm90_fp8_paged_mqa_logits`) | 10.5 (10.9) | 3.6 (3.7) |
+| indexer top-k (`topk_sort_at`; at 2048 `topk_chunks_at` + `topk_merge_at`, vs `topk_small_batch_cluster_kernel`) | 25.6 (50.7 + 5.7) | 1.7 (6.0) |
+| new cache rows (`store_row(_bf16)_at` vs `set_mla_kv_buffer`) | 1.2-1.6 each | 1.2 |
+
+The MLA attention kernels are ahead of SGLang at both contexts. The indexer's top-k is now the
+largest gap in the attention block, followed by the absorb matvecs and the indexer's scores.

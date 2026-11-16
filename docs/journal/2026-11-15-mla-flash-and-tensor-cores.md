@@ -245,9 +245,21 @@ The 13.9 us we had been chasing is SGLang's flash-decode kernel alone. Its MLA b
 |---|---|---|---|---|---|---|---|
 | us | 5.9 | 1.6 | 1.2 | 3.3 | 13.9 | 5.8 | 6.5 |
 
-Its counterpart to our step is flash decode plus combine, 19.7 us. That is an nsys duration inside a
-warm decode step. Ours, 22.2 us at 1000 tokens, includes a 3.1 us graph floor and a cold L2. A
-like-for-like profile is #40.
+The 3.3 us kernel turned out to be `flash::prepare_varlen_num_blocks` (split scheduling), so
+SGLang's attention is three kernels.
+
+The like-for-like profile (#40) used nsys kernel durations inside a real decode step, warm, at
+GLM-5.3 width: our `mla_step_profile.py` against SGLang's `pod_sglang.sh profile` at input 1000 and
+2048.
+
+| context | ours `'tc'` | ours `'flash'` | SGLang |
+|---|---|---|---|
+| 1000 | 1.9 + 12.2 + 4.4 = 18.5 us | 20.8 us | 3.3 + 14.4 + 5.8 = 23.5 us |
+| 2048 | 1.8 + 13.7 + 6.7 = 22.2 us | 30.8 us | 3.2 + 16.1 + 5.9 = 25.2 us |
+
+So `'tc'` beats SGLang's MLA attention at both contexts. The same traces show the indexer's top-k
+(25.6 us at 1000, 50.7 + 5.7 at 2048, against SGLang's 1.7 and 6.0) and scores (about 10.5 against
+3.6) as the larger gaps now.
 
 The larger remaining gap in the MLA block is now elsewhere: our absorb matvecs take 12.4 + 12.3 us
 against SGLang's 5.9 + 6.5 (#42).
@@ -287,7 +299,8 @@ older bundle's llvm-22). On the pod they sit next to each other as `~/glm-h200/v
 
 ## What remains
 
-- #40: profile against SGLang like-for-like.
+- #40: profile against SGLang like-for-like (done: see above).
+- #32: the indexer's top-k, now the largest gap in the attention block.
 - #41: shorten `mla_tc_at`'s per-block critical path (chunks with `scale_rows` and double-buffered
   row copies; fewer barriers).
 - #42: the absorb matvecs, and the bf16 queries written by the absorb kernel.
