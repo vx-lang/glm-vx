@@ -16,7 +16,7 @@ also cover every pass. A kernel whose rows have a run-time length writes a rank-
 times numbers; `launch.py` passes a rank-2 `DeviceTensor` as its 7-word descriptor. A row's
 index may then be anything, as in topk's `hist[t][digit]`.
 
-All 57 kernels build with Vx main from 12fea615 on; the repo is tested with 4f966fd6 (mla_tc_at needs #3490's lanes::copy_rows_async), which
+All 57 kernels build with Vx main from 12fea615 on; the repo is tested with 64ff9cd4 (mla_tc_at needs #3490's lanes::copy_rows_async), which
 also builds the CPU library in minutes (950a6f71, Vx #3326). #2979 lets the code after a nest of blocks
 (which the last block to finish runs) keep shared-memory tensors, which topk_radix's per-round
 scan and sort need. 60fea665's atomics take a `&mut` tensor (#2949),

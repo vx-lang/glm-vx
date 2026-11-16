@@ -855,11 +855,9 @@ pub fn glm_vx_gpu_rmsnorm_pair(out_a: *mut f32, x_a: *const f32, weight_a: *cons
 // [rotated even, rotated odd]), and the row stored at the step's position, cache[step[0] * dim + d]
 // (as glm_vx_gpu_store_row). Thread d writes value d past rot; thread p < rot / 2 computes the
 // normalized pair (2p, 2p + 1) with the same arithmetic and writes its two rotated values.
-// No `eps <= 0.0` guard (the caller passes 1e-6): with it, Vx 4f966fd6's prover hands z3 a real
-// comparison in an integer logic when it checks the two writes below, and panics (vx-lang/Vx#3145,
-// fixed by vx-lang/Vx#3517: put the guard back once the tested Vx has it).
 pub fn glm_vx_gpu_index_key_at(cache: *mut f32, x: *const f32, weight: *const f32, bias: *const f32, cosine: *const f32, sine: *const f32, step: *const i32, dim: i32, rot: i32, eps: f32) -> void {
   if dim <= 0 { return; }
+  if eps <= 0.0 { return; }
   if rot < 0 { return; }
   if rot > dim { return; }
   if rot % 2 != 0 { return; }
