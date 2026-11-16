@@ -63,7 +63,9 @@ def test_the_mtp_layer_under_graph_is_the_eager_ones(model):
         try:
             results.append([resident.mtp_step(PROMPT[p % len(PROMPT)], h, p, reuse_selection=reuse)
                             for (p, reuse), h in zip(steps, hiddens)])
-            assert resident.replays == (6 if resident.graph else 0)  # each graph: captured, then 2 replays
+            # Graphs by (reuse, short): the full indexer within index_topk 4 (positions 0, 1, 3: eager,
+            # captured, replayed), past it (6: eager), and the reused selection (2, 4, 5, 7) (#43).
+            assert resident.replays == (5 if resident.graph else 0)
         finally:
             resident.close()
     for (want_logits, want_hidden), (logits, hidden) in zip(*results):
