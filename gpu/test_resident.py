@@ -289,6 +289,28 @@ def test_fp8_cvt_kernels_match_the_hand_kernels():
     assert not any('fma' in k or 'matvec4' in k or k == 'swiglu' for k in launches), launches
 
 
+def test_fp8_cvt_absorbs_read_kv_b_proj_codes():
+    # fp8_kernels='cvt' with GLM-5.3's MLA widths, nope 192 and value 256 (#42): kv_b_proj's 128-row blocks
+    # straddle heads. The absorbs run fp8_matvec_cols_cvt and fp8_matvec_heads_cvt on its FP8 codes as
+    # stored, no float32 copy of it is uploaded, and the logits stay near the hand kernels'.
+    model, _ = fp8_model(37, hidden_size=144, moe_intermediate_size=144, kv_lora_rank=128, qk_nope_head_dim=192,
+                         v_head_dim=256, qk_head_dim=196)
+    runs = {}
+    for kernels in ('hand', 'cvt'):
+        resident = ResidentGLM(model, ctx=Context(), max_tokens=32, device_experts=True, fp8_kernels=kernels)
+        try:
+            runs[kernels] = (np.stack([resident.forward(t) for t in TOKENS[:6]]), dict(resident.launches),
+                             set(resident._weights))
+        finally:
+            resident.close()
+    (hand, _, _), (cvt, launches, weights) = runs['hand'], runs['cvt']
+    np.testing.assert_allclose(cvt, hand, rtol=1e-4, atol=1e-4)
+    assert (cvt.argmax(-1) == hand.argmax(-1)).all()
+    assert launches.get('fp8_matvec_cols_cvt_ref', 0) == launches.get('fp8_matvec_heads_cvt_ref', 0) == model.n_layers * 6
+    assert 'matvec_heads' not in launches
+    assert not any(k.endswith('kv_b_proj.weight') or k.endswith(':nope_t') for k in weights), weights
+
+
 def test_norm_block_1024_is_close_to_256_and_other_sizes_are_refused():
     # norm_block (#29): RMSNorm with 1024 threads reads a row in one batch of loads; each thread sums
     # other squares, so the logits are near the 256-thread ones (which the hybrid backend matches

@@ -856,3 +856,39 @@ macro_rules! fp8t_tiles_pair_rows {
         }
     };
 }
+
+// fp8t_tiles_pair_rows! for two given rows of a row-major matrix of $cols columns: row $pa into $sum and
+// row $pb into $sum2, each with its own 128-row block of scales, and x read from x[$xo ..]. Nothing
+// unless $live. fp8_matvec_heads_cvt: each group of output rows has its own x and its own place in the
+// stored matrix.
+macro_rules! fp8t_tiles_rows_ab_at {
+    ($sum:ident, $sum2:ident, $weight:ident, $scales:ident, $x:ident, $pa:expr, $pb:expr, $live:expr, $cols:expr, $lane:expr, $xo:expr) => {
+        unsafe {
+          let dv_pa: i64 = $pa;
+          let dv_pb: i64 = $pb;
+          let dv_cols: i32 = $cols;
+          if $live && dv_cols % 16 == 0 {
+            let dv_n: i64 = dv_cols as i64;
+            let dv_tiles: i64 = (dv_n + 127) / 128;
+            let dv_words: i64 = dv_n / 4;
+            let dv_rw: i64 = (dv_n / 16) * 4;
+            let dv_ra: i64 = dv_pa * dv_rw;
+            let dv_rb: i64 = dv_pb * dv_rw;
+            let dv_sba: i64 = (dv_pa / 128) * dv_tiles;
+            let dv_sbb: i64 = (dv_pb / 128) * dv_tiles;
+            let mut dv_word: i64 = $lane as i64;
+            while dv_word + 96 < dv_words {
+              fp8t_pair_tile!($sum, $sum2, $weight, $scales, $weight, $scales, $x, $xo, dv_ra, dv_rb, dv_sba, dv_sbb, dv_word);
+              dv_word = dv_word + 128;
+            }
+            while dv_word < dv_words {
+              fp8t_pair_group!($sum, $sum2, $weight, $scales, $weight, $scales, $x, $xo, dv_ra, dv_rb, dv_sba, dv_sbb, dv_word, dv_words);
+              fp8t_pair_group!($sum, $sum2, $weight, $scales, $weight, $scales, $x, $xo, dv_ra, dv_rb, dv_sba, dv_sbb, dv_word + 32, dv_words);
+              fp8t_pair_group!($sum, $sum2, $weight, $scales, $weight, $scales, $x, $xo, dv_ra, dv_rb, dv_sba, dv_sbb, dv_word + 64, dv_words);
+              fp8t_pair_group!($sum, $sum2, $weight, $scales, $weight, $scales, $x, $xo, dv_ra, dv_rb, dv_sba, dv_sbb, dv_word + 96, dv_words);
+              dv_word = dv_word + 128;
+            }
+          }
+        }
+    };
+}

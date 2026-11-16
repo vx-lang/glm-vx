@@ -150,10 +150,13 @@ def quantized_main(args, config, weights, tokens, fmt):
         **{f'{fmt}_matvec_launches': launches.get(f'{fmt}_matvec', 0)},
         **({'fp8_kernels': kernels, 'fp8_matvec4_launches': launches.get('fp8_matvec4', 0),
             'fp8_matvec_fma_launches': launches.get('fp8_matvec_fma', 0) + launches.get('fp8_matvec_fma_tiles', 0),
-            'fp8_cvt_launches': sum(v for n, v in launches.items() if '_cvt_' in n),
+            'fp8_cvt_launches': sum(v for n, v in launches.items() if '_cvt' in n),
+            'fp8_absorb_launches': sum(v for n, v in launches.items() if n.startswith(('fp8_matvec_heads_cvt', 'fp8_matvec_cols_cvt'))),
             'fp8_moe4_launches': launches.get('fp8_moe4_gate_up', 0),
             'cublaslt_launches': launches.get('cublaslt_fp8', 0)} if options else {}),
-        note=f'single run, synthetic {fmt.upper()} encoding of random weights; kv_b_proj is dequantized to float32 in both; lazy uploads; not a benchmark')
+        note=f'single run, synthetic {fmt.upper()} encoding of random weights; kv_b_proj is dequantized to float32 in '
+             + ('the baseline only (the candidate absorbs from its FP8 codes, #42)' if kernels == 'cvt' else 'both')
+             + '; lazy uploads; not a benchmark')
     if kernels == 'cublaslt':
         # e4m3 activations, as SGLang's w8a8, move each projection by ~2-3% of its largest output
         # (H100, 2026-11-14), and that compounds through the layers: the logits are reported, not gated.

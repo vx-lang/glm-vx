@@ -19,7 +19,7 @@
 #   STEPS='^(build-|layer-|moe-|matvec-|topk-|mla-)' scripts/pod_validate.sh
 # Use OMP_NUM_THREADS well below the host's vCPU count (NumPy thrashes on 128-vCPU pods).
 #
-# Toolchain: one vxc bundle from Vx main, 950a6f71 or later (tested: 56f57c3c; mla_flash_at needs Vx #3475 to keep its tiles in registers, mla_tc_at #3490's
+# Toolchain: one vxc bundle from Vx main, 950a6f71 or later (tested: 4f966fd6; mla_flash_at needs Vx #3475 to keep its tiles in registers, mla_tc_at #3490's
 # lanes::copy_rows_async). Before 950a6f71
 # (Vx #3326) step build-cpu-lib takes hours: packed.vx's raw-pointer writes asked z3 a question per
 # pair. The GPU kernels alone need 12fea615 (#2979: topk_radix's last-block

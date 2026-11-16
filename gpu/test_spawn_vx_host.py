@@ -512,6 +512,103 @@ def test_fp8_matvec_fma_decodes_every_code(run, kernel):
     bits_equal(got, F(0) + fp8(codes))
 
 
+# fp8_matvec_heads_cvt_ref (#42): with period = group and offset 0, fp8_matvec_cvt_tiles for a
+# block-diagonal matvec, each group of rows with its own x. Every row is the dense kernel's row on its
+# group's x, bit for bit. Shapes: GLM-5.3's two
+# MLA absorbs (64 heads cut to 3), and a group of 16 that splits scale blocks across groups.
+@pytest.mark.parametrize('heads,group,cols,x_stride', [(3, 512, 128, 192), (3, 128, 512, 512), (2, 256, 256, 300)])
+def test_fp8_matvec_heads_cvt_is_cvt_tiles_on_each_group(run, heads, group, cols, x_stride):
+    rows = heads * group
+    weight, scales, _, _ = fp8_matvec4_case(rows, cols, rows + cols + x_stride)
+    x = np.random.default_rng(rows + cols).normal(size=heads * x_stride).astype(F)
+    got = run('fp8_matvec_heads_cvt_ref', out=np.full(rows, 7, F), weight=weight.view(np.uint32).reshape(-1),
+              scales=scales.reshape(-1), x=x, rows=rows, cols=cols, group=group, x_stride=x_stride,
+              period=group, offset=0)['out']
+    for g in range(heads):
+        part = weight[g * group:(g + 1) * group]
+        want = run('fp8_matvec_cvt_tiles_ref', out=np.zeros(group, F), weight=np.ascontiguousarray(part).view(np.uint32).reshape(-1),
+                   scales=np.ascontiguousarray(scales[g * group // 128:(g + 1) * group // 128]).reshape(-1),
+                   x=np.ascontiguousarray(x[g * x_stride:g * x_stride + cols]), rows=group, cols=cols)['out']
+        bits_equal(got[g * group:(g + 1) * group], want)
+
+
+def test_fp8_matvec_heads_cvt_small_groups_and_bad_shapes(run):
+    heads, group, cols, x_stride = 5, 16, 144, 150
+    rows = heads * group
+    weight, scales, _, _ = fp8_matvec4_case(rows, cols, 11)
+    x = np.random.default_rng(3).normal(size=heads * x_stride).astype(F)
+    got = run('fp8_matvec_heads_cvt_ref', out=np.zeros(rows, F), weight=weight.view(np.uint32).reshape(-1),
+              scales=scales.reshape(-1), x=x, rows=rows, cols=cols, group=group, x_stride=x_stride,
+              period=group, offset=0)['out']
+    dense = fp8(weight).astype(np.float64) * np.repeat(np.repeat(scales.astype(np.float64), 128, 0), 128, 1)[:rows, :cols]
+    want = np.concatenate([dense[g * group:(g + 1) * group] @ x[g * x_stride:g * x_stride + cols].astype(np.float64)
+                           for g in range(heads)])
+    assert np.abs(got - want).max() <= 1e-5 * np.abs(want).max()
+    # group % 4, zero, rows % group, stride, a period shorter than its group, an offset below zero
+    for bad in (dict(group=10), dict(group=0), dict(group=32), dict(x_stride=-1), dict(period=14), dict(offset=-1),
+                dict(period=16, offset=2)):
+        values = {**dict(rows=rows, cols=cols, group=group, x_stride=x_stride, period=group, offset=0), **bad}
+        out = run('fp8_matvec_heads_cvt_ref', out=np.full(rows, 7, F), weight=weight.view(np.uint32).reshape(-1),
+                  scales=scales.reshape(-1), x=x, **values)['out']
+        bits_equal(out, np.full(rows, 7, F))
+
+
+def fp8_dense(weight, scales):
+    rows, cols = weight.shape
+    return fp8(weight).astype(np.float64) * np.repeat(np.repeat(scales.astype(np.float64), 128, 0), 128, 1)[:rows, :cols]
+
+
+# GLM's kv_b_proj holds nope + value rows a head (GLM-5.3: 192 + 256), so its 128-row blocks of scales
+# straddle heads. The value absorb reads the stored matrix in place: output row (head g, i) is stored row
+# g * period + offset + i, with that row's own scales. Here heads of 64 + 96 rows start 0, 32 and 64 rows
+# into a block.
+@pytest.mark.parametrize('cols', [128, 384])
+def test_fp8_matvec_heads_cvt_reads_value_rows_in_place(run, cols):
+    heads, nope, value = 3, 64, 96
+    period = nope + value
+    weight, scales, _, _ = fp8_matvec4_case(heads * period, cols, cols + 5)
+    x = np.random.default_rng(cols).normal(size=heads * cols).astype(F)
+    got = run('fp8_matvec_heads_cvt_ref', out=np.full(heads * value, 7, F), weight=weight.view(np.uint32).reshape(-1),
+              scales=scales.reshape(-1), x=x, rows=heads * value, cols=cols, group=value, x_stride=cols,
+              period=period, offset=nope)['out']
+    dense = fp8_dense(weight, scales)
+    want = np.concatenate([dense[g * period + nope:(g + 1) * period] @ x[g * cols:(g + 1) * cols].astype(np.float64)
+                           for g in range(heads)])
+    assert np.abs(got - want).max() <= 1e-5 * np.abs(want).max()
+
+
+# fp8_matvec_cols_cvt_ref (#42), the query absorb: out[g, c] = sum over d < depth of w[g * period + offset + d, c]
+# * x[g * x_stride + d], on the stored matrix. GLM-5.3's shape cut to 3 heads (nope 192 of 448 rows, so the
+# heads start 0, 64 and 0 rows into a block), depths shorter than one twelve-row step of the 16 subgroups,
+# and 400 rows: two steps and a tail.
+@pytest.mark.parametrize('groups,cols,depth,period,offset,x_stride', [(3, 512, 192, 448, 0, 256), (2, 128, 37, 50, 5, 40),
+                                                                     (3, 256, 8, 8, 0, 8), (1, 384, 100, 228, 128, 100),
+                                                                     (2, 128, 400, 410, 3, 400)])
+def test_fp8_matvec_cols_cvt_sums_rows_down_the_columns(run, groups, cols, depth, period, offset, x_stride):
+    weight, scales, _, _ = fp8_matvec4_case(groups * period, cols, groups + cols + depth)
+    x = np.random.default_rng(depth).normal(size=groups * x_stride).astype(F)
+    got = run('fp8_matvec_cols_cvt_ref', out=np.full(groups * cols, 7, F), weight=weight.view(np.uint32).reshape(-1),
+              scales=scales.reshape(-1), x=x, groups=groups, cols=cols, depth=depth, period=period, offset=offset,
+              x_stride=x_stride)['out']
+    dense = fp8_dense(weight, scales)
+    want = np.concatenate([x[g * x_stride:g * x_stride + depth].astype(np.float64)
+                           @ dense[g * period + offset:g * period + offset + depth] for g in range(groups)])
+    assert np.abs(got - want).max() <= 1e-5 * np.abs(want).max()
+
+
+def test_fp8_matvec_cols_cvt_zero_depth_and_bad_shapes(run):
+    groups, cols, depth, period, x_stride = 2, 128, 16, 16, 16
+    weight, scales, _, _ = fp8_matvec4_case(groups * period, cols, 9)
+    x = np.ones(groups * x_stride, F)
+    args = dict(weight=weight.view(np.uint32).reshape(-1), scales=scales.reshape(-1), x=x, groups=groups)
+    good = dict(cols=cols, depth=depth, period=period, offset=0, x_stride=x_stride)
+    got = run('fp8_matvec_cols_cvt_ref', out=np.full(groups * cols, 7, F), **args, **{**good, 'depth': 0})['out']
+    bits_equal(got, np.zeros(groups * cols, F))
+    for bad in (dict(period=15), dict(offset=-1), dict(x_stride=-1), dict(depth=-1), dict(cols=112)):
+        out = run('fp8_matvec_cols_cvt_ref', out=np.full(groups * cols, 7, F), **args, **{**good, **bad})['out']
+        bits_equal(out, np.full(groups * cols, 7, F))
+
+
 @pytest.mark.parametrize('kernel', FMA_KERNELS)
 def test_fp8_matvec_fma_writes_zeros_for_other_widths(run, kernel):
     got = run(kernel, out=np.full(3, 7.0, F), weight=np.zeros(3 * 100 // 4 + 1, np.uint32),

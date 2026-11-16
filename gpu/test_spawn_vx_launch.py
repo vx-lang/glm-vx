@@ -327,6 +327,17 @@ for mirror, names in {'fp8_matvec_fma_tiles': ('fp8_matvec_cvt_tiles',), 'fp8_ma
         CASES[name] = CASES[name + '_ref'] = CASES[mirror]
 
 
+# fp8_matvec_heads_cvt (#42): the dense kernel's arguments plus its row groups: GLM-5.3's value absorb cut
+# to two heads (rows 192 + 256 a head, the 256 value rows read in place), x at stride 512.
+CASES['fp8_matvec_heads_cvt'] = CASES['fp8_matvec_heads_cvt_ref'] = lambda r: dict(
+    out=normal(r, 512), weight=fp8(r, 896 * 512).view('u4'), scales=r.uniform(0.001, 0.1, size=7 * 4).astype('f4'),
+    x=normal(r, 1024), rows=512, cols=512, group=256, x_stride=512, period=448, offset=192)
+# fp8_matvec_cols_cvt (#42): GLM-5.3's query absorb cut to two heads (192 nope rows of 448, x at stride 256).
+CASES['fp8_matvec_cols_cvt'] = CASES['fp8_matvec_cols_cvt_ref'] = lambda r: dict(
+    out=normal(r, 1024), weight=fp8(r, 896 * 512).view('u4'), scales=r.uniform(0.001, 0.1, size=7 * 4).astype('f4'),
+    x=normal(r, 512), groups=2, cols=512, depth=192, period=448, offset=0, x_stride=256)
+
+
 def test_every_kernel_has_a_case():
     built = {p.stem for p in SPAWN.glob('*.ptx')}
     assert built <= set(CASES), built - set(CASES)

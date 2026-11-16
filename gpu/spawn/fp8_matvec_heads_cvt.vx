@@ -1,0 +1,59 @@
+// fp8_matvec_cvt_tiles for a matvec in row groups (#42): each group g of `group` output rows has its own
+// x and its own place in the stored matrix. Output row r = g * group + i reads stored row
+// p = g * period + offset + i, with p's 128-row block of scales, and x from g * x_stride:
+//   out[r] = sum over c < cols of decode(w[p, c]) * scale[p / 128, c / 128] * x[g * x_stride + c].
+// GLM's MLA value absorb, the attended latents back out, straight from kv_b_proj's FP8 codes instead of a
+// float32 copy: rows (head, value), period nope + value, offset nope, x = the head's latent sum at stride
+// rank. GLM-5.3's heads are 192 + 256 = 448 rows, so a 128-row block of scales can hold two heads; each
+// row reads its own. (The query absorb is fp8_matvec_cols_cvt.)
+// A warp takes four rows (two pairs through fp8t_tiles_rows_ab_at), which read the same x, so
+// group % 4 == 0 (9.3 us for GLM-5.3's 64 heads on the H200, graph and L2 flush included, against 10.5 for
+// two rows a warp); rows % group == 0, period >= offset + group and cols % 16 == 0, or it writes nothing.
+// The sm_90 build decodes with Hopper's e4m3x2 -> f16x2 conversion, `_ref` with integers; both give each
+// code's exact value, so the same bits.
+// spawn-include: device.vx
+// spawn-variant: - fp8_cvt_sm90.vx machine-sm90.vx
+// spawn-variant: _ref fp8_cvt_ref.vx
+
+pub fn glm_vx_spawn_fp8_matvec_heads_cvt(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<u32, [?], Memory::HBM>,
+                                         scales: &Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                                         rows: i32, cols: i32, group: i32, x_stride: i32, period: i32, offset: i32) -> void {
+  spawn on(Topology::Device) {
+    for rb in 0..(rows - 1) / 16 + 1 across blocks {
+      let mut a = unsafe { Tensor<f32, [16, 32], Memory::SMEM>::uninit() };
+      for w in 0..4 across subgroups {
+        for lane in 0..32 across lanes {
+          let ok: bool = group > 0 && group % 4 == 0 && rows % group == 0 && x_stride >= 0 && offset >= 0
+                         && period >= offset + group;
+          let row: i64 = (rb * 16 + w * 4) as i64;
+          let gd: i64 = if ok { group as i64 } else { 1 };
+          let g: i64 = row / gd;
+          let p: i64 = g * (period as i64) + (offset as i64) + (row - g * gd);
+          let xo: i64 = g * (x_stride as i64);
+          let n: i32 = if ok { cols } else { 1 };
+          let mut s0: f32 = 0.0;
+          let mut t0: f32 = 0.0;
+          let mut s1: f32 = 0.0;
+          let mut t1: f32 = 0.0;
+          fp8t_tiles_rows_ab_at!(s0, t0, weight, scales, x, p, p + 1, row < (rows as i64), n, lane, xo);
+          fp8t_tiles_rows_ab_at!(s1, t1, weight, scales, x, p + 2, p + 3, row < (rows as i64), n, lane, xo);
+          a[w * 4][lane] = s0;
+          a[w * 4 + 1][lane] = t0;
+          a[w * 4 + 2][lane] = s1;
+          a[w * 4 + 3][lane] = t1;
+        }
+        let v0: f32 = lanes::sum(&a[w * 4], 32);
+        let v1: f32 = lanes::sum(&a[w * 4 + 1], 32);
+        let v2: f32 = lanes::sum(&a[w * 4 + 2], 32);
+        let v3: f32 = lanes::sum(&a[w * 4 + 3], 32);
+        let ok: bool = group > 0 && group % 4 == 0 && rows % group == 0 && x_stride >= 0 && offset >= 0
+                       && period >= offset + group && cols % 16 == 0;
+        if ok && rb * 16 + w * 4 < rows { out[rb * 16 + w * 4] = v0; }
+        if ok && rb * 16 + w * 4 + 1 < rows { out[rb * 16 + w * 4 + 1] = v1; }
+        if ok && rb * 16 + w * 4 + 2 < rows { out[rb * 16 + w * 4 + 2] = v2; }
+        if ok && rb * 16 + w * 4 + 3 < rows { out[rb * 16 + w * 4 + 3] = v3; }
+      }
+    }
+  }
+  return;
+}

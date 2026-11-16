@@ -33,7 +33,9 @@ SafetensorsCheckpoint and glm_vx.quant.BlockFP8Weights do) stays as E4M3FN bytes
 its float32 128x128 ``weight_scale_inv`` grid and runs through ``glm_vx_gpu_fp8_matvec``
 (gpu/fp8.ptx). Activations stay float32: this is weight-only FP8, the same arithmetic as the NumPy
 reference on the exact dequantized weights, not the official per-token FP8 activation quantization.
-``kv_b_proj`` is dequantized to float32 as for INT4.
+``kv_b_proj`` is dequantized to float32 as for INT4, except with ``fp8_kernels='cvt'``: then both MLA
+absorbs read its FP8 codes as stored (#42): the query one through fp8_matvec_cols_cvt (each head's nope
+rows summed down the latent columns), the value one through fp8_matvec_heads_cvt (each head's value rows).
 
 BF16: any other Linear (including the router and lm_head) the source reports as a bfloat16 matrix
 (``is_bf16(prefix)``, as SafetensorsCheckpoint and glm_vx.quant.BF16Weights do) stays as its 16-bit
@@ -1034,6 +1036,27 @@ class ResidentGLM:
             self.selected.view((count,)).upload(chosen)
         self.selected_count = count
 
+    def _fp8_absorb(self, prefix):
+        """With fp8_kernels='cvt' and a block-FP8 kv_b_proj (128 x 128 blocks, rank a multiple of 128): its
+        codes (as uint32 words) and scales as stored, uploaded once, for both MLA absorbs (#42). Else None
+        (the float32 matvec_heads path). kv_b_proj's rows are nope + value per head (GLM-5.3: 192 + 256 =
+        448), so a block of scales can cover two heads; both kernels read each row's own."""
+        name = prefix + '.kv_b_proj'
+        key = name + ':fp8_absorb'
+        if key in self._weights:
+            return self._weights[key]
+        h, nope, value, rank = self.heads, self.nope, self.value_dim, self.rank
+        entry = None
+        if self.fp8_kernels == 'cvt' and self._is_fp8(name) and rank % 128 == 0 and value % 2 == 0:
+            codes, scales, block, shape = self.model.weights.block_fp8(name)
+            if tuple(block) == (128, 128) and tuple(shape) == (h * (nope + value), rank):
+                codes = np.ascontiguousarray(np.asarray(codes, np.uint8).reshape(-1))
+                scales = np.ascontiguousarray(np.asarray(scales, np.float32).reshape(-1))
+                entry = (self._upload_weight(key + ':codes', codes, 'uint8').view((codes.size // 4,), 'uint32'),
+                         self._upload_weight(key + ':scales', scales, 'float32'))
+        self._weights[key] = entry
+        return entry
+
     def _kv_nope_t(self, prefix):
         kv_name = prefix + '.kv_b_proj.weight'
         kv_t = self._weights.get(kv_name + ':nope_t')
@@ -1078,12 +1101,19 @@ class ResidentGLM:
             raise ValueError('Shared DSA layer has no preceding full indexer selection')
 
         # Absorbed MLA. q_latent[h] = W_k[h]^T q_nope[h]; the transposed nope blocks are built once.
-        kv_t = self._kv_nope_t(prefix)
-        kv_b = self._weight(prefix + '.kv_b_proj.weight')
         warps = 4
-        self._launch('matvec_heads', (self.heads * self.rank + warps - 1) // warps, 128,
-                     [self.latent_q, kv_t, query, I(self.heads), I(self.rank), I(self.nope),
-                      I(self.rank * self.nope), I(qk), I(self.rank)])
+        absorb = self._fp8_absorb(prefix)
+        if absorb is not None:
+            # kv_b_proj's FP8 codes, laid out once per head (#42): a quarter of the float32 copy's bytes.
+            codes, scales = absorb
+            self._spawn('fp8_matvec_cols_cvt' + self._cvt_suffix, out=self.latent_q.view((self.heads * self.rank,)),
+                        weight=codes, scales=scales, x=query.view((self.heads * qk,)), groups=self.heads,
+                        cols=self.rank, depth=self.nope, period=self.nope + self.value_dim, offset=0, x_stride=qk)
+        else:
+            kv_t = self._kv_nope_t(prefix)
+            self._launch('matvec_heads', (self.heads * self.rank + warps - 1) // warps, 128,
+                         [self.latent_q, kv_t, query, I(self.heads), I(self.rank), I(self.nope),
+                          I(self.rank * self.nope), I(qk), I(self.rank)])
         self._rope(self.rot_q, query.view((self.heads * qk - self.nope,), offset=self.nope * 4),
                    self.heads, self.rot, qk, self.rot)
         count = self.selected_count
@@ -1150,6 +1180,14 @@ class ResidentGLM:
                           self.selected, I(self.heads), I(self.rank), I(self.rot), I(tokens), I(count), I(0), I(splits), scale])
             self._launch('mla_merge', self.heads, 256,
                          [self.attended, self.numerator, self.stats, I(self.heads), I(self.rank), I(splits)])
+        if absorb is not None:
+            codes, scales = absorb
+            self._spawn('fp8_matvec_heads_cvt' + self._cvt_suffix, out=self.heads_out.view((self.heads * self.value_dim,)),
+                        weight=codes, scales=scales, x=self.attended.view((self.heads * self.rank,)),
+                        rows=self.heads * self.value_dim, cols=self.rank, group=self.value_dim, x_stride=self.rank,
+                        period=self.nope + self.value_dim, offset=self.nope)
+            return
+        kv_b = self._weight(prefix + '.kv_b_proj.weight')
         value_w = kv_b.view((self.heads * (self.nope + self.value_dim) - self.nope, self.rank), offset=self.nope * self.rank * 4)
         self._launch('matvec_heads', (self.heads * self.value_dim + warps - 1) // warps, 128,
                      [self.heads_out, value_w, self.attended, I(self.heads), I(self.value_dim), I(self.rank),
@@ -1342,8 +1380,9 @@ class ResidentGLM:
             linear(a + '.q_b_proj')
             self._weight(a + '.q_a_layernorm.weight')
             self._weight(a + '.kv_a_layernorm.weight')
-            self._kv_nope_t(a)
-            self._weight(a + '.kv_b_proj.weight')
+            if self._fp8_absorb(a) is None:  # else kv_b_proj's FP8 codes, laid out per head (#42)
+                self._kv_nope_t(a)
+                self._weight(a + '.kv_b_proj.weight')
             if m.indexer_type(layer) == 'full':
                 for n in ('wq_b', 'wk', 'weights_proj'):
                     linear(f'{a}.indexer.{n}')
