@@ -1,0 +1,7 @@
+tokens      index_scores cold      index_scores warm index_scores_rows cold index_scores_rows warm
+  2049                   22.7                   91.9                   23.4                   85.6
+  3001                   22.9                   86.9                   23.5                   82.7
+  4096                   24.0                   87.2                   23.6                   87.4
+  8192                   37.0                   85.9                   30.2                   81.5
+ 32768                  123.8                  123.3                  102.5                  189.4
+131072                  467.9                  468.7                  343.7                  342.7

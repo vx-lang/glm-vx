@@ -1,0 +1,16 @@
+...............F.....                                                    [100%]
+=================================== FAILURES ===================================
+_________________________ test_every_kernel_has_a_case _________________________
+
+    def test_every_kernel_has_a_case():
+        built = {p.stem for p in SPAWN.glob('*.ptx')}
+>       assert built <= set(CASES), built - set(CASES)
+E       AssertionError: {'topk_select2', 'topk_select2_at'}
+E       assert {'add', 'argm...matvec4', ...} <= {'add', 'argm...matvec4', ...}
+E         
+E         Extra items in the left set:
+E         'topk_select2'
+E         'topk_select2_at'
+
+gpu/test_spawn_vx_launch.py:352: AssertionError
+1 failed, 20 passed, 230 deselected in 1.48s

@@ -1258,6 +1258,45 @@ def test_topk_radix_at_reads_tokens_from_the_step(run, tokens):
         np.testing.assert_array_equal(got, np.argsort(-scores[:tokens], kind='stable')[:k])
 
 
+# topk_select (#32): the same set as the stable argsort's first k, in ascending position order, by
+# a radix select of the threshold in shared memory and a scan; no sort.
+def stable_set(scores, k):
+    return np.sort(np.argsort(-scores, kind='stable')[:min(k, len(scores))])
+
+
+@pytest.mark.parametrize('tokens,k,ties', [(2049, 2048, True), (5000, 2048, True), (6145, 64, False), (20000, 2048, True),
+                                           (70000, 2048, False), (9000, 1, True), (3000, 2048, 'equal'), (100, 7, False),
+                                           (100, 200, True), (1, 2048, False), (1025, 1024, 'equal'), (4097, 2048, 'few')])
+def test_topk_select_is_the_stable_set_in_position_order(run, tokens, k, ties):
+    rng = np.random.default_rng(tokens * 7 + k)
+    if ties == 'equal':
+        scores = np.zeros(tokens, F)  # one key: the lowest positions are taken
+    elif ties == 'few':
+        scores = rng.integers(0, 2, size=tokens).astype(F)  # the threshold bucket is most of the context
+    else:
+        scores = rng.integers(-4, 4, size=tokens).astype(F) if ties else rng.normal(size=tokens).astype(F)
+    if tokens > 10:
+        scores[3], scores[7], scores[9], scores[5] = np.nan, -0.0, np.inf, -np.inf  # NaN sorts last; -0.0 ties +0.0
+        scores[-1] = np.inf
+    kk = min(k, tokens)
+    got = run('topk_select', out_ids=np.full(kk + 3, -7, np.int32), scores=scores.view(np.int32), tokens=tokens, k=k)['out_ids']
+    np.testing.assert_array_equal(got[:kk], stable_set(scores, k))
+    np.testing.assert_array_equal(got[kk:], -7)
+
+
+# Under graph replay: tokens from the step buffer; up to k it writes nothing (#43's positions).
+@pytest.mark.parametrize('tokens', [100, 2048, 2049, 6000, 20000])
+def test_topk_select_at_reads_tokens_from_the_step(run, tokens):
+    max_tokens, k = 20000, 2048
+    scores = np.random.default_rng(tokens).integers(-50, 50, size=max_tokens).astype(F)
+    step = np.array([tokens - 1, tokens, min(k, tokens), 1], np.int32)
+    got = run('topk_select_at', out_ids=np.full(k, -7, np.int32), scores=scores.view(np.int32), step=step, k=k)['out_ids']
+    if tokens <= k:
+        np.testing.assert_array_equal(got, -7)
+    else:
+        np.testing.assert_array_equal(got, stable_set(scores[:tokens], k))
+
+
 @pytest.mark.parametrize('experts,k,ties', [(256, 8, False), (256, 8, True), (7, 3, True), (1, 1, False), (33, 8, True)])
 def test_router(run, experts, k, ties):
     rng = np.random.default_rng(experts * 10 + k)

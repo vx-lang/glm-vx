@@ -528,17 +528,22 @@ def test_long_contexts_select_through_chunk_sorts_and_merges(index_topk):
     resident['select'] = ResidentGLM(model, ctx=Context(), max_tokens=7000, topk='sort', long_topk='select')
     resident['graph_select'] = ResidentGLM(model, ctx=Context(), max_tokens=7000, topk='sort', long_topk='select',
                                            graph=True, device_experts=True)
+    # long_topk='position': one topk_select launch, the same set in position order.
+    resident['position'] = ResidentGLM(model, ctx=Context(), max_tokens=7000, long_topk='position')
+    resident['graph_position'] = ResidentGLM(model, ctx=Context(), max_tokens=7000, long_topk='position', graph=True,
+                                             device_experts=True)
     try:
         for tokens in (2049, 4096, 7000):
             scores = rng.integers(-20, 20, size=tokens).astype(np.float32)  # ties
             scores[[3, 7, 9]] = np.nan, -0.0, np.inf
             want = np.argsort(-scores, kind='stable')[:min(index_topk, tokens)]
-            for name in ('graph', 'graph_select'):
+            for name in ('graph', 'graph_select', 'graph_position'):
                 resident[name].step.upload(np.array([tokens - 1, tokens, min(index_topk, tokens), 1], np.int32))
-            for r in resident.values():
+            for name, r in resident.items():
                 r.scores.view((tokens,)).upload(scores)
                 r._select(tokens)
-                np.testing.assert_array_equal(r.selected.data[:r.selected_count], want)
+                np.testing.assert_array_equal(r.selected.data[:r.selected_count],
+                                              np.sort(want) if name.endswith('position') else want)
         sort, radix, graph = resident['sort'].launches, resident['radix'].launches, resident['graph'].launches
         assert sort['topk_chunks'] == 3 and sort['topk_merge'] == 1 + 1 + 2 and 'topk_stable' not in sort
         assert radix['topk_stable'] == 3 and 'topk_chunks' not in radix
@@ -547,9 +552,54 @@ def test_long_contexts_select_through_chunk_sorts_and_merges(index_topk):
         assert select['topk_radix'] == 3 * 9 and 'topk_chunks' not in select
         assert graph_select['topk_radix_at'] == 3 * 9
         assert 'topk_chunks_at' not in graph_select and 'topk_stable_long_at' not in graph_select
+        position, graph_position = resident['position'].launches, resident['graph_position'].launches
+        assert position['topk_select'] == 3 and not any(n.startswith('topk_') and n != 'topk_select' for n in position)
+        assert graph_position['topk_select_at'] == 3
+        assert not any(n.startswith('topk_') and n != 'topk_select_at' for n in graph_position)
     finally:
         for r in resident.values():
             r.close()
+
+
+@pytest.mark.parametrize('graph', [False, True])
+def test_short_contexts_skip_the_indexer_queries(graph):
+    # While the context fits in index_topk (4 here) every cached token is selected and nothing is
+    # scored (#43), so wq_b and weights_proj do not run: their outputs keep a NaN fill until the
+    # first step past index_topk, and the logits are still the reference's.
+    model = build(seed=47)
+    expected = reference(model, TOKENS[:6])
+    r = ResidentGLM(model, ctx=Context(), max_tokens=32, device_experts=graph, graph=graph)
+    try:
+        for buf in (r.iq, r.head_weights_raw):
+            buf.upload(np.full(buf.shape, np.nan, np.float32))
+        got = [r.forward(t) for t in TOKENS[:4]]
+        assert np.isnan(r.iq.data).all() and np.isnan(r.head_weights_raw.data).all()
+        got += [r.forward(t) for t in TOKENS[4:6]]
+        assert np.isfinite(r.iq.data).all() and np.isfinite(r.head_weights_raw.data).all()
+    finally:
+        r.close()
+    np.testing.assert_allclose(np.stack(got), expected, rtol=2e-5, atol=2e-5)
+
+
+def test_position_order_topk_gives_the_reference_logits():
+    # long_topk='position' (#32): past index_topk (4) the same set as the stable top-k, in position
+    # order, so only the order of the attention sums differs from the reference's. The host argsort
+    # (sorted), the eager kernel and the captured one give the same ids, so the same bits.
+    model = build(seed=53, index_n_heads=1)  # one indexer head: exact score ties
+    expected = reference(model, TOKENS)
+    runs = {}
+    for name, kw in (('eager', {}), ('host', dict(device_topk=False)), ('graph', dict(graph=True, device_experts=True))):
+        r = ResidentGLM(model, ctx=Context(), max_tokens=32, long_topk='position', **kw)
+        try:
+            runs[name] = (np.stack([r.forward(t) for t in TOKENS]), dict(r.launches))
+        finally:
+            r.close()
+    np.testing.assert_allclose(runs['eager'][0], expected, rtol=2e-5, atol=2e-5)
+    assert (runs['eager'][0].argmax(-1) == expected.argmax(-1)).all()
+    np.testing.assert_array_equal(runs['host'][0], runs['eager'][0])
+    np.testing.assert_array_equal(runs['graph'][0], runs['eager'][0])
+    assert runs['eager'][1].get('topk_select', 0) > 0 and runs['graph'][1].get('topk_select_at', 0) > 0
+    assert 'topk_select' not in runs['host'][1]
 
 
 @pytest.mark.parametrize('overrides', [{}, {'index_n_heads': 1}])  # one head: exact score ties

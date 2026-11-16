@@ -15,7 +15,10 @@ For each layer and decode step, after the projections:
 2. The DSA indexer selects up to `index_topk` (2048) cached tokens, the step's `selected` ids.
    While the context fits in `index_topk`, every cached token is selected. They are taken in position
    order, as SGLang's top-k does (its `trivial_transform`), and the indexer only stores its key row:
-   no scores or top-k run (#43). `GlmMoeDsaModel._index` does the same, so ResidentGLM still matches
+   no scores or top-k run (#43), and its query projections (`wq_b`, `weights_proj`) do not run either.
+   Past index_topk, `long_topk='position'` selects the same set as the stable top-k, also in
+   position order, with one `topk_select_at` launch (#32); the default `'merge'` gives it in score
+   order. `GlmMoeDsaModel._index` does the same, so ResidentGLM still matches
    it bit for bit. The set of tokens is the official one; only the order of the attention sums
    differs from `torch.topk`'s.
 3. Each head's query is absorbed into the latent space: a 512-wide latent query and a 64-wide rope
@@ -164,7 +167,13 @@ were 11.5 + 11.7 us (float32) and context 1000 ran scores (10.5 us) and top-k (2
 |---|---|---|
 | absorb matvecs (#42: `fp8_matvec_cols_cvt` + `fp8_matvec_heads_cvt`) | **5.4 + 6.3 us** | 5.9 + 6.5 us |
 | indexer scores | **none** (#43) (11.4 us) | 3.6 (3.7) us |
-| indexer top-k (#32) | **none** (#43) (0.9 + 51.0 + 5.8 us) | 1.7 (6.0) us |
+| indexer top-k (#32) | **none** (#43) (0.9 + 51.0 + 5.8 us; `long_topk='position'`: **13.2 us**) | 1.7 (6.0) us |
+
+With `long_topk='position'` the dense layer at 3001 tokens is 226.5 us (270.5 with `'merge'`), at 8192
+tokens 240.8 (291.2); at context 1000 it is 185.3 us, without the indexer's query projections (#32,
+evidence/h200-20261116-m to -q). At 131072 tokens the one-block `topk_select_at` takes 270 us against
+the chunk sort and merge's 91: long contexts need it over more blocks. The scores, 11.4 us at 3001
+tokens and 75 at 32768, are the other gap: a warp a token, about 13 instructions a multiply-add.
 
 Where `'tc'`'s 26.2 us goes at 2048 tokens:
 

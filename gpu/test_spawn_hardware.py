@@ -461,6 +461,30 @@ def test_spawn_topk_radix_matches_stable_argsort(context, tokens, k, ties):
         assert not download(hist).any() and not download(count).any() and not download(arrivals).any()
 
 
+# topk_select (#32): the stable top-k's set in position order, by one block's radix select in
+# shared memory (atomic counts, whose order depends on timing; the ids must not), twice each.
+@pytest.mark.skipif(not (BUILD / 'spawn/topk_select.ptx').exists(), reason='topk_select not built (gpu/spawn/build.sh)')
+@pytest.mark.parametrize('tokens,k,ties', [(2049, 2048, True), (3001, 2048, False), (8192, 2048, False), (70000, 2048, True),
+                                           (1 << 20, 2048, False), (9000, 16, True), (100000, 2048, 'equal'),
+                                           (5000, 2048, 'few')])
+def test_spawn_topk_select_is_the_stable_set_in_position_order(context, tokens, k, ties):
+    rng = np.random.default_rng(tokens * 7 + k)
+    if ties == 'equal':
+        scores = np.zeros(tokens, 'f4')
+    elif ties == 'few':
+        scores = rng.integers(0, 2, size=tokens).astype('f4')
+    else:
+        scores = rng.integers(-50, 50, size=tokens).astype('f4') if ties else rng.normal(size=tokens).astype('f4')
+    scores[[3, 5, 7, 9]] = np.nan, -np.inf, -0.0, np.inf
+    out, d_scores = context.tensor((k,), 'int32'), upload(context, scores.view(np.int32))
+    kernel = SpawnKernel(context, BUILD / 'spawn/topk_select.ptx')
+    want = np.sort(np.argsort(-scores, kind='stable')[:k])
+    for _ in range(2):
+        kernel.launch(out_ids=out, scores=d_scores, tokens=tokens, k=k)
+        context.synchronize()
+        np.testing.assert_array_equal(download(out), want)
+
+
 # topk_sort (#32): one shared-memory bitonic sort for up to 2048 tokens, against the host's rule.
 @pytest.mark.skipif(not (BUILD / 'spawn/topk_sort.ptx').exists(), reason='topk_sort not built (gpu/spawn/build.sh)')
 @pytest.mark.parametrize('tokens,k,ties', [(1, 1, False), (64, 2048, False), (300, 64, True), (2048, 2048, True),

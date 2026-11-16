@@ -1,0 +1,2 @@
+name, driver_version, clocks.max.sm [MHz], clocks.max.memory [MHz]
+NVIDIA H200, 580.173.02, 1980 MHz, 3201 MHz

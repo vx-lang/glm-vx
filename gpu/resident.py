@@ -203,8 +203,11 @@ class ResidentGLM:
         if topk not in ('auto', 'sort', 'radix'):
             raise ValueError("topk must be 'auto', 'sort' or 'radix'")
         self._topk_choice = topk
-        if long_topk not in ('merge', 'select'):
-            raise ValueError("long_topk must be 'merge' or 'select'")
+        # Past index_topk: 'merge' and 'select' write the stable top-k in score order (topk_chunks +
+        # topk_merge, or topk_radix); 'position' writes the same set in position order with one
+        # topk_select launch (#32), the order the selection has within index_topk (#43).
+        if long_topk not in ('merge', 'select', 'position'):
+            raise ValueError("long_topk must be 'merge', 'select' or 'position'")
         self.long_topk = long_topk
         if mla_kernel not in ('decode', 'chunks', 'heads', 'flash', 'tc'):
             raise ValueError("mla_kernel must be 'decode', 'chunks', 'heads', 'flash' or 'tc'")
@@ -936,13 +939,17 @@ class ResidentGLM:
                     cols=inter, **down_args, **common)
 
     # ---------------------------------------------------------------- blocks
-    def _index_project(self, prefix, x, q_res, iq, ik, head_weights_raw, key_done=False):
+    def _index_project(self, prefix, x, q_res, iq, ik, head_weights_raw, key_done=False, key_only=False):
         """The indexer's three projections: its queries from q_res, its key and head weights from x.
-        key_done: ik is already written (_fma_qkv_a)."""
-        self._linear(prefix + '.wq_b', q_res, iq)
+        key_done: ik is already written (_fma_qkv_a). key_only: the context fits in index_topk, so
+        _index_core stores the key row but scores nothing, and the queries and head weights are not
+        needed (#43)."""
+        if not key_only:
+            self._linear(prefix + '.wq_b', q_res, iq)
         if not key_done:
             self._linear(prefix + '.wk', x, ik)
-        self._linear(prefix + '.weights_proj', x, head_weights_raw)
+        if not key_only:
+            self._linear(prefix + '.weights_proj', x, head_weights_raw)
 
     def _fma_qkv_a(self, prefix, x, full):
         """q_a, kv_a and, for a layer whose indexer runs, the indexer's wk of x in one launch for
@@ -1006,6 +1013,17 @@ class ResidentGLM:
     def _select(self, tokens):
         """selected[:min(index_topk, tokens)] = the indexer's top-k of scores[:tokens], stable by position."""
         count = min(self.index_topk, tokens)
+        if self.long_topk == 'position' and self.device_topk:
+            # One block: the threshold by radix select in shared memory, then the set in position
+            # order (#32). Under replay it reads tokens from the step buffer; any tokens, any k.
+            if self.graph:
+                self._spawn('topk_select_at', out_ids=self.selected, scores=self.scores.view(self.scores.shape, 'int32'),
+                            step=self.step, k=self.index_topk)
+            else:
+                self._spawn('topk_select', out_ids=self.selected, scores=self.scores.view((tokens,), 'int32'),
+                            tokens=tokens, k=self.index_topk)
+            self.selected_count = count
+            return
         sort = self.device_topk and self._topk_sort()
         if self.graph and sort:
             # Both captured: topk_sort_at selects up to TOPK_SORT_TOKENS, the chunk sorts and merges (or
@@ -1033,6 +1051,8 @@ class ResidentGLM:
         else:
             scores = np.frombuffer(self.scores.view((tokens,)).download(), dtype=np.float32)
             chosen = np.argsort(-scores, kind='stable')[:count].astype(np.int32)
+            if self.long_topk == 'position':
+                chosen = np.sort(chosen)
             self.selected.view((count,)).upload(chosen)
         self.selected_count = count
 
@@ -1078,7 +1098,7 @@ class ResidentGLM:
             self._linear(prefix + '.kv_a_proj_with_mqa', x, self.compressed, bias)
         if full:
             self._index_project(prefix + '.indexer', x, self.q_res, self.iq, self.ik, self.head_weights_raw,
-                                key_done=stacked)
+                                key_done=stacked, key_only=position + 1 <= self.index_topk)
         self._attention_core(layer, position, shared_ok, self.query, self.compressed,
                              (self.iq, self.ik, self.head_weights_raw) if full else None)
         self._linear(prefix + '.o_proj', self.heads_out, self.attn_out, bias)

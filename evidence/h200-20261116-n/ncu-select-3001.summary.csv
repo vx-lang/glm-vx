@@ -1,0 +1,6 @@
+"ID","Process ID","Process Name","Host Name","Kernel Name","Context","Stream","Block Size","Grid Size","Device","CC","gpu__time_duration.sum","launch__grid_size","launch__registers_per_thread","sm__throughput.avg.pct_of_peak_sustained_elapsed","smsp__inst_executed.sum"
+"","","","","","","","","","","","us","","register/thread","%","inst"
+"0","10801","python3.12","127.0.0.1","glm_vx_gpu_index_scores_at","1","13","(128, 1, 1)","(753, 1, 1)","0","9.0","19.296000","753","32","34.096087","5181642.000000"
+"1","10801","python3.12","127.0.0.1","glm_vx_spawn_topk_select_at","1","13","(1024, 1, 1)","(1, 1, 1)","0","9.0","20.704000","1","30","0.340032","50747.000000"
+"2","10801","python3.12","127.0.0.1","glm_vx_gpu_index_scores_at","1","13","(128, 1, 1)","(753, 1, 1)","0","9.0","19.360000","753","32","35.144437","5183349.000000"
+"3","10801","python3.12","127.0.0.1","glm_vx_spawn_topk_select_at","1","13","(1024, 1, 1)","(1, 1, 1)","0","9.0","20.512000","1","30","0.342748","50751.000000"

@@ -1,0 +1,4 @@
+gpu/build/spawn/index_scores_rows.ptx: glm_vx_spawn_index_scores_rows (8 params)
+gpu/build/spawn/index_scores_rows_at.ptx: glm_vx_spawn_index_scores_rows_at (9 params)
+gpu/build/spawn/topk_select4.ptx: glm_vx_spawn_topk_select4 (4 params)
+gpu/build/spawn/topk_select4_at.ptx: glm_vx_spawn_topk_select4_at (4 params)
