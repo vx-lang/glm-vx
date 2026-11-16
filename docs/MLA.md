@@ -16,11 +16,11 @@ For each layer and decode step, after the projections:
    While the context fits in `index_topk`, every cached token is selected. They are taken in position
    order, as SGLang's top-k does (its `trivial_transform`), and the indexer only stores its key row:
    no scores or top-k run (#43), and its query projections (`wq_b`, `weights_proj`) do not run either.
-   Past index_topk, `long_topk='position'` selects the same set as the stable top-k, also in
-   position order, with one `topk_select_at` launch (#32); the default `'merge'` gives it in score
-   order. `GlmMoeDsaModel._index` does the same, so ResidentGLM still matches
-   it bit for bit. The set of tokens is the official one; only the order of the attention sums
-   differs from `torch.topk`'s.
+   Past index_topk the stable top-k set is selected, also in position order, with one
+   `topk_select_at` launch (#32, `long_topk='position'`, the default); `long_topk='merge'` gives it
+   in score order, as `torch.topk` does, for an A/B. `GlmMoeDsaModel._index` and the expanded oracles
+   take the same position order, so ResidentGLM still matches the reference bit for bit. The set of
+   tokens is the official one; only the order of the attention sums differs from `torch.topk`'s.
 3. Each head's query is absorbed into the latent space: a 512-wide latent query and a 64-wide rope
    query, 64 heads. With `fp8_kernels='cvt'` and an FP8 `kv_b_proj`, this and step 5's value absorb read
    its FP8 codes as stored (#42): `fp8_matvec_cols_cvt` sums each head's 192 nope rows down the 512

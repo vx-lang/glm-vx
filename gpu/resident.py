@@ -170,7 +170,7 @@ class ResidentGLM:
 
     def __init__(self, model, *, max_tokens=4096, ptx_dir=None, device=0, ctx=None, max_weight_bytes=None,
                  device_topk=True, device_experts=False, fused_attention=False, graph=False, fp8_kernels='hand',
-                 topk='auto', long_topk='merge', mla_kernel='decode', matvec_kernels='hand', mtp=False,
+                 topk='auto', long_topk='position', mla_kernel='decode', matvec_kernels='hand', mtp=False,
                  norm_block=256):
         if getattr(model, 'packed_weights', False):
             raise NotImplementedError('ResidentGLM supports expanded float32 weights only')
@@ -203,9 +203,10 @@ class ResidentGLM:
         if topk not in ('auto', 'sort', 'radix'):
             raise ValueError("topk must be 'auto', 'sort' or 'radix'")
         self._topk_choice = topk
-        # Past index_topk: 'merge' and 'select' write the stable top-k in score order (topk_chunks +
-        # topk_merge, or topk_radix); 'position' writes the same set in position order with one
-        # topk_select launch (#32), the order the selection has within index_topk (#43).
+        # Past index_topk: 'position' (the default) writes the stable top-k set in position order with
+        # one topk_select launch (#32), the order the selection has within index_topk (#43) and the
+        # reference model's; 'merge' and 'select' write it in score order (topk_chunks + topk_merge, or
+        # topk_radix), as torch.topk does, for an A/B of the order's rounding.
         if long_topk not in ('merge', 'select', 'position'):
             raise ValueError("long_topk must be 'merge', 'select' or 'position'")
         self.long_topk = long_topk

@@ -137,20 +137,26 @@ def run(model, tokens, **kwargs):
 
 
 @needs_spawn
-@pytest.mark.parametrize('kind', ['float32', 'fused', 'int4', 'fp8', 'bf16'])
-def test_graph_replay_equals_the_per_launch_path(kind):
+@pytest.mark.parametrize('kind,long_topk', [('float32', 'position'), ('float32', 'merge'), ('fused', 'position'),
+                                            ('int4', 'position'), ('fp8', 'position'), ('bf16', 'position')])
+def test_graph_replay_equals_the_per_launch_path(kind, long_topk):
     model = expert_models(kind)
-    got, graph = run(model, TOKENS, graph=True)
-    want, _ = run(model, TOKENS)
+    got, graph = run(model, TOKENS, graph=True, long_topk=long_topk)
+    want, _ = run(model, TOKENS, long_topk=long_topk)
     np.testing.assert_array_equal(got, want)
     # Two step graphs (#43): while the context fits in index_topk (4 here) every cached token is
     # selected and no scores or top-k run; past it, the indexer selects. Each graph runs eagerly
     # first, is captured the second time, and every later step replays it.
     assert graph.replays == len(TOKENS) - 2
     full = sum(t == 'full' for t in model.indexer_types)
-    # topk_sort_at (#32) and the radix select past its 2048 tokens are both captured, in the long graph.
-    assert graph.launches['index_scores_at'] == graph.launches['topk_sort_at'] == 2 * full
-    assert graph.launches['topk_stable_long_at'] == 2 * full and 'topk_stable_at' not in graph.launches
+    if long_topk == 'position':
+        # One topk_select_at (#32) in the long graph: the stable top-k set in position order.
+        assert graph.launches['index_scores_at'] == graph.launches['topk_select_at'] == 2 * full
+        assert not {'topk_sort_at', 'topk_stable_long_at', 'topk_stable_at'} & set(graph.launches)
+    else:
+        # topk_sort_at (#32) and the radix select past its 2048 tokens are both captured, in the long graph.
+        assert graph.launches['index_scores_at'] == graph.launches['topk_sort_at'] == 2 * full
+        assert graph.launches['topk_stable_long_at'] == 2 * full and 'topk_stable_at' not in graph.launches
     assert graph.launches['mla_partial_at'] == graph.launches['mla_merge_at'] == 4 * model.n_layers
     assert graph.launches['store_row'] == 4 * (2 * model.n_layers + full)
     assert not {'index_scores', 'topk_stable', 'mla_partial', 'mla_merge'} & set(graph.launches)

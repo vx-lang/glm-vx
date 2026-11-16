@@ -28,9 +28,11 @@ alone needs no sort: a radix select finds the threshold, and a scan places each 
 3. Lane r finds slot r (binary search over the scan, then a walk along the run), so the writes are
    linear in r, as the race proof needs.
 
-It is `ResidentGLM(long_topk='position')`, opt-in like `mla_kernel='tc'`; the reference model still
-orders by score, so the logits match it within float32 rounding, not bit for bit (the eager, captured
-and host-argsort paths do match each other bit for bit).
+It is `ResidentGLM(long_topk='position')`. It started opt-in, with the reference model still ordering
+by score, so the logits matched it within float32 rounding only (the eager, captured and host-argsort
+paths matched each other bit for bit). The next commit made it the default: `GlmMoeDsaModel._index`
+and both expanded oracles return the set in position order, as the official traces already record it
+(`np.sort` of the causal slots), and `long_topk='merge'` keeps the score order for an A/B.
 
 | top-k in the step | chunk sort + merge | `topk_select_at` |
 |---|---|---|

@@ -494,12 +494,14 @@ def test_bf16_checkpoint_on_disk_runs_as_bf16(tmp_path):
 def test_topk_sort_selects_what_the_radix_select_selects(monkeypatch, graph, short):
     # gpu/spawn's topk_sort (#32) returns the same ids as topk_stable, so the logits are equal bit
     # for bit; past TOPK_SORT_TOKENS the radix select takes over (both captured under graph replay).
+    # Both are long_topk='merge''s, the score order.
     import gpu.resident as resident_module
     monkeypatch.setattr(resident_module, 'TOPK_SORT_TOKENS', short)
     model = build(seed=41, index_n_heads=1)  # one indexer head: exact score ties
     runs = {}
     for topk in ('sort', 'radix'):
-        resident = ResidentGLM(model, ctx=Context(), max_tokens=32, device_experts=graph, graph=graph, topk=topk)
+        resident = ResidentGLM(model, ctx=Context(), max_tokens=32, device_experts=graph, graph=graph, topk=topk,
+                               long_topk='merge')
         try:
             runs[topk] = (np.stack([resident.forward(t) for t in TOKENS]), dict(resident.launches))
         finally:
@@ -521,17 +523,18 @@ def test_long_contexts_select_through_chunk_sorts_and_merges(index_topk):
     # since a forward pass per position would take minutes here.
     model = build(seed=43, index_topk=index_topk, max_position_embeddings=8192)
     rng = np.random.default_rng(index_topk)
-    resident = {topk: ResidentGLM(model, ctx=Context(), max_tokens=7000, topk=topk) for topk in ('sort', 'radix')}
+    resident = {topk: ResidentGLM(model, ctx=Context(), max_tokens=7000, topk=topk, long_topk='merge')
+                for topk in ('sort', 'radix')}
     # Under graph replay the launches are those captured for max_tokens, reading tokens from the step buffer.
-    resident['graph'] = ResidentGLM(model, ctx=Context(), max_tokens=7000, topk='sort', graph=True, device_experts=True)
+    resident['graph'] = ResidentGLM(model, ctx=Context(), max_tokens=7000, topk='sort', long_topk='merge', graph=True,
+                                    device_experts=True)
     # long_topk='select': topk_radix rounds in place of the chunk sorts and merges.
     resident['select'] = ResidentGLM(model, ctx=Context(), max_tokens=7000, topk='sort', long_topk='select')
     resident['graph_select'] = ResidentGLM(model, ctx=Context(), max_tokens=7000, topk='sort', long_topk='select',
                                            graph=True, device_experts=True)
-    # long_topk='position': one topk_select launch, the same set in position order.
-    resident['position'] = ResidentGLM(model, ctx=Context(), max_tokens=7000, long_topk='position')
-    resident['graph_position'] = ResidentGLM(model, ctx=Context(), max_tokens=7000, long_topk='position', graph=True,
-                                             device_experts=True)
+    # long_topk='position' (the default): one topk_select launch, the same set in position order.
+    resident['position'] = ResidentGLM(model, ctx=Context(), max_tokens=7000)
+    resident['graph_position'] = ResidentGLM(model, ctx=Context(), max_tokens=7000, graph=True, device_experts=True)
     try:
         for tokens in (2049, 4096, 7000):
             scores = rng.integers(-20, 20, size=tokens).astype(np.float32)  # ties
@@ -582,14 +585,16 @@ def test_short_contexts_skip_the_indexer_queries(graph):
 
 
 def test_position_order_topk_gives_the_reference_logits():
-    # long_topk='position' (#32): past index_topk (4) the same set as the stable top-k, in position
-    # order, so only the order of the attention sums differs from the reference's. The host argsort
-    # (sorted), the eager kernel and the captured one give the same ids, so the same bits.
+    # long_topk='position' (#32, the default): past index_topk (4) the stable top-k set in position
+    # order, the reference's order. The host argsort (sorted), the eager kernel and the captured one
+    # give the same ids, so the same bits. long_topk='merge' takes the set in score order: only the
+    # order of the attention sums differs.
     model = build(seed=53, index_n_heads=1)  # one indexer head: exact score ties
     expected = reference(model, TOKENS)
     runs = {}
-    for name, kw in (('eager', {}), ('host', dict(device_topk=False)), ('graph', dict(graph=True, device_experts=True))):
-        r = ResidentGLM(model, ctx=Context(), max_tokens=32, long_topk='position', **kw)
+    for name, kw in (('eager', {}), ('host', dict(device_topk=False)), ('graph', dict(graph=True, device_experts=True)),
+                     ('merge', dict(long_topk='merge'))):
+        r = ResidentGLM(model, ctx=Context(), max_tokens=32, **kw)
         try:
             runs[name] = (np.stack([r.forward(t) for t in TOKENS]), dict(r.launches))
         finally:
@@ -600,13 +605,17 @@ def test_position_order_topk_gives_the_reference_logits():
     np.testing.assert_array_equal(runs['graph'][0], runs['eager'][0])
     assert runs['eager'][1].get('topk_select', 0) > 0 and runs['graph'][1].get('topk_select_at', 0) > 0
     assert 'topk_select' not in runs['host'][1]
+    np.testing.assert_allclose(runs['merge'][0], expected, rtol=2e-5, atol=2e-5)
+    assert (runs['merge'][0].argmax(-1) == expected.argmax(-1)).all()
+    assert 'topk_select' not in runs['merge'][1]
 
 
 @pytest.mark.parametrize('overrides', [{}, {'index_n_heads': 1}])  # one head: exact score ties
 def test_device_topk_selects_exactly_what_the_host_argsort_selects(overrides):
+    # Score order (long_topk='merge'): position order's equivalent is test_position_order_topk_gives_the_reference_logits.
     model = build(seed=37, **overrides)
-    device = ResidentGLM(model, ctx=Context(), max_tokens=32)
-    host = ResidentGLM(model, ctx=Context(), max_tokens=32, device_topk=False)
+    device = ResidentGLM(model, ctx=Context(), max_tokens=32, long_topk='merge')
+    host = ResidentGLM(model, ctx=Context(), max_tokens=32, device_topk=False, long_topk='merge')
     for t in TOKENS:
         a, b = device.forward(t), host.forward(t)
         np.testing.assert_array_equal(device.selected.data[:device.selected_count],
