@@ -59,3 +59,28 @@ read again for each token, about 13 instructions a multiply-add. A version with 
 the queries in shared memory was faster alone (16.6 against 22.9 us, L2 flushed) but slower in the
 step (13.9 against 11.4), where the keys are warm. SGLang's takes 3.6 us with FP8 keys on the tensor
 cores; doing the same changes the scores' precision, which is a separate decision.
+
+## Glue fusion (#39), and the A/B
+
+With the top-k down, about 30 us a layer went to the small launches between the big kernels: norms,
+the cache rows' copies, RoPE and stores, the residual add. `ResidentGLM(fuse_glue=True)` fuses them,
+each fusion with the bits of the launches it replaces, so the flag changes the time and nothing else
+(the CPU tests check the logits on and off for equality; the H200 tests check each kernel against the
+launches it replaces). Both changes are flags on one build, so one H200 session compared them
+(evidence/h200-20261116-r):
+
+| step (us) | `merge` | `position` | + `fuse_glue` |
+|---|---|---|---|
+| 1 dense layer, context 1000 | 184.9 | 186.1 | 175.4 |
+| 1 dense layer, 3001 tokens | 269.6 | 224.3 | 215.1 |
+| 1 dense layer, 8192 tokens | 291.1 | 243.1 | 231.4 |
+| dense + MoE layer, context 1000 | | 425.9 | 400.1 |
+
+One fusion first gained nothing: the residual add with RMSNorm in registers took 5.1 us where plain
+RMSNorm takes 3.3, so as a layer boundary's add (1.8) + RMSNorm (2.7) it broke even. Its weight loads
+came after the block sum, a memory round trip in series. Loading them before the sum, as the values
+are, took it to 3.1 us, the same bits.
+
+One Vx bug on the way: an `eps <= 0.0` guard with two stores a thread made the prover hand z3 a real
+comparison in an integer logic (vx-lang/Vx#3145, fixed by vx-lang/Vx#3517); `index_key_at` has no
+guard until the tested Vx has the fix.

@@ -1,0 +1,18 @@
+total    425.9 ->    405.8 us (2 traces)
+  128.4 x3     128.8 x3   glm_vx_spawn_fp8_moe_cvt_gate_up
+  114.2 x6     112.2 x6   glm_vx_spawn_fp8_matvec_cvt_tiles
+   34.8 x1      34.4 x1   glm_vx_spawn_fp8_moe_cvt_down
+   19.3 x2      20.2 x2   glm_vx_spawn_fp8_matvec_cvt_tiles3
+   16.2 x6       3.2 x1   glm_vx_gpu_rmsnorm
+    0.0 x0      15.4 x3   glm_vx_gpu_residual_rmsnorm8
+   13.3 x2       0.0 x0   glm_vx_gpu_residual_rmsnorm
+   13.1 x2      12.7 x2   glm_vx_spawn_fp8_matvec_heads_cvt
+    7.8 x6       2.7 x2   glm_vx_gpu_rope_strided
+    6.5 x5       3.0 x2   glm_vx_gpu_copy
+    0.0 x0       5.2 x2   glm_vx_gpu_rmsnorm_pair
+    5.0 x3       3.2 x2   glm_vx_gpu_add
+    4.9 x4       0.0 x0   glm_vx_spawn_store_row_bf16_at
+    0.0 x0       4.7 x2   glm_vx_gpu_index_key_at
+    4.6 x2       0.0 x0   glm_vx_gpu_layernorm
+    0.0 x0       4.1 x2   glm_vx_spawn_kv_rows_bf16_at
+    2.3 x2       0.0 x0   glm_vx_gpu_store_row
