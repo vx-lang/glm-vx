@@ -1,0 +1,3 @@
+total    215.3 ->    214.7 us (2 traces)
+   72.9 x4      71.9 x4   glm_vx_spawn_fp8_matvec_cvt_tiles
+   13.9 x1      14.2 x1   glm_vx_spawn_mla_tc_at

@@ -1,0 +1,20 @@
+[parallel-frontend] emitted module with -j 2
+[JIT] Translating to LLVM IR...
+[JIT] Optimizing LLVM IR (-O0)...
+[JIT] Compiling to native object (-O0)...
+[JIT] Linking native executable...
+[JIT] Executing native binary...
+y row 0: 103 104 105 106 -1
+y row 3: 403 404 405 406 -1
+y row 4: 809 810 0 0 -1
+y row 5: 909 910 0 0 -1
+y row 7: 0 0 0 0 -1
+y row 8: -1 -1 -1 103 104
+y row 9: -1 -1 -1 203 204
+z row 0: 0 0 0
+z row 1: 0 0 0
+z row 2: 1 1 1
+z row 5: 10 10 10
+z row 7: 11 11 11
+
+[Vx CUDA] no CUDA device (no CUDA-capable device is detected); kernels will run on the host
