@@ -712,3 +712,36 @@ def test_device_experts_preload_uploads_each_projection_once_stacked():
     finally:
         device.close()
         host.close()
+
+
+@needs_spawn
+@pytest.mark.parametrize('kind,graph,options', [('float32', False, {}), ('float32', True, {}), ('fused', True, {}),
+                                                ('fp8', True, dict(fp8_kernels='cvt')), ('bf16', False, {})])
+def test_fused_glue_gives_the_same_bits(kind, graph, options):
+    # fuse_glue (#39): residual_rmsnorm8 after the attention and at each layer boundary (with the next
+    # layer's input RMSNorm), rmsnorm_pair for q_a and kv_a, and under graph replay index_key_at for
+    # the indexer's key row; each has the bits of the launches it replaces, so the logits are equal.
+    # fp8_kernels='cvt' stacks q_a, kv_a and the indexer's wk in one launch before the norms.
+    model = expert_models(kind)
+    runs = {}
+    for fuse in (False, True):
+        r = ResidentGLM(model, ctx=Context(), max_tokens=32, device_experts=True, graph=graph, fuse_glue=fuse, **options)
+        try:
+            runs[fuse] = (np.stack([r.forward(t) for t in TOKENS]), dict(r.launches))
+        finally:
+            r.close()
+    (plain, before), (fused, after) = runs[False], runs[True]
+    np.testing.assert_array_equal(fused, plain)
+    n = model.n_layers
+    steps = before['residual_rmsnorm'] // n  # the steps that launched (eagerly or under capture)
+    assert 'residual_rmsnorm' not in after and after['residual_rmsnorm8'] == steps * (2 * n - 1)
+    assert after['rmsnorm_pair'] == steps * n
+    # Each step's input norms past the first layer and its q_a and kv_a norms are gone.
+    assert after['rmsnorm'] == before['rmsnorm'] - steps * (n - 1) - 2 * steps * n
+    if graph:
+        assert 'layernorm' not in after and after['index_key_at'] == before['layernorm'] > 0
+    else:
+        assert after['layernorm'] == before['layernorm'] and 'index_key_at' not in after
+    moe = sum(model.mlp_type(i) != 'dense' for i in range(n))
+    # moe_sum is read in place, and under graph replay the indexer's key row is not copied either.
+    assert after.get('copy', 0) == before.get('copy', 0) - steps * moe - (before['layernorm'] if graph else 0)

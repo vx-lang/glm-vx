@@ -1297,6 +1297,30 @@ def test_topk_select_at_reads_tokens_from_the_step(run, tokens):
         np.testing.assert_array_equal(got, stable_set(scores[:tokens], k))
 
 
+# kv_rows_bf16_at (#39, ResidentGLM(fuse_glue=True)): store_row_bf16_at of the latent row, and of
+# rope_strided's packed [rotated even, rotated odd] (one rounding an operation), in one launch.
+@pytest.mark.parametrize('rank,rot', [(512, 64), (333, 10), (16, 0)])
+def test_kv_rows_bf16_at_is_store_rope_store(run, rank, rot):
+    rng = np.random.default_rng(rank + rot)
+    latent_row, rope_x = rng.normal(size=rank).astype(F), rng.normal(size=max(rot, 2)).astype(F)
+    angle = rng.normal(size=max(rot // 2, 1)).astype(F)
+    cosine, sine = np.cos(angle).astype(F), np.sin(angle).astype(F)
+    step = np.array([5, 6, 6, 1], np.int32)
+    latents = rng.integers(0, 1 << 16, size=(9, rank)).astype(np.uint16)
+    rope_keys = rng.integers(0, 1 << 16, size=(9, max(rot, 1))).astype(np.uint16)
+    got = run('kv_rows_bf16_at', latents=latents.copy(), rope_keys=rope_keys.copy(), latent_row=latent_row,
+              rope_x=rope_x, cosine=cosine, sine=sine, step=step, rank=rank, rot=rot)
+    want_latents = run('store_row_bf16_at', cache=latents.copy(), row=latent_row, step=step, width=rank)['cache']
+    np.testing.assert_array_equal(got['latents'], want_latents)
+    if rot:
+        a, b, p = rope_x[0:rot:2], rope_x[1:rot:2], rot // 2
+        rotated = np.concatenate((a * cosine[:p] - b * sine[:p], b * cosine[:p] + a * sine[:p])).astype(F)
+        want_rope = run('store_row_bf16_at', cache=rope_keys.copy(), row=rotated, step=step, width=rot)['cache']
+        np.testing.assert_array_equal(got['rope_keys'], want_rope)
+    else:
+        np.testing.assert_array_equal(got['rope_keys'], rope_keys)
+
+
 @pytest.mark.parametrize('experts,k,ties', [(256, 8, False), (256, 8, True), (7, 3, True), (1, 1, False), (33, 8, True)])
 def test_router(run, experts, k, ties):
     rng = np.random.default_rng(experts * 10 + k)

@@ -150,6 +150,17 @@ void glm_vx_gpu_mla_merge_at(float *out, const float *numerator, const float *st
     const int32_t *step, int32_t heads, int32_t rank);
 /* cache[step[0]*width + i] = row[i]; grid-stride. */
 void glm_vx_gpu_store_row(float *cache, const float *row, const int32_t *step, int32_t width);
+/* Glue fusions (gpu/resident.py fuse_glue=True, #39), each with the bits of the launches it
+ * replaces. residual_rmsnorm8: residual_rmsnorm of one row (grid 1) held in registers, dim <=
+ * 8*block.x. rmsnorm_pair: rmsnorm of a (block 0) and of b (block 1), grid 2. index_key_at: grid 1,
+ * block.x 256 (layernorm's), rot/2 <= block.x: layernorm with bias, rope_strided on the first rot
+ * values, stored at cache[step[0]*dim]. */
+void glm_vx_gpu_residual_rmsnorm8(float *out, float *residual_out, const float *x,
+    const float *residual, const float *weight, int32_t dim, float eps);
+void glm_vx_gpu_rmsnorm_pair(float *out_a, const float *x_a, const float *weight_a, int32_t dim_a,
+    float *out_b, const float *x_b, const float *weight_b, int32_t dim_b, float eps);
+void glm_vx_gpu_index_key_at(float *cache, const float *x, const float *weight, const float *bias,
+    const float *cosine, const float *sine, const int32_t *step, int32_t dim, int32_t rot, float eps);
 #ifdef __cplusplus
 }
 #endif

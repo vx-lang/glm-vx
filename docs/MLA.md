@@ -122,6 +122,10 @@ the rope queries. It runs on 64 blocks, one per head (group, head half, head), o
 Writes the new cache row in bf16 at the step buffer's position. With `'tc'`, the latent and rope
 caches are uint16 tensors that hold bf16 bits.
 
+With `ResidentGLM(fuse_glue=True)` (#39) the latent row and the rope key go to the caches in one
+`kv_rows_bf16_at` launch (store, RoPE, store, with their bits), the latent's RMSNorm runs with q_a's
+in one `rmsnorm_pair`, and the indexer's key row is one `index_key_at` (LayerNorm, RoPE, store).
+
 ### `mla_flash_merge_at`
 
 Merges the splits of `'flash'` and `'tc'`. Block (head, 128 columns):

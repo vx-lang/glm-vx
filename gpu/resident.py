@@ -171,7 +171,7 @@ class ResidentGLM:
     def __init__(self, model, *, max_tokens=4096, ptx_dir=None, device=0, ctx=None, max_weight_bytes=None,
                  device_topk=True, device_experts=False, fused_attention=False, graph=False, fp8_kernels='hand',
                  topk='auto', long_topk='position', mla_kernel='decode', matvec_kernels='hand', mtp=False,
-                 norm_block=256):
+                 norm_block=256, fuse_glue=False):
         if getattr(model, 'packed_weights', False):
             raise NotImplementedError('ResidentGLM supports expanded float32 weights only')
         if getattr(model, 'expert_placement', None) is not None:
@@ -200,6 +200,17 @@ class ResidentGLM:
         if norm_block not in (256, 512, 1024):
             raise ValueError('norm_block must be 256, 512 or 1024')
         self.norm_block = norm_block
+        # fuse_glue (#39): the step's small launches between the big ones fused, each with the bits of
+        # the launches it replaces, so the logits are the same either way (an A/B of the time only):
+        #   - the post-attention residual_rmsnorm as residual_rmsnorm8 (its row in registers), and
+        #     each layer's closing add with the next layer's input RMSNorm as one residual_rmsnorm8,
+        #     while the hidden width fits eight values a thread of norm_block; a MoE layer's output
+        #     is read from moe_sum, not copied to ffn_out first;
+        #   - the q_a and kv_a RMSNorms as one rmsnorm_pair launch of two blocks;
+        #   - under graph replay, the indexer's LayerNorm, copy, RoPE and store_row as one
+        #     index_key_at, and with mla_kernel='tc' the bf16 latent and rope rows (store, RoPE,
+        #     store) as one kv_rows_bf16_at.
+        self.fuse_glue = bool(fuse_glue)
         if topk not in ('auto', 'sort', 'radix'):
             raise ValueError("topk must be 'auto', 'sort' or 'radix'")
         self._topk_choice = topk
@@ -982,12 +993,18 @@ class ResidentGLM:
     def _index_core(self, layer, prefix, position, iq, ik, head_weights_raw):
         """The indexer after its projections: the key row, the rotated queries, scores, top-k."""
         tokens = position + 1
-        self._launch('layernorm', 1, 256, [self.ik_norm, ik, self._weight(prefix + '.k_norm.weight'),
-                                           self._weight(prefix + '.k_norm.bias'), I(1), I(self.index_dim), F(1e-6)])
-        row = self._new_row(self.index_keys[layer], position, self.index_dim, self.index_key_new)
-        self._copy(row, self.ik_norm, self.index_dim)
-        self._rope(row, self.ik_norm, 1, self.rot, self.rot, self.rot)
-        self._store_row(self.index_keys[layer], row, self.index_dim)
+        if self.fuse_glue and self.graph and self.rot // 2 <= 256:
+            # LayerNorm, RoPE and the cache row at the step's position in one launch (#39).
+            self._launch('index_key_at', 1, 256, [self.index_keys[layer], ik, self._weight(prefix + '.k_norm.weight'),
+                                                  self._weight(prefix + '.k_norm.bias'), self.cos, self.sin, self.step,
+                                                  I(self.index_dim), I(self.rot), F(1e-6)])
+        else:
+            self._launch('layernorm', 1, 256, [self.ik_norm, ik, self._weight(prefix + '.k_norm.weight'),
+                                               self._weight(prefix + '.k_norm.bias'), I(1), I(self.index_dim), F(1e-6)])
+            row = self._new_row(self.index_keys[layer], position, self.index_dim, self.index_key_new)
+            self._copy(row, self.ik_norm, self.index_dim)
+            self._rope(row, self.ik_norm, 1, self.rot, self.rot, self.rot)
+            self._store_row(self.index_keys[layer], row, self.index_dim)
         if tokens <= self.index_topk:
             # Every cached token is selected, in position order, as SGLang's DSA top-k does (topk_v2.cuh,
             # trivial_transform when seq_len <= topk) and GlmMoeDsaModel._index too (#43): the key row is
@@ -1093,29 +1110,48 @@ class ResidentGLM:
         stacked = not bias and self._fma_qkv_a(prefix, x, full)
         if not stacked:
             self._linear(prefix + '.q_a_proj', x, self.q_a, bias)
-        self._rmsnorm(self.q_a, self._weight(prefix + '.q_a_layernorm.weight'), self.q_res, 1e-6)
+        if self.fuse_glue:
+            # Both norms in one launch of two blocks (#39): kv_a's projection first.
+            if not stacked:
+                self._linear(prefix + '.kv_a_proj_with_mqa', x, self.compressed, bias)
+            latent_row = self._new_row(self.latents[layer], position, self.rank, self.latent_new)
+            self._launch('rmsnorm_pair', 2, self.norm_block,
+                         [self.q_res, self.q_a, self._weight(prefix + '.q_a_layernorm.weight'), I(self.q_a.shape[0]),
+                          latent_row, self.compressed.view((self.rank,)), self._weight(prefix + '.kv_a_layernorm.weight'),
+                          I(self.rank), F(1e-6)])
+        else:
+            self._rmsnorm(self.q_a, self._weight(prefix + '.q_a_layernorm.weight'), self.q_res, 1e-6)
         self._linear(prefix + '.q_b_proj', self.q_res, self.query)
-        if not stacked:
+        if not stacked and not self.fuse_glue:
             self._linear(prefix + '.kv_a_proj_with_mqa', x, self.compressed, bias)
         if full:
             self._index_project(prefix + '.indexer', x, self.q_res, self.iq, self.ik, self.head_weights_raw,
                                 key_done=stacked, key_only=position + 1 <= self.index_topk)
         self._attention_core(layer, position, shared_ok, self.query, self.compressed,
-                             (self.iq, self.ik, self.head_weights_raw) if full else None)
+                             (self.iq, self.ik, self.head_weights_raw) if full else None, kv_normed=self.fuse_glue)
         self._linear(prefix + '.o_proj', self.heads_out, self.attn_out, bias)
 
-    def _attention_core(self, layer, position, shared_ok, query, compressed, index):
+    def _attention_core(self, layer, position, shared_ok, query, compressed, index, kv_normed=False):
         """One token's attention after its projections: its cache rows, the indexer's top-k (index:
         its (queries, key, head weights), for a full indexer), MLA over the selection, and the
-        per-head values in self.heads_out. The caller runs o_proj."""
+        per-head values in self.heads_out. The caller runs o_proj. kv_normed: the latent row already
+        holds kv_a's RMSNorm (fuse_glue's rmsnorm_pair)."""
         prefix = f'model.layers.{layer}.self_attn'
         qk = self.nope + self.rot
         latent_row = self._new_row(self.latents[layer], position, self.rank, self.latent_new)
-        self._rmsnorm(compressed.view((self.rank,)), self._weight(prefix + '.kv_a_layernorm.weight'), latent_row, 1e-6)
-        self._store_row(self.latents[layer], latent_row, self.rank)
-        rope_row = self._new_row(self.rope_keys[layer], position, self.rot, self.rope_new)
-        self._rope(rope_row, compressed.view((self.rot,), offset=self.rank * 4), 1, self.rot, self.rot, self.rot)
-        self._store_row(self.rope_keys[layer], rope_row, self.rot)
+        if not kv_normed:
+            self._rmsnorm(compressed.view((self.rank,)), self._weight(prefix + '.kv_a_layernorm.weight'), latent_row, 1e-6)
+        rope_x = compressed.view((self.rot,), offset=self.rank * 4)
+        if self.fuse_glue and self.graph and self.latents[layer].dtype == 'uint16' and self.rope_keys[layer].dtype == 'uint16':
+            # mla_kernel='tc''s bf16 rows, stored and RoPE'd in one launch (#39).
+            self._spawn('kv_rows_bf16_at', latents=self.latents[layer], rope_keys=self.rope_keys[layer],
+                        latent_row=latent_row, rope_x=rope_x, cosine=self.cos, sine=self.sin, step=self.step,
+                        rank=self.rank, rot=self.rot)
+        else:
+            self._store_row(self.latents[layer], latent_row, self.rank)
+            rope_row = self._new_row(self.rope_keys[layer], position, self.rot, self.rope_new)
+            self._rope(rope_row, rope_x, 1, self.rot, self.rot, self.rot)
+            self._store_row(self.rope_keys[layer], rope_row, self.rot)
         if index is not None:
             self._index_core(layer, prefix + '.indexer', position, *index)
         elif not shared_ok:
@@ -1215,11 +1251,13 @@ class ResidentGLM:
                       I((self.nope + self.value_dim) * self.rank), I(self.rank), I(self.value_dim)])
 
     def _feed_forward(self, layer, x):
+        """The layer's MLP or MoE of x; returns the buffer that holds it: ffn_out, or with fuse_glue a
+        MoE layer's moe_sum (no copy)."""
         m, c = self.model, self.config
         prefix = f'model.layers.{layer}.mlp'
         if m.mlp_type(layer) == 'dense':
             self._mlp(prefix, x, self.ffn_out)
-            return
+            return self.ffn_out
         experts = int(c['n_routed_experts'])
         k = int(c['num_experts_per_tok'])
         self._project(prefix + '.gate', x, self.router_logits)
@@ -1236,7 +1274,10 @@ class ResidentGLM:
         if int(c.get('n_shared_experts', 1)) > 0:
             self._mlp(prefix + '.shared_experts', x, self.mlp_out)
             self._add(self.moe_sum, self.moe_sum, self.mlp_out, self.hidden)
+        if self.fuse_glue:
+            return self.moe_sum
         self._copy(self.ffn_out, self.moe_sum, self.hidden)
+        return self.ffn_out
 
     def _host_experts(self, prefix, x, k):
         """The routed experts with the ids read back to the host to pick each expert's weights."""
@@ -1328,21 +1369,41 @@ class ResidentGLM:
     def _layers(self, position):
         """Every layer of one decode step, from self.x (the embedding row) to the final residual
         in self.x; with graph=True, what the step graph holds."""
-        for layer in range(self.model.n_layers):
-            self._layer(layer, position, layer > 0)
+        n = self.model.n_layers
+        fuse = self._fuse_norms()
+        for layer in range(n):
+            # fuse_glue: a layer's closing add takes the next layer's input RMSNorm along (#39).
+            following = f'model.layers.{layer + 1}.input_layernorm.weight' if fuse and layer + 1 < n else None
+            self._layer(layer, position, layer > 0, normed=fuse and layer > 0, next_norm=following)
 
-    def _layer(self, layer, position, have_selection, reuse_selection=False):
+    def _fuse_norms(self):
+        """Whether fuse_glue's residual_rmsnorm8 holds the hidden row: eight values a thread."""
+        return self.fuse_glue and self.hidden <= 8 * self.norm_block
+
+    def _residual_rmsnorm8(self, x, residual, weight, out, residual_out, eps):
+        """_residual_rmsnorm's bits (and _add then _rmsnorm's) with the row in registers (#39)."""
+        n = x.shape[0]
+        self._launch('residual_rmsnorm8', 1, self.norm_block,
+                     [out, residual_out, x, residual, weight, I(n), F(_f32(eps, 'epsilon', True))])
+
+    def _layer(self, layer, position, have_selection, reuse_selection=False, *, normed=False, next_norm=None):
         """One decoder layer from self.x to self.x: attention and the feed-forward, each with its
-        norm and residual. reuse_selection: attend to self.selected without running a full indexer."""
+        norm and residual. reuse_selection: attend to self.selected without running a full indexer.
+        normed: self.norm already holds this layer's input RMSNorm of self.x; next_norm: the next
+        layer's input RMSNorm weight, applied with the closing add (fuse_glue, #39)."""
         m = self.model
         prefix = f'model.layers.{layer}'
-        self._rmsnorm(self.x, self._weight(prefix + '.input_layernorm.weight'), self.norm, m.eps)
+        if not normed:
+            self._rmsnorm(self.x, self._weight(prefix + '.input_layernorm.weight'), self.norm, m.eps)
         self._attention(layer, self.norm, position, have_selection or reuse_selection, reuse_selection)
-        self._residual_rmsnorm(self.attn_out, self.x, self._weight(prefix + '.post_attention_layernorm.weight'),
-                               self.norm, self.x_next, m.eps)
+        post = self._residual_rmsnorm8 if self._fuse_norms() else self._residual_rmsnorm
+        post(self.attn_out, self.x, self._weight(prefix + '.post_attention_layernorm.weight'), self.norm, self.x_next, m.eps)
         self.x, self.x_next = self.x_next, self.x
-        self._feed_forward(layer, self.norm)
-        self._add(self.x_next, self.x, self.ffn_out, self.hidden)
+        out = self._feed_forward(layer, self.norm)
+        if next_norm is not None:
+            self._residual_rmsnorm8(self.x, out, self._weight(next_norm), self.norm, self.x_next, m.eps)
+        else:
+            self._add(self.x_next, self.x, out, self.hidden)
         self.x, self.x_next = self.x_next, self.x
 
     def preload(self, reserve_bytes=256 * 1024 ** 2):
