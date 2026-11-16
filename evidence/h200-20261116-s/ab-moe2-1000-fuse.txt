@@ -1,0 +1,6 @@
+total    400.1 ->    399.6 us (2 traces)
+  128.5 x3     128.9 x3   glm_vx_spawn_fp8_moe_cvt_gate_up
+  111.8 x6     112.4 x6   glm_vx_spawn_fp8_matvec_cvt_tiles
+   35.0 x1      34.3 x1   glm_vx_spawn_fp8_moe_cvt_down
+   19.9 x2      19.0 x2   glm_vx_spawn_fp8_matvec_cvt_tiles3
+    3.3 x2       2.9 x2   glm_vx_gpu_add

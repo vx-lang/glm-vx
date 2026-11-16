@@ -105,8 +105,8 @@ and caches on the GPU; one request at a time, others queue; see [gpu/README.md](
 The kernels written in Vx's own GPU model (`spawn` and `across` loops) are in
 [gpu/spawn](gpu/spawn/README.md); they need Vx main 12fea615 or later, and the CPU library
 (`kernels/build.sh`) builds in minutes from 950a6f71 on (Vx #3326: before it `packed.vx` took
-hours). Tested with 4f966fd6 (Vx #3475, which `mla_flash_at` needs to keep its tiles in registers, and #3490, whose
-`lanes::copy_rows_async` `mla_tc_at` gathers with; #3492 converts f32 to bf16 with one cvt). Pods restore a prebuilt
+hours). Tested with 64ff9cd4 (Vx #3475, which `mla_flash_at` needs to keep its tiles in registers, and #3490, whose
+`lanes::copy_rows_async` `mla_tc_at` gathers with; #3492 converts f32 to bf16 with one cvt; #3517 lets `index_key_at` keep its eps guard). Pods restore a prebuilt
 toolchain with `scripts/pod_restore.sh` (built on a pod by `scripts/pod_build_bundle.sh`) and run
 `scripts/pod_validate.sh`. The [original CPU report](REPORT.md) remains a baseline, not a GPU benchmark.
 
