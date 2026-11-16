@@ -1,11 +1,15 @@
-// Merges mla_flash_at's splits (#33): out[h][t] = sum over splits s of exp(m_s - m) * numerator_s[t]
-// over the sum of exp(m_s - m) * l_s, m the largest m_s of the splits that saw a token, as mla_merge.
-// Block (h, c) writes head h's columns c * 128 .. + 127. Its subgroup w merges splits 16 * w .. + 15
-// the same way, for four columns a lane, into its own max, sum and denominator; the block then merges
-// the four. numerator [heads / 16, splits_max, 16 * rank] and stats [heads / 16, splits_max, 32] are
-// mla_flash_at's; splits comes from the step buffer. The split loops are branch-free and of constant
-// length, so their loads are issued together. Needs heads % 16 == 0, rank == 512 and
-// 0 < splits <= min(splits_max, 64); otherwise it writes nothing.
+// Merges mla_flash_at's (and mla_tc_at's) splits (#33): out[h][t] = sum over splits s of
+// exp(m_s - m) * numerator_s[t] over the sum of exp(m_s - m) * l_s, m the largest m_s of the splits
+// that saw a token, as mla_merge. Block (h, c) writes columns c * 128 .. + 127 of head h:
+//   1. lane s of subgroups 0 and 1 reads split s's m and l, and the subgroups take the largest m;
+//   2. each split's factor exp(m_s - m) goes to shared memory, with l_s times it summed for the
+//      denominator;
+//   3. each lane sums factor_s * numerator_s over the step's splits only, at its column.
+// The merge reads what the splits wrote just before, so it is bound by its instructions and their
+// latency, not bandwidth: the factors are worked out once a block, not once a column, and a step with
+// few splits reads only those. numerator [heads / 16, splits_max, 16 * rank] and stats
+// [heads / 16, splits_max, 32] are mla_flash_at's; splits comes from the step buffer. Needs
+// heads % 16 == 0, rank == 512 and 0 < splits <= min(splits_max, 64); otherwise it writes nothing.
 // spawn-include: device.vx
 
 pub fn glm_vx_spawn_mla_flash_merge_at(out: &mut Tensor<f32, [?, ?], Memory::HBM>, numerator: &Tensor<f32, [?, ?, ?], Memory::HBM>,
@@ -16,66 +20,53 @@ pub fn glm_vx_spawn_mla_flash_merge_at(out: &mut Tensor<f32, [?, ?], Memory::HBM
       for c in 0..4 across blocks {
         let splits: i32 = step[3];
         let ok: bool = splits > 0 && splits <= splits_max && splits <= 64 && heads % 16 == 0 && rank == 512;
+        let n: i32 = if ok { splits } else { 0 };
         let hg: i32 = if ok { h / 16 } else { 0 };
         let g: i32 = h % 16;
-        // ps[w][j][lane]: subgroup w's sum at column c * 128 + j * 32 + lane; pm, pd: its max and
-        // denominator (the same in every lane).
-        let mut ps = unsafe { Tensor<f32, [4, 4, 32], Memory::SMEM>::uninit() };
+        // xs[w][lane]: split 32 * w + lane's m (-3e38 if it is past n or saw no token); fac its factor;
+        // dl its l times the factor. pm, pd: each subgroup's max and sum of dl (the same in every lane).
+        let mut xs = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
+        let mut fac = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
+        let mut dl = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
         let mut pm = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
         let mut pd = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
         for w in 0..4 across subgroups {
           for lane in 0..32 across lanes {
-            let n: i32 = if ok { splits } else { 1 };
-            // Split s reads split min(s, n - 1) and counts only when s < n and its l > 0.
-            let mut m: f32 = -3.0e38;
-            for i in 0..16 {
-              let s: i32 = w * 16 + i;
-              let r: i32 = if s < n { s } else { n - 1 };
-              let v: f32 = stats[hg][r][g * 2];
-              let l: f32 = stats[hg][r][g * 2 + 1];
-              m = if s < n && l > 0.0 && v > m { v } else { m };
-            }
-            let mut s0: f32 = 0.0;
-            let mut s1: f32 = 0.0;
-            let mut s2: f32 = 0.0;
-            let mut s3: f32 = 0.0;
-            let mut d: f32 = 0.0;
-            let base: i32 = g * 512 + c * 128 + lane;
-            for i in 0..16 {
-              let s: i32 = w * 16 + i;
-              let r: i32 = if s < n { s } else { n - 1 };
-              let l: f32 = stats[hg][r][g * 2 + 1];
-              let e: f32 = (stats[hg][r][g * 2] - m).fast_exp();
-              let factor: f32 = if s < n && l > 0.0 { e } else { 0.0 };
-              s0 = s0 + numerator[hg][r][base] * factor;
-              s1 = s1 + numerator[hg][r][base + 32] * factor;
-              s2 = s2 + numerator[hg][r][base + 64] * factor;
-              s3 = s3 + numerator[hg][r][base + 96] * factor;
-              d = d + l * factor;
-            }
-            ps[w][0][lane] = s0;
-            ps[w][1][lane] = s1;
-            ps[w][2][lane] = s2;
-            ps[w][3][lane] = s3;
+            let s: i32 = w * 32 + lane;
+            let r: i32 = if s < n { s } else { 0 };
+            let v: f32 = stats[hg][r][g * 2];
+            let l: f32 = stats[hg][r][g * 2 + 1];
+            xs[w][lane] = if s < n && l > 0.0 { v } else { -3.0e38 };
+          }
+          let m: f32 = lanes::max(&xs[w], 32);
+          for lane in 0..32 across lanes {
             pm[w][lane] = m;
+          }
+        }
+        for w in 0..4 across subgroups {
+          for lane in 0..32 across lanes {
+            let m01: f32 = if pm[1][lane] > pm[0][lane] { pm[1][lane] } else { pm[0][lane] };
+            let m23: f32 = if pm[3][lane] > pm[2][lane] { pm[3][lane] } else { pm[2][lane] };
+            let m: f32 = if m23 > m01 { m23 } else { m01 };
+            let s: i32 = w * 32 + lane;
+            let r: i32 = if s < n { s } else { 0 };
+            let x: f32 = xs[w][lane];
+            let e: f32 = (x - m).fast_exp();
+            let f: f32 = if x > -1.0e38 { e } else { 0.0 };
+            fac[w][lane] = f;
+            dl[w][lane] = stats[hg][r][g * 2 + 1] * f;
+          }
+          let d: f32 = lanes::sum(&dl[w], 32);
+          for lane in 0..32 across lanes {
             pd[w][lane] = d;
           }
         }
         for t in 0..128 across lanes {
           if ok {
-            let j: i32 = t / 32;
-            let k: i32 = t % 32;
-            let mut m: f32 = -3.0e38;
-            for w in 0..4 {
-              m = if pd[w][k] > 0.0 && pm[w][k] > m { pm[w][k] } else { m };
-            }
+            let denominator: f32 = pd[0][t % 32] + pd[1][t % 32] + pd[2][t % 32] + pd[3][t % 32];
             let mut sum: f32 = 0.0;
-            let mut denominator: f32 = 0.0;
-            for w in 0..4 {
-              let e: f32 = (pm[w][k] - m).fast_exp();
-              let factor: f32 = if pd[w][k] > 0.0 { e } else { 0.0 };
-              sum = sum + ps[w][j][k] * factor;
-              denominator = denominator + pd[w][k] * factor;
+            for s in 0..n {
+              sum = sum + numerator[hg][s][g * 512 + c * 128 + t] * fac[s / 32][s % 32];
             }
             let mut result: f32 = 0.0;
             if denominator > 0.0 { result = sum / denominator; }
