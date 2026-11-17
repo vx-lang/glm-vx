@@ -18,7 +18,10 @@ For each layer and decode step, after the projections:
    no scores or top-k run (#43), and its query projections (`wq_b`, `weights_proj`) do not run either.
    Past index_topk the stable top-k set is selected, also in position order, with one
    `topk_select_at` launch (#32, `long_topk='position'`, the default); `long_topk='merge'` gives it
-   in score order, as `torch.topk` does, for an A/B. `GlmMoeDsaModel._index` and the expanded oracles
+   in score order, as `torch.topk` does, for an A/B. `long_topk='ilp'` and `'ilp_hist'` (not yet
+   measured on a GPU) give `'position'`'s set and order in fewer passes over the scores: three in one
+   block, or two with the scores kernel counting the first pass's bins, and past `topk_blocks_from`
+   tokens over blocks of 8192 positions (see "The indexer top-k" below). `GlmMoeDsaModel._index` and the expanded oracles
    take the same position order, so ResidentGLM still matches the reference bit for bit. The set of
    tokens is the official one; only the order of the attention sums differs from `torch.topk`'s.
 3. Each head's query is absorbed into the latent space: a 512-wide latent query and a 64-wide rope
@@ -143,6 +146,12 @@ about 10.8 us (4.6 M warp instructions) to about 3-7 us in the step.
 From `evidence/h200-20261116/graph_split.py`: one CUDA graph a step, CUDA events after an L2 flush,
 median of 50. An almost empty graph takes 3.1 us.
 
+Kernel sums are the step's GPU time: in a captured step the GPU leaves about 0.1 us between kernels
+(evidence/h200-20261117-v, nsys with `--cuda-graph-trace=node`: a dense layer's 24 kernels sum to 206.8
+/ 214.5 / 242.7 us at 3001 / 8192 / 32768 tokens and span 208.4 / 216.2 / 244.4 us). What a kernel sum
+leaves out is the host's part of a step (the step inputs' upload, the graph launch, the token's
+download), paid once a step, not once a layer.
+
 | selected tokens | `'heads'` (event-timed) | `'flash'` | `'tc'` |
 |---|---|---|---|
 | 256 | 149 | 15.6 | 19.0 |
@@ -181,6 +190,23 @@ tokens, 243.1 -> 231.4 at 8192, and 425.9 -> 400.1 for a dense layer and a MoE l
 a layer boundary's add and next RMSNorm are one launch and the MoE output is not copied. At 131072 tokens the one-block `topk_select_at` takes 270 us against
 the chunk sort and merge's 91: long contexts need it over more blocks. The scores, 11.4 us at 3001
 tokens and 75 at 32768, are the other gap: a warp a token, about 13 instructions a multiply-add.
+
+### The indexer top-k (#32)
+
+One block of SGLang's `fast_topk_v2` takes 10.0 / 21.4 / 64.7 us at 3001 / 32768 / 131072 tokens on the
+H200 (evidence/h200-20261117-y), and `topk_select_at` 16.1 / 68.2 / 274.8. Both are one block: the gap is
+passes over the scores and instructions a score. `topk_select_at` reads the scores six times (four
+radix rounds, a count, a walk), a lane one load at a time. With four loads in flight and the count and
+write by warp it is exact at 13.5 / 40.4 / 130.4 us. The kernels since, checked against
+`validation/topk_ilp_model.py` (the passes in numpy) and waiting for a GPU:
+
+| option | kernels | passes over the scores |
+|---|---|---|
+| `'ilp'` | `topk_select_ilp_at`: a 4096-bin histogram of the keys' top 12 bits, the threshold bin's keys listed in shared memory, the write by warp (vote.ballot, %lanemask_lt) | 3 |
+| `'ilp_hist'` | the scores kernel's `_hist_at` twin counts the bins; `topk_select_ilp_hist_at` | 2 |
+| `'ilp_hist'` past `topk_blocks_from` | the same twin; `topk_mb_list_at` + `topk_mb_write_at`, blocks of 8192 positions | 2, over every SM |
+
+`validation/topk_hist_ab.py` times each launch alone and checks every output.
 
 Where `'tc'`'s 26.2 us goes at 2048 tokens:
 
