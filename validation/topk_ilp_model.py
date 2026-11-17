@@ -13,11 +13,15 @@ def keys(scores):
     key = np.where((b & 0x7FFFFFFF) > 0x7F800000, 0, key)
     return key.astype(np.uint64)
 
-def model(scores, k, cap=2048):
+def model(scores, k, cap=2048, chunk=None):
+    """topk_select_ilp_at: chunk None (tokens / 32 warps, a multiple of 128) and a list of 2048; the
+    multi-block topk_mb_list_at / topk_mb_write_at: chunk 256 (warp w of the grid owns positions 256 w ..)
+    and a list of 16384."""
     tokens = len(scores)
     need = min(k, tokens)
     key = keys(scores)
-    chunk = (tokens + 4095) // 4096 * 128
+    chunk = chunk or (tokens + 4095) // 4096 * 128
+    warps = -(-tokens // chunk)
     # A
     hist = np.bincount((key >> 20).astype(np.int64), minlength=4096)
     above = np.concatenate([np.cumsum(hist[::-1])[::-1], [0]])  # above[d] = bins d..4095
@@ -30,7 +34,7 @@ def model(scores, k, cap=2048):
     # B
     w_of = np.arange(tokens) // chunk
     bin_ = key >> 20
-    wsum_b = np.bincount(w_of[bin_ > B], minlength=32)
+    wsum_b = np.bincount(w_of[bin_ > B], minlength=warps)
     listed = (bin_ == B).sum() <= cap
     cand = np.flatnonzero(bin_ == B)  # the list, or the scores again: the same keys
     # rounds
@@ -47,11 +51,11 @@ def model(scores, k, cap=2048):
         dd = ds[0]
         K, left = K + (dd << shift), left - (a[dd] - h2[dd])
     ck, cw = key[cand], w_of[cand]
-    wa = wsum_b + np.bincount(cw[ck > K], minlength=32)
-    wt = np.bincount(cw[ck == K], minlength=32)
+    wa = wsum_b + np.bincount(cw[ck > K], minlength=warps)
+    wt = np.bincount(cw[ck == K], minlength=warps)
     # D
     out = np.full(k, -7, np.int64)
-    for g in range(32):
+    for g in range(warps):
         na, nt = wa[:g].sum(), wt[:g].sum()
         for p in range(g * chunk, min(tokens, (g + 1) * chunk)):
             a_, e_ = key[p] > K, key[p] == K
@@ -72,5 +76,6 @@ for tokens, k, ties in cases:
     else: scores = rng.integers(-50, 50, size=tokens).astype('f4') if ties else rng.normal(size=tokens).astype('f4')
     if tokens > 9: scores[[3, 5, 7, 9]] = np.nan, -np.inf, -0.0, np.inf
     want = np.sort(np.argsort(-scores, kind='stable')[:k])
-    got, listed = model(scores, k)
-    print(tokens, k, ties, 'list' if listed else 'scores', 'OK' if np.array_equal(got, want) else 'WRONG')
+    for name, kw in (('ilp', {}), ('mb', dict(cap=16384, chunk=256))):
+        got, listed = model(scores, k, **kw)
+        print(name, tokens, k, ties, 'list' if listed else 'scores', 'OK' if np.array_equal(got, want) else 'WRONG')

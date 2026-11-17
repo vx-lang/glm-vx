@@ -238,3 +238,22 @@ def test_index_kernel_tc_matches_simt_to_bf16_rounding():
     assert (got.argmax(-1) == want.argmax(-1)).all()
     with pytest.raises(ValueError, match='index_kernel'):
         ResidentGLM(model, ctx=Context(), index_kernel='int8')
+
+
+def test_long_topk_takes_ilp_and_ilp_hist():
+    # long_topk='ilp' and 'ilp_hist' (#32) are GPU-only kernels (gpu/spawn/index_mma: their tests are
+    # test_resident_graph_hardware.py's); here only the option and 'ilp_hist''s zeroed bins.
+    model = build(seed=61)
+    with pytest.raises(ValueError, match='long_topk'):
+        ResidentGLM(model, ctx=Context(), long_topk='ilp2')
+    resident = ResidentGLM(model, ctx=Context(), long_topk='ilp_hist')
+    try:
+        assert resident.score_bins.shape == (4096,) and str(resident.score_bins.dtype) == 'uint32'
+        assert not np.frombuffer(resident.score_bins.download(), np.uint32).any()
+    finally:
+        resident.close()
+    resident = ResidentGLM(model, ctx=Context(), long_topk='ilp')
+    try:
+        assert resident.score_bins is None
+    finally:
+        resident.close()

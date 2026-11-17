@@ -25,7 +25,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--context', type=int, default=1000)
     p.add_argument('--mla-kernel', choices=['decode', 'chunks', 'heads', 'flash', 'tc'], default='tc')
-    p.add_argument('--long-topk', choices=['position', 'merge', 'select', 'warp'], default='position')
+    p.add_argument('--long-topk', choices=['position', 'merge', 'select', 'warp', 'ilp', 'ilp_hist'], default='position')
     p.add_argument('--fuse-glue', action=argparse.BooleanOptionalAction, default=True)
     p.add_argument('--index-kernel', choices=['simt', 'tc', 'mma', 'fp8'], default='mma')
     p.add_argument('--layers', type=int, default=1)

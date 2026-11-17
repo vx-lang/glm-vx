@@ -171,7 +171,8 @@ class ResidentGLM:
     def __init__(self, model, *, max_tokens=4096, ptx_dir=None, device=0, ctx=None, max_weight_bytes=None,
                  device_topk=True, device_experts=False, fused_attention=False, graph=False, fp8_kernels='hand',
                  topk='auto', long_topk='position', mla_kernel='decode', matvec_kernels='hand', mtp=False,
-                 norm_block=256, fuse_glue=True, index_kernel='mma'):
+                 norm_block=256, fuse_glue=True, index_kernel='mma',
+                 topk_blocks_from=65536):
         if getattr(model, 'packed_weights', False):
             raise NotImplementedError('ResidentGLM supports expanded float32 weights only')
         if getattr(model, 'expert_placement', None) is not None:
@@ -224,9 +225,21 @@ class ResidentGLM:
         # same select with warp instructions in mlir! blocks (gpu/spawn/index_mma): per-warp histograms
         # with one add a distinct digit, shuffle scans, the digit by a ballot count. GPU only (no host
         # build); without graph replay it is 'position'.
-        if long_topk not in ('merge', 'select', 'position', 'warp'):
-            raise ValueError("long_topk must be 'merge', 'select', 'position' or 'warp'")
+        # long_topk='ilp' (#32): the same set and order from topk_select_ilp_at, three passes over the
+        # scores (a histogram of the keys' top 12 bits, the threshold bin's keys listed in shared
+        # memory, the write by warp), not topk_select_at's six. 'ilp_hist' also folds the first pass
+        # into the scores kernel (index_scores_mma_hist_at / index_scores_fp8_hist_at count the bins
+        # into score_bins, which topk_select_ilp_hist_at reads and zeroes): two passes. Where the scores
+        # are not those kernels' (no graph, other shapes or index kernels), 'ilp_hist' is 'ilp'. GPU
+        # only; without graph replay both are 'position'.
+        if long_topk not in ('merge', 'select', 'position', 'warp', 'ilp', 'ilp_hist'):
+            raise ValueError("long_topk must be 'merge', 'select', 'position', 'warp', 'ilp' or 'ilp_hist'")
         self.long_topk = long_topk
+        # With 'ilp_hist', a step of more than topk_blocks_from tokens selects with the multi-block pair
+        # topk_mb_list_at + topk_mb_write_at (8192 positions a block) instead of one block; the step graphs
+        # are kept by that range too, so a request crossing it captures once more. Either kernel gives
+        # the same set and order, so the choice is speed only.
+        self.topk_blocks_from = int(topk_blocks_from)
         if mla_kernel not in ('decode', 'chunks', 'heads', 'flash', 'tc'):
             raise ValueError("mla_kernel must be 'decode', 'chunks', 'heads', 'flash' or 'tc'")
         self.mla_kernel = mla_kernel
@@ -548,6 +561,20 @@ class ResidentGLM:
             self.ik = self._qkv_a.view((self.index_dim,), offset=(pad(q_rank) + pad(spans[1])) * 4)
         self.head_weights_raw, self.head_weights = t((self.index_heads,)), t((self.index_heads,))
         self.scores = t((cap,))
+        # long_topk='ilp_hist': the scores' bins of 4096, zero between layers (the top-k zeroes it).
+        self.score_bins = t((4096,), 'uint32', np.zeros(4096, np.uint32)) if self.long_topk == 'ilp_hist' else None
+        self._hist_counted = False
+        # The multi-block top-k's scratch (topk_mb_list_at): each warp's keys above the threshold bin, the
+        # bin's keys and positions, their count (zero between layers), each warp's first slots, K and left,
+        # and the two launches' arrival counts. Its offsets hold 4096 warps of 256 positions.
+        self._mb = None
+        if self.score_bins is not None and cap > self.topk_blocks_from:
+            if cap > 4096 * 256:
+                raise ValueError(f'the multi-block top-k takes up to {4096 * 256} tokens, not {cap}')
+            z = lambda n, dtype: t((n,), dtype, np.zeros(n, dtype))
+            self._mb = dict(wcnt=t((4096,), 'int32'), ckey=t((16384,), 'uint32'), cpos=t((16384,), 'int32'),
+                            count=z(1, np.uint32), offs=t((8192,), 'int32'), sel=z(4, np.uint32),
+                            list_arrivals=z(1, np.int32), write_arrivals=z(1, np.int32))
         self.selected = t((self.index_topk,), 'int32')
         # 0, 1, ..., index_topk - 1: the selection while the context fits in index_topk (#43).
         self.positions = t((self.index_topk,), 'int32', np.arange(self.index_topk, dtype=np.int32))
@@ -1054,14 +1081,18 @@ class ResidentGLM:
         self._launch('scale', self._grid(self.index_heads), _ELEMENTWISE_BLOCK,
                      [self.head_weights, head_weights_raw, F(_f32(self.index_heads ** -0.5, 'scale')), I(self.index_heads)])
         scale = F(_f32(self.index_dim ** -0.5, 'scale'))
+        hist = {} if self.score_bins is None else {'hist': self.score_bins}
+        self._hist_counted = False
         if self.index_fp8:
-            self._spawn('index_mma/index_scores_fp8_at', out=self.scores,
+            self._hist_counted = bool(hist)
+            self._spawn('index_mma/index_scores_fp8' + ('_hist' if hist else '') + '_at', out=self.scores, **hist,
                         q=self.iq_rot.view((self.index_heads, self.index_dim)), codes=self.index_codes[layer],
                         scales=self.index_key_scales[layer], weights=self.head_weights, step=self.step,
                         max_tokens=self.index_keys[layer].shape[0], heads=self.index_heads, dim=self.index_dim,
                         scale=_f32(self.index_dim ** -0.5, 'scale'))
         elif self.graph and self.index_kernel == 'mma' and self.index_heads == 32 and self.index_dim == 128:
-            self._spawn('index_mma/index_scores_mma_at', out=self.scores,
+            self._hist_counted = bool(hist)
+            self._spawn('index_mma/index_scores_mma' + ('_hist' if hist else '') + '_at', out=self.scores, **hist,
                         q=self.iq_rot.view((self.index_heads, self.index_dim)), keys=self.index_keys[layer],
                         weights=self.head_weights, step=self.step, max_tokens=self.index_keys[layer].shape[0],
                         heads=self.index_heads, dim=self.index_dim, scale=_f32(self.index_dim ** -0.5, 'scale'))
@@ -1080,13 +1111,34 @@ class ResidentGLM:
                           I(self.index_dim), scale])
         self._select(tokens)
 
+    def _multi_block_topk(self, tokens):
+        """Whether a step of `tokens` selects with the multi-block top-k (long_topk='ilp_hist' past
+        topk_blocks_from)."""
+        return self._mb is not None and tokens > self.topk_blocks_from
+
     def _select(self, tokens):
         """selected[:min(index_topk, tokens)] = the indexer's top-k of scores[:tokens], stable by position."""
         count = min(self.index_topk, tokens)
-        if self.long_topk in ('position', 'warp') and self.device_topk:
+        if self.long_topk in ('position', 'warp', 'ilp', 'ilp_hist') and self.device_topk:
             # One block: the threshold by radix select in shared memory, then the set in position
             # order (#32). Under replay it reads tokens from the step buffer; any tokens, any k.
-            if self.graph and self.long_topk == 'warp':
+            if self.graph and self.long_topk == 'ilp_hist' and self._hist_counted and self._multi_block_topk(tokens):
+                mb, size = self._mb, dict(max_tokens=self.scores.shape[0], k=self.index_topk)
+                self._spawn('index_mma/topk_mb_list_at', wcnt=mb['wcnt'], ckey=mb['ckey'], cpos=mb['cpos'],
+                            count=mb['count'], offs=mb['offs'], sel=mb['sel'],
+                            scores=self.scores.view(self.scores.shape, 'int32'), hist=self.score_bins, step=self.step,
+                            arrivals=mb['list_arrivals'], **size)
+                self._spawn('index_mma/topk_mb_write_at', out_ids=self.selected,
+                            scores=self.scores.view(self.scores.shape, 'int32'), hist=self.score_bins, offs=mb['offs'],
+                            sel=mb['sel'], step=self.step, arrivals=mb['write_arrivals'], **size)
+            elif self.graph and self.long_topk == 'ilp_hist' and self._hist_counted:
+                self._spawn('index_mma/topk_select_ilp_hist_at', out_ids=self.selected,
+                            scores=self.scores.view(self.scores.shape, 'int32'), hist=self.score_bins, step=self.step,
+                            k=self.index_topk)
+            elif self.graph and self.long_topk in ('ilp', 'ilp_hist'):
+                self._spawn('index_mma/topk_select_ilp_at', out_ids=self.selected,
+                            scores=self.scores.view(self.scores.shape, 'int32'), step=self.step, k=self.index_topk)
+            elif self.graph and self.long_topk == 'warp':
                 self._spawn('index_mma/topk_select_warp_at', out_ids=self.selected,
                             scores=self.scores.view(self.scores.shape, 'int32'), step=self.step, k=self.index_topk)
             elif self.graph:
@@ -1124,7 +1176,7 @@ class ResidentGLM:
         else:
             scores = np.frombuffer(self.scores.view((tokens,)).download(), dtype=np.float32)
             chosen = np.argsort(-scores, kind='stable')[:count].astype(np.int32)
-            if self.long_topk in ('position', 'warp'):
+            if self.long_topk in ('position', 'warp', 'ilp', 'ilp_hist'):
                 chosen = np.sort(chosen)
             self.selected.view((count,)).upload(chosen)
         self.selected_count = count
@@ -1361,6 +1413,8 @@ class ResidentGLM:
         if self.graph:
             count = min(self.index_topk, position + 1)
             short = position + 1 <= self.index_topk  # every cached token selected: no scores or top-k (#43)
+            if self._multi_block_topk(position + 1):
+                short = 'blocks'  # its own graph: the multi-block top-k's launches
             self.step_inputs.upload(np.concatenate([embedding, cosine, sine, self._step_buffer(position, count)]))
             graph = self._step_graphs.get(short)
             if graph is not None:

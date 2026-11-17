@@ -186,3 +186,41 @@ def test_long_topk_warp_gives_the_bits_of_position(ctx):
         finally:
             resident.close()
     np.testing.assert_array_equal(out['warp'], out['position'])
+
+
+@pytest.mark.skipif(not (SPAWN / 'index_mma/topk_mb_write_at.ptx').exists(), reason='gpu/spawn index_mma not built')
+@pytest.mark.parametrize('index_kernel', ['mma', 'fp8'])
+@pytest.mark.parametrize('option', ['ilp', 'ilp_hist', 'blocks'])
+def test_long_topk_ilp_gives_the_bits_of_position(ctx, option, index_kernel):
+    """long_topk='ilp' and 'ilp_hist' (#32): topk_select_ilp_at, or the scores kernel's bins and
+    topk_select_ilp_hist_at, select topk_select_at's set in the same order, so under replay the logits are
+    'position''s bit for bit. 'blocks' is 'ilp_hist' with topk_blocks_from=256: from step 257 on, the
+    multi-block pair topk_mb_list_at + topk_mb_write_at, in a third step graph. 32 heads of 128, so the
+    scores are index_scores_mma_at's or _fp8_at's (or their _hist_at twins, whose scores are the same);
+    600 steps, index_topk 128."""
+    if index_kernel == 'fp8' and tuple(ctx.compute_capability) < (9, 0):
+        pytest.skip('index_kernel=fp8 needs sm_90a')
+    steps = 600
+    model = build(seed=113, index_n_heads=32, index_head_dim=128, index_topk=128, max_position_embeddings=1024)
+    tokens = np.random.default_rng(113).integers(0, model.config['vocab_size'], size=steps).tolist()
+    long_topk = 'ilp_hist' if option == 'blocks' else option
+    extra = dict(topk_blocks_from=256) if option == 'blocks' else {}
+    out = {}
+    for name, kwargs in ((option, dict(long_topk=long_topk, **extra)), ('position', dict(long_topk='position'))):
+        resident = ResidentGLM(model, ctx=ctx, max_tokens=steps + 8, device_experts=True, graph=True,
+                               index_kernel=index_kernel, **kwargs)
+        try:
+            out[name] = resident.prefill(tokens)
+            launched = lambda kernel: resident.launches.get('index_mma/' + kernel, 0) > 0
+            assert launched('topk_select_ilp_at') == (name == 'ilp')
+            assert launched('topk_select_ilp_hist_at') == (name in ('ilp_hist', 'blocks'))
+            assert launched('topk_mb_list_at') == launched('topk_mb_write_at') == (name == 'blocks')
+            if name != 'position':
+                assert resident.replays == steps - (3 if name == 'blocks' else 2)
+            if name in ('ilp_hist', 'blocks'):  # every step past index_topk counted and zeroed its bins
+                assert not np.frombuffer(resident.score_bins.download(), np.uint32).any()
+                if name == 'blocks':
+                    assert not np.frombuffer(resident._mb['count'].download(), np.uint32).any()
+        finally:
+            resident.close()
+    np.testing.assert_array_equal(out[option], out['position'])

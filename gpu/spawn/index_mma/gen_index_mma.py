@@ -365,9 +365,83 @@ pub fn glm_vx_spawn_index_scores_mma_at(out: &mut Tensor<f32, [?], Memory::HBM>,
 '''
 
 
+# The scores kernels with the top-k's first pass folded in (#32): each also counts its scores' keys by their
+# top 12 bits into hist[4096] for topk_select_ilp_hist_at, which then reads the scores twice, not three
+# times, and zeroes hist for the next layer. A warp adds once a distinct bin, by its lowest lane
+# (match.any.sync, popc), with a global atomic.
+HIST_HELPERS = """
+// Order-preserving map from float32 bits to [0, 2^32), as topk_select_at's: bigger key == bigger score;
+// NaN is 0, and -0.0 is +0.0's key.
+macro_rules! topk_key32 {
+    ($bits:expr) => {
+        unsafe {
+          let dv_b: u32 = $bits as u32;
+          let mut dv_key: u32 = dv_b ^ 2147483648u32;
+          if dv_b >= 2147483648u32 { dv_key = 4294967295u32 - dv_b; }
+          if dv_b == 2147483648u32 { dv_key = 2147483648u32; }
+          if (dv_b & 2147483647u32) > 2139095040u32 { dv_key = 0u32; }
+          dv_key
+        }
+    };
+}
+
+// The lanes of this warp whose x equals this lane's (match.any.sync); all 32 lanes must call it.
+fn match_any(x: i32) on Topology::Device -> i32
+ensures writes_only()
+{
+  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
+    %r = llvm.inline_asm has_side_effects "match.any.sync.b32 $0, $1, -1;", "=r,r" %x : (i32) -> i32
+    macro.yield %r : i32
+  };
+}
+
+fn popc(x: i32) on Topology::Device -> i32
+ensures writes_only()
+{
+  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
+    %r = llvm.inline_asm "popc.b32 $0, $1;", "=r,r" %x : (i32) -> i32
+    macro.yield %r : i32
+  };
+}
+"""
+
+HIST_WRITE = """            let token: i32 = first + lane;
+            let ok: bool = token < tokens && token < max_tokens;
+            if ok {{ out[token] = score; }}
+            // The score's bin for topk_select_ilp_hist_at: the warp's lanes with one bin add once, by the
+            // lowest of them. Every lane calls match_any (the whole warp is in this branch).
+            let mut bin: i32 = 4096;
+            if ok {{ bin = (topk_key32!(score.to_bits()) >> 20u32) as i32; }}
+            let same: u32 = match_any(bin) as u32;
+            let below: u32 = (1u32 << (lane as u32)) - 1u32;
+            if bin < 4096 && (same & below) == 0u32 {{
+              let _o = atomic_fetch_add_u32(hist, bin, popc(same as i32) as u32, AtomicOrdering::Relaxed);
+            }}"""
+
+
+def hist_variant(text, name):
+    """`text` (a scores kernel) as <name>_hist_at: a `hist` parameter after `out`, and the bins counted."""
+    entry = f'pub fn glm_vx_spawn_{name}_at(out: &mut Tensor<f32, [?], Memory::HBM>, '
+    assert text.count(entry) == 1, name
+    pad = ' ' * len(f'pub fn glm_vx_spawn_{name}_hist_at(')
+    text = text.replace(entry, f'pub fn glm_vx_spawn_{name}_hist_at(out: &mut Tensor<f32, [?], Memory::HBM>, '
+                               f'hist: &mut Tensor<u32, [?], Memory::HBM>,\n{pad}')
+    write = """            let token: i32 = first + lane;
+            if token < tokens && token < max_tokens { out[token] = score; }"""
+    assert text.count(write) == 1, name
+    text = text.replace(write, HIST_WRITE.replace('{{', '{').replace('}}', '}'))
+    head, rest = text.split('// spawn-include: ../device.vx\n', 1)
+    head = head + ('// With hist: the top-k\'s first pass folded in (gen_index_mma.py\'s HIST_HELPERS): hist[4096]\n'
+                   '// counts the keys\' top 12 bits for topk_select_ilp_hist_at, which zeroes it after use.\n')
+    return (head + '// spawn-include: ../device.vx\n// spawn-vxc: -fweak-relaxed-atomics\nimport core::sync::atomic;\n'
+            + HIST_HELPERS + rest)
+
+
 def main():
     outputs = {'index_scores_mma_at.vx': source(), 'index_key_fp8_at.vx': key_fp8_source(),
-               'index_scores_fp8_at.vx': scores_fp8_source()}
+               'index_scores_fp8_at.vx': scores_fp8_source(),
+               'index_scores_mma_hist_at.vx': hist_variant(source(), 'index_scores_mma'),
+               'index_scores_fp8_hist_at.vx': hist_variant(scores_fp8_source(), 'index_scores_fp8')}
     stale = [name for name, text in outputs.items()
              if not (HERE / name).exists() or (HERE / name).read_text() != text]
     if '--check' in sys.argv:

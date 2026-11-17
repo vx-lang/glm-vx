@@ -1113,3 +1113,113 @@ def test_spawn_topk_select_warp_at_is_the_stable_set_in_position_order(context, 
         kernel.launch(out_ids=out, scores=d_scores, step=step, k=k)
         context.synchronize()
         np.testing.assert_array_equal(download(out), want)
+
+
+def topk_bins(scores):
+    """The bins of 4096 that the _hist_at kernels count: topk_select_at's key of each score, top 12 bits."""
+    b = np.asarray(scores, 'f4').view(np.uint32).astype(np.uint64)
+    key = np.where(b >= 0x80000000, 0xFFFFFFFF - b, b ^ 0x80000000)
+    key = np.where(b == 0x80000000, 0x80000000, key)
+    key = np.where((b & 0x7FFFFFFF) > 0x7F800000, 0, key)
+    return np.bincount((key >> 20).astype(np.int64), minlength=4096).astype(np.uint32)
+
+
+# index_scores_mma_hist_at and index_scores_fp8_hist_at (#32, long_topk='ilp_hist'): the scores of their
+# twins bit for bit, and hist += the bins of the scores below tokens, added to what hist held.
+@pytest.mark.parametrize('kernel', ['mma', 'fp8'])
+@pytest.mark.parametrize('tokens,max_tokens', [(1, 128), (2049, 3072), (3001, 3001), (32768, 32768)])
+def test_spawn_index_scores_hist_at_is_its_twin_and_counts_the_bins(context, kernel, tokens, max_tokens):
+    if kernel == 'fp8' and tuple(context.compute_capability) < (9, 0):
+        pytest.skip('index_scores_fp8_at needs sm_90a')
+    heads, dim = 32, 128
+    rng = np.random.default_rng(tokens + 3)
+    q = rng.normal(size=(heads, dim)).astype('f4')
+    keys = (rng.normal(size=(max_tokens, dim)) * rng.uniform(0.1, 10, size=(max_tokens, 1))).astype('f4')
+    weights, scale = (rng.normal(size=heads) * heads ** -0.5).astype('f4'), float(np.float32(dim ** -0.5))
+    step = upload(context, np.array([tokens - 1, tokens, 0, 0], np.int32))
+    if kernel == 'mma':
+        args = dict(q=upload(context, q), keys=upload(context, keys), weights=upload(context, weights), step=step,
+                    max_tokens=max_tokens, heads=heads, dim=dim, scale=scale)
+    else:
+        kc, ks = fp8_rows(keys, bf16_first=True)
+        args = dict(q=upload(context, q), codes=upload(context, kc.view(np.int32).reshape(max_tokens, 32)),
+                    scales=upload(context, ks), weights=upload(context, weights), step=step, max_tokens=max_tokens,
+                    heads=heads, dim=dim, scale=scale)
+    twin, out = upload(context, np.full(max_tokens, 7, 'f4')), upload(context, np.full(max_tokens, 7, 'f4'))
+    SpawnKernel(context, BUILD / f'spawn/index_mma/index_scores_{kernel}_at.ptx').launch(out=twin, **args)
+    start = np.arange(4096, dtype=np.uint32) % 3  # what hist held before: added to, not overwritten
+    hist = upload(context, start)
+    SpawnKernel(context, BUILD / f'spawn/index_mma/index_scores_{kernel}_hist_at.ptx').launch(out=out, hist=hist, **args)
+    context.synchronize()
+    got = download(out)
+    np.testing.assert_array_equal(got.view(np.uint32), download(twin).view(np.uint32))
+    np.testing.assert_array_equal(download(hist), start + topk_bins(got[:tokens]))
+
+
+# topk_select_ilp_hist_at (#32): topk_select_ilp_at's set and order from hist (the scores' bins, as the
+# _hist_at scores kernels count them), and hist zero after, also when tokens <= k writes nothing.
+@pytest.mark.parametrize('tokens,k,ties', [(2049, 2048, True), (3001, 2048, False), (70000, 2048, True),
+                                           (100000, 2048, 'equal'), (131072, 2048, 'narrow'), (40000, 1000, 'near'),
+                                           (9000, 16, True), (2048, 2048, False)])
+def test_spawn_topk_select_ilp_hist_at_is_the_stable_set_and_zeroes_hist(context, tokens, k, ties):
+    rng = np.random.default_rng(tokens * 11 + k)
+    if ties == 'equal':
+        scores = np.zeros(tokens, 'f4')
+    elif ties == 'narrow':
+        scores = (5 + 0.01 * rng.normal(size=tokens)).astype('f4')
+    elif ties == 'near':
+        scores = np.where(rng.random(tokens) < 0.05, 4 + 0.5 * rng.random(tokens), rng.random(tokens)).astype('f4')
+    else:
+        scores = rng.integers(-50, 50, size=tokens).astype('f4') if ties else rng.normal(size=tokens).astype('f4')
+    if tokens > 9:
+        scores[[3, 5, 7, 9]] = np.nan, -np.inf, -0.0, np.inf
+    kernel = SpawnKernel(context, BUILD / 'spawn/index_mma/topk_select_ilp_hist_at.ptx')
+    out, d_scores = upload(context, np.full(k, -7, 'i4')), upload(context, scores.view(np.int32))
+    step = upload(context, np.array([tokens - 1, tokens, min(k, tokens), 1], np.int32))
+    want = np.sort(np.argsort(-scores, kind='stable')[:k]) if tokens > k else np.full(k, -7, 'i4')
+    for _ in range(2):  # the second run's hist counted again, as the next layer's scores kernel would
+        hist = upload(context, topk_bins(scores))
+        kernel.launch(out_ids=out, scores=d_scores, hist=hist, step=step, k=k)
+        context.synchronize()
+        np.testing.assert_array_equal(download(out), want)
+        assert not download(hist).any()
+
+
+# topk_mb_list_at + topk_mb_write_at (#32, ResidentGLM(long_topk='ilp_hist') past topk_blocks_from): the
+# same set and order over blocks of 8192 positions, from the bins; the list of 16384 overflows for
+# 'equal' and 'narrow'. After: hist and count zero, also when tokens <= k writes nothing.
+@pytest.mark.parametrize('tokens,k,ties,max_tokens', [(3001, 2048, False, 3001), (70000, 2048, True, 80000),
+                                                      (131072, 2048, False, 131072), (200000, 2048, False, 262144),
+                                                      (100000, 2048, 'equal', 100000), (131072, 2048, 'narrow', 131072),
+                                                      (40000, 1000, 'near', 65536), (9000, 16, True, 9000),
+                                                      (2048, 2048, False, 8192)])
+def test_spawn_topk_mb_is_the_stable_set_and_zeroes_hist(context, tokens, k, ties, max_tokens):
+    rng = np.random.default_rng(tokens * 13 + k)
+    if ties == 'equal':
+        scores = np.zeros(tokens, 'f4')
+    elif ties == 'narrow':
+        scores = (5 + 0.01 * rng.normal(size=tokens)).astype('f4')
+    elif ties == 'near':
+        scores = np.where(rng.random(tokens) < 0.05, 4 + 0.5 * rng.random(tokens), rng.random(tokens)).astype('f4')
+    else:
+        scores = rng.integers(-50, 50, size=tokens).astype('f4') if ties else rng.normal(size=tokens).astype('f4')
+    if tokens > 9:
+        scores[[3, 5, 7, 9]] = np.nan, -np.inf, -0.0, np.inf
+    padded = np.concatenate([scores, np.full(max_tokens - tokens, np.inf, 'f4')])  # never read past tokens
+    lister = SpawnKernel(context, BUILD / 'spawn/index_mma/topk_mb_list_at.ptx')
+    writer = SpawnKernel(context, BUILD / 'spawn/index_mma/topk_mb_write_at.ptx')
+    z = lambda n, dtype: upload(context, np.zeros(n, dtype))
+    wcnt, ckey, cpos, count = z(4096, np.int32), z(16384, np.uint32), z(16384, np.int32), z(1, np.uint32)
+    offs, sel, arrive1, arrive2 = z(8192, np.int32), z(4, np.uint32), z(1, np.int32), z(1, np.int32)
+    out, d_scores = upload(context, np.full(k, -7, 'i4')), upload(context, padded.view(np.int32))
+    step = upload(context, np.array([tokens - 1, tokens, min(k, tokens), 1], np.int32))
+    want = np.sort(np.argsort(-scores, kind='stable')[:k]) if tokens > k else np.full(k, -7, 'i4')
+    for _ in range(2):
+        hist = upload(context, topk_bins(scores))
+        lister.launch(wcnt=wcnt, ckey=ckey, cpos=cpos, count=count, offs=offs, sel=sel, scores=d_scores, hist=hist,
+                      step=step, max_tokens=max_tokens, k=k, arrivals=arrive1)
+        writer.launch(out_ids=out, scores=d_scores, hist=hist, offs=offs, sel=sel, step=step, max_tokens=max_tokens,
+                      k=k, arrivals=arrive2)
+        context.synchronize()
+        np.testing.assert_array_equal(download(out), want)
+        assert not download(hist).any() and not download(count).any()
