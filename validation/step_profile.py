@@ -2,13 +2,13 @@
 between cuProfilerStart and cuProfilerStop (twice), for nsys's kernel durations:
 
   nsys profile --capture-range=cudaProfilerApi --capture-range-end=repeat --cuda-graph-trace=node \\
-      python -m validation.step_profile --context 3001 --long-topk position --fuse-glue
+      python -m validation.step_profile --context 3001
 
 FP8 Linears through the cvt kernels, matvec_kernels='x4', norm_block 1024, a bf16 lm_head, index_topk
 2048, random weights. One dense layer by default (as evidence/h200-20261116-m to -q); --layers 2
 --moe gives a dense layer then a MoE one (16 routed experts), so a layer boundary and a MoE output are
-in the step for fuse_glue's fusions there. --long-topk and --fuse-glue select ResidentGLM's options,
-for an A/B in one build (#32, #39)."""
+in the step for fuse_glue's fusions there. --long-topk, --no-fuse-glue and --index-kernel select
+ResidentGLM's options, for an A/B in one build (#32, #39)."""
 import argparse
 import time
 
@@ -26,7 +26,8 @@ def main():
     p.add_argument('--context', type=int, default=1000)
     p.add_argument('--mla-kernel', choices=['decode', 'chunks', 'heads', 'flash', 'tc'], default='tc')
     p.add_argument('--long-topk', choices=['position', 'merge', 'select'], default='position')
-    p.add_argument('--fuse-glue', action='store_true')
+    p.add_argument('--fuse-glue', action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument('--index-kernel', choices=['simt', 'tc'], default='simt')
     p.add_argument('--layers', type=int, default=1)
     p.add_argument('--moe', action='store_true', help='layers past the first are MoE (16 routed experts)')
     p.add_argument('--repeats', type=int, default=2)
@@ -42,7 +43,7 @@ def main():
     tokens = [int(t) for t in np.random.default_rng(1).integers(0, config['vocab_size'], args.context + args.repeats)]
     r = ResidentGLM(model, max_tokens=args.context + 8, device_experts=True, graph=True, fused_attention=True,
                     mla_kernel=args.mla_kernel, fp8_kernels='cvt', matvec_kernels='x4', norm_block=1024,
-                    long_topk=args.long_topk, fuse_glue=args.fuse_glue)
+                    long_topk=args.long_topk, fuse_glue=args.fuse_glue, index_kernel=args.index_kernel)
     t0 = time.time()
     for t in tokens[:args.context]:
         r.forward(t, logits=False)

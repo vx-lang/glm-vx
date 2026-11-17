@@ -158,7 +158,10 @@ def test_graph_replay_equals_the_per_launch_path(kind, long_topk):
         assert graph.launches['index_scores_at'] == graph.launches['topk_sort_at'] == 2 * full
         assert graph.launches['topk_stable_long_at'] == 2 * full and 'topk_stable_at' not in graph.launches
     assert graph.launches['mla_partial_at'] == graph.launches['mla_merge_at'] == 4 * model.n_layers
-    assert graph.launches['store_row'] == 4 * (2 * model.n_layers + full)
+    # fuse_glue (#39, the default): under replay each full indexer's key row is one index_key_at, so
+    # store_row writes only the latent and rope rows.
+    assert graph.launches['store_row'] == 4 * 2 * model.n_layers
+    assert graph.launches['index_key_at'] == 4 * full
     assert not {'index_scores', 'topk_stable', 'mla_partial', 'mla_merge'} & set(graph.launches)
 
 
@@ -219,3 +222,19 @@ def test_the_test_context_refuses_copies_and_allocations_during_a_capture():
         with stream.capture():
             ctx.tensor((2,))
     x.upload(np.ones(4, 'f4'))  # allowed again once the capture ended
+
+
+@needs_spawn
+def test_index_kernel_tc_matches_simt_to_bf16_rounding():
+    # index_kernel='tc' (#32): the indexer's q and key rows in bf16, the scores on the tensor cores
+    # (index_scores_tc_at) past index_topk=4. They agree with the f32 scores to bf16 rounding, so here
+    # every step selects the same tokens and the logits are those of index_kernel='simt' to rounding.
+    model = build(seed=59, index_head_dim=64)
+    got, tc = run(model, TOKENS, graph=True, index_kernel='tc')
+    want, simt = run(model, TOKENS, graph=True)
+    assert tc.launches.get('index_scores_tc_at', 0) > 0 and 'index_scores_at' not in tc.launches
+    assert 'index_scores_tc_at' not in simt.launches
+    np.testing.assert_allclose(got, want, rtol=1e-4, atol=1e-4)
+    assert (got.argmax(-1) == want.argmax(-1)).all()
+    with pytest.raises(ValueError, match='index_kernel'):
+        ResidentGLM(model, ctx=Context(), index_kernel='fp8')

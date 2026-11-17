@@ -1,0 +1,100 @@
+// The indexer's scores on the tensor cores (#32), under graph replay: tokens is step[1] of
+// ResidentGLM's step buffer. out[t] = sum over heads h, in head order, of
+// weights[h] * relu(scale * (q[h] . keys[t])), as index_scores_at, for t < tokens; out past tokens
+// is not written.
+//
+// q and the key rows are rounded to bf16 and multiplied with mma.sync, the sums in f32. That is the
+// precision of SGLang's indexer or better: SGLang rounds both to FP8 E4M3 (one scale a 128-value
+// row) and multiplies them with DeepGEMM's FP8 MMA (fp8_paged_mqa_logits). So out agrees with
+// index_scores_at to bf16 rounding, not bit for bit.
+//
+// Block b takes tokens 128 * b .. + 127; its subgroup w the 32 tokens 128 * b + 32 * w .. + 31, as two
+// tiles of 16 (th):
+//   1. subgroup w copies the query tiles of heads 8 * w .. + 7 (both 64-dim halves, transposed,
+//      bf16; zero past heads or dim), and its 32 key rows (bf16; zero past tokens);
+//   2. s[w][th][n] = keys @ q^T for heads 8 * n .. + 7, over one or two 64-dim halves;
+//   3. lane t adds token t's weighted heads and writes out.
+// Needs 1 <= heads <= 32 and dim 64 or 128; otherwise it writes nothing.
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_index_scores_tc_at(out: &mut Tensor<f32, [?], Memory::HBM>, q: &Tensor<f32, [?, ?], Memory::HBM>,
+                                       keys: &Tensor<f32, [?, ?], Memory::HBM>, weights: &Tensor<f32, [?], Memory::HBM>,
+                                       step: &Tensor<i32, [?], Memory::HBM>, max_tokens: i32, heads: i32, dim: i32,
+                                       scale: f32) -> void {
+  spawn on(Topology::Device) {
+    for b in 0..(max_tokens + 127) / 128 across blocks {
+      let tokens: i32 = step[1];
+      let ok: bool = heads >= 1 && heads <= 32 && (dim == 64 || dim == 128) && b * 128 < tokens;
+      // sk[w][th][c][t][k]: dim 64 * c + k of token 128 * b + 32 * w + 16 * th + t.
+      let mut sk = unsafe { Tensor<bf16, [4, 2, 2, 16, 64], Memory::SMEM>::uninit() };
+      // qt[c][n][k][h]: dim 64 * c + k of head 8 * n + h.
+      let mut qt = unsafe { Tensor<bf16, [2, 4, 64, 8], Memory::SMEM>::uninit() };
+      let mut s = unsafe { Tensor<f32, [4, 2, 4, 16, 8], Memory::SMEM>::uninit() };
+      if ok {
+      for w in 0..4 across subgroups {
+        for l in 0..32 across lanes {
+          for c in 0..2 {
+            for kk in 0..2 {
+              let k: i32 = l + 32 * kk;
+              let d: i32 = 64 * c + k;
+              for h in 0..8 {
+                let head: i32 = 8 * w + h;
+                let hc: i32 = if head < heads { head } else { 0 };
+                let dc: i32 = if d < dim { d } else { 0 };
+                let x: f32 = q[hc][dc];
+                qt[c][w][k][h] = if head < heads && d < dim { x as bf16 } else { 0.0 as bf16 };
+              }
+            }
+          }
+        }
+        for l in 0..32 across lanes {
+          for th in 0..2 {
+            for c in 0..2 {
+              for kk in 0..2 {
+                let k: i32 = l + 32 * kk;
+                let d: i32 = 64 * c + k;
+                for t in 0..16 {
+                  let token: i32 = 128 * b + 32 * w + 16 * th + t;
+                  let tc: i32 = if token < tokens { token } else { 0 };
+                  let dc: i32 = if d < dim { d } else { 0 };
+                  let x: f32 = keys[tc][dc];
+                  sk[w][th][c][t][k] = if token < tokens && d < dim { x as bf16 } else { 0.0 as bf16 };
+                }
+              }
+            }
+          }
+        }
+      }
+      for w in 0..4 across subgroups {
+        for th in 0..2 {
+          s[w][th][0] = (sk[w][th][0] as f32) @ (qt[0][0] as f32);
+          s[w][th][1] = (sk[w][th][0] as f32) @ (qt[0][1] as f32);
+          s[w][th][2] = (sk[w][th][0] as f32) @ (qt[0][2] as f32);
+          s[w][th][3] = (sk[w][th][0] as f32) @ (qt[0][3] as f32);
+          if dim == 128 {
+            s[w][th][0] = s[w][th][0] + (sk[w][th][1] as f32) @ (qt[1][0] as f32);
+            s[w][th][1] = s[w][th][1] + (sk[w][th][1] as f32) @ (qt[1][1] as f32);
+            s[w][th][2] = s[w][th][2] + (sk[w][th][1] as f32) @ (qt[1][2] as f32);
+            s[w][th][3] = s[w][th][3] + (sk[w][th][1] as f32) @ (qt[1][3] as f32);
+          }
+        }
+      }
+      for w in 0..4 across subgroups {
+        for t in 0..32 across lanes {
+          let token: i32 = 128 * b + 32 * w + t;
+          let mut score: f32 = 0.0;
+          for h in 0..32 {
+            if h < heads {
+              let mut a: f32 = s[w][t / 16][h / 8][t % 16][h % 8] * scale;
+              if a < 0.0 { a = 0.0; }
+              score = score + weights[h] * a;
+            }
+          }
+          if token < tokens { out[token] = score; }
+        }
+      }
+      }
+    }
+  }
+  return;
+}
