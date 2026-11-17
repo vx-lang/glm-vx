@@ -135,3 +135,27 @@ def test_fused_glue_gives_the_same_bits_on_the_gpu(ctx, kind):
     assert launches[True]['kv_rows_bf16_at'] > 0 and 'store_row_bf16_at' not in launches[True]
     assert launches[True]['index_key_at'] > 0 and 'layernorm' not in launches[True]
     assert launches[True]['rmsnorm_pair'] > 0 and 'residual_rmsnorm' not in launches[True]
+
+
+@pytest.mark.skipif(not (SPAWN / 'index_scores_tc_at.ptx').exists(), reason='gpu/spawn index_scores_tc_at not built')
+def test_index_kernel_tc_matches_simt_to_bf16_rounding(ctx):
+    """index_kernel='tc' (#32): the indexer's q and key rows in bf16, the scores on the tensor cores, against
+    'simt' (f32) under replay at GLM-5.3's indexer shape (32 heads, dim 128); 600 steps, index_topk 128, so
+    472 of them select by score. A score within bf16 rounding of the cut can change one selected token,
+    so the logits agree closely, not bit for bit, with the same argmax almost everywhere."""
+    steps = 600
+    model = build(seed=107, index_n_heads=32, index_head_dim=128, index_topk=128, max_position_embeddings=1024)
+    tokens = np.random.default_rng(107).integers(0, model.config['vocab_size'], size=steps).tolist()
+    out = {}
+    for kernel in ('tc', 'simt'):
+        resident = ResidentGLM(model, ctx=ctx, max_tokens=steps + 8, device_experts=True, graph=True,
+                               index_kernel=kernel)
+        try:
+            out[kernel] = resident.prefill(tokens)
+            assert resident.replays == steps - 1
+            assert (resident.launches.get('index_scores_tc_at', 0) > 0) == (kernel == 'tc')
+        finally:
+            resident.close()
+    scale = np.abs(out['simt']).max()
+    np.testing.assert_allclose(out['tc'], out['simt'], rtol=0, atol=2e-2 * scale)
+    assert (out['tc'].argmax(-1) == out['simt'].argmax(-1)).mean() > 0.95

@@ -223,3 +223,18 @@ def test_the_test_context_refuses_copies_and_allocations_during_a_capture():
             ctx.tensor((2,))
     x.upload(np.ones(4, 'f4'))  # allowed again once the capture ended
 
+
+@needs_spawn
+def test_index_kernel_tc_matches_simt_to_bf16_rounding():
+    # index_kernel='tc' (#32): the indexer's q and key rows in bf16, the scores on the tensor cores
+    # (index_scores_tc_at) past index_topk=4. They agree with the f32 scores to bf16 rounding, so here
+    # every step selects the same tokens and the logits are those of index_kernel='simt' to rounding.
+    model = build(seed=59, index_head_dim=64)
+    got, tc = run(model, TOKENS, graph=True, index_kernel='tc')
+    want, simt = run(model, TOKENS, graph=True)
+    assert tc.launches.get('index_scores_tc_at', 0) > 0 and 'index_scores_at' not in tc.launches
+    assert 'index_scores_tc_at' not in simt.launches
+    np.testing.assert_allclose(got, want, rtol=1e-4, atol=1e-4)
+    assert (got.argmax(-1) == want.argmax(-1)).all()
+    with pytest.raises(ValueError, match='index_kernel'):
+        ResidentGLM(model, ctx=Context(), index_kernel='fp8')

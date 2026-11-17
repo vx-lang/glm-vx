@@ -985,3 +985,26 @@ def test_glue_fusions_give_the_bits_of_the_launches_they_replace(context):
                  (pair[1], pair[3]), (keys[0], keys[1]), (caches[0], caches[2]), (caches[1], caches[3])):
         np.testing.assert_array_equal(bits(a), bits(b))
     assert not np.isnan(download(keys[1])[3]).any() and np.isnan(download(keys[1])[[0, 1, 2, 4, 5]]).all()
+
+
+# index_scores_tc_at (#32, ResidentGLM(index_kernel='tc')) at GLM-5.3's indexer shape (32 heads, dim
+# 128): q and the key rows rounded to bf16, mma.sync with f32 sums, against float64 sums of the same
+# bf16 values; out past step[1]'s tokens is not written.
+@pytest.mark.parametrize('tokens,max_tokens', [(1, 128), (2049, 3072), (3001, 4096), (32768, 32768)])
+def test_spawn_index_scores_tc_at_matches_float64_on_bf16_values(context, tokens, max_tokens):
+    heads, dim = 32, 128
+    rng = np.random.default_rng(tokens)
+    q, keys = rng.normal(size=(heads, dim)).astype('f4'), rng.normal(size=(max_tokens, dim)).astype('f4')
+    weights, scale = (rng.normal(size=heads) * heads ** -0.5).astype('f4'), dim ** -0.5
+    out = upload(context, np.full(max_tokens, 7, 'f4'))
+    SpawnKernel(context, BUILD / 'spawn/index_scores_tc_at.ptx').launch(
+        out=out, q=upload(context, q), keys=upload(context, keys), weights=upload(context, weights),
+        step=upload(context, np.array([tokens - 1, tokens, 0, 0], np.int32)), max_tokens=max_tokens, heads=heads,
+        dim=dim, scale=scale)
+    context.synchronize()
+    got = download(out)
+    rb = lambda x: ((x.view(np.uint32).astype(np.uint64) + 0x7FFF + ((x.view(np.uint32) >> 16) & 1)) >> 16 << 16
+                    ).astype(np.uint32).view('f4').astype(np.float64)
+    terms = np.maximum(rb(keys[:tokens]) @ rb(q).T * scale, 0) * weights.astype(np.float64)
+    np.testing.assert_allclose(got[:tokens], terms.sum(-1), rtol=0, atol=1e-5 * np.abs(terms).sum(-1).max())
+    assert (got[tokens:] == 7).all()

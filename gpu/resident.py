@@ -171,7 +171,7 @@ class ResidentGLM:
     def __init__(self, model, *, max_tokens=4096, ptx_dir=None, device=0, ctx=None, max_weight_bytes=None,
                  device_topk=True, device_experts=False, fused_attention=False, graph=False, fp8_kernels='hand',
                  topk='auto', long_topk='position', mla_kernel='decode', matvec_kernels='hand', mtp=False,
-                 norm_block=256, fuse_glue=True):
+                 norm_block=256, fuse_glue=True, index_kernel='simt'):
         if getattr(model, 'packed_weights', False):
             raise NotImplementedError('ResidentGLM supports expanded float32 weights only')
         if getattr(model, 'expert_placement', None) is not None:
@@ -226,6 +226,14 @@ class ResidentGLM:
         if mla_kernel not in ('decode', 'chunks', 'heads', 'flash', 'tc'):
             raise ValueError("mla_kernel must be 'decode', 'chunks', 'heads', 'flash' or 'tc'")
         self.mla_kernel = mla_kernel
+        # index_kernel (#32): the indexer's scores past index_topk. 'simt' is index_scores(_at), in f32,
+        # bit for bit the reference's; 'tc' (under graph replay) is index_scores_tc_at: q and the key
+        # rows rounded to bf16, the products on the tensor cores with f32 sums, so the scores agree to
+        # bf16 rounding. SGLang's indexer rounds both to FP8 (DeepGEMM fp8_paged_mqa_logits), so 'tc'
+        # is at its precision or above.
+        if index_kernel not in ('simt', 'tc'):
+            raise ValueError("index_kernel must be 'simt' or 'tc'")
+        self.index_kernel = index_kernel
         if mla_kernel != 'decode' and not (self.graph and self.fused_attention):
             raise ValueError(f"mla_kernel={mla_kernel!r} needs graph=True and fused_attention=True")
         if self.graph and not (self.device_topk and self.device_experts):
@@ -1020,7 +1028,12 @@ class ResidentGLM:
         self._launch('scale', self._grid(self.index_heads), _ELEMENTWISE_BLOCK,
                      [self.head_weights, head_weights_raw, F(_f32(self.index_heads ** -0.5, 'scale')), I(self.index_heads)])
         scale = F(_f32(self.index_dim ** -0.5, 'scale'))
-        if self.graph:
+        if self.graph and self.index_kernel == 'tc' and self.index_heads <= 32 and self.index_dim in (64, 128):
+            self._spawn('index_scores_tc_at', out=self.scores, q=self.iq_rot.view((self.index_heads, self.index_dim)),
+                        keys=self.index_keys[layer], weights=self.head_weights, step=self.step,
+                        max_tokens=self.index_keys[layer].shape[0], heads=self.index_heads, dim=self.index_dim,
+                        scale=_f32(self.index_dim ** -0.5, 'scale'))
+        elif self.graph:
             self._launch('index_scores_at', (self.max_tokens + 3) // 4, 128,
                          [self.scores, self.iq_rot, self.index_keys[layer], self.head_weights, self.step,
                           I(self.index_heads), I(self.index_dim), scale])

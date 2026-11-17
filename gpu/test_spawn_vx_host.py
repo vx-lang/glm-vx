@@ -1618,3 +1618,30 @@ def test_mla_decode_at_equals_mla_decode_for_each_splits(run, heads, rank, rope,
         bits_equal(got['numerator'][:, :splits], want['numerator'])
         bits_equal(got['stats'][:, :splits], want['stats'])
         bits_equal(got['out'], want['out'])
+
+
+# index_scores_tc_at (#32, ResidentGLM(index_kernel='tc')): q and the key rows rounded to bf16, the
+# products on the tensor cores with f32 sums, against float64 sums of the same bf16 values; out past
+# step[1]'s tokens is not written.
+@pytest.mark.parametrize('heads,dim,tokens,max_tokens', [(32, 128, 300, 384), (8, 64, 129, 256), (5, 128, 40, 40),
+                                                         (32, 64, 1, 128), (17, 128, 255, 256)])
+def test_index_scores_tc_at_matches_float64_on_bf16_values(run, heads, dim, tokens, max_tokens):
+    rng = np.random.default_rng(heads + dim + tokens)
+    q, keys = rng.normal(size=(heads, dim)).astype(F), rng.normal(size=(max_tokens, dim)).astype(F)
+    weights, scale = rng.normal(size=heads).astype(F), dim ** -0.5
+    out = run('index_scores_tc_at', out=np.full(max_tokens, 7, F), q=q, keys=keys, weights=weights,
+              step=np.array([tokens - 1, tokens, 0, 0], np.int32), max_tokens=max_tokens, heads=heads, dim=dim,
+              scale=scale)['out']
+    qb, kb = bf16(to_bf16(q)).astype(np.float64), bf16(to_bf16(keys[:tokens])).astype(np.float64)
+    terms = np.maximum(kb @ qb.T * scale, 0) * weights.astype(np.float64)
+    np.testing.assert_allclose(out[:tokens], terms.sum(-1), rtol=0, atol=1e-5 * np.abs(terms).sum(-1).max())
+    assert (out[tokens:] == 7).all()
+
+
+@pytest.mark.parametrize('heads,dim', [(33, 128), (32, 96), (0, 64)])
+def test_index_scores_tc_at_writes_nothing_off_its_shape(run, heads, dim):
+    rng = np.random.default_rng(heads + dim)
+    out = run('index_scores_tc_at', out=np.full(128, 7, F), q=rng.normal(size=(max(heads, 1), dim)).astype(F),
+              keys=rng.normal(size=(128, dim)).astype(F), weights=np.ones(max(heads, 1), F),
+              step=np.array([99, 100, 0, 0], np.int32), max_tokens=128, heads=heads, dim=dim, scale=0.1)['out']
+    assert (out == 7).all()
