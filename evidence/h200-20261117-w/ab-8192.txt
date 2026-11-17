@@ -1,0 +1,6 @@
+total    214.5 ->    215.9 us (2 traces)
+   19.8 x1      19.4 x1   glm_vx_spawn_topk_select_at
+    5.5 x1       5.8 x1   glm_vx_spawn_fp8_matvec_cols_cvt
+    5.1 x1       0.0 x0   glm_vx_spawn_index_scores_mma_at
+    0.0 x0       4.5 x1   glm_vx_spawn_index_scores_fp8_at
+    0.0 x0       1.4 x1   glm_vx_spawn_index_key_fp8_at

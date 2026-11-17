@@ -139,11 +139,12 @@ def test_fused_glue_gives_the_same_bits_on_the_gpu(ctx, kind):
 
 
 @pytest.mark.skipif(not (SPAWN / 'index_scores_tc_at.ptx').exists(), reason='gpu/spawn index_scores_tc_at not built')
-@pytest.mark.parametrize('kernel,name', [('tc', 'index_scores_tc_at'), ('mma', 'index_mma/index_scores_mma_at')])
+@pytest.mark.parametrize('kernel,name', [('tc', 'index_scores_tc_at'), ('mma', 'index_mma/index_scores_mma_at'),
+                                         ('fp8', 'index_mma/index_scores_fp8_at')])
 def test_index_kernel_tc_matches_simt_to_bf16_rounding(ctx, kernel, name):
-    """index_kernel='tc' and 'mma' (#32): the indexer's q and key rows in bf16, the scores on the tensor cores, against
-    'simt' (f32) under replay at GLM-5.3's indexer shape (32 heads, dim 128); 600 steps, index_topk 128, so
-    472 of them select by score. A score within bf16 rounding of the cut can change one selected token,
+    """index_kernel='tc', 'mma' (bf16) and 'fp8' (#32): the indexer's q and key rows rounded, the scores on the
+    tensor cores, against 'simt' (f32) under replay at GLM-5.3's indexer shape (32 heads, dim 128); 600 steps, index_topk 128, so
+    472 of them select by score. A score within rounding of the cut can change one selected token,
     so the logits agree closely, not bit for bit, with the same argmax almost everywhere."""
     steps = 600
     model = build(seed=107, index_n_heads=32, index_head_dim=128, index_topk=128, max_position_embeddings=1024)
@@ -157,8 +158,13 @@ def test_index_kernel_tc_matches_simt_to_bf16_rounding(ctx, kernel, name):
             # Two step graphs (#43), within index_topk and past it, each run once before its capture.
             assert resident.replays == steps - 2
             assert (resident.launches.get(name, 0) > 0) == (option == kernel)
+            if option == 'fp8':  # every cached key row quantized as it is stored, within index_topk too
+                assert resident.launches['index_mma/index_key_fp8_at'] == resident.launches['index_key_at']
         finally:
             resident.close()
     scale = np.abs(out['simt']).max()
-    np.testing.assert_allclose(out[kernel], out['simt'], rtol=0, atol=2e-2 * scale)
+    far = (np.abs(out[kernel] - out['simt']) > 2e-2 * scale).any(-1)
+    # FP8 rounds the scores far more than bf16, so a step's selection can lose a token at the cut (H200:
+    # 1 step of 600, evidence/h200-20261117-w); bf16 keeps every step within the tolerance here.
+    assert far.sum() <= (steps // 100 if kernel == 'fp8' else 0), np.flatnonzero(far)
     assert (out[kernel].argmax(-1) == out['simt'].argmax(-1)).mean() > 0.95

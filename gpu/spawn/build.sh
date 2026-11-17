@@ -34,7 +34,8 @@ for source in gpu/spawn/*.vx; do
     "$PYTHON" gpu/spawn/build.py --source "$source" --output "$OUT/$out.ptx" "${extra[@]}" "${lib[@]}" "${args[@]}"
   done
 done
-# The kernels in subdirectories with their own build (inline PTX: no host library).
-if [[ -z ${KERNELS:-} || " $KERNELS " == *" index_scores_mma_at "* ]]; then
+# The kernels in subdirectories with their own build (inline PTX: no host library); KERNELS=index_mma
+# builds only those.
+if [[ -z ${KERNELS:-} || " $KERNELS " == *" index_mma "* ]]; then
   OUT="$OUT/index_mma" bash gpu/spawn/index_mma/build.sh
 fi

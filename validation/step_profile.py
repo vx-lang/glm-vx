@@ -27,7 +27,7 @@ def main():
     p.add_argument('--mla-kernel', choices=['decode', 'chunks', 'heads', 'flash', 'tc'], default='tc')
     p.add_argument('--long-topk', choices=['position', 'merge', 'select'], default='position')
     p.add_argument('--fuse-glue', action=argparse.BooleanOptionalAction, default=True)
-    p.add_argument('--index-kernel', choices=['simt', 'tc', 'mma'], default='simt')
+    p.add_argument('--index-kernel', choices=['simt', 'tc', 'mma', 'fp8'], default='simt')
     p.add_argument('--layers', type=int, default=1)
     p.add_argument('--moe', action='store_true', help='layers past the first are MoE (16 routed experts)')
     p.add_argument('--repeats', type=int, default=2)

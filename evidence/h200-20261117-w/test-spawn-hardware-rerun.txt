@@ -1,0 +1,6 @@
+...........max |err| / max sum |terms|: 1.15e-08
+.max |err| / max sum |terms|: 6.15e-08
+.max |err| / max sum |terms|: 8.45e-08
+.max |err| / max sum |terms|: 6.43e-08
+.
+15 passed, 163 deselected in 1.51s

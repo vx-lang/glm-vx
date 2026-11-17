@@ -1,0 +1,46 @@
+..........Fmax |err| / max sum |terms|: 1.15e-08
+.max |err| / max sum |terms|: 6.15e-08
+.max |err| / max sum |terms|: 8.45e-08
+.max |err| / max sum |terms|: 6.43e-08
+.
+=================================== FAILURES ===================================
+__________ test_index_key_fp8_at_quantizes_the_row_at_step_as_sglang ___________
+
+context = <gpu.runtime.CUDAContext object at 0x7b49ebc8a030>
+
+    def test_index_key_fp8_at_quantizes_the_row_at_step_as_sglang(context):
+        rng = np.random.default_rng(5)
+        cap = 40
+        keys = (rng.normal(size=(cap, 128)) * rng.uniform(0.01, 30, size=(cap, 1))).astype('f4')
+        keys[7] = 0  # all zero: the 1e-4 floor
+        keys[9, :5] = [1e30, -1e30, 3e-8, 448, -0.0]
+        codes, scales = upload(context, np.zeros((cap, 32), np.int32)), upload(context, np.full(cap, 7, 'f4'))
+        kernel = SpawnKernel(context, BUILD / 'spawn/index_mma/index_key_fp8_at.ptx')
+        dk = upload(context, keys)
+        rows = [0, 7, 9, 21, cap - 1]
+        for pos in rows:
+            kernel.launch(codes=codes, scales=scales, keys=dk, step=upload(context, np.array([pos, pos + 1, 0, 0], np.int32)),
+                          max_tokens=cap, dim=128)
+        context.synchronize()
+        want_codes, want_scales = fp8_rows(keys[rows], bf16_first=True)
+        got_codes = download(codes).view(np.uint8).reshape(cap, 128)
+>       np.testing.assert_array_equal(got_codes[rows], want_codes)
+E       AssertionError: 
+E       Arrays are not equal
+E       
+E       Mismatched elements: 1 / 640 (0.156%)
+E       Mismatch at index:
+E        [2, 4]: 128 (ACTUAL), 0 (DESIRED)
+E       Max absolute difference among violations: 128
+E       Max relative difference among violations: inf
+E        ACTUAL: array([[241, 247, 227, 106, 117,  90, 237, 241, 113, 121, 101, 246, 243,
+E               121,  97, 250, 215, 245, 239, 235, 240, 109, 212, 238, 105, 114,
+E               249, 228, 243, 224, 247,  71, 206, 230, 244, 233, 245, 248,  98,...
+E        DESIRED: array([[241, 247, 227, 106, 117,  90, 237, 241, 113, 121, 101, 246, 243,
+E               121,  97, 250, 215, 245, 239, 235, 240, 109, 212, 238, 105, 114,
+E               249, 228, 243, 224, 247,  71, 206, 230, 244, 233, 245, 248,  98,...
+
+gpu/test_spawn_hardware.py:1047: AssertionError
+=========================== short test summary info ============================
+FAILED gpu/test_spawn_hardware.py::test_index_key_fp8_at_quantizes_the_row_at_step_as_sglang
+1 failed, 14 passed, 163 deselected in 1.67s
