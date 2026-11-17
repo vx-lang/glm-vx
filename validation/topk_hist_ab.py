@@ -13,7 +13,10 @@ Every output is checked: the twins' scores are equal bit for bit, the bins are n
 gives np.sort(np.argsort(-scores, kind='stable')[:k]). The last columns are a step's indexer before
 (scores + topk_select_at) and after (scores_hist + topk_select_ilp_hist_at).
 
-  python -m validation.topk_hist_ab --output run/topk-hist.md [--kernel mma|fp8|mma16]
+  python -m validation.topk_hist_ab --output run/topk-hist.md [--kernel mma|fp8|mma16] [--spawn DIR]
+
+--spawn times the PTX in another build directory (default gpu/build/spawn), such as one built by a
+different vxc.
 """
 import argparse
 from pathlib import Path
@@ -41,10 +44,11 @@ def main():
     p.add_argument('--repeats', type=int, default=20)
     p.add_argument('--tokens', type=int, nargs='+', default=TOKENS)
     p.add_argument('--kernel', choices=['mma', 'fp8', 'mma16'], default='mma')
+    p.add_argument('--spawn', type=Path, default=Path(__file__).resolve().parent.parent / 'gpu' / 'build' / 'spawn')
     args = p.parse_args()
     from gpu.runtime import CUDAContext
     from gpu.spawn.launch import SpawnKernel
-    spawn = Path(__file__).resolve().parent.parent / 'gpu' / 'build' / 'spawn'
+    spawn = args.spawn.resolve()
     ctx = CUDAContext(minimum_compute_capability=(8, 0))
     stream = ctx.stream()
     mma = spawn / 'index_mma'
@@ -122,7 +126,7 @@ def main():
         rows.append(f'| {tokens} | ' + ' | '.join(f'{x:.1f}' for x in t) + ' |')
         print(rows[-1], flush=True)
     rows += ['', f'index_scores_{args.kernel}; scores_hist and ilp_hist less a 4096-word copy timed alone; every '
-             f'output checked; median of {args.repeats}.']
+             f'output checked; median of {args.repeats}; PTX from {spawn}.']
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text('\n'.join(rows) + '\n')
 
