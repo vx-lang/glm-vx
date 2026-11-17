@@ -230,9 +230,12 @@ class ResidentGLM:
         # bit for bit the reference's; 'tc' (under graph replay) is index_scores_tc_at: q and the key
         # rows rounded to bf16, the products on the tensor cores with f32 sums, so the scores agree to
         # bf16 rounding. SGLang's indexer rounds both to FP8 (DeepGEMM fp8_paged_mqa_logits), so 'tc'
-        # is at its precision or above.
-        if index_kernel not in ('simt', 'tc'):
-            raise ValueError("index_kernel must be 'simt' or 'tc'")
+        # is at its precision or above. 'mma' (graph replay, 32 heads of dim 128 only) is the same
+        # arithmetic with the warp's work in inline PTX (gpu/spawn/index_mma): key and query rows
+        # loaded as float4s and rounded to bf16 in registers, no shared memory. It has no host build,
+        # so only the GPU runs it.
+        if index_kernel not in ('simt', 'tc', 'mma'):
+            raise ValueError("index_kernel must be 'simt', 'tc' or 'mma'")
         self.index_kernel = index_kernel
         if mla_kernel != 'decode' and not (self.graph and self.fused_attention):
             raise ValueError(f"mla_kernel={mla_kernel!r} needs graph=True and fused_attention=True")
@@ -1028,7 +1031,12 @@ class ResidentGLM:
         self._launch('scale', self._grid(self.index_heads), _ELEMENTWISE_BLOCK,
                      [self.head_weights, head_weights_raw, F(_f32(self.index_heads ** -0.5, 'scale')), I(self.index_heads)])
         scale = F(_f32(self.index_dim ** -0.5, 'scale'))
-        if self.graph and self.index_kernel == 'tc' and self.index_heads <= 32 and self.index_dim in (64, 128):
+        if self.graph and self.index_kernel == 'mma' and self.index_heads == 32 and self.index_dim == 128:
+            self._spawn('index_mma/index_scores_mma_at', out=self.scores,
+                        q=self.iq_rot.view((self.index_heads, self.index_dim)), keys=self.index_keys[layer],
+                        weights=self.head_weights, step=self.step, max_tokens=self.index_keys[layer].shape[0],
+                        heads=self.index_heads, dim=self.index_dim, scale=_f32(self.index_dim ** -0.5, 'scale'))
+        elif self.graph and self.index_kernel in ('tc', 'mma') and self.index_heads <= 32 and self.index_dim in (64, 128):
             self._spawn('index_scores_tc_at', out=self.scores, q=self.iq_rot.view((self.index_heads, self.index_dim)),
                         keys=self.index_keys[layer], weights=self.head_weights, step=self.step,
                         max_tokens=self.index_keys[layer].shape[0], heads=self.index_heads, dim=self.index_dim,

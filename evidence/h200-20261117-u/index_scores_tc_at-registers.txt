@@ -1,0 +1,1 @@
+Used 142 registers, used 1 barriers

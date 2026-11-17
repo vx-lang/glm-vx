@@ -1,0 +1,8 @@
+pod_validate 2026-11-17T01:32:27Z, NVIDIA H200
+build-ptx                    ok       6s
+build-spawn                  ok     409s
+build-cpu-lib                ok       8s
+build-cublaslt               ok       1s
+test-spawn-hardware          ok     163s
+test-resident-graph          FAIL    11s
+failed steps: 1

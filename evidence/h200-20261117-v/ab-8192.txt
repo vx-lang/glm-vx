@@ -1,0 +1,4 @@
+total    230.1 ->    214.5 us (2 traces)
+   21.1 x1       0.0 x0   glm_vx_gpu_index_scores_at
+   19.5 x1      19.8 x1   glm_vx_spawn_topk_select_at
+    0.0 x0       5.1 x1   glm_vx_spawn_index_scores_mma_at

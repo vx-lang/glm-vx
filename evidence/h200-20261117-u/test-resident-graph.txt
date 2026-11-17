@@ -1,0 +1,57 @@
+........F..F                                                             [100%]
+=================================== FAILURES ===================================
+________________ test_mla_tc_matches_mla_flash_to_bf16_rounding ________________
+
+ctx = <gpu.runtime.CUDAContext object at 0x7eeed253f740>
+
+    @pytest.mark.skipif(not (SPAWN / 'mla_tc_at.ptx').exists(), reason='gpu/spawn mla_tc_at not built')
+    def test_mla_tc_matches_mla_flash_to_bf16_rounding(ctx):
+        """mla_kernel='tc' (#33): bf16 caches and queries, the products on the tensor cores, against 'flash'
+        (f32) under replay; 600 steps run 1 to 19 splits of 32. The logits agree to bf16 rounding."""
+        steps = 600
+        model = build(seed=101, num_attention_heads=16, num_key_value_heads=16, kv_lora_rank=512, qk_rope_head_dim=64,
+                      qk_head_dim=72, index_head_dim=64, index_topk=1024, max_position_embeddings=1024)
+        tokens = np.random.default_rng(101).integers(0, model.config['vocab_size'], size=steps).tolist()
+        out = {}
+        for kernel in ('tc', 'flash'):
+            resident = ResidentGLM(model, ctx=ctx, max_tokens=steps + 8, device_experts=True, graph=True,
+                                   fused_attention=True, mla_kernel=kernel)
+            try:
+                out[kernel] = resident.prefill(tokens)
+                assert resident.replays == steps - 1
+                if kernel == 'tc':
+>                   assert resident.launches.get('mla_tc_at', 0) > 0 and resident.launches.get('store_row_bf16_at', 0) > 0
+E                   AssertionError: assert (8 > 0 and 0 > 0)
+E                    +  where 8 = <built-in method get of dict object at 0x7eeecdf71700>('mla_tc_at', 0)
+E                    +    where <built-in method get of dict object at 0x7eeecdf71700> = {'rmsnorm': 602, 'matvec_rows': 660, 'rmsnorm_pair': 8, 'matvec': 8, ...}.get
+E                    +      where {'rmsnorm': 602, 'matvec_rows': 660, 'rmsnorm_pair': 8, 'matvec': 8, ...} = <gpu.resident.ResidentGLM object at 0x7eeecd940410>.launches
+E                    +  and   0 = <built-in method get of dict object at 0x7eeecdf71700>('store_row_bf16_at', 0)
+E                    +    where <built-in method get of dict object at 0x7eeecdf71700> = {'rmsnorm': 602, 'matvec_rows': 660, 'rmsnorm_pair': 8, 'matvec': 8, ...}.get
+E                    +      where {'rmsnorm': 602, 'matvec_rows': 660, 'rmsnorm_pair': 8, 'matvec': 8, ...} = <gpu.resident.ResidentGLM object at 0x7eeecd940410>.launches
+
+gpu/test_resident_graph_hardware.py:101: AssertionError
+______________ test_index_kernel_tc_matches_simt_to_bf16_rounding ______________
+
+ctx = <gpu.runtime.CUDAContext object at 0x7eeed253f740>
+
+    @pytest.mark.skipif(not (SPAWN / 'index_scores_tc_at.ptx').exists(), reason='gpu/spawn index_scores_tc_at not built')
+    def test_index_kernel_tc_matches_simt_to_bf16_rounding(ctx):
+        """index_kernel='tc' (#32): the indexer's q and key rows in bf16, the scores on the tensor cores, against
+        'simt' (f32) under replay at GLM-5.3's indexer shape (32 heads, dim 128); 600 steps, index_topk 128, so
+        472 of them select by score. A score within bf16 rounding of the cut can change one selected token,
+        so the logits agree closely, not bit for bit, with the same argmax almost everywhere."""
+        steps = 600
+        model = build(seed=107, index_n_heads=32, index_head_dim=128, index_topk=128, max_position_embeddings=1024)
+        tokens = np.random.default_rng(107).integers(0, model.config['vocab_size'], size=steps).tolist()
+        out = {}
+        for kernel in ('tc', 'simt'):
+            resident = ResidentGLM(model, ctx=ctx, max_tokens=steps + 8, device_experts=True, graph=True,
+                                   index_kernel=kernel)
+            try:
+                out[kernel] = resident.prefill(tokens)
+>               assert resident.replays == steps - 1
+E               assert 598 == (600 - 1)
+E                +  where 598 = <gpu.resident.ResidentGLM object at 0x7eeecd92b530>.replays
+
+gpu/test_resident_graph_hardware.py:155: AssertionError
+2 failed, 10 passed in 10.30s

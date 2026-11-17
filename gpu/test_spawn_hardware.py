@@ -990,14 +990,17 @@ def test_glue_fusions_give_the_bits_of_the_launches_they_replace(context):
 # index_scores_tc_at (#32, ResidentGLM(index_kernel='tc')) at GLM-5.3's indexer shape (32 heads, dim
 # 128): q and the key rows rounded to bf16, mma.sync with f32 sums, against float64 sums of the same
 # bf16 values; out past step[1]'s tokens is not written.
-@pytest.mark.parametrize('tokens,max_tokens', [(1, 128), (2049, 3072), (3001, 4096), (32768, 32768)])
-def test_spawn_index_scores_tc_at_matches_float64_on_bf16_values(context, tokens, max_tokens):
+# index_mma/index_scores_mma_at (index_kernel='mma') is the same arithmetic in inline PTX, its rows
+# loaded as float4s and rounded in registers; max_tokens 3001 is not a multiple of its 32-token warps.
+@pytest.mark.parametrize('kernel', ['index_scores_tc_at', 'index_mma/index_scores_mma_at'])
+@pytest.mark.parametrize('tokens,max_tokens', [(1, 128), (2049, 3072), (3001, 3001), (3001, 4096), (32768, 32768)])
+def test_spawn_index_scores_tc_at_matches_float64_on_bf16_values(context, kernel, tokens, max_tokens):
     heads, dim = 32, 128
     rng = np.random.default_rng(tokens)
     q, keys = rng.normal(size=(heads, dim)).astype('f4'), rng.normal(size=(max_tokens, dim)).astype('f4')
     weights, scale = (rng.normal(size=heads) * heads ** -0.5).astype('f4'), dim ** -0.5
     out = upload(context, np.full(max_tokens, 7, 'f4'))
-    SpawnKernel(context, BUILD / 'spawn/index_scores_tc_at.ptx').launch(
+    SpawnKernel(context, BUILD / f'spawn/{kernel}.ptx').launch(
         out=out, q=upload(context, q), keys=upload(context, keys), weights=upload(context, weights),
         step=upload(context, np.array([tokens - 1, tokens, 0, 0], np.int32)), max_tokens=max_tokens, heads=heads,
         dim=dim, scale=scale)
