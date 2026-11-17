@@ -1,0 +1,56 @@
+.............F                                                           [100%]
+=================================== FAILURES ===================================
+_ test_index_kernel_tc_matches_simt_to_bf16_rounding[fp8-index_mma/index_scores_fp8_at] _
+
+ctx = <gpu.runtime.CUDAContext object at 0x73c69b5e2d50>, kernel = 'fp8'
+name = 'index_mma/index_scores_fp8_at'
+
+    @pytest.mark.skipif(not (SPAWN / 'index_scores_tc_at.ptx').exists(), reason='gpu/spawn index_scores_tc_at not built')
+    @pytest.mark.parametrize('kernel,name', [('tc', 'index_scores_tc_at'), ('mma', 'index_mma/index_scores_mma_at'),
+                                             ('fp8', 'index_mma/index_scores_fp8_at')])
+    def test_index_kernel_tc_matches_simt_to_bf16_rounding(ctx, kernel, name):
+        """index_kernel='tc', 'mma' (bf16) and 'fp8' (#32): the indexer's q and key rows rounded, the scores on the
+        tensor cores, against 'simt' (f32) under replay at GLM-5.3's indexer shape (32 heads, dim 128); 600 steps, index_topk 128, so
+        472 of them select by score. A score within rounding of the cut can change one selected token,
+        so the logits agree closely, not bit for bit, with the same argmax almost everywhere."""
+        steps = 600
+        model = build(seed=107, index_n_heads=32, index_head_dim=128, index_topk=128, max_position_embeddings=1024)
+        tokens = np.random.default_rng(107).integers(0, model.config['vocab_size'], size=steps).tolist()
+        out = {}
+        for option in (kernel, 'simt'):
+            resident = ResidentGLM(model, ctx=ctx, max_tokens=steps + 8, device_experts=True, graph=True,
+                                   index_kernel=option)
+            try:
+                out[option] = resident.prefill(tokens)
+                # Two step graphs (#43), within index_topk and past it, each run once before its capture.
+                assert resident.replays == steps - 2
+                assert (resident.launches.get(name, 0) > 0) == (option == kernel)
+                if option == 'fp8':  # every cached key row quantized as it is stored, within index_topk too
+                    assert resident.launches['index_mma/index_key_fp8_at'] == resident.launches['index_key_at']
+            finally:
+                resident.close()
+        scale = np.abs(out['simt']).max()
+>       np.testing.assert_allclose(out[kernel], out['simt'], rtol=0, atol=2e-2 * scale)
+E       AssertionError: 
+E       Not equal to tolerance rtol=0, atol=0.00986427
+E       
+E       Mismatched elements: 31 / 153600 (0.0202%)
+E       First 5 mismatches are at indices:
+E        [283, 2]: -0.02592119574546814 (ACTUAL), -0.03633202612400055 (DESIRED)
+E        [283, 3]: 0.08977299928665161 (ACTUAL), 0.10012981295585632 (DESIRED)
+E        [283, 26]: -0.014774054288864136 (ACTUAL), -0.0032322928309440613 (DESIRED)
+E        [283, 41]: 0.0584067665040493 (ACTUAL), 0.07164639234542847 (DESIRED)
+E        [283, 54]: -0.06982642412185669 (ACTUAL), -0.08561478555202484 (DESIRED)
+E       Max absolute difference among violations: 0.01934005
+E       Max relative difference among violations: 3.570766
+E        ACTUAL: array([[ 0.174125, -0.162279,  0.221697, ...,  0.021726, -0.012564,
+E               -0.078683],
+E              [-0.085308, -0.025325, -0.150509, ..., -0.127074, -0.031546,...
+E        DESIRED: array([[ 0.174125, -0.162279,  0.221697, ...,  0.021726, -0.012564,
+E               -0.078683],
+E              [-0.085308, -0.025325, -0.150509, ..., -0.127074, -0.031546,...
+
+gpu/test_resident_graph_hardware.py:166: AssertionError
+=========================== short test summary info ============================
+FAILED gpu/test_resident_graph_hardware.py::test_index_kernel_tc_matches_simt_to_bf16_rounding[fp8-index_mma/index_scores_fp8_at]
+1 failed, 13 passed in 12.47s

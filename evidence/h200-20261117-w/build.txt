@@ -1,0 +1,3 @@
+gpu/build/spawn/index_mma/index_scores_mma_at.ptx: glm_vx_spawn_index_scores_mma_at (9 params)
+gpu/build/spawn/index_mma/index_key_fp8_at.ptx: glm_vx_spawn_index_key_fp8_at (6 params)
+gpu/build/spawn/index_mma/index_scores_fp8_at.ptx: glm_vx_spawn_index_scores_fp8_at (10 params)

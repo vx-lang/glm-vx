@@ -1,0 +1,6 @@
+total    312.9 ->    242.7 us (2 traces)
+   74.5 x1       0.0 x0   glm_vx_gpu_index_scores_at
+   71.1 x4      70.3 x4   glm_vx_spawn_fp8_matvec_cvt_tiles
+   50.6 x1      49.7 x1   glm_vx_spawn_fp8_moe_cvt_gate_up
+   14.4 x1      13.7 x1   glm_vx_spawn_mla_tc_at
+    0.0 x0       6.7 x1   glm_vx_spawn_index_scores_mma_at

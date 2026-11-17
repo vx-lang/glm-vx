@@ -990,14 +990,17 @@ def test_glue_fusions_give_the_bits_of_the_launches_they_replace(context):
 # index_scores_tc_at (#32, ResidentGLM(index_kernel='tc')) at GLM-5.3's indexer shape (32 heads, dim
 # 128): q and the key rows rounded to bf16, mma.sync with f32 sums, against float64 sums of the same
 # bf16 values; out past step[1]'s tokens is not written.
-@pytest.mark.parametrize('tokens,max_tokens', [(1, 128), (2049, 3072), (3001, 4096), (32768, 32768)])
-def test_spawn_index_scores_tc_at_matches_float64_on_bf16_values(context, tokens, max_tokens):
+# index_mma/index_scores_mma_at (index_kernel='mma') is the same arithmetic in inline PTX, its rows
+# loaded as float4s and rounded in registers; max_tokens 3001 is not a multiple of its 32-token warps.
+@pytest.mark.parametrize('kernel', ['index_scores_tc_at', 'index_mma/index_scores_mma_at'])
+@pytest.mark.parametrize('tokens,max_tokens', [(1, 128), (2049, 3072), (3001, 3001), (3001, 4096), (32768, 32768)])
+def test_spawn_index_scores_tc_at_matches_float64_on_bf16_values(context, kernel, tokens, max_tokens):
     heads, dim = 32, 128
     rng = np.random.default_rng(tokens)
     q, keys = rng.normal(size=(heads, dim)).astype('f4'), rng.normal(size=(max_tokens, dim)).astype('f4')
     weights, scale = (rng.normal(size=heads) * heads ** -0.5).astype('f4'), dim ** -0.5
     out = upload(context, np.full(max_tokens, 7, 'f4'))
-    SpawnKernel(context, BUILD / 'spawn/index_scores_tc_at.ptx').launch(
+    SpawnKernel(context, BUILD / f'spawn/{kernel}.ptx').launch(
         out=out, q=upload(context, q), keys=upload(context, keys), weights=upload(context, weights),
         step=upload(context, np.array([tokens - 1, tokens, 0, 0], np.int32)), max_tokens=max_tokens, heads=heads,
         dim=dim, scale=scale)
@@ -1007,4 +1010,72 @@ def test_spawn_index_scores_tc_at_matches_float64_on_bf16_values(context, tokens
                     ).astype(np.uint32).view('f4').astype(np.float64)
     terms = np.maximum(rb(keys[:tokens]) @ rb(q).T * scale, 0) * weights.astype(np.float64)
     np.testing.assert_allclose(got[:tokens], terms.sum(-1), rtol=0, atol=1e-5 * np.abs(terms).sum(-1).max())
+    assert (got[tokens:] == 7).all()
+
+
+# index_kernel='fp8' (#32), SGLang 0.5.22's indexer recipe. index_key_fp8_at quantizes the key row at
+# step[0] as indexer_k.cuh does: the codes and the scale bit for bit against the NumPy model.
+def fp8_rows(x, bf16_first):
+    """(codes [rows, 128] uint8, scales [rows] float32): SGLang's indexer FP8 rows, one scale a row of 128;
+    bf16_first rounds each value to bf16 before (the key rows; the queries are not)."""
+    from gpu.fp8_quant import e4m3_encode
+    x = np.asarray(x, 'f4')
+    if bf16_first:
+        u = x.view(np.uint32).astype(np.uint64)
+        x = (((u + 0x7FFF + ((u >> 16) & 1)) >> 16).astype(np.uint32) << 16).view('f4')
+    scales = (np.maximum(np.abs(x).max(-1), np.float32(1e-4)) / np.float32(448)).astype('f4')
+    inv = (np.float32(1) / scales).astype('f4')
+    v = (x * inv[:, None]).astype('f4')
+    # cvt.rn.satfinite.e4m3x2.f32 (the kernel's and SGLang's) keeps -0.0's sign; e4m3_encode does not.
+    return np.where(np.signbit(v) & (v == 0), np.uint8(128), e4m3_encode(v)), scales
+
+
+def test_index_key_fp8_at_quantizes_the_row_at_step_as_sglang(context):
+    rng = np.random.default_rng(5)
+    cap = 40
+    keys = (rng.normal(size=(cap, 128)) * rng.uniform(0.01, 30, size=(cap, 1))).astype('f4')
+    keys[7] = 0  # all zero: the 1e-4 floor
+    keys[9, :5] = [1e30, -1e30, 3e-8, 448, -0.0]
+    codes, scales = upload(context, np.zeros((cap, 32), np.int32)), upload(context, np.full(cap, 7, 'f4'))
+    kernel = SpawnKernel(context, BUILD / 'spawn/index_mma/index_key_fp8_at.ptx')
+    dk = upload(context, keys)
+    rows = [0, 7, 9, 21, cap - 1]
+    for pos in rows:
+        kernel.launch(codes=codes, scales=scales, keys=dk, step=upload(context, np.array([pos, pos + 1, 0, 0], np.int32)),
+                      max_tokens=cap, dim=128)
+    context.synchronize()
+    want_codes, want_scales = fp8_rows(keys[rows], bf16_first=True)
+    got_codes = download(codes).view(np.uint8).reshape(cap, 128)
+    np.testing.assert_array_equal(got_codes[rows], want_codes)
+    np.testing.assert_array_equal(download(scales)[rows].view(np.uint32), want_scales.view(np.uint32))
+    others = [r for r in range(cap) if r not in rows]
+    assert (got_codes[others] == 0).all() and (download(scales)[others] == 7).all()
+
+
+# index_scores_fp8_at: out[t] = ks[t] * sum_h relu(q8[h] . k8[t]) * weights[h] * qs[h] * scale, the q codes
+# made in the kernel as fused_q_indexer_rope_first_quant does; against float64 on the same codes.
+@pytest.mark.parametrize('tokens,max_tokens', [(1, 128), (2049, 3072), (3001, 3001), (32768, 32768)])
+def test_spawn_index_scores_fp8_at_matches_float64_on_its_codes(context, tokens, max_tokens):
+    from gpu.fp8_quant import e4m3_values
+    heads, dim = 32, 128
+    rng = np.random.default_rng(tokens + 1)
+    q = rng.normal(size=(heads, dim)).astype('f4')
+    keys = (rng.normal(size=(max_tokens, dim)) * rng.uniform(0.1, 10, size=(max_tokens, 1))).astype('f4')
+    weights, scale = (rng.normal(size=heads) * heads ** -0.5).astype('f4'), np.float32(dim ** -0.5)
+    kc, ks = fp8_rows(keys, bf16_first=True)
+    qc, qs = fp8_rows(q, bf16_first=False)
+    out = upload(context, np.full(max_tokens, 7, 'f4'))
+    SpawnKernel(context, BUILD / 'spawn/index_mma/index_scores_fp8_at.ptx').launch(
+        out=out, q=upload(context, q), codes=upload(context, kc.view(np.int32).reshape(max_tokens, 32)),
+        scales=upload(context, ks), weights=upload(context, weights),
+        step=upload(context, np.array([tokens - 1, tokens, 0, 0], np.int32)), max_tokens=max_tokens, heads=heads,
+        dim=dim, scale=float(scale))
+    context.synchronize()
+    got = download(out)
+    values = e4m3_values()
+    dots = values[kc[:tokens]] @ values[qc].T                       # [tokens, heads], exact in float64
+    terms = np.maximum(dots, 0) * (weights.astype(np.float64) * qs * scale) * ks[:tokens, None].astype(np.float64)
+    err = np.abs(got[:tokens] - terms.sum(-1)) / np.abs(terms).sum(-1).max()
+    print(f'max |err| / max sum |terms|: {err.max():.3g}')
+    assert err.max() < 1e-5
     assert (got[tokens:] == 7).all()

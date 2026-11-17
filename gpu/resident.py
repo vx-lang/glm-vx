@@ -171,7 +171,7 @@ class ResidentGLM:
     def __init__(self, model, *, max_tokens=4096, ptx_dir=None, device=0, ctx=None, max_weight_bytes=None,
                  device_topk=True, device_experts=False, fused_attention=False, graph=False, fp8_kernels='hand',
                  topk='auto', long_topk='position', mla_kernel='decode', matvec_kernels='hand', mtp=False,
-                 norm_block=256, fuse_glue=True, index_kernel='simt'):
+                 norm_block=256, fuse_glue=True, index_kernel='mma'):
         if getattr(model, 'packed_weights', False):
             raise NotImplementedError('ResidentGLM supports expanded float32 weights only')
         if getattr(model, 'expert_placement', None) is not None:
@@ -230,9 +230,20 @@ class ResidentGLM:
         # bit for bit the reference's; 'tc' (under graph replay) is index_scores_tc_at: q and the key
         # rows rounded to bf16, the products on the tensor cores with f32 sums, so the scores agree to
         # bf16 rounding. SGLang's indexer rounds both to FP8 (DeepGEMM fp8_paged_mqa_logits), so 'tc'
-        # is at its precision or above.
-        if index_kernel not in ('simt', 'tc'):
-            raise ValueError("index_kernel must be 'simt' or 'tc'")
+        # is at its precision or above. 'mma' (graph replay, 32 heads of dim 128 only) is the same
+        # arithmetic with the warp's work in inline PTX (gpu/spawn/index_mma): key and query rows
+        # loaded as float4s and rounded to bf16 in registers, no shared memory. It has no host build,
+        # so only the GPU runs it. 'fp8' (graph replay, 32 heads of dim 128, sm_89 and up) is SGLang
+        # 0.5.22's indexer exactly: the key rows quantized to E4M3 with one scale a row as they are
+        # cached (index_key_fp8_at, as indexer_k.cuh), each head's q with one scale a head
+        # (fused_q_indexer_rope_first_quant), mma.sync e4m3 with f32 sums (index_scores_fp8_at). It
+        # matches SGLang's precision; it is slower than 'mma' until q is quantized once a step (in the
+        # RoPE) and the key row in index_key_at, not in each warp and a launch of its own. 'mma' (bf16,
+        # above SGLang's precision) is the default: 3.9 us at 3001 tokens on the H200 against
+        # 'simt''s 11.2 and 'fp8''s 4.2 + 1.4 (evidence/h200-20261117-v, -w). Off its shape, or without
+        # graph replay, 'mma' and 'fp8' take 'simt''s path, so smaller models keep the reference's bits.
+        if index_kernel not in ('simt', 'tc', 'mma', 'fp8'):
+            raise ValueError("index_kernel must be 'simt', 'tc', 'mma' or 'fp8'")
         self.index_kernel = index_kernel
         if mla_kernel != 'decode' and not (self.graph and self.fused_attention):
             raise ValueError(f"mla_kernel={mla_kernel!r} needs graph=True and fused_attention=True")
@@ -579,6 +590,13 @@ class ResidentGLM:
         self.rope_keys = [t((cap, self.rot), cache) for _ in range(layers)]
         self.index_keys = [t((cap, self.index_dim)) if m.indexer_type(i) == 'full' else None
                            for i in range(layers)]
+        # index_kernel='fp8': each full indexer's key rows also as E4M3 codes (128 bytes, 32 words a row)
+        # and a scale a row, written by index_key_fp8_at as the rows are cached.
+        self.index_fp8 = (self.graph and self.index_kernel == 'fp8' and self.index_heads == 32
+                          and self.index_dim == 128)
+        if self.index_fp8:
+            self.index_codes = [t((cap, 32), 'int32') if k is not None else None for k in self.index_keys]
+            self.index_key_scales = [t((cap,)) if k is not None else None for k in self.index_keys]
         if self.mtp:
             self.mtp_input = t((2 * self.hidden,))  # [enorm(embedding), hnorm(hidden)], eh_proj's input
 
@@ -1015,6 +1033,10 @@ class ResidentGLM:
             self._copy(row, self.ik_norm, self.index_dim)
             self._rope(row, self.ik_norm, 1, self.rot, self.rot, self.rot)
             self._store_row(self.index_keys[layer], row, self.index_dim)
+        if self.index_fp8:
+            self._spawn('index_mma/index_key_fp8_at', codes=self.index_codes[layer], scales=self.index_key_scales[layer],
+                        keys=self.index_keys[layer], step=self.step, max_tokens=self.index_keys[layer].shape[0],
+                        dim=self.index_dim)
         if tokens <= self.index_topk:
             # Every cached token is selected, in position order, as SGLang's DSA top-k does (topk_v2.cuh,
             # trivial_transform when seq_len <= topk) and GlmMoeDsaModel._index too (#43): the key row is
@@ -1028,7 +1050,18 @@ class ResidentGLM:
         self._launch('scale', self._grid(self.index_heads), _ELEMENTWISE_BLOCK,
                      [self.head_weights, head_weights_raw, F(_f32(self.index_heads ** -0.5, 'scale')), I(self.index_heads)])
         scale = F(_f32(self.index_dim ** -0.5, 'scale'))
-        if self.graph and self.index_kernel == 'tc' and self.index_heads <= 32 and self.index_dim in (64, 128):
+        if self.index_fp8:
+            self._spawn('index_mma/index_scores_fp8_at', out=self.scores,
+                        q=self.iq_rot.view((self.index_heads, self.index_dim)), codes=self.index_codes[layer],
+                        scales=self.index_key_scales[layer], weights=self.head_weights, step=self.step,
+                        max_tokens=self.index_keys[layer].shape[0], heads=self.index_heads, dim=self.index_dim,
+                        scale=_f32(self.index_dim ** -0.5, 'scale'))
+        elif self.graph and self.index_kernel == 'mma' and self.index_heads == 32 and self.index_dim == 128:
+            self._spawn('index_mma/index_scores_mma_at', out=self.scores,
+                        q=self.iq_rot.view((self.index_heads, self.index_dim)), keys=self.index_keys[layer],
+                        weights=self.head_weights, step=self.step, max_tokens=self.index_keys[layer].shape[0],
+                        heads=self.index_heads, dim=self.index_dim, scale=_f32(self.index_dim ** -0.5, 'scale'))
+        elif self.graph and self.index_kernel == 'tc' and self.index_heads <= 32 and self.index_dim in (64, 128):
             self._spawn('index_scores_tc_at', out=self.scores, q=self.iq_rot.view((self.index_heads, self.index_dim)),
                         keys=self.index_keys[layer], weights=self.head_weights, step=self.step,
                         max_tokens=self.index_keys[layer].shape[0], heads=self.index_heads, dim=self.index_dim,

@@ -49,7 +49,9 @@ def events_ms(resident, enqueue, repeats):
 
 def measure(model, tokens, *, graph, replays):
     from gpu.resident import ResidentGLM
-    resident = ResidentGLM(model, max_tokens=len(tokens) + 1, device_experts=True, graph=graph)
+    # index_kernel='simt' on both sides: this checks replay against the per-launch path bit for bit, and
+    # the default 'mma' (bf16, graph replay only) rounds the indexer's scores at GLM-5.3's shape.
+    resident = ResidentGLM(model, max_tokens=len(tokens) + 1, device_experts=True, graph=graph, index_kernel='simt')
     try:
         t0 = time.perf_counter()
         for t in tokens:  # uploads every weight (and captures the step graph at the second token)

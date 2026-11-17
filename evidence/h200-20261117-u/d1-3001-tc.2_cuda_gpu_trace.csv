@@ -1,0 +1,26 @@
+Start (ns),Duration (ns),CorrId,GrdX,GrdY,GrdZ,BlkX,BlkY,BlkZ,Reg/Trd,StcSMem (MB),DymSMem (MB),Bytes (MB),Throughput (MB/s),SrcMemKd,DstMemKd,Device,Ctx,GreenCtx,Strm,Name
+15796462,2336,23,,,,,,,,,,0.025,10636.982,Pageable,Device,NVIDIA H200 (0),1,,7,[CUDA memcpy Host-to-Device]
+15900910,3328,27,1,1,1,1024,1,1,32,0.001,0.000,,,,,NVIDIA H200 (0),1,,13,glm_vx_gpu_rmsnorm
+15904302,10016,27,344,1,1,128,1,1,92,0.001,0.000,,,,,NVIDIA H200 (0),1,,13,glm_vx_spawn_fp8_matvec_cvt_tiles3
+15914382,2784,27,2,1,1,1024,1,1,32,0.001,0.000,,,,,NVIDIA H200 (0),1,,13,glm_vx_gpu_rmsnorm_pair
+15917198,13920,27,2048,1,1,128,1,1,80,0.001,0.000,,,,,NVIDIA H200 (0),1,,13,glm_vx_spawn_fp8_matvec_cvt_tiles
+15931182,4864,27,512,1,1,128,1,1,80,0.001,0.000,,,,,NVIDIA H200 (0),1,,13,glm_vx_spawn_fp8_matvec_cvt_tiles
+15936174,3712,27,32,1,1,1024,1,1,32,0.033,0.000,,,,,NVIDIA H200 (0),1,,13,glm_vx_gpu_matvec_rows
+15940014,2176,27,1,1,1,256,1,1,26,0.000,0.000,,,,,NVIDIA H200 (0),1,,13,glm_vx_spawn_kv_rows_bf16_at
+15942318,2432,27,1,1,1,256,1,1,32,0.001,0.000,,,,,NVIDIA H200 (0),1,,13,glm_vx_gpu_index_key_at
+15944878,1248,27,16,1,1,256,1,1,32,0.000,0.000,,,,,NVIDIA H200 (0),1,,13,glm_vx_gpu_copy
+15946222,1280,27,4,1,1,256,1,1,32,0.000,0.000,,,,,NVIDIA H200 (0),1,,13,glm_vx_gpu_rope_strided
+15947598,1248,27,1,1,1,256,1,1,32,0.000,0.000,,,,,NVIDIA H200 (0),1,,13,glm_vx_gpu_scale
+15948942,11456,27,24,1,1,128,1,1,142,0.000,0.057,,,,,NVIDIA H200 (0),1,,13,glm_vx_spawn_index_scores_tc_at
+15960782,13280,27,1,1,1,1024,1,1,22,0.023,0.000,,,,,NVIDIA H200 (0),1,,13,glm_vx_spawn_topk_select_at
+15974190,5376,27,256,1,1,512,1,1,32,0.008,0.000,,,,,NVIDIA H200 (0),1,,13,glm_vx_spawn_fp8_matvec_cols_cvt
+15979694,1408,27,8,1,1,256,1,1,32,0.000,0.000,,,,,NVIDIA H200 (0),1,,13,glm_vx_gpu_rope_strided
+15981230,1760,27,4,2,8,128,1,1,32,0.000,0.000,,,,,NVIDIA H200 (0),1,,13,glm_vx_spawn_mla_q_bf16_at
+15983086,13953,27,256,1,1,256,1,1,110,0.000,0.070,,,,,NVIDIA H200 (0),1,,13,glm_vx_spawn_mla_tc_at
+15997167,6560,27,64,4,1,128,1,1,32,0.002,0.000,,,,,NVIDIA H200 (0),1,,13,glm_vx_spawn_mla_flash_merge_at
+16003823,7072,27,1024,1,1,128,1,1,56,0.002,0.000,,,,,NVIDIA H200 (0),1,,13,glm_vx_spawn_fp8_matvec_heads_cvt
+16011023,30688,27,768,1,1,128,1,1,80,0.001,0.000,,,,,NVIDIA H200 (0),1,,13,glm_vx_spawn_fp8_matvec_cvt_tiles
+16041583,3200,27,1,1,1,1024,1,1,48,0.001,0.000,,,,,NVIDIA H200 (0),1,,13,glm_vx_gpu_residual_rmsnorm8
+16044687,49568,27,3072,1,1,128,1,1,91,0.001,0.000,,,,,NVIDIA H200 (0),1,,13,glm_vx_spawn_fp8_moe_cvt_gate_up
+16094191,22304,27,768,1,1,128,1,1,80,0.001,0.000,,,,,NVIDIA H200 (0),1,,13,glm_vx_spawn_fp8_matvec_cvt_tiles
+16116431,2144,27,24,1,1,256,1,1,32,0.000,0.000,,,,,NVIDIA H200 (0),1,,13,glm_vx_gpu_add

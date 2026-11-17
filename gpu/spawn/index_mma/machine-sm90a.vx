@@ -1,0 +1,15 @@
+// H200 for the FP8 indexer kernels (index_key_fp8_at, index_scores_fp8_at): gpu/spawn/machine.vx's
+// levels with `chip: sm_90a`, for e4m3 mma.sync and cvt (sm_89 and up). build.sh raises the PTX to 8.4,
+// which the e4m3 mma.sync needs.
+Memory HBM { capacity: 141 GiB, bandwidth: 4.8 TB/s, managed: explicit, alignment: 16 B, scope: device }
+Memory SMEM { within: Memory::HBM, capacity: 228 KiB, bandwidth: 128 B/cyc, granule: 1 KiB, managed: explicit, scope: sm }
+Topology Device {
+  arch: nvptx64,
+  chip: sm_90a,
+  levels: [blocks(max_lanes: 1024, memory: cta), subgroups(lanes: 32), lanes(memory: thread)],
+  memory: Memory::HBM,
+  visible: [Memory::CPU_DRAM, Memory::HBM, Memory::SMEM],
+  transfer Memory::CPU_DRAM -> Memory::HBM : 31.5 GB/s,
+  transfer Memory::HBM -> Memory::CPU_DRAM : 31.5 GB/s,
+  transfer Memory::HBM -> Memory::SMEM
+}

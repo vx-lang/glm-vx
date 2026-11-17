@@ -1,0 +1,2 @@
+index_key_fp8_at Used 22 registers
+index_scores_fp8_at Used 108 registers
