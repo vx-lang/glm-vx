@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/mnt/disk-a4/glm-h200/repo-z/evidence/h200-20261117-z/abdiff.py", line 12, in <module>
+    (a, ca), (b, cb) = load(sys.argv[1]), load(sys.argv[2])
+                                          ^^^^^^^^^^^^^^^^^
+  File "/mnt/disk-a4/glm-h200/repo-z/evidence/h200-20261117-z/abdiff.py", line 6, in load
+    for r in csv.DictReader(open(p)):
+                            ^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'evidence/h200-20261117-z/d1-131072-ilp-hist16.2_cuda_gpu_trace.csv'

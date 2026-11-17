@@ -1,0 +1,10 @@
+name, driver_version, memory.total [MiB], compute_cap
+NVIDIA H200, 580.173.02, 143771 MiB, 9.0
+ptx target sm_80, ptxas /usr/local/cuda/bin/ptxas for sm_90
+repo pod-z (no .git; set REPO_REV)
+vxc vxc 0.0.4
+llvm LLVM version 22.1.8
+Python 3.12.3
+dispatch lib /home/aditya/glm-h200/vxtc-6a1d/lib/libvx_cuda_dispatch.so
+vx_cuda_set_stream (Vx #2100): exported
+cublaslt /home/aditya/glm-h200/repo/.venv/lib/python3.12/site-packages/nvidia/cublas/lib/libcublasLt.so.12 120903

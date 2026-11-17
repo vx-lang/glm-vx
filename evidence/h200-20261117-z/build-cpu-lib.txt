@@ -1,0 +1,100 @@
+[JIT] Translating to LLVM IR...
+[JIT] Optimizing LLVM IR (-O0)...
+[JIT] Compiling to native object (-O2)...
+Warning[W1007] at packed.vx:7:25: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:7:46: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:11:25: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:11:44: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:11:69: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:11:96: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:19:18: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1003] at packed.vx:22:3: Unreachable code after return, break, or continue
+Warning[W1003] at packed.vx:26:3: Unreachable code after return, break, or continue
+Warning[W1009] at packed.vx:24:4: Unused function parameter 'j'
+Warning[W1009] at packed.vx:24:4: Unused function parameter 'table'
+Warning[W1009] at packed.vx:28:4: Unused function parameter 'table'
+Warning[W1007] at packed.vx:37:36: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:51:57: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:52:29: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:53:58: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:56:43: this cast only widens, so it cannot lose a value; `f32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:66:57: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:67:45: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:68:58: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:71:43: this cast only widens, so it cannot lose a value; `f32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:78:33: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:80:37: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:87:29: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:88:44: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1009] at packed.vx:85:4: Unused function parameter 'table'
+Warning[W1007] at packed.vx:98:34: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:99:36: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:101:48: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:102:20: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1009] at packed.vx:95:4: Unused function parameter 'table'
+Warning[W1007] at packed.vx:109:31: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:110:23: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:110:51: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:116:33: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:117:23: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:117:49: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:124:43: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1009] at packed.vx:121:4: Unused function parameter 'table'
+Warning[W1007] at packed.vx:134:45: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:135:41: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1009] at packed.vx:131:4: Unused function parameter 'table'
+Warning[W1007] at packed.vx:145:52: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1007] at packed.vx:146:48: this cast only widens, so it cannot lose a value; `i32::from(..)` from `core::convert` says so
+Warning[W1009] at packed.vx:142:4: Unused function parameter 'table'
+[JIT] Translating to LLVM IR...
+[JIT] Optimizing LLVM IR (-O0)...
+[JIT] Compiling to native object (-O2)...
+00000000000028a0 T glm_vx_add
+00000000000015a0 T glm_vx_attention
+0000000000002870 T glm_vx_axpy
+0000000000001230 T glm_vx_index_scores
+0000000000002970 T glm_vx_layernorm
+0000000000001d40 T glm_vx_matmul_nt
+0000000000002460 T glm_vx_matvec
+000000000001e0d0 T glm_vx_packed_batch_v2_f16
+00000000000057b0 T glm_vx_packed_batch_v2_iq1_s
+000000000000af70 T glm_vx_packed_batch_v2_iq2_xxs
+0000000000008350 T glm_vx_packed_batch_v2_iq3_xxs
+0000000000002b90 T glm_vx_packed_batch_v2_iq4_xs
+0000000000018a60 T glm_vx_packed_batch_v2_q2_k
+0000000000015ea0 T glm_vx_packed_batch_v2_q3_k
+0000000000013320 T glm_vx_packed_batch_v2_q4_k
+0000000000010700 T glm_vx_packed_batch_v2_q5_k
+000000000000db50 T glm_vx_packed_batch_v2_q6_k
+000000000001b5e0 T glm_vx_packed_batch_v2_q8_0
+0000000000022010 T glm_vx_packed_f16
+0000000000021c30 T glm_vx_packed_iq1_s
+0000000000021a30 T glm_vx_packed_iq2_xxs
+0000000000021830 T glm_vx_packed_iq3_xxs
+0000000000021630 T glm_vx_packed_iq4_xs
+0000000000021430 T glm_vx_packed_q2_k
+0000000000021230 T glm_vx_packed_q3_k
+0000000000021030 T glm_vx_packed_q4_k
+0000000000020e30 T glm_vx_packed_q5_k
+0000000000020c30 T glm_vx_packed_q6_k
+0000000000021e30 T glm_vx_packed_q8_0
+0000000000002ab0 T glm_vx_rmsnorm
+0000000000001d20 T glm_vx_rope
+0000000000001140 T glm_vx_rope_glm
+0000000000001ba0 T glm_vx_rope_offset
+00000000000019c0 T glm_vx_router
+00000000000014b0 T glm_vx_softmax
+0000000000001320 T glm_vx_sparse_attention
+00000000000028f0 T glm_vx_swiglu
+00000000000016d0 T glm_vx_topk
+0000000000021f70 T glm_vx_unpack_f16
+0000000000021b70 T glm_vx_unpack_iq1_s
+0000000000021970 T glm_vx_unpack_iq2_xxs
+0000000000021770 T glm_vx_unpack_iq3_xxs
+0000000000021570 T glm_vx_unpack_iq4_xs
+0000000000021370 T glm_vx_unpack_q2_k
+0000000000021170 T glm_vx_unpack_q3_k
+0000000000020f70 T glm_vx_unpack_q4_k
+0000000000020d70 T glm_vx_unpack_q5_k
+0000000000020b70 T glm_vx_unpack_q6_k
+0000000000021d70 T glm_vx_unpack_q8_0

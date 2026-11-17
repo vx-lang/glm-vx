@@ -1,0 +1,186 @@
+.....................FFF...                                              [100%]
+=================================== FAILURES ===================================
+__________ test_long_topk_ilp_gives_the_bits_of_position[blocks-mma] ___________
+
+ctx = <gpu.runtime.CUDAContext object at 0x715745168b30>, option = 'blocks'
+index_kernel = 'mma'
+
+    @pytest.mark.skipif(not (SPAWN / 'index_mma/topk_mb_write_at.ptx').exists(), reason='gpu/spawn index_mma not built')
+    @pytest.mark.parametrize('index_kernel', ['mma', 'fp8', 'mma16'])
+    @pytest.mark.parametrize('option', ['ilp', 'ilp_hist', 'blocks'])
+    def test_long_topk_ilp_gives_the_bits_of_position(ctx, option, index_kernel):
+        """long_topk='ilp' and 'ilp_hist' (#32): topk_select_ilp_at, or the scores kernel's bins and
+        topk_select_ilp_hist_at, select topk_select_at's set in the same order, so under replay the logits are
+        'position''s bit for bit. 'blocks' is 'ilp_hist' with topk_blocks_from=256: from step 257 on, the
+        multi-block pair topk_mb_list_at + topk_mb_write_at, in a third step graph. 32 heads of 128, so the
+        scores are index_scores_mma_at's or _fp8_at's (or their _hist_at twins, whose scores are the same);
+        600 steps, index_topk 128."""
+        if index_kernel == 'fp8' and tuple(ctx.compute_capability) < (9, 0):
+            pytest.skip('index_kernel=fp8 needs sm_90a')
+        steps = 600
+        model = build(seed=113, index_n_heads=32, index_head_dim=128, index_topk=128, max_position_embeddings=1024)
+        tokens = np.random.default_rng(113).integers(0, model.config['vocab_size'], size=steps).tolist()
+        long_topk = 'ilp_hist' if option == 'blocks' else option
+        extra = dict(topk_blocks_from=256) if option == 'blocks' else {}
+        out = {}
+        for name, kwargs in ((option, dict(long_topk=long_topk, **extra)), ('position', dict(long_topk='position'))):
+>           resident = ResidentGLM(model, ctx=ctx, max_tokens=steps + 8, device_experts=True, graph=True,
+                                   index_kernel=index_kernel, **kwargs)
+
+gpu/test_resident_graph_hardware.py:210: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+gpu/resident.py:335: in __init__
+    self._allocate()
+gpu/resident.py:606: in _allocate
+    count=z(1, np.uint32), offs=t((8192,), 'int32'), sel=z(4, np.uint32),
+          ^^^^^^^^^^^^^^^
+gpu/resident.py:604: in <lambda>
+    z = lambda n, dtype: t((n,), dtype, np.zeros(n, dtype))
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/resident.py:366: in _tensor
+    return self.ctx.tensor(tuple(shape), dtype, data)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:356: in tensor
+    shape, dtype, nbytes = DeviceTensor._layout(shape, dtype)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+shape = (1,), dtype = <class 'numpy.uint32'>
+
+    @staticmethod
+    def _layout(shape, dtype):
+        if isinstance(shape, (str, bytes)):
+            raise TypeError("shape must be a sequence of nonnegative integers")
+        shape = tuple(shape)
+        if not shape:
+            raise ValueError("shape must have at least one dimension")
+        for dimension in shape:
+            _integer(dimension, "shape dimension")
+        if not isinstance(dtype, str) or dtype not in _DTYPES:
+>           raise ValueError(f"unsupported dtype {dtype!r}; use one of {tuple(_DTYPES)}")
+E           ValueError: unsupported dtype <class 'numpy.uint32'>; use one of ('float16', 'float32', 'float64', 'int8', 'uint8', 'int16', 'uint16', 'int32', 'uint32', 'int64', 'uint64')
+
+gpu/runtime.py:536: ValueError
+__________ test_long_topk_ilp_gives_the_bits_of_position[blocks-fp8] ___________
+
+ctx = <gpu.runtime.CUDAContext object at 0x715745168b30>, option = 'blocks'
+index_kernel = 'fp8'
+
+    @pytest.mark.skipif(not (SPAWN / 'index_mma/topk_mb_write_at.ptx').exists(), reason='gpu/spawn index_mma not built')
+    @pytest.mark.parametrize('index_kernel', ['mma', 'fp8', 'mma16'])
+    @pytest.mark.parametrize('option', ['ilp', 'ilp_hist', 'blocks'])
+    def test_long_topk_ilp_gives_the_bits_of_position(ctx, option, index_kernel):
+        """long_topk='ilp' and 'ilp_hist' (#32): topk_select_ilp_at, or the scores kernel's bins and
+        topk_select_ilp_hist_at, select topk_select_at's set in the same order, so under replay the logits are
+        'position''s bit for bit. 'blocks' is 'ilp_hist' with topk_blocks_from=256: from step 257 on, the
+        multi-block pair topk_mb_list_at + topk_mb_write_at, in a third step graph. 32 heads of 128, so the
+        scores are index_scores_mma_at's or _fp8_at's (or their _hist_at twins, whose scores are the same);
+        600 steps, index_topk 128."""
+        if index_kernel == 'fp8' and tuple(ctx.compute_capability) < (9, 0):
+            pytest.skip('index_kernel=fp8 needs sm_90a')
+        steps = 600
+        model = build(seed=113, index_n_heads=32, index_head_dim=128, index_topk=128, max_position_embeddings=1024)
+        tokens = np.random.default_rng(113).integers(0, model.config['vocab_size'], size=steps).tolist()
+        long_topk = 'ilp_hist' if option == 'blocks' else option
+        extra = dict(topk_blocks_from=256) if option == 'blocks' else {}
+        out = {}
+        for name, kwargs in ((option, dict(long_topk=long_topk, **extra)), ('position', dict(long_topk='position'))):
+>           resident = ResidentGLM(model, ctx=ctx, max_tokens=steps + 8, device_experts=True, graph=True,
+                                   index_kernel=index_kernel, **kwargs)
+
+gpu/test_resident_graph_hardware.py:210: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+gpu/resident.py:335: in __init__
+    self._allocate()
+gpu/resident.py:606: in _allocate
+    count=z(1, np.uint32), offs=t((8192,), 'int32'), sel=z(4, np.uint32),
+          ^^^^^^^^^^^^^^^
+gpu/resident.py:604: in <lambda>
+    z = lambda n, dtype: t((n,), dtype, np.zeros(n, dtype))
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/resident.py:366: in _tensor
+    return self.ctx.tensor(tuple(shape), dtype, data)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:356: in tensor
+    shape, dtype, nbytes = DeviceTensor._layout(shape, dtype)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+shape = (1,), dtype = <class 'numpy.uint32'>
+
+    @staticmethod
+    def _layout(shape, dtype):
+        if isinstance(shape, (str, bytes)):
+            raise TypeError("shape must be a sequence of nonnegative integers")
+        shape = tuple(shape)
+        if not shape:
+            raise ValueError("shape must have at least one dimension")
+        for dimension in shape:
+            _integer(dimension, "shape dimension")
+        if not isinstance(dtype, str) or dtype not in _DTYPES:
+>           raise ValueError(f"unsupported dtype {dtype!r}; use one of {tuple(_DTYPES)}")
+E           ValueError: unsupported dtype <class 'numpy.uint32'>; use one of ('float16', 'float32', 'float64', 'int8', 'uint8', 'int16', 'uint16', 'int32', 'uint32', 'int64', 'uint64')
+
+gpu/runtime.py:536: ValueError
+_________ test_long_topk_ilp_gives_the_bits_of_position[blocks-mma16] __________
+
+ctx = <gpu.runtime.CUDAContext object at 0x715745168b30>, option = 'blocks'
+index_kernel = 'mma16'
+
+    @pytest.mark.skipif(not (SPAWN / 'index_mma/topk_mb_write_at.ptx').exists(), reason='gpu/spawn index_mma not built')
+    @pytest.mark.parametrize('index_kernel', ['mma', 'fp8', 'mma16'])
+    @pytest.mark.parametrize('option', ['ilp', 'ilp_hist', 'blocks'])
+    def test_long_topk_ilp_gives_the_bits_of_position(ctx, option, index_kernel):
+        """long_topk='ilp' and 'ilp_hist' (#32): topk_select_ilp_at, or the scores kernel's bins and
+        topk_select_ilp_hist_at, select topk_select_at's set in the same order, so under replay the logits are
+        'position''s bit for bit. 'blocks' is 'ilp_hist' with topk_blocks_from=256: from step 257 on, the
+        multi-block pair topk_mb_list_at + topk_mb_write_at, in a third step graph. 32 heads of 128, so the
+        scores are index_scores_mma_at's or _fp8_at's (or their _hist_at twins, whose scores are the same);
+        600 steps, index_topk 128."""
+        if index_kernel == 'fp8' and tuple(ctx.compute_capability) < (9, 0):
+            pytest.skip('index_kernel=fp8 needs sm_90a')
+        steps = 600
+        model = build(seed=113, index_n_heads=32, index_head_dim=128, index_topk=128, max_position_embeddings=1024)
+        tokens = np.random.default_rng(113).integers(0, model.config['vocab_size'], size=steps).tolist()
+        long_topk = 'ilp_hist' if option == 'blocks' else option
+        extra = dict(topk_blocks_from=256) if option == 'blocks' else {}
+        out = {}
+        for name, kwargs in ((option, dict(long_topk=long_topk, **extra)), ('position', dict(long_topk='position'))):
+>           resident = ResidentGLM(model, ctx=ctx, max_tokens=steps + 8, device_experts=True, graph=True,
+                                   index_kernel=index_kernel, **kwargs)
+
+gpu/test_resident_graph_hardware.py:210: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+gpu/resident.py:335: in __init__
+    self._allocate()
+gpu/resident.py:606: in _allocate
+    count=z(1, np.uint32), offs=t((8192,), 'int32'), sel=z(4, np.uint32),
+          ^^^^^^^^^^^^^^^
+gpu/resident.py:604: in <lambda>
+    z = lambda n, dtype: t((n,), dtype, np.zeros(n, dtype))
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/resident.py:366: in _tensor
+    return self.ctx.tensor(tuple(shape), dtype, data)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+gpu/runtime.py:356: in tensor
+    shape, dtype, nbytes = DeviceTensor._layout(shape, dtype)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+shape = (1,), dtype = <class 'numpy.uint32'>
+
+    @staticmethod
+    def _layout(shape, dtype):
+        if isinstance(shape, (str, bytes)):
+            raise TypeError("shape must be a sequence of nonnegative integers")
+        shape = tuple(shape)
+        if not shape:
+            raise ValueError("shape must have at least one dimension")
+        for dimension in shape:
+            _integer(dimension, "shape dimension")
+        if not isinstance(dtype, str) or dtype not in _DTYPES:
+>           raise ValueError(f"unsupported dtype {dtype!r}; use one of {tuple(_DTYPES)}")
+E           ValueError: unsupported dtype <class 'numpy.uint32'>; use one of ('float16', 'float32', 'float64', 'int8', 'uint8', 'int16', 'uint16', 'int32', 'uint32', 'int64', 'uint64')
+
+gpu/runtime.py:536: ValueError
+3 failed, 24 passed in 20.66s
