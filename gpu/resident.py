@@ -171,7 +171,7 @@ class ResidentGLM:
     def __init__(self, model, *, max_tokens=4096, ptx_dir=None, device=0, ctx=None, max_weight_bytes=None,
                  device_topk=True, device_experts=False, fused_attention=False, graph=False, fp8_kernels='hand',
                  topk='auto', long_topk='position', mla_kernel='decode', matvec_kernels='hand', mtp=False,
-                 norm_block=256, fuse_glue=False):
+                 norm_block=256, fuse_glue=True):
         if getattr(model, 'packed_weights', False):
             raise NotImplementedError('ResidentGLM supports expanded float32 weights only')
         if getattr(model, 'expert_placement', None) is not None:
@@ -210,6 +210,8 @@ class ResidentGLM:
         #   - under graph replay, the indexer's LayerNorm, copy, RoPE and store_row as one
         #     index_key_at, and with mla_kernel='tc' the bf16 latent and rope rows (store, RoPE,
         #     store) as one kv_rows_bf16_at.
+        # On by default since the H200 A/B (evidence/h200-20261116-r: about 13 us a layer); False keeps
+        # the separate launches, for an A/B or to check a fusion against them.
         self.fuse_glue = bool(fuse_glue)
         if topk not in ('auto', 'sort', 'radix'):
             raise ValueError("topk must be 'auto', 'sort' or 'radix'")

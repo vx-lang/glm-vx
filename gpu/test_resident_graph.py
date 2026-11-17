@@ -158,7 +158,10 @@ def test_graph_replay_equals_the_per_launch_path(kind, long_topk):
         assert graph.launches['index_scores_at'] == graph.launches['topk_sort_at'] == 2 * full
         assert graph.launches['topk_stable_long_at'] == 2 * full and 'topk_stable_at' not in graph.launches
     assert graph.launches['mla_partial_at'] == graph.launches['mla_merge_at'] == 4 * model.n_layers
-    assert graph.launches['store_row'] == 4 * (2 * model.n_layers + full)
+    # fuse_glue (#39, the default): under replay each full indexer's key row is one index_key_at, so
+    # store_row writes only the latent and rope rows.
+    assert graph.launches['store_row'] == 4 * 2 * model.n_layers
+    assert graph.launches['index_key_at'] == 4 * full
     assert not {'index_scores', 'topk_stable', 'mla_partial', 'mla_merge'} & set(graph.launches)
 
 
@@ -219,3 +222,4 @@ def test_the_test_context_refuses_copies_and_allocations_during_a_capture():
         with stream.capture():
             ctx.tensor((2,))
     x.upload(np.ones(4, 'f4'))  # allowed again once the capture ended
+

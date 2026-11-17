@@ -122,7 +122,7 @@ the rope queries. It runs on 64 blocks, one per head (group, head half, head), o
 Writes the new cache row in bf16 at the step buffer's position. With `'tc'`, the latent and rope
 caches are uint16 tensors that hold bf16 bits.
 
-With `ResidentGLM(fuse_glue=True)` (#39) the latent row and the rope key go to the caches in one
+With `fuse_glue` (#39, on by default) the latent row and the rope key go to the caches in one
 `kv_rows_bf16_at` launch (store, RoPE, store, with their bits), the latent's RMSNorm runs with q_a's
 in one `rmsnorm_pair`, and the indexer's key row is one `index_key_at` (LayerNorm, RoPE, store).
 
@@ -175,7 +175,7 @@ were 11.5 + 11.7 us (float32) and context 1000 ran scores (10.5 us) and top-k (2
 
 With `long_topk='position'` (now the default) the dense layer at 3001 tokens is 226.5 us (270.5 with
 `'merge'`), at 8192 tokens 240.8 (291.2); at context 1000 it is 185.3 us, without the indexer's query
-projections (#32, evidence/h200-20261116-m to -q). `fuse_glue` (#39, evidence/h200-20261116-r) takes
+projections (#32, evidence/h200-20261116-m to -q). `fuse_glue` (#39, evidence/h200-20261116-r; now the default) takes
 about 10 us more off a layer, the same bits: 186.1 -> 175.4 us at context 1000, 224.3 -> 215.1 at 3001
 tokens, 243.1 -> 231.4 at 8192, and 425.9 -> 400.1 for a dense layer and a MoE layer together, where
 a layer boundary's add and next RMSNorm are one launch and the MoE output is not copied. At 131072 tokens the one-block `topk_select_at` takes 270 us against
