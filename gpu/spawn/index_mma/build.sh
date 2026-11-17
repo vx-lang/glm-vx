@@ -18,6 +18,8 @@ if [[ -n "${MACHINE:-}" ]]; then machine=(--machine "$MACHINE"); fi
   "${machine[@]}" "${ptxas[@]}" ${PTXAS:+${PTXAS_ARCH:+--ptxas-arch "$PTXAS_ARCH"}}
 "$PYTHON" gpu/spawn/build.py --source gpu/spawn/index_mma/topk_select_warp_at.vx --output "$OUT/topk_select_warp_at.ptx" \
   "${machine[@]}" "${ptxas[@]}" ${PTXAS:+${PTXAS_ARCH:+--ptxas-arch "$PTXAS_ARCH"}}
+"$PYTHON" gpu/spawn/build.py --source gpu/spawn/index_mma/topk_select_ilp_at.vx --output "$OUT/topk_select_ilp_at.ptx" \
+  "${machine[@]}" "${ptxas[@]}" ${PTXAS:+${PTXAS_ARCH:+--ptxas-arch "$PTXAS_ARCH"}}
 for name in index_key_fp8_at index_scores_fp8_at; do
   "$PYTHON" gpu/spawn/build.py --source "gpu/spawn/index_mma/$name.vx" --output "$OUT/$name.ptx" \
     --machine gpu/spawn/index_mma/machine-sm90a.vx --ptx-version 8.4 "${ptxas[@]}" ${PTXAS:+--ptxas-arch sm_90a}

@@ -1,0 +1,379 @@
+// topk_select_at (#32) in three passes over the scores instead of six: the same set in the same order
+// (the stable top-k's set in ascending position order, ties at the threshold the lowest positions
+// first), one block of 1024 lanes, tokens from step[1]; tokens <= k writes nothing (#43).
+//
+// One block is bound by its instructions a score and its passes over the scores. topk_select_at
+// makes six (four radix rounds, a count, a walk), each lane loading one score at a time; SGLang's
+// fast_topk_v2, also one block, takes 64.7 us at 131072 tokens against its 274.7
+// (evidence/h200-20261117-y). Here, with four loads in flight a lane:
+//   A. A histogram of the keys' top 12 bits (4096 bins) gives the threshold bin B: the keys of bins
+//      above B are taken, and `take` of bin B's.
+//   B. Warp w owns a contiguous chunk of the positions and reads it 32 at a time: it counts its keys
+//      above bin B (vote.ballot, popc) and puts bin B's keys, with their positions, in shared memory.
+//   With at most 2048 of them, two radix rounds of 10 bits over that list find the threshold key K
+//   and `left`, the keys equal to K to take, and add each warp's keys above K and equal to K from it.
+//   With more, the two rounds and the counts read the scores again (topk_select_at's way).
+//   D. Each warp reads its chunk again, in order: position p goes to slot (keys above K before p) +
+//      min(keys equal to K before p, left), from the warps' counts, vote.ballot and %lanemask_lt.
+// A slot is computed, not a loop index, so the writes are atomic stores (as std::nn's
+// nn_moe_group_place's are): the checker cannot see that slots differ. Scores arrive as raw float32
+// bits in an i32 tensor. Warp instructions in mlir! blocks have no host build: GPU only.
+// spawn-include: ../device.vx
+// spawn-vxc: -fweak-relaxed-atomics
+import core::sync::atomic;
+
+// Order-preserving map from float32 bits to [0, 2^32): bigger key == bigger score; NaN is 0, and
+// -0.0 is +0.0's key. (topk_select_at's.)
+macro_rules! topk_key32 {
+    ($bits:expr) => {
+        unsafe {
+          let dv_b: u32 = $bits as u32;
+          let mut dv_key: u32 = dv_b ^ 2147483648u32;
+          if dv_b >= 2147483648u32 { dv_key = 4294967295u32 - dv_b; }
+          if dv_b == 2147483648u32 { dv_key = 2147483648u32; }
+          if (dv_b & 2147483647u32) > 2139095040u32 { dv_key = 0u32; }
+          dv_key
+        }
+    };
+}
+
+// The lanes of this warp whose x equals this lane's (match.any.sync); all 32 lanes must call it.
+fn match_any(x: i32) on Topology::Device -> i32
+ensures writes_only()
+{
+  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
+    %r = llvm.inline_asm has_side_effects "match.any.sync.b32 $0, $1, -1;", "=r,r" %x : (i32) -> i32
+    macro.yield %r : i32
+  };
+}
+
+// The number of lanes of this warp with p != 0 (vote.ballot, popc); all 32 lanes must call it.
+fn count_lanes(p: i32) on Topology::Device -> i32
+ensures writes_only()
+{
+  return mlir!( inputs : (%p = p : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
+    %r = llvm.inline_asm has_side_effects "{ .reg .pred q; .reg .b32 m; setp.ne.s32 q, $1, 0; vote.sync.ballot.b32 m, q, -1; popc.b32 $0, m; }", "=r,r" %p : (i32) -> i32
+    macro.yield %r : i32
+  };
+}
+
+fn popc(x: i32) on Topology::Device -> i32
+ensures writes_only()
+{
+  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
+    %r = llvm.inline_asm "popc.b32 $0, $1;", "=r,r" %x : (i32) -> i32
+    macro.yield %r : i32
+  };
+}
+
+// The sum of x over this lane and the lanes above it in the warp (shfl.sync.down); all 32 lanes must
+// call it.
+fn warp_suffix_sum(x: i32) on Topology::Device -> i32
+ensures writes_only()
+{
+  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
+    %r = llvm.inline_asm has_side_effects "{ .reg .b32 v, t; .reg .pred p; mov.b32 v, $1; shfl.sync.down.b32 t|p, v, 1, 31, -1; @p add.s32 v, v, t; shfl.sync.down.b32 t|p, v, 2, 31, -1; @p add.s32 v, v, t; shfl.sync.down.b32 t|p, v, 4, 31, -1; @p add.s32 v, v, t; shfl.sync.down.b32 t|p, v, 8, 31, -1; @p add.s32 v, v, t; shfl.sync.down.b32 t|p, v, 16, 31, -1; @p add.s32 v, v, t; mov.b32 $0, v; }", "=r,r" %x : (i32) -> i32
+    macro.yield %r : i32
+  };
+}
+
+// The sum of x over this lane and the lanes below it in the warp (shfl.sync.up); all 32 lanes must
+// call it.
+fn warp_prefix_sum(x: i32) on Topology::Device -> i32
+ensures writes_only()
+{
+  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
+    %r = llvm.inline_asm has_side_effects "{ .reg .b32 v, t; .reg .pred p; mov.b32 v, $1; shfl.sync.up.b32 t|p, v, 1, 0, -1; @p add.s32 v, v, t; shfl.sync.up.b32 t|p, v, 2, 0, -1; @p add.s32 v, v, t; shfl.sync.up.b32 t|p, v, 4, 0, -1; @p add.s32 v, v, t; shfl.sync.up.b32 t|p, v, 8, 0, -1; @p add.s32 v, v, t; shfl.sync.up.b32 t|p, v, 16, 0, -1; @p add.s32 v, v, t; mov.b32 $0, v; }", "=r,r" %x : (i32) -> i32
+    macro.yield %r : i32
+  };
+}
+
+// The number of lanes of this warp below this one with p != 0 (vote.ballot, %lanemask_lt, popc); all
+// 32 lanes must call it.
+fn count_lanes_below(p: i32) on Topology::Device -> i32
+ensures writes_only()
+{
+  return mlir!( inputs : (%p = p : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
+    %r = llvm.inline_asm has_side_effects "{ .reg .pred q; .reg .b32 m, lt; setp.ne.s32 q, $1, 0; vote.sync.ballot.b32 m, q, -1; mov.u32 lt, %lanemask_lt; and.b32 m, m, lt; popc.b32 $0, m; }", "=r,r" %p : (i32) -> i32
+    macro.yield %r : i32
+  };
+}
+
+// The sum of x over the 32 lanes of this warp, in every lane (shfl.sync.bfly); all 32 lanes must call it.
+fn warp_total(x: i32) on Topology::Device -> i32
+ensures writes_only()
+{
+  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
+    %r = llvm.inline_asm has_side_effects "{ .reg .b32 v, t; mov.b32 v, $1; shfl.sync.bfly.b32 t, v, 16, 31, -1; add.s32 v, v, t; shfl.sync.bfly.b32 t, v, 8, 31, -1; add.s32 v, v, t; shfl.sync.bfly.b32 t, v, 4, 31, -1; add.s32 v, v, t; shfl.sync.bfly.b32 t, v, 2, 31, -1; add.s32 v, v, t; shfl.sync.bfly.b32 t, v, 1, 31, -1; add.s32 v, v, t; mov.b32 $0, v; }", "=r,r" %x : (i32) -> i32
+    macro.yield %r : i32
+  };
+}
+
+
+// One score of pass A: its key's top 12 bits counted, if `at` is a position.
+macro_rules! count_bin {
+    ($hist:ident, $bits:expr, $at:expr, $tokens:expr) => {
+        unsafe {
+          if $at < $tokens {
+            let _o = atomic_fetch_add_u32(&$hist, (topk_key32!($bits) >> 20u32) as i32, 1u32, AtomicOrdering::Relaxed);
+          }
+          0
+        }
+    };
+}
+
+// One score of pass B: 1 if its key's bin is above `bin`; a key of bin `bin` goes to the list.
+macro_rules! sort_bin {
+    ($ckey:ident, $cpos:ident, $cursor:ident, $bits:expr, $at:expr, $tokens:expr, $bin:expr) => {
+        unsafe {
+          let dv_key: u32 = topk_key32!($bits);
+          let dv_ok: bool = $at < $tokens;
+          let dv_b: u32 = dv_key >> 20u32;
+          if dv_ok && dv_b == $bin {
+            let dv_c: u32 = atomic_fetch_add_u32(&$cursor, 0, 1u32, AtomicOrdering::Relaxed);
+            if dv_c < 2048u32 {
+              atomic_store_u32(&$ckey, dv_c as i32, dv_key, AtomicOrdering::Relaxed);
+              atomic_store_i32(&$cpos, dv_c as i32, $at, AtomicOrdering::Relaxed);
+            }
+          }
+          count_lanes(if dv_ok && dv_b > $bin { 1 } else { 0 })
+        }
+    };
+}
+
+// One step of 32 positions of pass D: writes this lane's position if it is taken; returns the step's
+// keys above K (low 16 bits) and equal to K (high 16 bits), for every lane.
+macro_rules! place {
+    ($out:ident, $bits:expr, $at:expr, $tokens:expr, $key_k:expr, $left:expr, $na:expr, $nt:expr) => {
+        unsafe {
+          let dv_key: u32 = topk_key32!($bits);
+          let dv_ok: bool = $at < $tokens;
+          let dv_a: i32 = if dv_ok && dv_key > $key_k { 1 } else { 0 };
+          let dv_e: i32 = if dv_ok && dv_key == $key_k { 1 } else { 0 };
+          let dv_any: i32 = count_lanes(dv_a + dv_e);
+          let mut dv_r: i32 = 0;
+          if dv_any > 0 {
+            // Every vote before the branch: a vote.sync of all 32 lanes inside it would wait forever.
+            let dv_ties: i32 = $nt + count_lanes_below(dv_e);
+            let dv_before: i32 = $na + count_lanes_below(dv_a);
+            let mut dv_taken: i32 = dv_ties;
+            if dv_taken > $left { dv_taken = $left; }
+            if dv_a == 1 || (dv_e == 1 && dv_ties < $left) {
+              atomic_store_i32($out, dv_before + dv_taken, $at, AtomicOrdering::Relaxed);
+            }
+            dv_r = count_lanes(dv_a) + (count_lanes(dv_e) << 16);
+          }
+          dv_r
+        }
+    };
+}
+
+pub fn glm_vx_spawn_topk_select_ilp_at(out_ids: &Tensor<i32, [?], Memory::HBM>, scores: &Tensor<i32, [?], Memory::HBM>,
+                                       step: &Tensor<i32, [?], Memory::HBM>, k: i32) -> void {
+  spawn on(Topology::Device) {
+    for blk in 0..1 across blocks {
+      let tokens: i32 = step[1];
+      if tokens > k && k > 0 {
+        let hist = Tensor<u32, [4096], Memory::SMEM>::fill(0u32);
+        let mut hist2 = Tensor<u32, [1024], Memory::SMEM>::fill(0u32);
+        let ckey = Tensor<u32, [2048], Memory::SMEM>::fill(0u32);
+        let cpos = Tensor<i32, [2048], Memory::SMEM>::fill(0);
+        let cursor = Tensor<u32, [1], Memory::SMEM>::fill(0u32);
+        let wcnt = Tensor<i32, [64], Memory::SMEM>::fill(0);
+        let mut wsum = unsafe { Tensor<i32, [32], Memory::SMEM>::uninit() };
+        let mut wsum_b = unsafe { Tensor<i32, [32], Memory::SMEM>::uninit() };
+        // sel: [0] bin B, [1] keys of bin B to take; [2 + 2r] K so far before round r, [3 + 2r] keys
+        // equal to it still to take; [6], [7] K and `left`.
+        let mut sel = Tensor<u32, [8], Memory::SMEM>::fill(0u32);
+        // A: the top 12 bits' histogram.
+        for l in 0..1024 across lanes {
+          let last: i32 = tokens - 1;
+          let mut i: i32 = l;
+          while i < tokens {
+            let b0: i32 = scores[i];
+            let b1: i32 = scores[(i + 1024).min(last)];
+            let b2: i32 = scores[(i + 2048).min(last)];
+            let b3: i32 = scores[(i + 3072).min(last)];
+            let _0 = count_bin!(hist, b0, i, tokens);
+            let _1 = count_bin!(hist, b1, i + 1024, tokens);
+            let _2 = count_bin!(hist, b2, i + 2048, tokens);
+            let _3 = count_bin!(hist, b3, i + 3072, tokens);
+            i = i + 4096;
+          }
+        }
+        // B = the largest bin d with above[d] >= need, above[d] = the keys of bins d .. 4095. Lane l
+        // holds bins 4l .. 4l + 3: the warp's suffix sums of its lanes, then the warps above.
+        for g in 0..32 across subgroups {
+          for t in 0..32 across lanes {
+            let l: i32 = g * 32 + t;
+            let c: i32 = (hist[4 * l] + hist[4 * l + 1] + hist[4 * l + 2] + hist[4 * l + 3]) as i32;
+            let sfx: i32 = warp_suffix_sum(c);
+            if t == 0 { wsum[g] = sfx; }
+          }
+        }
+        for g in 0..32 across subgroups {
+          for t in 0..32 across lanes {
+            let l: i32 = g * 32 + t;
+            let h0: i32 = hist[4 * l] as i32;
+            let h1: i32 = hist[4 * l + 1] as i32;
+            let h2: i32 = hist[4 * l + 2] as i32;
+            let h3: i32 = hist[4 * l + 3] as i32;
+            let need: i32 = k.min(tokens);
+            let mut up: i32 = 0;
+            for w in 0..32 { if w > g { up = up + wsum[w]; } }
+            let a0: i32 = up + warp_suffix_sum(h0 + h1 + h2 + h3);
+            let a1: i32 = a0 - h0;
+            let a2: i32 = a1 - h1;
+            let a3: i32 = a2 - h2;
+            let a4: i32 = a3 - h3;
+            if a0 >= need && a4 < need {
+              let mut d: i32 = 3;
+              let mut over: i32 = a4;
+              if a3 < need { d = 2; over = a3; }
+              if a2 < need { d = 1; over = a2; }
+              if a1 < need { d = 0; over = a1; }
+              atomic_store_u32(&sel, 0, (4 * l + d) as u32, AtomicOrdering::Relaxed);
+              atomic_store_u32(&sel, 1, (need - over) as u32, AtomicOrdering::Relaxed);
+            }
+          }
+        }
+        // B: each warp's keys above bin B, and bin B's keys listed.
+        for g in 0..32 across subgroups {
+          for t in 0..32 across lanes {
+            let bin: u32 = sel[0];
+            let last: i32 = tokens - 1;
+            let chunk: i32 = (tokens + 4095) / 4096 * 128;
+            let mut na: i32 = 0;
+            for s in 0..chunk / 128 {
+              let p: i32 = g * chunk + s * 128 + t;
+              let b0: i32 = scores[p.min(last)];
+              let b1: i32 = scores[(p + 32).min(last)];
+              let b2: i32 = scores[(p + 64).min(last)];
+              let b3: i32 = scores[(p + 96).min(last)];
+              na = na + sort_bin!(ckey, cpos, cursor, b0, p, tokens, bin);
+              na = na + sort_bin!(ckey, cpos, cursor, b1, p + 32, tokens, bin);
+              na = na + sort_bin!(ckey, cpos, cursor, b2, p + 64, tokens, bin);
+              na = na + sort_bin!(ckey, cpos, cursor, b3, p + 96, tokens, bin);
+            }
+            if t == 0 { wsum_b[g] = na; }
+          }
+        }
+        for l in 0..1 across lanes(1024) {
+          sel[2] = sel[0] << 20u32;
+          sel[3] = sel[1];
+        }
+        // K: two rounds of 10 bits over bin B's keys, from the list or from the scores.
+        for r in 0..2 {
+          let shift: u32 = (10 - 10 * r) as u32;
+          for l in 0..1024 across lanes { hist2[l] = 0u32; }
+          for l in 0..1024 across lanes {
+            let prefix: u32 = sel[2 + 2 * r];
+            let hi: u32 = shift + 10u32;
+            if cursor[0] <= 2048u32 {
+              let n: i32 = cursor[0] as i32;
+              let mut c: i32 = l;
+              while c < n {
+                let key: u32 = atomic_load_u32(&ckey, c, AtomicOrdering::Relaxed);
+                if (key >> hi) == (prefix >> hi) {
+                  let _o = atomic_fetch_add_u32(&hist2, ((key >> shift) & 1023u32) as i32, 1u32, AtomicOrdering::Relaxed);
+                }
+                c = c + 1024;
+              }
+            } else {
+              let mut i: i32 = l;
+              while i < tokens {
+                let key: u32 = topk_key32!(scores[i]);
+                if (key >> hi) == (prefix >> hi) {
+                  let _o = atomic_fetch_add_u32(&hist2, ((key >> shift) & 1023u32) as i32, 1u32, AtomicOrdering::Relaxed);
+                }
+                i = i + 1024;
+              }
+            }
+          }
+          for g in 0..32 across subgroups {
+            for t in 0..32 across lanes {
+              let sfx: i32 = warp_suffix_sum(hist2[g * 32 + t] as i32);
+              if t == 0 { wsum[g] = sfx; }
+            }
+          }
+          for g in 0..32 across subgroups {
+            for t in 0..32 across lanes {
+              let d: i32 = g * 32 + t;
+              let needed: i32 = atomic_load_u32(&sel, 3 + 2 * r, AtomicOrdering::Relaxed) as i32;
+              let h: i32 = hist2[d] as i32;
+              let mut up: i32 = 0;
+              for w in 0..32 { if w > g { up = up + wsum[w]; } }
+              let a: i32 = up + warp_suffix_sum(h);
+              if a >= needed && a - h < needed {
+                atomic_store_u32(&sel, 4 + 2 * r, atomic_load_u32(&sel, 2 + 2 * r, AtomicOrdering::Relaxed) + ((d as u32) << shift),
+                                 AtomicOrdering::Relaxed);
+                atomic_store_u32(&sel, 5 + 2 * r, (needed - (a - h)) as u32, AtomicOrdering::Relaxed);
+              }
+            }
+          }
+        }
+        // Each warp's keys above K and equal to K: its keys above bin B, and the rest from the list or
+        // from the scores.
+        for l in 0..1024 across lanes {
+          let key_k: u32 = sel[6];
+          let chunk: i32 = (tokens + 4095) / 4096 * 128;
+          if cursor[0] <= 2048u32 {
+            let n: i32 = cursor[0] as i32;
+            let mut c: i32 = l;
+            while c < n {
+              let key: u32 = atomic_load_u32(&ckey, c, AtomicOrdering::Relaxed);
+              let w: i32 = atomic_load_i32(&cpos, c, AtomicOrdering::Relaxed) / chunk;
+              if key > key_k { let _o = atomic_fetch_add_i32(&wcnt, w, 1, AtomicOrdering::Relaxed); }
+              if key == key_k { let _o = atomic_fetch_add_i32(&wcnt, 32 + w, 1, AtomicOrdering::Relaxed); }
+              c = c + 1024;
+            }
+          } else {
+            let mut i: i32 = l;
+            while i < tokens {
+              let key: u32 = topk_key32!(scores[i]);
+              if (key >> 20u32) == (key_k >> 20u32) {
+                let w: i32 = i / chunk;
+                if key > key_k { let _o = atomic_fetch_add_i32(&wcnt, w, 1, AtomicOrdering::Relaxed); }
+                if key == key_k { let _o = atomic_fetch_add_i32(&wcnt, 32 + w, 1, AtomicOrdering::Relaxed); }
+              }
+              i = i + 1024;
+            }
+          }
+        }
+        // D: every taken position, in order.
+        for g in 0..32 across subgroups {
+          for t in 0..32 across lanes {
+            let key_k: u32 = sel[6];
+            let left: i32 = sel[7] as i32;
+            let last: i32 = tokens - 1;
+            let chunk: i32 = (tokens + 4095) / 4096 * 128;
+            let mut na: i32 = 0;
+            let mut nt: i32 = 0;
+            for w in 0..32 {
+              if w < g {
+                na = na + wsum_b[w] + wcnt[w];
+                nt = nt + wcnt[32 + w];
+              }
+            }
+            for s in 0..chunk / 128 {
+              let p: i32 = g * chunk + s * 128 + t;
+              let b0: i32 = scores[p.min(last)];
+              let b1: i32 = scores[(p + 32).min(last)];
+              let b2: i32 = scores[(p + 64).min(last)];
+              let b3: i32 = scores[(p + 96).min(last)];
+              let r0: i32 = place!(out_ids, b0, p, tokens, key_k, left, na, nt);
+              na = na + (r0 & 65535); nt = nt + (r0 >> 16);
+              let r1: i32 = place!(out_ids, b1, p + 32, tokens, key_k, left, na, nt);
+              na = na + (r1 & 65535); nt = nt + (r1 >> 16);
+              let r2: i32 = place!(out_ids, b2, p + 64, tokens, key_k, left, na, nt);
+              na = na + (r2 & 65535); nt = nt + (r2 >> 16);
+              let r3: i32 = place!(out_ids, b3, p + 96, tokens, key_k, left, na, nt);
+              na = na + (r3 & 65535); nt = nt + (r3 >> 16);
+            }
+          }
+        }
+      }
+    }
+  }
+  return;
+}

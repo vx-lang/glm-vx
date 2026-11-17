@@ -28,12 +28,18 @@ def main():
     stream = ctx.stream()
     kernels = {'topk_select_at': SpawnKernel(ctx, spawn / 'topk_select_at.ptx'),
                'topk_select_warp_at': SpawnKernel(ctx, spawn / 'index_mma' / 'topk_select_warp_at.ptx')}
+    if (spawn / 'index_mma' / 'topk_select_ilp_at.ptx').exists():
+        kernels['topk_select_ilp_at'] = SpawnKernel(ctx, spawn / 'index_mma' / 'topk_select_ilp_at.ptx')
     rng = np.random.default_rng(1)
     rows = ['| tokens | ' + ' | '.join(f'{n} us' for n in kernels) + ' |', '|---|' + '---|' * len(kernels)]
     for tokens in args.tokens:
         scores = rng.normal(size=tokens).astype('f4')
         want = np.sort(np.argsort(-scores, kind='stable')[:K])
-        d_scores = ctx.tensor((tokens,), 'int32', scores.view('i4').tobytes())
+        # A whole number of quads (topk_select_ilp_at reads 16 bytes at a time); +inf past the end, so
+        # a kernel that read it would select it.
+        room = -(-tokens // 4) * 4
+        padded = np.concatenate([scores, np.full(room - tokens, np.inf, 'f4')])
+        d_scores = ctx.tensor((room,), 'int32', padded.view('i4').tobytes())
         step = ctx.tensor((4,), 'int32', np.array([tokens - 1, tokens, K, 1], 'i4').tobytes())
         times = []
         for name, kernel in kernels.items():

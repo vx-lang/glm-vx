@@ -1081,24 +1081,32 @@ def test_spawn_index_scores_fp8_at_matches_float64_on_its_codes(context, tokens,
     assert (got[tokens:] == 7).all()
 
 
-# topk_select_warp_at (#32): topk_select_at's set with warp instructions (match.any, vote.ballot,
-# shuffles) from mlir! blocks; the same cases as topk_select's, twice each, and nothing written while
-# tokens <= k.
+# topk_select_warp_at and topk_select_ilp_at (#32): topk_select_at's set with warp instructions
+# (match.any, vote.ballot, shuffles) from mlir! blocks; the same cases as topk_select's, twice each,
+# and nothing written while tokens <= k. 'narrow' puts every key in one of topk_select_ilp_at's 4096
+# bins, more than its list of 2048 holds, so it reads the scores again; 'near' fills the list.
+@pytest.mark.parametrize('kernel_name', ['topk_select_warp_at', 'topk_select_ilp_at'])
 @pytest.mark.parametrize('tokens,k,ties', [(2049, 2048, True), (3001, 2048, False), (8192, 2048, False), (70000, 2048, True),
                                            (1 << 20, 2048, False), (9000, 16, True), (100000, 2048, 'equal'),
-                                           (5000, 2048, 'few'), (2048, 2048, False), (1, 2048, False)])
-def test_spawn_topk_select_warp_at_is_the_stable_set_in_position_order(context, tokens, k, ties):
+                                           (5000, 2048, 'few'), (2048, 2048, False), (1, 2048, False),
+                                           (131072, 2048, False), (131072, 2048, 'narrow'), (40000, 1000, 'near'),
+                                           (4099, 2048, 'narrow'), (6000, 1, False), (6000, 4000, True)])
+def test_spawn_topk_select_warp_at_is_the_stable_set_in_position_order(context, tokens, k, ties, kernel_name):
     rng = np.random.default_rng(tokens * 7 + k)
     if ties == 'equal':
         scores = np.zeros(tokens, 'f4')
     elif ties == 'few':
         scores = rng.integers(0, 2, size=tokens).astype('f4')
+    elif ties == 'narrow':
+        scores = (5 + 0.01 * rng.normal(size=tokens)).astype('f4')
+    elif ties == 'near':  # about 2000 keys in the threshold bin: 4.0 .. 4.5 holds the top 5%
+        scores = np.where(rng.random(tokens) < 0.05, 4 + 0.5 * rng.random(tokens), rng.random(tokens)).astype('f4')
     else:
         scores = rng.integers(-50, 50, size=tokens).astype('f4') if ties else rng.normal(size=tokens).astype('f4')
     if tokens > 9:
         scores[[3, 5, 7, 9]] = np.nan, -np.inf, -0.0, np.inf
     out, d_scores = upload(context, np.full(k, -7, 'i4')), upload(context, scores.view(np.int32))
-    kernel = SpawnKernel(context, BUILD / 'spawn/index_mma/topk_select_warp_at.ptx')
+    kernel = SpawnKernel(context, BUILD / f'spawn/index_mma/{kernel_name}.ptx')
     step = upload(context, np.array([tokens - 1, tokens, min(k, tokens), 1], np.int32))
     want = np.sort(np.argsort(-scores, kind='stable')[:k]) if tokens > k else np.full(k, -7, 'i4')
     for _ in range(2):
