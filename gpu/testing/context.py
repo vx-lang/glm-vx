@@ -9,6 +9,8 @@ from gpu.test_simt import Simt
 class Tensor:
     ctx=None
     def __init__(self,shape,dtype='float32',data=None):
+        # gpu/runtime's DeviceTensor takes a dtype by name only: refuse np.uint32 and the like here too.
+        if not isinstance(dtype,str):raise ValueError(f'unsupported dtype {dtype!r}: pass its name, as gpu/runtime takes it')
         self.shape=tuple(shape);self.dtype=dtype;self._closed=False;self.parent=None
         self.data=np.zeros(shape,dtype=dtype) if data is None else np.frombuffer(data,dtype=dtype).reshape(shape).copy()
     @property

@@ -58,7 +58,7 @@ def main():
             [('topk_select_at', spawn / 'topk_select_at.ptx'), ('topk_select_ilp_at', mma / 'topk_select_ilp_at.ptx'),
              ('topk_select_ilp_hist_at', mma / 'topk_select_ilp_hist_at.ptx'),
              ('topk_mb_list_at', mma / 'topk_mb_list_at.ptx'), ('topk_mb_write_at', mma / 'topk_mb_write_at.ptx')]}
-    z = lambda n, dtype: ctx.tensor((n,), dtype, np.zeros(n, dtype).tobytes())
+    z = lambda n, dtype: ctx.tensor((n,), np.dtype(dtype).name, np.zeros(n, dtype).tobytes())
     mb = dict(wcnt=z(4096, np.int32), ckey=z(16384, np.uint32), cpos=z(16384, np.int32), count=z(1, np.uint32),
               offs=z(8192, np.int32), sel=z(4, np.uint32))
     arrivals = z(1, np.int32), z(1, np.int32)

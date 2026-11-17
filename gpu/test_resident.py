@@ -369,34 +369,37 @@ def fp8_bf16_router_model(seed, **overrides):
 
 
 def test_fuse_router_gives_the_same_bits_in_one_launch():
-    # fuse_router: router_bf16 is bf16_matvec4's rows of the BF16 gate, then the router in the last block
-    # to finish: the same ids and weights in one launch instead of two, so the same logits bit for bit,
-    # one token at a time, with fold_shared (the ninth slot is not the router's), and under graph replay
-    # (the arrival count goes back to zero each launch).
+    # fuse_router: router_bf16 sums the BF16 gate's rows in the hand bf16_matvec's order, then picks the
+    # router's experts in the last block to finish: the same ids and weights in one launch instead of two
+    # (on the emulator, where both sigmoids are libm's), so the same logits bit for bit, one token at a
+    # time, with fold_shared (the ninth slot is not the router's), and under graph replay (the arrival
+    # count goes back to zero each launch). Under matvec_kernels='x4' the unfused projection is
+    # bf16_matvec4, another order: near, not equal.
     model = fp8_bf16_router_model(43, hidden_size=272, moe_intermediate_size=144)
-    options = dict(ctx=None, max_tokens=32, device_experts=True, fp8_kernels='cvt', matvec_kernels='x4')
+    options = dict(max_tokens=32, device_experts=True, fp8_kernels='cvt')
     runs = {}
-    for fuse, fold, graph in ((False, False, False), (True, False, False), (True, True, False), (True, True, True)):
-        resident = ResidentGLM(model, **dict(options, ctx=Context(), fuse_router=fuse, fold_shared=fold, graph=graph))
+    for fuse, fold, graph, kernels in ((False, False, False, 'hand'), (True, False, False, 'hand'),
+                                       (True, True, False, 'hand'), (True, True, True, 'hand'),
+                                       (False, False, False, 'x4'), (True, False, False, 'x4')):
+        resident = ResidentGLM(model, ctx=Context(), fuse_router=fuse, fold_shared=fold, graph=graph,
+                               matvec_kernels=kernels, **options)
         try:
-            runs[fuse, fold, graph] = (np.stack([resident.forward(t) for t in TOKENS[:6]]), dict(resident.launches),
-                                       resident.replays if graph else None)
+            runs[fuse, fold, graph, kernels] = (np.stack([resident.forward(t) for t in TOKENS[:6]]),
+                                                dict(resident.launches), resident.replays if graph else None)
         finally:
             resident.close()
-    plain, before, _ = runs[False, False, False]
+    plain, before, _ = runs[False, False, False, 'hand']
     moe_layers = sum(model.mlp_type(i) != 'dense' for i in range(model.n_layers))
     assert moe_layers > 0
-    for key, (got, after, replays) in runs.items():
-        np.testing.assert_array_equal(got.view(np.uint32), plain.view(np.uint32), err_msg=str(key))
-    _, after, _ = runs[True, False, False]
+    for key in ((True, False, False, 'hand'), (True, True, False, 'hand'), (True, True, True, 'hand')):
+        np.testing.assert_array_equal(runs[key][0].view(np.uint32), plain.view(np.uint32), err_msg=str(key))
+    np.testing.assert_allclose(runs[True, False, False, 'x4'][0], runs[False, False, False, 'x4'][0], rtol=1e-5, atol=1e-5)
+    _, after, _ = runs[True, False, False, 'hand']
     tokens = 6
     assert before['router'] == moe_layers * tokens and 'router' not in after
     assert after['router_bf16'] == moe_layers * tokens
-    assert after.get('bf16_matvec4', 0) == before['bf16_matvec4'] - moe_layers * tokens
     assert sum(after.values()) == sum(before.values()) - moe_layers * tokens
-    assert runs[True, True, True][2] > 0
-    with pytest.raises(ValueError, match='fuse_router'):
-        ResidentGLM(model, ctx=Context(), fuse_router=True)
+    assert runs[True, True, True, 'hand'][2] > 0
 
 
 def test_norm_block_1024_is_close_to_256_and_other_sizes_are_refused():

@@ -1341,19 +1341,24 @@ def test_router(run, experts, k, ties):
     np.testing.assert_allclose(got['weights'], chosen[:k] / (warp_tree(chosen) + F(1e-20)) * F(2.5), **CLOSE)
 
 
-# router_bf16 (fuse_router): bf16_matvec4's rows of the gate, then router's selection in the last block,
-# bit for bit the two kernels; slot k (fold_shared's) untouched, and arrivals back to 0.
-@pytest.mark.parametrize('experts,cols,k,ties', [(256, 6144, 8, False), (7, 136, 3, True), (33, 520, 8, False)])
+# router_bf16 (fuse_router): the gate's rows in the hand bf16_matvec's order (lane-strided sums, then the
+# warp tree), then router's choice and weights, bit for bit; slot k (fold_shared's) untouched. Ties: a
+# zero gate and a bias that repeats, so the lower id must win.
+@pytest.mark.parametrize('experts,cols,k,ties', [(256, 6144, 8, False), (7, 136, 3, True), (33, 520, 8, False),
+                                                 (256, 64, 8, True), (1, 8, 1, False)])
 def test_router_bf16(run, experts, cols, k, ties):
-    words, x, expected = bf16_matvec4_case(experts, cols, experts + cols + k)
+    rng = np.random.default_rng(experts + cols + k)
+    w = (rng.normal(size=(experts, cols)).astype(F).view(np.uint32) >> 16).astype(np.uint16)
+    x = rng.normal(size=cols).astype(F)
     if ties:
-        words, expected = np.zeros_like(words), np.zeros(experts, F)
+        w[...] = 0
         bias = np.tile(np.array([0.0, 0.5], F), experts)[:experts].copy()
     else:
-        bias = (np.random.default_rng(experts).normal(size=experts) * 0.1).astype(F)
+        bias = (rng.normal(size=experts) * 0.1).astype(F)
+    expected = warp_tree(strided_sums(bf16(w) * x, 32))
     ids, weights = np.full(k + 1, -7, np.int32), np.full(k + 1, 3.0, F)
-    got = run('router_bf16', indices=ids, weights=weights, logits=np.zeros(experts, F), gate=words, x=x, bias=bias,
-              experts=experts, cols=cols, k=k, scale=2.5, arrivals=np.zeros(1, np.uint32))
+    got = run('router_bf16', indices=ids, weights=weights, logits=np.zeros(experts, F), gate=w.view(np.uint32).reshape(-1),
+              x=x, bias=bias, experts=experts, cols=cols, k=k, scale=2.5, arrivals=np.zeros(1, np.uint32))
     bits_equal(got['logits'], expected)
     want = run('router', indices=ids[:k].copy(), weights=weights[:k].copy(), logits=np.asarray(expected, F), bias=bias,
                experts=experts, k=k, scale=2.5)

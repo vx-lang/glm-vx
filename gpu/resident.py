@@ -49,10 +49,11 @@ block of each head's last split merges that head), in place of mla_partial then 
 is libdevice's expf, not the hand kernels' ex2.approx, so logits differ from the default in the last
 bits. It needs Vx's code of a group of blocks (#2185 to #2188, on Vx main from c3716538).
 
-``fuse_router=True`` (with ``matvec_kernels='x4'``) runs a MoE layer's BF16 router projection and the
-router in one launch, gpu/spawn's router_bf16: bf16_matvec4's rows, then the selection in the last block
-to finish. As with fused_attention, its sigmoid's exp is libdevice's expf, not the hand router's
-ex2.approx, so on the GPU the routing weights, and the logits, differ from the default in the last bits.
+``fuse_router=True`` runs a MoE layer's BF16 router projection and the router in one launch, gpu/spawn's
+router_bf16: a block a row summed in the hand bf16_matvec's order, then the selection, in one pass of
+ranks, in the last block to finish. As with fused_attention, its sigmoid's exp is libdevice's expf, not
+the hand router's ex2.approx, so on the GPU the routing weights, and the logits, differ from the default
+in the last bits.
 
 ``fold_shared=True`` (with ``device_experts`` and ``fp8_kernels='cvt'``) runs a MoE layer's shared expert
 inside the routed experts' two launches, as expert ``n_routed_experts`` with weight 1.0 in route slot k:
@@ -259,14 +260,13 @@ class ResidentGLM:
         if self.fold_shared and not (self.device_experts and fp8_kernels == 'cvt'):
             raise ValueError("fold_shared needs device_experts=True and fp8_kernels='cvt'")
         # fuse_router: a MoE layer's router projection and the router in one launch (gpu/spawn/router_bf16:
-        # bf16_matvec4's rows, then gpu/spawn's router in the last block to finish). For a BF16 gate, as the
-        # official checkpoints store it, under matvec_kernels='x4' (whose bf16_matvec4 the unfused
-        # projection is); another gate keeps the two launches. The hand router's exp is ex2.approx, the
-        # spawn router's libdevice's expf: on the GPU the weights differ in the last bits (as
-        # fused_attention's); on the host both are libm's, and the logits equal bit for bit.
+        # a block a row in the hand bf16_matvec's order, then the router's choice in the last block to
+        # finish). For a BF16 gate, as the official checkpoints store it; another gate keeps the two
+        # launches. Its logits are the hand bf16_matvec's (so matvec_kernels='x4' changes its bits, as
+        # bf16_matvec4 sums in another order). The hand router's exp is ex2.approx, router_bf16's
+        # libdevice's expf: on the GPU the weights differ in the last bits (as fused_attention's); on the
+        # CPU emulator the logits equal the hand path's bit for bit.
         self.fuse_router = bool(fuse_router)
-        if self.fuse_router and matvec_kernels != 'x4':
-            raise ValueError("fuse_router needs matvec_kernels='x4'")
         if mla_kernel not in ('decode', 'chunks', 'heads', 'flash', 'tc'):
             raise ValueError("mla_kernel must be 'decode', 'chunks', 'heads', 'flash' or 'tc'")
         self.mla_kernel = mla_kernel
@@ -601,10 +601,10 @@ class ResidentGLM:
         if self.score_bins is not None and cap > self.topk_blocks_from:
             if cap > 4096 * 256:
                 raise ValueError(f'the multi-block top-k takes up to {4096 * 256} tokens, not {cap}')
-            z = lambda n, dtype: t((n,), dtype, np.zeros(n, dtype))
+            z = lambda n, dtype: t((n,), dtype, np.zeros(n, dtype))  # dtype by name, as CUDAContext.tensor takes it
             self._mb = dict(wcnt=t((4096,), 'int32'), ckey=t((16384,), 'uint32'), cpos=t((16384,), 'int32'),
-                            count=z(1, np.uint32), offs=t((8192,), 'int32'), sel=z(4, np.uint32),
-                            list_arrivals=z(1, np.int32), write_arrivals=z(1, np.int32))
+                            count=z(1, 'uint32'), offs=t((8192,), 'int32'), sel=z(4, 'uint32'),
+                            list_arrivals=z(1, 'int32'), write_arrivals=z(1, 'int32'))
         self.selected = t((self.index_topk,), 'int32')
         # 0, 1, ..., index_topk - 1: the selection while the context fits in index_topk (#43).
         self.positions = t((self.index_topk,), 'int32', np.arange(self.index_topk, dtype=np.int32))
