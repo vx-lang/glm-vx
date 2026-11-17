@@ -168,3 +168,21 @@ def test_index_kernel_tc_matches_simt_to_bf16_rounding(ctx, kernel, name):
     # 1 step of 600, evidence/h200-20261117-w); bf16 keeps every step within the tolerance here.
     assert far.sum() <= (steps // 100 if kernel == 'fp8' else 0), np.flatnonzero(far)
     assert (out[kernel].argmax(-1) == out['simt'].argmax(-1)).mean() > 0.95
+
+
+@pytest.mark.skipif(not (SPAWN / 'index_mma/topk_select_warp_at.ptx').exists(), reason='gpu/spawn index_mma not built')
+def test_long_topk_warp_gives_the_bits_of_position(ctx):
+    """long_topk='warp' (#32): topk_select_warp_at selects topk_select_at's set in the same order, so under
+    replay the logits are 'position''s bit for bit; 600 steps, index_topk 128, so 472 select by score."""
+    steps = 600
+    model = build(seed=109, index_topk=128, max_position_embeddings=1024)
+    tokens = np.random.default_rng(109).integers(0, model.config['vocab_size'], size=steps).tolist()
+    out = {}
+    for option in ('warp', 'position'):
+        resident = ResidentGLM(model, ctx=ctx, max_tokens=steps + 8, device_experts=True, graph=True, long_topk=option)
+        try:
+            out[option] = resident.prefill(tokens)
+            assert (resident.launches.get('index_mma/topk_select_warp_at', 0) > 0) == (option == 'warp')
+        finally:
+            resident.close()
+    np.testing.assert_array_equal(out['warp'], out['position'])

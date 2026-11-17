@@ -1079,3 +1079,29 @@ def test_spawn_index_scores_fp8_at_matches_float64_on_its_codes(context, tokens,
     print(f'max |err| / max sum |terms|: {err.max():.3g}')
     assert err.max() < 1e-5
     assert (got[tokens:] == 7).all()
+
+
+# topk_select_warp_at (#32): topk_select_at's set with warp instructions (match.any, vote.ballot,
+# shuffles) from mlir! blocks; the same cases as topk_select's, twice each, and nothing written while
+# tokens <= k.
+@pytest.mark.parametrize('tokens,k,ties', [(2049, 2048, True), (3001, 2048, False), (8192, 2048, False), (70000, 2048, True),
+                                           (1 << 20, 2048, False), (9000, 16, True), (100000, 2048, 'equal'),
+                                           (5000, 2048, 'few'), (2048, 2048, False), (1, 2048, False)])
+def test_spawn_topk_select_warp_at_is_the_stable_set_in_position_order(context, tokens, k, ties):
+    rng = np.random.default_rng(tokens * 7 + k)
+    if ties == 'equal':
+        scores = np.zeros(tokens, 'f4')
+    elif ties == 'few':
+        scores = rng.integers(0, 2, size=tokens).astype('f4')
+    else:
+        scores = rng.integers(-50, 50, size=tokens).astype('f4') if ties else rng.normal(size=tokens).astype('f4')
+    if tokens > 9:
+        scores[[3, 5, 7, 9]] = np.nan, -np.inf, -0.0, np.inf
+    out, d_scores = upload(context, np.full(k, -7, 'i4')), upload(context, scores.view(np.int32))
+    kernel = SpawnKernel(context, BUILD / 'spawn/index_mma/topk_select_warp_at.ptx')
+    step = upload(context, np.array([tokens - 1, tokens, min(k, tokens), 1], np.int32))
+    want = np.sort(np.argsort(-scores, kind='stable')[:k]) if tokens > k else np.full(k, -7, 'i4')
+    for _ in range(2):
+        kernel.launch(out_ids=out, scores=d_scores, step=step, k=k)
+        context.synchronize()
+        np.testing.assert_array_equal(download(out), want)

@@ -220,8 +220,12 @@ class ResidentGLM:
         # one topk_select launch (#32), the order the selection has within index_topk (#43) and the
         # reference model's; 'merge' and 'select' write it in score order (topk_chunks + topk_merge, or
         # topk_radix), as torch.topk does, for an A/B of the order's rounding.
-        if long_topk not in ('merge', 'select', 'position'):
-            raise ValueError("long_topk must be 'merge', 'select' or 'position'")
+        # long_topk='warp' (#32): 'position''s set and order from topk_select_warp_at under graph replay, the
+        # same select with warp instructions in mlir! blocks (gpu/spawn/index_mma): per-warp histograms
+        # with one add a distinct digit, shuffle scans, the digit by a ballot count. GPU only (no host
+        # build); without graph replay it is 'position'.
+        if long_topk not in ('merge', 'select', 'position', 'warp'):
+            raise ValueError("long_topk must be 'merge', 'select', 'position' or 'warp'")
         self.long_topk = long_topk
         if mla_kernel not in ('decode', 'chunks', 'heads', 'flash', 'tc'):
             raise ValueError("mla_kernel must be 'decode', 'chunks', 'heads', 'flash' or 'tc'")
@@ -1079,10 +1083,13 @@ class ResidentGLM:
     def _select(self, tokens):
         """selected[:min(index_topk, tokens)] = the indexer's top-k of scores[:tokens], stable by position."""
         count = min(self.index_topk, tokens)
-        if self.long_topk == 'position' and self.device_topk:
+        if self.long_topk in ('position', 'warp') and self.device_topk:
             # One block: the threshold by radix select in shared memory, then the set in position
             # order (#32). Under replay it reads tokens from the step buffer; any tokens, any k.
-            if self.graph:
+            if self.graph and self.long_topk == 'warp':
+                self._spawn('index_mma/topk_select_warp_at', out_ids=self.selected,
+                            scores=self.scores.view(self.scores.shape, 'int32'), step=self.step, k=self.index_topk)
+            elif self.graph:
                 self._spawn('topk_select_at', out_ids=self.selected, scores=self.scores.view(self.scores.shape, 'int32'),
                             step=self.step, k=self.index_topk)
             else:
@@ -1117,7 +1124,7 @@ class ResidentGLM:
         else:
             scores = np.frombuffer(self.scores.view((tokens,)).download(), dtype=np.float32)
             chosen = np.argsort(-scores, kind='stable')[:count].astype(np.int32)
-            if self.long_topk == 'position':
+            if self.long_topk in ('position', 'warp'):
                 chosen = np.sort(chosen)
             self.selected.view((count,)).upload(chosen)
         self.selected_count = count

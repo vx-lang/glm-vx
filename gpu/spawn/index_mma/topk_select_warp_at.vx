@@ -1,0 +1,261 @@
+// topk_select_at (#32) with warp instructions from mlir! blocks: the same set, in the same order (the
+// stable top-k's set in ascending position order, ties at the threshold the lowest positions first),
+// one block of 1024 lanes, tokens from step[1]; tokens <= k writes nothing (#43). Three changes:
+//   - Each warp counts into its own 256-bin histogram, and the lanes of a warp with the same digit
+//     add once, by their leader (match.any.sync, popc). topk_select_at's shared histogram took
+//     every lane's add on one counter when the scores share their top byte, as they mostly do: in
+//     series, which grows with the tokens (62 us at 32768, 270 at 131072 in the step).
+//   - The suffix sums over the bins are warp shuffles (shfl.sync.down), not eight doubling steps
+//     with a barrier each.
+//   - The round's digit is a count, not one lane's binary search: above[d] does not grow with d,
+//     so the largest d with above[d] >= needed is the number of such d less one (vote.ballot,
+//     popc). Every lane then derives the next prefix and count, so no lane writes them.
+// The runs' scan and the slot search are topk_select_at's, the scan by warp shuffles.
+// Scores arrive as raw float32 bits in an i32 tensor. Warp instructions in mlir! blocks have no host
+// build, so only the GPU runs this kernel (gpu/spawn/index_mma/build.sh).
+// spawn-include: ../device.vx
+// spawn-vxc: -fweak-relaxed-atomics
+import core::sync::atomic;
+
+// Order-preserving map from float32 bits to [0, 2^32): bigger key == bigger score; NaN is 0, and
+// -0.0 is +0.0's key. (topk_select_at's.)
+macro_rules! topk_key32 {
+    ($bits:expr) => {
+        unsafe {
+          let dv_b: u32 = $bits as u32;
+          let mut dv_key: u32 = dv_b ^ 2147483648u32;
+          if dv_b >= 2147483648u32 { dv_key = 4294967295u32 - dv_b; }
+          if dv_b == 2147483648u32 { dv_key = 2147483648u32; }
+          if (dv_b & 2147483647u32) > 2139095040u32 { dv_key = 0u32; }
+          dv_key
+        }
+    };
+}
+
+// The lanes of this warp whose x equals this lane's (match.any.sync); all 32 lanes must call it.
+fn match_any(x: i32) on Topology::Device -> i32
+ensures writes_only()
+{
+  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
+    %r = llvm.inline_asm has_side_effects "match.any.sync.b32 $0, $1, -1;", "=r,r" %x : (i32) -> i32
+    macro.yield %r : i32
+  };
+}
+
+// The number of lanes of this warp with p != 0 (vote.ballot, popc); all 32 lanes must call it.
+fn count_lanes(p: i32) on Topology::Device -> i32
+ensures writes_only()
+{
+  return mlir!( inputs : (%p = p : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
+    %r = llvm.inline_asm has_side_effects "{ .reg .pred q; .reg .b32 m; setp.ne.s32 q, $1, 0; vote.sync.ballot.b32 m, q, -1; popc.b32 $0, m; }", "=r,r" %p : (i32) -> i32
+    macro.yield %r : i32
+  };
+}
+
+fn popc(x: i32) on Topology::Device -> i32
+ensures writes_only()
+{
+  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
+    %r = llvm.inline_asm "popc.b32 $0, $1;", "=r,r" %x : (i32) -> i32
+    macro.yield %r : i32
+  };
+}
+
+// The sum of x over this lane and the lanes above it in the warp (shfl.sync.down); all 32 lanes must
+// call it.
+fn warp_suffix_sum(x: i32) on Topology::Device -> i32
+ensures writes_only()
+{
+  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
+    %r = llvm.inline_asm has_side_effects "{ .reg .b32 v, t; .reg .pred p; mov.b32 v, $1; shfl.sync.down.b32 t|p, v, 1, 31, -1; @p add.s32 v, v, t; shfl.sync.down.b32 t|p, v, 2, 31, -1; @p add.s32 v, v, t; shfl.sync.down.b32 t|p, v, 4, 31, -1; @p add.s32 v, v, t; shfl.sync.down.b32 t|p, v, 8, 31, -1; @p add.s32 v, v, t; shfl.sync.down.b32 t|p, v, 16, 31, -1; @p add.s32 v, v, t; mov.b32 $0, v; }", "=r,r" %x : (i32) -> i32
+    macro.yield %r : i32
+  };
+}
+
+// The sum of x over this lane and the lanes below it in the warp (shfl.sync.up); all 32 lanes must
+// call it.
+fn warp_prefix_sum(x: i32) on Topology::Device -> i32
+ensures writes_only()
+{
+  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
+    %r = llvm.inline_asm has_side_effects "{ .reg .b32 v, t; .reg .pred p; mov.b32 v, $1; shfl.sync.up.b32 t|p, v, 1, 0, -1; @p add.s32 v, v, t; shfl.sync.up.b32 t|p, v, 2, 0, -1; @p add.s32 v, v, t; shfl.sync.up.b32 t|p, v, 4, 0, -1; @p add.s32 v, v, t; shfl.sync.up.b32 t|p, v, 8, 0, -1; @p add.s32 v, v, t; shfl.sync.up.b32 t|p, v, 16, 0, -1; @p add.s32 v, v, t; mov.b32 $0, v; }", "=r,r" %x : (i32) -> i32
+    macro.yield %r : i32
+  };
+}
+
+pub fn glm_vx_spawn_topk_select_warp_at(out_ids: &mut Tensor<i32, [?], Memory::HBM>, scores: &Tensor<i32, [?], Memory::HBM>,
+                                        step: &Tensor<i32, [?], Memory::HBM>, k: i32) -> void {
+  spawn on(Topology::Device) {
+    for blk in 0..1 across blocks {
+      let tokens: i32 = step[1];
+      if tokens > k && k > 0 {
+        // whist[256 w + d]: warp w's count of digit d this round.
+        let mut whist = unsafe { Tensor<u32, [8192], Memory::SMEM>::uninit() };
+        // above[d]: the keys (with the prefix so far) whose digit is d or more; wsum: a warp's part.
+        let mut above = unsafe { Tensor<i32, [256], Memory::SMEM>::uninit() };
+        let mut wsum = unsafe { Tensor<i32, [32], Memory::SMEM>::uninit() };
+        let mut wcount = unsafe { Tensor<i32, [32], Memory::SMEM>::uninit() };
+        // prefix[r], needed[r]: the threshold key's bytes above round r's, and the keys still to take.
+        let mut sel = unsafe { Tensor<u32, [8], Memory::SMEM>::uninit() };
+        let mut runs_a = unsafe { Tensor<i32, [2048], Memory::SMEM>::uninit() };
+        let mut tot = unsafe { Tensor<i32, [64], Memory::SMEM>::uninit() };
+        for l in 0..1 across lanes(1024) {
+          sel[0] = 0u32;
+          sel[4] = k.min(tokens) as u32;
+        }
+        for r in 0..4 {
+          for l in 0..1024 across lanes {
+            for i in 0..8 { whist[l * 8 + i] = 0u32; }
+          }
+          for l in 0..1024 across lanes {
+            let prefix: u32 = sel[r];
+            let shift: u32 = (24 - 8 * r) as u32;
+            let w: i32 = l / 32;
+            let below: u32 = (1u32 << ((l % 32) as u32)) - 1u32;
+            for it in 0..(tokens + 1023) / 1024 {
+              let i: i32 = it * 1024 + l;
+              let mut digit: i32 = 256;
+              if i < tokens {
+                let key: u32 = topk_key32!(scores[i]);
+                if r == 0 || (key >> (shift + 8u32)) == (prefix >> (shift + 8u32)) {
+                  digit = ((key >> shift) & 255u32) as i32;
+                }
+              }
+              // One add a distinct digit of the warp, by its lowest lane.
+              let same: u32 = match_any(digit) as u32;
+              if digit < 256 && (same & below) == 0u32 {
+                let _o = atomic_fetch_add_u32(&whist, w * 256 + digit, popc(same as i32) as u32, AtomicOrdering::Relaxed);
+              }
+            }
+          }
+          // above[d] = the warps' counts of digits d .. 255: a suffix sum in each of the eight warps of
+          // lanes 0 .. 255, then the warps above.
+          for g in 0..8 across subgroups {
+            for t in 0..32 across lanes {
+              let d: i32 = g * 32 + t;
+              let mut h: i32 = 0;
+              for w in 0..32 { h = h + whist[w * 256 + d] as i32; }
+              let s: i32 = warp_suffix_sum(h);
+              above[d] = s;
+              if t == 0 { wsum[g] = s; }
+            }
+          }
+          for d in 0..256 across lanes(1024) {
+            let mut s: i32 = above[d];
+            for w in 0..8 { if w > d / 32 { s = s + wsum[w]; } }
+            above[d] = s;
+          }
+          // The digit: the number of d with above[d] >= needed, less one (above[0] >= needed always).
+          for g in 0..8 across subgroups {
+            for t in 0..32 across lanes {
+              let needed: i32 = sel[4 + r] as i32;
+              let n: i32 = count_lanes(if above[g * 32 + t] >= needed { 1 } else { 0 });
+              if t == 0 { wcount[g] = n; }
+            }
+          }
+          for l in 0..1 across lanes(1024) {
+            if r < 3 {
+              let mut digit: i32 = 0 - 1;
+              for w in 0..8 { digit = digit + wcount[w]; }
+              let needed: i32 = sel[4 + r] as i32;
+              let mut over: i32 = 0;
+              if digit < 255 { over = above[digit + 1]; }
+              sel[r + 1] = sel[r] + ((digit as u32) << ((24 - 8 * r) as u32));
+              sel[5 + r] = (needed - over) as u32;
+            }
+          }
+        }
+        // K and the number of keys equal to K to take, from round 3's digit (every lane, from wcount).
+        // Each run's keys above K (runs_a[l]) and equal to K (runs_a[1024 + l]), then inclusive sums of
+        // both over the runs: by warp, then the warps before.
+        for g in 0..32 across subgroups {
+          for t in 0..32 across lanes {
+          let l: i32 = g * 32 + t;
+          let mut digit: i32 = 0 - 1;
+          for w in 0..8 { digit = digit + wcount[w]; }
+          let key_k: u32 = sel[3] + (digit as u32);
+          let seg: i32 = (tokens + 1023) / 1024;
+          let start: i32 = l * seg;
+          let end: i32 = tokens.min(start + seg);
+          let mut na: i32 = 0;
+          let mut nt: i32 = 0;
+          let mut i: i32 = start;
+          while i < end {
+            let key: u32 = topk_key32!(scores[i]);
+            if key > key_k { na = na + 1; }
+            if key == key_k { nt = nt + 1; }
+            i = i + 1;
+          }
+          let sa: i32 = warp_prefix_sum(na);
+          let st: i32 = warp_prefix_sum(nt);
+          runs_a[l] = sa;
+          runs_a[1024 + l] = st;
+          if t == 31 {
+            tot[g] = sa;
+            tot[32 + g] = st;
+          }
+          }
+        }
+        for l in 0..1024 across lanes {
+          let mut ba: i32 = 0;
+          let mut bt: i32 = 0;
+          for w in 0..32 {
+            if w < l / 32 {
+              ba = ba + tot[w];
+              bt = bt + tot[32 + w];
+            }
+          }
+          runs_a[l] = runs_a[l] + ba;
+          runs_a[1024 + l] = runs_a[1024 + l] + bt;
+        }
+        // Lane r finds slot r: the run holding it by binary search over the sums (the largest l whose
+        // first slot, above + min(ties, left) before it, is <= r), then a walk along that run.
+        for r in 0..k.min(tokens) across lanes(1024) {
+          let mut digit: i32 = 0 - 1;
+          for w in 0..8 { digit = digit + wcount[w]; }
+          let key_k: u32 = sel[3] + (digit as u32);
+          let needed: i32 = sel[7] as i32;
+          let mut over: i32 = 0;
+          if digit < 255 { over = above[digit + 1]; }
+          let left: i32 = needed - over;
+          let mut lo: i32 = 0;
+          let mut hi: i32 = 1023;
+          while lo < hi {
+            let mid: i32 = (lo + hi + 1) / 2;
+            let mut t: i32 = runs_a[1024 + mid - 1];
+            if t > left { t = left; }
+            if runs_a[mid - 1] + t <= r { lo = mid; } else { hi = mid - 1; }
+          }
+          let mut na: i32 = 0;
+          let mut nt: i32 = 0;
+          if lo > 0 {
+            na = runs_a[lo - 1];
+            nt = runs_a[1024 + lo - 1];
+          }
+          let seg: i32 = (tokens + 1023) / 1024;
+          let mut i: i32 = lo * seg;
+          let end: i32 = tokens.min(i + seg);
+          let mut found: i32 = -1;
+          while i < end && found < 0 {
+            let key: u32 = topk_key32!(scores[i]);
+            let mut slot: i32 = -1;
+            if key > key_k {
+              let mut t: i32 = nt;
+              if t > left { t = left; }
+              slot = na + t;
+              na = na + 1;
+            }
+            if key == key_k {
+              if nt < left { slot = na + nt; }
+              nt = nt + 1;
+            }
+            if slot == r { found = i; }
+            i = i + 1;
+          }
+          out_ids[r] = found;
+        }
+      }
+    }
+  }
+  return;
+}
