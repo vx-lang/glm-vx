@@ -49,6 +49,15 @@ block of each head's last split merges that head), in place of mla_partial then 
 is libdevice's expf, not the hand kernels' ex2.approx, so logits differ from the default in the last
 bits. It needs Vx's code of a group of blocks (#2185 to #2188, on Vx main from c3716538).
 
+``fuse_router=True`` (with ``matvec_kernels='x4'``) runs a MoE layer's BF16 router projection and the
+router in one launch, gpu/spawn's router_bf16: bf16_matvec4's rows, then the selection in the last block
+to finish. As with fused_attention, its sigmoid's exp is libdevice's expf, not the hand router's
+ex2.approx, so on the GPU the routing weights, and the logits, differ from the default in the last bits.
+
+``fold_shared=True`` (with ``device_experts`` and ``fp8_kernels='cvt'``) runs a MoE layer's shared expert
+inside the routed experts' two launches, as expert ``n_routed_experts`` with weight 1.0 in route slot k:
+the same bits as its own three launches.
+
 ``graph=True`` captures the decode step's layers into a CUDA graph (#26) and replays it every token:
 one upload of the step's inputs (the embedding row, cos, sin and the step buffer), one graph launch,
 then the final norm, lm_head and the logits down. What changes per token comes from the step buffer
@@ -172,7 +181,7 @@ class ResidentGLM:
                  device_topk=True, device_experts=False, fused_attention=False, graph=False, fp8_kernels='hand',
                  topk='auto', long_topk='position', mla_kernel='decode', matvec_kernels='hand', mtp=False,
                  norm_block=256, fuse_glue=True, index_kernel='mma',
-                 topk_blocks_from=65536, fold_shared=False):
+                 topk_blocks_from=65536, fold_shared=False, fuse_router=False):
         if getattr(model, 'packed_weights', False):
             raise NotImplementedError('ResidentGLM supports expanded float32 weights only')
         if getattr(model, 'expert_placement', None) is not None:
@@ -249,6 +258,15 @@ class ResidentGLM:
         self.fold_shared = bool(fold_shared)
         if self.fold_shared and not (self.device_experts and fp8_kernels == 'cvt'):
             raise ValueError("fold_shared needs device_experts=True and fp8_kernels='cvt'")
+        # fuse_router: a MoE layer's router projection and the router in one launch (gpu/spawn/router_bf16:
+        # bf16_matvec4's rows, then gpu/spawn's router in the last block to finish). For a BF16 gate, as the
+        # official checkpoints store it, under matvec_kernels='x4' (whose bf16_matvec4 the unfused
+        # projection is); another gate keeps the two launches. The hand router's exp is ex2.approx, the
+        # spawn router's libdevice's expf: on the GPU the weights differ in the last bits (as
+        # fused_attention's); on the host both are libm's, and the logits equal bit for bit.
+        self.fuse_router = bool(fuse_router)
+        if self.fuse_router and matvec_kernels != 'x4':
+            raise ValueError("fuse_router needs matvec_kernels='x4'")
         if mla_kernel not in ('decode', 'chunks', 'heads', 'flash', 'tc'):
             raise ValueError("mla_kernel must be 'decode', 'chunks', 'heads', 'flash' or 'tc'")
         self.mla_kernel = mla_kernel
@@ -619,6 +637,7 @@ class ResidentGLM:
             experts = int(c['n_routed_experts'])
             k = int(c['num_experts_per_tok'])
             self.router_logits = t((experts,))
+            self.router_arrivals = t((1,), 'int32', np.zeros(1, np.int32))  # fuse_router's last-block count
             # fold_shared: slot k is the shared expert, id `experts` and weight 1.0, written once here.
             slots = k + 1 if self.fold_shared else k
             self.route_ids = t((slots,), 'int32', np.array([0] * k + [experts] * (slots - k), np.int32))
@@ -1407,6 +1426,24 @@ class ResidentGLM:
                      [self.heads_out, value_w, self.attended, I(self.heads), I(self.value_dim), I(self.rank),
                       I((self.nope + self.value_dim) * self.rank), I(self.rank), I(self.value_dim)])
 
+    def _route(self, prefix, x):
+        """The MoE layer's router on x: route_ids and route_weights (slots 0..k-1), router_logits."""
+        c = self.config
+        experts, k = int(c['n_routed_experts']), int(c['num_experts_per_tok'])
+        bias = self._weight(prefix + '.gate.e_score_correction_bias')
+        scale = _f32(float(c.get('routed_scaling_factor', 1.0)), 'router scale')
+        if self.fuse_router and self._format(prefix + '.gate') == 'bf16':
+            bits, (rows, cols) = self._bf16_weight(prefix + '.gate')
+            if rows == experts and cols % 8 == 0:
+                self._check_shape(prefix + '.gate', 'bf16', rows, cols, x, self.router_logits)
+                self._spawn('router_bf16', indices=self.route_ids, weights=self.route_weights, logits=self.router_logits,
+                            gate=bits.view((rows * cols // 2,), 'uint32'), x=x, bias=bias, experts=experts, cols=cols,
+                            k=k, scale=scale, arrivals=self.router_arrivals)
+                return
+        self._project(prefix + '.gate', x, self.router_logits)
+        self._launch('router', 1, 32, [self.route_ids, self.route_weights, self.router_logits, bias, I(experts), I(k),
+                                       F(scale)])
+
     def _feed_forward(self, layer, x):
         """The layer's MLP or MoE of x; returns the buffer that holds it: ffn_out, or with fuse_glue a
         MoE layer's moe_sum (no copy)."""
@@ -1417,11 +1454,7 @@ class ResidentGLM:
             return self.ffn_out
         experts = int(c['n_routed_experts'])
         k = int(c['num_experts_per_tok'])
-        self._project(prefix + '.gate', x, self.router_logits)
-        self._launch('router', 1, 32,
-                     [self.route_ids, self.route_weights, self.router_logits,
-                      self._weight(prefix + '.gate.e_score_correction_bias'), I(experts), I(k),
-                      F(_f32(float(c.get('routed_scaling_factor', 1.0)), 'router scale'))])
+        self._route(prefix, x)
         # Reduction order of the pinned official Experts: ascending expert id, whatever the top-k order.
         if self.device_experts:
             self._device_moe(prefix, x, k)
@@ -1915,11 +1948,7 @@ class ResidentGLM:
         moe = self._many('moe_sum', self.hidden)
         for i in range(count):
             row = self._many_row(x, i)
-            self._project(prefix + '.gate', row, self.router_logits)
-            self._launch('router', 1, 32,
-                         [self.route_ids, self.route_weights, self.router_logits,
-                          self._weight(prefix + '.gate.e_score_correction_bias'), I(experts), I(k),
-                          F(_f32(float(c.get('routed_scaling_factor', 1.0)), 'router scale'))])
+            self._route(prefix, row)
             if self.device_experts:
                 self._device_moe(prefix, row, k)
             else:

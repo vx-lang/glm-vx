@@ -1341,6 +1341,27 @@ def test_router(run, experts, k, ties):
     np.testing.assert_allclose(got['weights'], chosen[:k] / (warp_tree(chosen) + F(1e-20)) * F(2.5), **CLOSE)
 
 
+# router_bf16 (fuse_router): bf16_matvec4's rows of the gate, then router's selection in the last block,
+# bit for bit the two kernels; slot k (fold_shared's) untouched, and arrivals back to 0.
+@pytest.mark.parametrize('experts,cols,k,ties', [(256, 6144, 8, False), (7, 136, 3, True), (33, 520, 8, False)])
+def test_router_bf16(run, experts, cols, k, ties):
+    words, x, expected = bf16_matvec4_case(experts, cols, experts + cols + k)
+    if ties:
+        words, expected = np.zeros_like(words), np.zeros(experts, F)
+        bias = np.tile(np.array([0.0, 0.5], F), experts)[:experts].copy()
+    else:
+        bias = (np.random.default_rng(experts).normal(size=experts) * 0.1).astype(F)
+    ids, weights = np.full(k + 1, -7, np.int32), np.full(k + 1, 3.0, F)
+    got = run('router_bf16', indices=ids, weights=weights, logits=np.zeros(experts, F), gate=words, x=x, bias=bias,
+              experts=experts, cols=cols, k=k, scale=2.5, arrivals=np.zeros(1, np.uint32))
+    bits_equal(got['logits'], expected)
+    want = run('router', indices=ids[:k].copy(), weights=weights[:k].copy(), logits=np.asarray(expected, F), bias=bias,
+               experts=experts, k=k, scale=2.5)
+    np.testing.assert_array_equal(got['indices'][:k], want['indices'])
+    bits_equal(got['weights'][:k], want['weights'])
+    assert got['indices'][k] == -7 and got['weights'][k] == 3.0
+
+
 # --- MLA decode ---------------------------------------------------------------------------
 
 def mla_reference(q, qr, kv, kr, selected, heads, rank, rope, tokens, count, stride, splits, scale, threads):

@@ -1,0 +1,109 @@
+// The router's projection and the router in one launch (fuse_router): logits = W x with W the
+// [experts, cols] BF16 gate (raw bits viewed as u32), each row by bf16_matvec4's loop to the bit (one
+// warp a row, four rows a block, the same per-lane order and lanes::sum tree), then, in the last block
+// to finish, router.vx's selection: k <= 8 of experts <= 256 by sigmoid(logit) + bias, lanes::argmax's
+// stable order, the chosen sigmoids normalized and scaled. The logits, ids and weights are those of
+// bf16_matvec4 then gpu/spawn's router bit for bit; the hand router (kernels.vx) takes its sigmoid's exp
+// from ex2.approx where this is libdevice's expf (device.vx), so its weights differ in the last bits.
+// Slots k and above of indices and weights are not written (fold_shared's shared-expert slot).
+// arrivals: one u32, zero before the first launch; the last block puts it back to zero.
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_router_bf16(indices: &mut Tensor<i32, [?], Memory::HBM>, weights: &mut Tensor<f32, [?], Memory::HBM>,
+                                logits: &mut Tensor<f32, [?], Memory::HBM>, gate: &Tensor<u32, [?], Memory::HBM>,
+                                x: &Tensor<f32, [?], Memory::HBM>, bias: &Tensor<f32, [?], Memory::HBM>,
+                                experts: i32, cols: i32, k: i32, scale: f32) -> void {
+  spawn on(Topology::Device) {
+    for rb in 0..(experts - 1) / 4 + 1 across blocks {
+      let mut a = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
+      for w in 0..4 across subgroups {
+        for lane in 0..32 across lanes {
+          // bf16_matvec4's lane loop, unchanged (rows = experts, weight = gate).
+          let row: i64 = (rb * 4 + w) as i64;
+          let mut sum: f32 = 0.0;
+          if row < (experts as i64) && cols % 8 == 0 {
+            let words: i64 = (cols as i64) / 2;
+            let row_words: i64 = row * ((cols as i64) / 8) * 4;
+            let mut at: i64 = (lane as i64) * 4;
+            while at < words {
+              let w0: i32 = gate[row_words + at] as i32;
+              let w1: i32 = gate[row_words + at + 1] as i32;
+              let w2: i32 = gate[row_words + at + 2] as i32;
+              let w3: i32 = gate[row_words + at + 3] as i32;
+              let col: i64 = at * 2;
+              sum = sum + bf16_decode!(w0) * x[col];
+              sum = sum + bf16_decode!(w0 >> 16) * x[col + 1];
+              sum = sum + bf16_decode!(w1) * x[col + 2];
+              sum = sum + bf16_decode!(w1 >> 16) * x[col + 3];
+              sum = sum + bf16_decode!(w2) * x[col + 4];
+              sum = sum + bf16_decode!(w2 >> 16) * x[col + 5];
+              sum = sum + bf16_decode!(w3) * x[col + 6];
+              sum = sum + bf16_decode!(w3 >> 16) * x[col + 7];
+              at = at + 128;
+            }
+          }
+          a[w][lane] = sum;
+        }
+        let total: f32 = lanes::sum(&a[w], 32);
+        if rb * 4 + w < experts && cols >= 0 { logits[rb * 4 + w] = total; }
+      }
+    }
+    // The last block to finish: router.vx's selection, with each expert's sigmoid and score worked out
+    // once into shared memory (router.vx works them out again in each of the k rounds): the same
+    // values, so the same choices and bits. Each part is a loop of one trip or none, not an `if`
+    // around lane loops.
+    let mut sg = unsafe { Tensor<f32, [256], Memory::SMEM>::uninit() };
+    let mut sc = unsafe { Tensor<f32, [256], Memory::SMEM>::uninit() };
+    let mut ch = unsafe { Tensor<i32, [32], Memory::SMEM>::uninit() };
+    let mut sa = unsafe { Tensor<f32, [32], Memory::SMEM>::uninit() };
+    let mut ia = unsafe { Tensor<i32, [32], Memory::SMEM>::uninit() };
+    for once in 0..(if experts > 0 && experts <= 256 && k > 0 && k <= 8 && k <= experts { 1 } else { 0 }) {
+      for lane in 0..128 across lanes {
+        for j in 0..2 {
+          let e: i32 = lane + 128 * j;
+          if e < experts {
+            let s: f32 = sigmoid!(logits[e]);
+            sg[e] = s;
+            sc[e] = s + bias[e];
+          }
+        }
+      }
+      for slot in 0..k {
+        for lane in 0..32 across lanes {
+          let mut best_index: i32 = -1;
+          let mut best_score: f32 = 0.0;
+          for j in 0..8 {
+            let e: i32 = lane + 32 * j;
+            if e < experts {
+              let mut used: i32 = 0;
+              for previous in 0..slot { if ch[previous] == e { used = 1; } }
+              if used == 0 {
+                let score: f32 = sc[e];
+                if best_index < 0 { best_index = e; best_score = score; }
+                else { if score > best_score { best_index = e; best_score = score; } }
+              }
+            }
+          }
+          sa[lane] = best_score;
+          ia[lane] = best_index;
+        }
+        let chosen: i32 = lanes::argmax(&sa, &ia, 32);
+        for t in 0..1 across lanes {
+          ch[slot] = chosen;
+          indices[slot] = chosen;
+          weights[slot] = sg[chosen];
+        }
+      }
+      for lane in 0..32 across lanes {
+        let mut value: f32 = 0.0;
+        if lane < k { value = sg[ch[lane]]; }
+        sa[lane] = value;
+      }
+      let total: f32 = lanes::sum(&sa, 32);
+      for lane in 0..32 across lanes {
+        if lane < k { weights[lane] = sg[ch[lane]] / (total + 0.00000000000000000001) * scale; }
+      }
+    }
+  }
+  return;
+}

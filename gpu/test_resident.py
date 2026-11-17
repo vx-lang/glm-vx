@@ -353,6 +353,52 @@ def test_fold_shared_gives_the_same_bits_in_fewer_launches():
         ResidentGLM(model, ctx=Context(), fold_shared=True)
 
 
+def fp8_bf16_router_model(seed, **overrides):
+    """fp8_model with each MoE router's gate in bfloat16, as the official FP8 checkpoint stores it."""
+    from glm_vx.quant import BF16Weights, BlockFP8Weights
+    from validation.write_checkpoint import UNQUANTIZED, fp8_quantize, to_bf16_bits
+    base = build(seed=seed, **overrides)
+    linears, routers = {}, {}
+    for name, w in base.weights.items():
+        if w.ndim == 2 and name.endswith('.mlp.gate.weight'):
+            routers[name[:-len('.weight')]] = to_bf16_bits(w)
+        elif w.ndim == 2 and name.endswith('.weight') and not any(u in name for u in UNQUANTIZED):
+            linears[name[:-len('.weight')]] = fp8_quantize(w)
+    rest = {n: w for n, w in base.weights.items() if n[:-len('.weight')] not in linears and n[:-len('.weight')] not in routers}
+    return GlmMoeDsaModel(base.config, BlockFP8Weights(BF16Weights(rest, routers), linears), NumpyBackend())
+
+
+def test_fuse_router_gives_the_same_bits_in_one_launch():
+    # fuse_router: router_bf16 is bf16_matvec4's rows of the BF16 gate, then the router in the last block
+    # to finish: the same ids and weights in one launch instead of two, so the same logits bit for bit,
+    # one token at a time, with fold_shared (the ninth slot is not the router's), and under graph replay
+    # (the arrival count goes back to zero each launch).
+    model = fp8_bf16_router_model(43, hidden_size=272, moe_intermediate_size=144)
+    options = dict(ctx=None, max_tokens=32, device_experts=True, fp8_kernels='cvt', matvec_kernels='x4')
+    runs = {}
+    for fuse, fold, graph in ((False, False, False), (True, False, False), (True, True, False), (True, True, True)):
+        resident = ResidentGLM(model, **dict(options, ctx=Context(), fuse_router=fuse, fold_shared=fold, graph=graph))
+        try:
+            runs[fuse, fold, graph] = (np.stack([resident.forward(t) for t in TOKENS[:6]]), dict(resident.launches),
+                                       resident.replays if graph else None)
+        finally:
+            resident.close()
+    plain, before, _ = runs[False, False, False]
+    moe_layers = sum(model.mlp_type(i) != 'dense' for i in range(model.n_layers))
+    assert moe_layers > 0
+    for key, (got, after, replays) in runs.items():
+        np.testing.assert_array_equal(got.view(np.uint32), plain.view(np.uint32), err_msg=str(key))
+    _, after, _ = runs[True, False, False]
+    tokens = 6
+    assert before['router'] == moe_layers * tokens and 'router' not in after
+    assert after['router_bf16'] == moe_layers * tokens
+    assert after.get('bf16_matvec4', 0) == before['bf16_matvec4'] - moe_layers * tokens
+    assert sum(after.values()) == sum(before.values()) - moe_layers * tokens
+    assert runs[True, True, True][2] > 0
+    with pytest.raises(ValueError, match='fuse_router'):
+        ResidentGLM(model, ctx=Context(), fuse_router=True)
+
+
 def test_norm_block_1024_is_close_to_256_and_other_sizes_are_refused():
     # norm_block (#29): RMSNorm with 1024 threads reads a row in one batch of loads; each thread sums
     # other squares, so the logits are near the 256-thread ones (which the hybrid backend matches

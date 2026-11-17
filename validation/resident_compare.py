@@ -51,18 +51,22 @@ def int4_source(weights):
     return CompressedInt4Weights(rest, linears)
 
 
-def fp8_source(weights, bf16_head=False):
+def fp8_source(weights, bf16_head=False, bf16_router=False):
     """The Linears in block FP8; with bf16_head, lm_head too as an FP8 checkpoint stores it, in
-    bfloat16 (ResidentGLM then uploads its 16-bit bits, not float32)."""
+    bfloat16 (ResidentGLM then uploads its 16-bit bits, not float32), and with bf16_router each MoE
+    router's gate the same way."""
     from glm_vx.quant import BF16Weights, BlockFP8Weights
     from validation.write_checkpoint import UNQUANTIZED, fp8_quantize, to_bf16_bits
     linears = {name[:-len('.weight')]: fp8_quantize(w) for name, w in weights.items()
                if w.ndim == 2 and name.endswith('.weight') and not any(u in name for u in UNQUANTIZED)}
     rest = {n: w for n, w in weights.items() if n[:-len('.weight')] not in linears}
+    halves = {}
     if bf16_head and 'lm_head.weight' in rest:
-        head = to_bf16_bits(rest.pop('lm_head.weight'))
-        return BlockFP8Weights(BF16Weights(rest, {'lm_head': head}), linears)
-    return BlockFP8Weights(rest, linears)
+        halves['lm_head'] = to_bf16_bits(rest.pop('lm_head.weight'))
+    if bf16_router:
+        for name in [n for n in rest if n.endswith('.mlp.gate.weight') and rest[n].ndim == 2]:
+            halves[name[:-len('.weight')]] = to_bf16_bits(rest.pop(name))
+    return BlockFP8Weights(BF16Weights(rest, halves) if halves else rest, linears)
 
 
 def bf16_source(weights):

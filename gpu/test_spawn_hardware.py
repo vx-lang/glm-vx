@@ -818,6 +818,44 @@ def test_spawn_router_matches_hand_kernel(context, experts, k, ties):
         np.testing.assert_array_equal(download(ids[0]), np.lexsort((np.arange(experts), -score))[:k])
 
 
+# router_bf16 (fuse_router): the gate's rows and the router in one launch against bf16_matvec4 then
+# router.ptx, bit for bit: logits, ids and weights. Ties: a zero gate (every logit 0) and a bias that
+# repeats, so the lower id must win. Three launches on one arrivals buffer, which the last block of
+# each puts back to 0.
+@pytest.mark.skipif(not (BUILD / 'spawn/router_bf16.ptx').exists(), reason='router_bf16 not built (gpu/spawn/build.sh)')
+@pytest.mark.parametrize('experts,cols,k,ties', [(256, 6144, 8, False), (256, 6144, 8, True), (7, 136, 3, True),
+                                                 (33, 520, 8, False), (1, 8, 1, False)])
+def test_spawn_router_bf16_is_bf16_matvec4_then_router(context, experts, cols, k, ties):
+    from gpu.test_spawn_vx_host import bf16_matvec4_case
+    words, x, _ = bf16_matvec4_case(experts, cols, experts + cols + k)
+    rng = np.random.default_rng(experts * 3 + k)
+    if ties:
+        words = np.zeros_like(words)
+        bias = np.tile(np.array([0.0, 0.5], 'f4'), experts)[:experts].copy()
+    else:
+        bias = (rng.normal(size=experts) * 0.1).astype('f4')
+    dw, dx, db = upload(context, words), upload(context, x), upload(context, bias)
+    logits = [context.tensor((experts,)) for _ in range(2)]
+    ids = [context.tensor((k + 1,), 'int32', np.full(k + 1, -7, np.int32).tobytes()) for _ in range(2)]
+    weights = [context.tensor((k + 1,), 'float32', np.full(k + 1, 3.0, np.float32).tobytes()) for _ in range(2)]
+    arrivals = context.tensor((1,), 'int32', np.zeros(1, np.int32).tobytes())
+    SpawnKernel(context, BUILD / 'spawn/bf16_matvec4.ptx').launch(rows=experts, cols=cols, weight=dw, x=dx, out=logits[1])
+    SpawnKernel(context, BUILD / 'spawn/router.ptx').launch(experts=experts, k=k, indices=ids[1], logits=logits[1],
+                                                            bias=db, weights=weights[1], scale=2.5)
+    fused = SpawnKernel(context, BUILD / 'spawn/router_bf16.ptx')
+    for _ in range(3):
+        fused.launch(indices=ids[0], weights=weights[0], logits=logits[0], gate=dw, x=dx, bias=db, experts=experts,
+                     cols=cols, k=k, scale=2.5, arrivals=arrivals)
+    context.synchronize()
+    np.testing.assert_array_equal(download(logits[0]).view(np.uint32), download(logits[1]).view(np.uint32))
+    np.testing.assert_array_equal(download(ids[0]), download(ids[1]))
+    np.testing.assert_array_equal(download(weights[0]).view(np.uint32), download(weights[1]).view(np.uint32))
+    assert download(ids[0])[k] == -7 and download(weights[0])[k] == 3.0  # slot k is not the router's
+    np.testing.assert_array_equal(download(arrivals), 0)
+    if ties:
+        np.testing.assert_array_equal(download(ids[0])[:k], np.lexsort((np.arange(experts), -bias))[:k])
+
+
 # selected mixes padding (-1) and out-of-range ids; selection_stride 0 shares one list across
 # heads, > 0 gives each head its own. splits > count leaves some partitions empty (l = 0).
 @pytest.mark.parametrize('heads,rank,rope,tokens,count,splits,stride,block', [

@@ -266,3 +266,30 @@ def test_fold_shared_gives_the_same_bits_on_the_gpu(ctx):
             resident.close()
     np.testing.assert_array_equal(out[True].view(np.uint32), out[False].view(np.uint32))
     assert sum(launches[True].values()) < sum(launches[False].values())
+
+
+@pytest.mark.skipif(not (SPAWN / 'router_bf16.ptx').exists(), reason='gpu/spawn router_bf16 not built')
+def test_fuse_router_on_the_gpu(ctx):
+    """fuse_router under replay with BF16 routers (the official checkpoint's): router_bf16 in one launch
+    against bf16_matvec4 then the hand router. The ids and weights are the spawn router's
+    (test_spawn_router_bf16_is_bf16_matvec4_then_router, bit for bit), whose sigmoid is libdevice's expf
+    where the hand router's is ex2.approx, so near, not equal, as fused_attention; and with fold_shared."""
+    from gpu.test_resident import fp8_bf16_router_model
+    model = fp8_bf16_router_model(117, hidden_size=512, moe_intermediate_size=512, n_routed_experts=6,
+                                  num_experts_per_tok=4, vocab_size=512, num_hidden_layers=2,
+                                  mlp_layer_types=['dense', 'sparse'], indexer_types=['full', 'full'])
+    out, launches = {}, {}
+    for fuse, fold in ((False, False), (True, False), (True, True)):
+        resident = ResidentGLM(model, ctx=ctx, max_tokens=32, device_experts=True, graph=True, fp8_kernels='cvt',
+                               matvec_kernels='x4', fuse_router=fuse, fold_shared=fold)
+        try:
+            out[fuse, fold], launches[fuse, fold] = resident.prefill(TOKENS), dict(resident.launches)
+            if fuse:
+                np.testing.assert_array_equal(np.frombuffer(resident.router_arrivals.download(), np.int32), 0)
+        finally:
+            resident.close()
+    plain = out[False, False]
+    for key in ((True, False), (True, True)):
+        np.testing.assert_allclose(out[key], plain, rtol=1e-4, atol=1e-5)
+        assert np.array_equal(out[key].argmax(-1), plain.argmax(-1))
+        assert 'router' not in launches[key] and launches[key]['router_bf16'] > 0
