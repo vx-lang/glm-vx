@@ -1223,3 +1223,51 @@ def test_spawn_topk_mb_is_the_stable_set_and_zeroes_hist(context, tokens, k, tie
         context.synchronize()
         np.testing.assert_array_equal(download(out), want)
         assert not download(hist).any() and not download(count).any()
+
+
+# index_kernel='mma16' (#32): index_key_bf16_at stores the key row at step[0] as bf16 words (round to
+# nearest even, cvt.rn.bf16x2.f32), and index_scores_mma16_at over those words is index_scores_mma_at
+# over the f32 rows bit for bit, and so is its _hist_at twin, with the same bins.
+def test_index_key_bf16_at_rounds_the_row_at_step_to_nearest_even(context):
+    rng = np.random.default_rng(17)
+    cap = 40
+    keys = (rng.normal(size=(cap, 128)) * rng.uniform(0.01, 30, size=(cap, 1))).astype('f4')
+    keys[9, :6] = [1e30, -1e30, 3e-41, -0.0, np.float32(1.00390625), np.float32(1.01171875)]  # ties to even
+    words = upload(context, np.full((cap, 64), 7, np.int32))
+    kernel = SpawnKernel(context, BUILD / 'spawn/index_mma/index_key_bf16_at.ptx')
+    dk = upload(context, keys)
+    rows = [0, 9, 21, cap - 1]
+    for pos in rows:
+        kernel.launch(words=words, keys=dk, step=upload(context, np.array([pos, pos + 1, 0, 0], np.int32)),
+                      max_tokens=cap, dim=128)
+    context.synchronize()
+    u = keys.view(np.uint32).astype(np.uint64)
+    want = ((u + 0x7FFF + ((u >> 16) & 1)) >> 16).astype(np.uint16)  # no NaN here
+    got = download(words).view(np.uint16).reshape(cap, 128)
+    np.testing.assert_array_equal(got[rows], want[rows])
+    others = [r for r in range(cap) if r not in rows]
+    assert (download(words)[others] == 7).all()
+
+
+@pytest.mark.parametrize('tokens,max_tokens', [(1, 128), (2049, 3072), (3001, 3001), (32768, 32768)])
+def test_spawn_index_scores_mma16_at_is_mma_at_bit_for_bit(context, tokens, max_tokens):
+    heads, dim = 32, 128
+    rng = np.random.default_rng(tokens + 19)
+    q, keys = rng.normal(size=(heads, dim)).astype('f4'), rng.normal(size=(max_tokens, dim)).astype('f4')
+    weights, scale = (rng.normal(size=heads) * heads ** -0.5).astype('f4'), float(np.float32(dim ** -0.5))
+    u = keys.view(np.uint32).astype(np.uint64)
+    words = ((u + 0x7FFF + ((u >> 16) & 1)) >> 16).astype(np.uint16).view(np.int32).reshape(max_tokens, 64)
+    step = upload(context, np.array([tokens - 1, tokens, 0, 0], np.int32))
+    common = dict(q=upload(context, q), weights=upload(context, weights), step=step, max_tokens=max_tokens,
+                  heads=heads, dim=dim, scale=scale)
+    want, got, again = (upload(context, np.full(max_tokens, 7, 'f4')) for _ in range(3))
+    hist = upload(context, np.zeros(4096, np.uint32))
+    SpawnKernel(context, BUILD / 'spawn/index_mma/index_scores_mma_at.ptx').launch(out=want, keys=upload(context, keys), **common)
+    d_words = upload(context, words)
+    SpawnKernel(context, BUILD / 'spawn/index_mma/index_scores_mma16_at.ptx').launch(out=got, keys=d_words, **common)
+    SpawnKernel(context, BUILD / 'spawn/index_mma/index_scores_mma16_hist_at.ptx').launch(out=again, hist=hist,
+                                                                                          keys=d_words, **common)
+    context.synchronize()
+    np.testing.assert_array_equal(download(got).view(np.uint32), download(want).view(np.uint32))
+    np.testing.assert_array_equal(download(again).view(np.uint32), download(want).view(np.uint32))
+    np.testing.assert_array_equal(download(hist), topk_bins(download(want)[:tokens]))

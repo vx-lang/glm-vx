@@ -259,8 +259,11 @@ class ResidentGLM:
         # above SGLang's precision) is the default: 3.9 us at 3001 tokens on the H200 against
         # 'simt''s 11.2 and 'fp8''s 4.2 + 1.4 (evidence/h200-20261117-v, -w). Off its shape, or without
         # graph replay, 'mma' and 'fp8' take 'simt''s path, so smaller models keep the reference's bits.
-        if index_kernel not in ('simt', 'tc', 'mma', 'fp8'):
-            raise ValueError("index_kernel must be 'simt', 'tc', 'mma' or 'fp8'")
+        # 'mma16' (not yet GPU-run) is 'mma' over a bf16 copy of the key rows (index_key_bf16_at, by the
+        # cvt.rn.bf16x2.f32 'mma' rounds them with in registers): the same scores bit for bit from half
+        # the bytes (index_scores_mma16_at).
+        if index_kernel not in ('simt', 'tc', 'mma', 'fp8', 'mma16'):
+            raise ValueError("index_kernel must be 'simt', 'tc', 'mma', 'fp8' or 'mma16'")
         self.index_kernel = index_kernel
         if mla_kernel != 'decode' and not (self.graph and self.fused_attention):
             raise ValueError(f"mla_kernel={mla_kernel!r} needs graph=True and fused_attention=True")
@@ -628,6 +631,12 @@ class ResidentGLM:
         if self.index_fp8:
             self.index_codes = [t((cap, 32), 'int32') if k is not None else None for k in self.index_keys]
             self.index_key_scales = [t((cap,)) if k is not None else None for k in self.index_keys]
+        # index_kernel='mma16': each full indexer's key rows also in bf16 (64 words a row), written by
+        # index_key_bf16_at as the rows are cached.
+        self.index_bf16 = (self.graph and self.index_kernel == 'mma16' and self.index_heads == 32
+                           and self.index_dim == 128)
+        if self.index_bf16:
+            self.index_words = [t((cap, 64), 'int32') if k is not None else None for k in self.index_keys]
         if self.mtp:
             self.mtp_input = t((2 * self.hidden,))  # [enorm(embedding), hnorm(hidden)], eh_proj's input
 
@@ -1068,6 +1077,9 @@ class ResidentGLM:
             self._spawn('index_mma/index_key_fp8_at', codes=self.index_codes[layer], scales=self.index_key_scales[layer],
                         keys=self.index_keys[layer], step=self.step, max_tokens=self.index_keys[layer].shape[0],
                         dim=self.index_dim)
+        if self.index_bf16:
+            self._spawn('index_mma/index_key_bf16_at', words=self.index_words[layer], keys=self.index_keys[layer],
+                        step=self.step, max_tokens=self.index_keys[layer].shape[0], dim=self.index_dim)
         if tokens <= self.index_topk:
             # Every cached token is selected, in position order, as SGLang's DSA top-k does (topk_v2.cuh,
             # trivial_transform when seq_len <= topk) and GlmMoeDsaModel._index too (#43): the key row is
@@ -1090,6 +1102,12 @@ class ResidentGLM:
                         scales=self.index_key_scales[layer], weights=self.head_weights, step=self.step,
                         max_tokens=self.index_keys[layer].shape[0], heads=self.index_heads, dim=self.index_dim,
                         scale=_f32(self.index_dim ** -0.5, 'scale'))
+        elif self.index_bf16:
+            self._hist_counted = bool(hist)
+            self._spawn('index_mma/index_scores_mma16' + ('_hist' if hist else '') + '_at', out=self.scores, **hist,
+                        q=self.iq_rot.view((self.index_heads, self.index_dim)), keys=self.index_words[layer],
+                        weights=self.head_weights, step=self.step, max_tokens=self.index_keys[layer].shape[0],
+                        heads=self.index_heads, dim=self.index_dim, scale=_f32(self.index_dim ** -0.5, 'scale'))
         elif self.graph and self.index_kernel == 'mma' and self.index_heads == 32 and self.index_dim == 128:
             self._hist_counted = bool(hist)
             self._spawn('index_mma/index_scores_mma' + ('_hist' if hist else '') + '_at', out=self.scores, **hist,

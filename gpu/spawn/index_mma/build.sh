@@ -18,7 +18,8 @@ ptxas=()
 if [[ -n "${PTXAS:-}" ]]; then ptxas=(--ptxas "$PTXAS"); fi
 machine=()
 if [[ -n "${MACHINE:-}" ]]; then machine=(--machine "$MACHINE"); fi
-for name in index_scores_mma_at index_scores_mma_hist_at topk_select_ilp_hist_at topk_mb_list_at topk_mb_write_at; do
+for name in index_scores_mma_at index_scores_mma_hist_at index_key_bf16_at index_scores_mma16_at \
+            index_scores_mma16_hist_at topk_select_ilp_hist_at topk_mb_list_at topk_mb_write_at; do
   "$PYTHON" gpu/spawn/build.py --source "gpu/spawn/index_mma/$name.vx" --output "$OUT/$name.ptx" \
     "${machine[@]}" "${ptxas[@]}" ${PTXAS:+${PTXAS_ARCH:+--ptxas-arch "$PTXAS_ARCH"}}
 done

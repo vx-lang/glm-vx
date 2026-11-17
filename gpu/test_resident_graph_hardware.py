@@ -189,7 +189,7 @@ def test_long_topk_warp_gives_the_bits_of_position(ctx):
 
 
 @pytest.mark.skipif(not (SPAWN / 'index_mma/topk_mb_write_at.ptx').exists(), reason='gpu/spawn index_mma not built')
-@pytest.mark.parametrize('index_kernel', ['mma', 'fp8'])
+@pytest.mark.parametrize('index_kernel', ['mma', 'fp8', 'mma16'])
 @pytest.mark.parametrize('option', ['ilp', 'ilp_hist', 'blocks'])
 def test_long_topk_ilp_gives_the_bits_of_position(ctx, option, index_kernel):
     """long_topk='ilp' and 'ilp_hist' (#32): topk_select_ilp_at, or the scores kernel's bins and
@@ -224,3 +224,24 @@ def test_long_topk_ilp_gives_the_bits_of_position(ctx, option, index_kernel):
         finally:
             resident.close()
     np.testing.assert_array_equal(out[option], out['position'])
+
+
+@pytest.mark.skipif(not (SPAWN / 'index_mma/index_scores_mma16_at.ptx').exists(), reason='gpu/spawn index_mma not built')
+def test_index_kernel_mma16_gives_the_bits_of_mma(ctx):
+    """index_kernel='mma16' (#32): the key rows cached in bf16 too (index_key_bf16_at, the rounding
+    'mma' does in registers), and index_scores_mma16_at over them: 'mma''s scores bit for bit, so the
+    logits too; 600 steps, index_topk 128, 32 heads of 128."""
+    steps = 600
+    model = build(seed=127, index_n_heads=32, index_head_dim=128, index_topk=128, max_position_embeddings=1024)
+    tokens = np.random.default_rng(127).integers(0, model.config['vocab_size'], size=steps).tolist()
+    out = {}
+    for option in ('mma16', 'mma'):
+        resident = ResidentGLM(model, ctx=ctx, max_tokens=steps + 8, device_experts=True, graph=True, index_kernel=option)
+        try:
+            out[option] = resident.prefill(tokens)
+            assert (resident.launches.get('index_mma/index_scores_mma16_at', 0) > 0) == (option == 'mma16')
+            if option == 'mma16':  # every cached key row in bf16 too, within index_topk as well
+                assert resident.launches['index_mma/index_key_bf16_at'] == resident.launches['index_key_at']
+        finally:
+            resident.close()
+    np.testing.assert_array_equal(out['mma16'], out['mma'])

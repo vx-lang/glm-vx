@@ -13,7 +13,7 @@ Every output is checked: the twins' scores are equal bit for bit, the bins are n
 gives np.sort(np.argsort(-scores, kind='stable')[:k]). The last columns are a step's indexer before
 (scores + topk_select_at) and after (scores_hist + topk_select_ilp_hist_at).
 
-  python -m validation.topk_hist_ab --output run/topk-hist.md [--kernel mma|fp8]
+  python -m validation.topk_hist_ab --output run/topk-hist.md [--kernel mma|fp8|mma16]
 """
 import argparse
 from pathlib import Path
@@ -40,7 +40,7 @@ def main():
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--repeats', type=int, default=20)
     p.add_argument('--tokens', type=int, nargs='+', default=TOKENS)
-    p.add_argument('--kernel', choices=['mma', 'fp8'], default='mma')
+    p.add_argument('--kernel', choices=['mma', 'fp8', 'mma16'], default='mma')
     args = p.parse_args()
     from gpu.runtime import CUDAContext
     from gpu.spawn.launch import SpawnKernel
@@ -72,6 +72,10 @@ def main():
                       step=step, max_tokens=tokens, heads=HEADS, dim=DIM, scale=float(np.float32(DIM ** -0.5)))
         if args.kernel == 'mma':
             common['keys'] = ctx.tensor(keys.shape, 'float32', keys.tobytes())
+        elif args.kernel == 'mma16':  # index_key_bf16_at's words: the key rows rounded to nearest even
+            u = keys.view(np.uint32).astype(np.uint64)
+            words = ((u + 0x7FFF + ((u >> 16) & 1)) >> 16).astype(np.uint16).view(np.int32).reshape(tokens, 64)
+            common['keys'] = ctx.tensor((tokens, 64), 'int32', words.tobytes())
         else:
             from gpu.test_spawn_hardware import fp8_rows
             kc, ks = fp8_rows(keys, bf16_first=True)
