@@ -1341,6 +1341,17 @@ def test_router(run, experts, k, ties):
     np.testing.assert_allclose(got['weights'], chosen[:k] / (warp_tree(chosen) + F(1e-20)) * F(2.5), **CLOSE)
 
 
+# bf16_matvec_rows: a block a row, the hand bf16_matvec's order (lane-strided sums, then the warp tree), bit for
+# bit; 6144 is the router's width, 136 a partial run of lanes, 8192 the most columns it takes.
+@pytest.mark.parametrize('rows,cols', [(256, 6144), (5, 136), (33, 8192), (1, 8)])
+def test_bf16_matvec_rows(run, rows, cols):
+    rng = np.random.default_rng(rows + cols)
+    w = (rng.normal(size=(rows, cols)).astype(F).view(np.uint32) >> 16).astype(np.uint16)
+    x = rng.normal(size=cols).astype(F)
+    got = run('bf16_matvec_rows', out=np.zeros(rows, F), weight=w.view(np.uint32).reshape(-1), x=x, rows=rows, cols=cols)
+    bits_equal(got['out'], warp_tree(strided_sums(bf16(w) * x, 32)))
+
+
 # router_bf16 (fuse_router): the gate's rows in the hand bf16_matvec's order (lane-strided sums, then the
 # warp tree), then router's choice and weights, bit for bit; slot k (fold_shared's) untouched. Ties: a
 # zero gate and a bias that repeats, so the lower id must win.

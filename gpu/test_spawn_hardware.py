@@ -818,6 +818,24 @@ def test_spawn_router_matches_hand_kernel(context, experts, k, ties):
         np.testing.assert_array_equal(download(ids[0]), np.lexsort((np.arange(experts), -score))[:k])
 
 
+# bf16_matvec_rows against the hand bf16_matvec, bit for bit (H200, evidence z2: 6.9 us against bf16_matvec4's
+# 13.2 for the router's 256 x 6144, in a graph after an L2 flush).
+@pytest.mark.skipif(not (BUILD / 'spawn/bf16_matvec_rows.ptx').exists(), reason='bf16_matvec_rows not built')
+@pytest.mark.parametrize('rows,cols', [(256, 6144), (5, 136), (33, 8192)])
+def test_spawn_bf16_matvec_rows_matches_hand_kernel(context, rows, cols):
+    rng = np.random.default_rng(rows * 7 + cols)
+    w = (rng.normal(size=(rows, cols)).astype('f4').view(np.uint32) >> 16).astype(np.uint16)
+    x = rng.normal(size=cols).astype('f4')
+    dw, dx = upload(context, w.reshape(-1)), upload(context, x)
+    out, hand_out = context.tensor((rows,)), context.tensor((rows,))
+    SpawnKernel(context, BUILD / 'spawn/bf16_matvec_rows.ptx').launch(
+        rows=rows, cols=cols, weight=dw.view((rows * cols // 2,), 'uint32'), x=dx, out=out)
+    context.load_ptx(BUILD / 'bf16.ptx').kernel('glm_vx_gpu_bf16_matvec').launch(
+        -(-rows // 8), 256, [hand_out, dw, dx, C.c_int32(rows), C.c_int32(cols)])
+    context.synchronize()
+    np.testing.assert_array_equal(download(out).view(np.uint32), download(hand_out).view(np.uint32))
+
+
 # router_bf16 (fuse_router): the gate's rows and the router in one launch against the hand bf16_matvec
 # then router.ptx, bit for bit: logits, ids and weights. Ties: a zero gate (every logit 0) and a bias that
 # repeats, so the lower id must win. Three launches on one arrivals buffer, which the last block of each
