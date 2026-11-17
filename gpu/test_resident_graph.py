@@ -237,4 +237,4 @@ def test_index_kernel_tc_matches_simt_to_bf16_rounding():
     np.testing.assert_allclose(got, want, rtol=1e-4, atol=1e-4)
     assert (got.argmax(-1) == want.argmax(-1)).all()
     with pytest.raises(ValueError, match='index_kernel'):
-        ResidentGLM(model, ctx=Context(), index_kernel='fp8')
+        ResidentGLM(model, ctx=Context(), index_kernel='int8')
