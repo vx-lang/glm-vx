@@ -245,3 +245,24 @@ def test_index_kernel_mma16_gives_the_bits_of_mma(ctx):
         finally:
             resident.close()
     np.testing.assert_array_equal(out['mma16'], out['mma'])
+
+
+@pytest.mark.skipif(not (SPAWN / 'fp8_moe_cvt_down.ptx').exists(), reason='gpu/spawn fp8_moe_cvt_* not built')
+def test_fold_shared_gives_the_same_bits_on_the_gpu(ctx):
+    """fold_shared under replay on Hopper's cvt builds: the shared expert as the last of nine experts in
+    fp8_moe_cvt_gate_up and _down gives the bits of its own fp8_moe_cvt_gate_up, fp8_matvec_cvt_tiles and
+    add, with 512-wide hidden and expert rows (whole 128-word tiles, as GLM-5.3's 6144 and 2048)."""
+    from gpu.test_resident import fp8_model
+    model = fp8_model(113, hidden_size=512, moe_intermediate_size=512, n_routed_experts=6, num_experts_per_tok=4,
+                      vocab_size=512, num_hidden_layers=2, mlp_layer_types=['dense', 'sparse'],
+                      indexer_types=['full', 'full'])[0]
+    out, launches = {}, {}
+    for fold in (False, True):
+        resident = ResidentGLM(model, ctx=ctx, max_tokens=32, device_experts=True, graph=True, fp8_kernels='cvt',
+                               fold_shared=fold)
+        try:
+            out[fold], launches[fold] = resident.prefill(TOKENS), dict(resident.launches)
+        finally:
+            resident.close()
+    np.testing.assert_array_equal(out[True].view(np.uint32), out[False].view(np.uint32))
+    assert sum(launches[True].values()) < sum(launches[False].values())

@@ -311,6 +311,48 @@ def test_fp8_cvt_absorbs_read_kv_b_proj_codes():
     assert not any(k.endswith('kv_b_proj.weight') or k.endswith(':nope_t') for k in weights), weights
 
 
+def test_fold_shared_gives_the_same_bits_in_fewer_launches():
+    # fold_shared: the shared expert as the last of k + 1 experts in fp8_moe_cvt_gate_up and _down (id
+    # n_routed_experts, weight 1.0), so its gate_up, down and the add are not launches of their own.
+    # The routed kernels' rows are fp8_moe_cvt_gate_up's (k = 1) and fp8_matvec_cvt_tiles' and ascending
+    # ids put it last, where the add put it: the same logits, bit for bit, one token at a time and under
+    # graph replay. Its Linears are stacked, never uploaded alone.
+    model, _ = fp8_model(41, hidden_size=272, moe_intermediate_size=144)
+    runs = {}
+    for fold in (False, True):
+        resident = ResidentGLM(model, ctx=Context(), max_tokens=32, device_experts=True, fp8_kernels='cvt', fold_shared=fold)
+        try:
+            one = np.stack([resident.forward(t) for t in TOKENS[:6]])
+            launches = dict(resident.launches)
+            many = resident.forward_many(TOKENS[6:9])[0]
+            runs[fold] = (one, launches, set(resident._weights), many)
+        finally:
+            resident.close()
+    (plain, before, _, plain_many), (folded, after, weights, folded_many) = runs[False], runs[True]
+    np.testing.assert_array_equal(folded.view(np.uint32), plain.view(np.uint32))
+    # forward_many with fp8_kernels='cvt' is not forward()'s bits even unfolded (its shared expert runs
+    # gate, up and swiglu apart; test_resident_many checks 'hand' and 'x4' only), so near, not equal.
+    np.testing.assert_allclose(folded_many, plain_many, rtol=1e-5, atol=1e-5)
+    moe_layers = sum(model.mlp_type(i) != 'dense' for i in range(model.n_layers))
+    assert moe_layers > 0
+    tokens = 6
+    assert after['fp8_moe_cvt_gate_up_ref'] == before['fp8_moe_cvt_gate_up_ref'] - moe_layers * tokens
+    assert sum(after.values()) == sum(before.values()) - 3 * moe_layers * tokens
+    assert not any('.shared_experts.' in k for k in weights), weights
+    assert any(k.endswith(':stacked:shared') for k in weights)
+    # Under graph replay: the ninth route slot is written once, before capture, and replays keep it.
+    resident = ResidentGLM(model, ctx=Context(), max_tokens=32, device_experts=True, fp8_kernels='cvt', fold_shared=True,
+                           graph=True)
+    try:
+        replayed = np.stack([resident.forward(t) for t in TOKENS[:6]])
+        assert resident.replays > 0
+    finally:
+        resident.close()
+    np.testing.assert_array_equal(replayed.view(np.uint32), plain.view(np.uint32))
+    with pytest.raises(ValueError, match='fold_shared'):
+        ResidentGLM(model, ctx=Context(), fold_shared=True)
+
+
 def test_norm_block_1024_is_close_to_256_and_other_sizes_are_refused():
     # norm_block (#29): RMSNorm with 1024 threads reads a row in one batch of loads; each thread sums
     # other squares, so the logits are near the 256-thread ones (which the hybrid backend matches

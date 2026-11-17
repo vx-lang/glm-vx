@@ -172,7 +172,7 @@ class ResidentGLM:
                  device_topk=True, device_experts=False, fused_attention=False, graph=False, fp8_kernels='hand',
                  topk='auto', long_topk='position', mla_kernel='decode', matvec_kernels='hand', mtp=False,
                  norm_block=256, fuse_glue=True, index_kernel='mma',
-                 topk_blocks_from=65536):
+                 topk_blocks_from=65536, fold_shared=False):
         if getattr(model, 'packed_weights', False):
             raise NotImplementedError('ResidentGLM supports expanded float32 weights only')
         if getattr(model, 'expert_placement', None) is not None:
@@ -240,6 +240,15 @@ class ResidentGLM:
         # are kept by that range too, so a request crossing it captures once more. Either kernel gives
         # the same set and order, so the choice is speed only.
         self.topk_blocks_from = int(topk_blocks_from)
+        # fold_shared: a MoE layer's shared expert runs inside the routed experts' two launches as one more
+        # expert, stacked last (id n_routed_experts, weight 1.0 in a ninth route slot the router never
+        # writes), so its gate_up, down and the add after them are not launches of their own. Ascending
+        # id order puts it last, where the add put it: for fp8_kernels='cvt' the same bits (the routed
+        # kernels' rows are fp8_matvec_cvt_tiles' and fp8_moe_cvt_gate_up's). Needs device_experts, one
+        # shared expert, and its Linears in the routed experts' format and shapes.
+        self.fold_shared = bool(fold_shared)
+        if self.fold_shared and not (self.device_experts and fp8_kernels == 'cvt'):
+            raise ValueError("fold_shared needs device_experts=True and fp8_kernels='cvt'")
         if mla_kernel not in ('decode', 'chunks', 'heads', 'flash', 'tc'):
             raise ValueError("mla_kernel must be 'decode', 'chunks', 'heads', 'flash' or 'tc'")
         self.mla_kernel = mla_kernel
@@ -610,9 +619,12 @@ class ResidentGLM:
             experts = int(c['n_routed_experts'])
             k = int(c['num_experts_per_tok'])
             self.router_logits = t((experts,))
-            self.route_ids, self.route_weights = t((k,), 'int32'), t((k,))
+            # fold_shared: slot k is the shared expert, id `experts` and weight 1.0, written once here.
+            slots = k + 1 if self.fold_shared else k
+            self.route_ids = t((slots,), 'int32', np.array([0] * k + [experts] * (slots - k), np.int32))
+            self.route_weights = t((slots,), 'float32', np.array([0.0] * k + [1.0] * (slots - k), np.float32))
             if self.device_experts:  # each routed expert's SwiGLU output, in ascending id order
-                self.moe_act = t((k * int(c['moe_intermediate_size']),))
+                self.moe_act = t((slots * int(c['moe_intermediate_size']),))
         vocab = int(c['vocab_size'])
         self.logits = t((vocab,))
         self.token_ids = t((MANY_TOKENS,), 'int32')  # argmax_rows' greedy tokens (greedy=True)
@@ -928,11 +940,12 @@ class ResidentGLM:
             return
         self._mlp(base, x, out)
 
-    def _stacked_experts(self, prefix, name):
+    def _stacked_experts(self, prefix, name, shared=False):
         """All routed experts' Linear `name` ('gate_proj', 'up_proj', 'down_proj', or 'gate_up' /
         'down' of the fused layout) back to back on the device, uploaded once:
-        (format, tensors, (rows, cols), extra arguments)."""
-        key = f'{prefix}.experts:{name}:stacked'
+        (format, tensors, (rows, cols), extra arguments). shared: the shared expert's `name` after
+        them, as expert n_routed_experts (fold_shared; separate Linears only)."""
+        key = f'{prefix}.experts:{name}:stacked' + (':shared' if shared else '')
         entry = self._weights.get(key)
         if entry is not None:
             return entry
@@ -945,12 +958,20 @@ class ResidentGLM:
             self._weights[key] = entry
             return entry
         linears = [f'{prefix}.experts.{e}.{name}' for e in range(experts)]
+        if shared:
+            linears.append(f'{prefix}.shared_experts.{name}')
         fmt = self._format(linears[0])
         mixed = [p for p in linears if self._format(p) != fmt]
         if mixed:
             raise ValueError(f'device_experts needs one format per expert projection: {linears[0]} is {fmt}, '
                              f'{mixed[0]} is {self._format(mixed[0])}')
         w = self.model.weights
+        if shared:  # before any upload: _upload_stacked takes the parts' shapes as the first's
+            shape_of = {'int4': lambda p: w.compressed_int4(p)[3], 'fp8': lambda p: w.block_fp8(p)[3],
+                        'bf16': lambda p: w.bf16(p)[1]}.get(fmt, lambda p: self.model._weight(p + '.weight').shape)
+            want, got = tuple(shape_of(linears[0])), tuple(shape_of(linears[-1]))
+            if got != want:
+                raise ValueError(f"fold_shared needs {linears[-1]} in the routed experts' shape {want}, got {got}")
         if fmt == 'int4':
             first = w.compressed_int4(linears[0])
             kind = {'float16': 0, 'bfloat16': 1}[first[2]]
@@ -980,13 +1001,24 @@ class ResidentGLM:
         self._weights[key] = entry
         return entry
 
+    def _folds_shared(self, prefix):
+        """fold_shared applies to this MoE layer: one shared expert and separate expert Linears."""
+        return (self.fold_shared and int(self.config.get('n_shared_experts', 1)) == 1
+                and not self._fused_experts(f'{prefix}.experts.0'))
+
     def _device_moe(self, prefix, x, k):
         """moe_sum = the routed experts' weighted sum in two launches, the ids read on the device:
         gpu/spawn's moe_gate_up (every expert's gate, up and SwiGLU) then moe_down (each output
         row sums its k terms in ascending id order). The same arithmetic as the per-expert
-        kernels (*_expert_matvec, swiglu, expert_scaled_add from zeros), to the last bit."""
+        kernels (*_expert_matvec, swiglu, expert_scaled_add from zeros), to the last bit. With
+        fold_shared, the shared expert is the last of k + 1 (id n_routed_experts, weight 1.0)."""
         experts = int(self.config['n_routed_experts'])
-        if self._fused_experts(f'{prefix}.experts.0'):
+        if self._folds_shared(prefix):
+            gate, up, down = (self._stacked_experts(prefix, n, shared=True) for n in ('gate_proj', 'up_proj', 'down_proj'))
+            inter, up_row = gate[2][0], 0
+            stride = inter
+            experts, k = experts + 1, k + 1
+        elif self._fused_experts(f'{prefix}.experts.0'):
             gate = up = self._stacked_experts(prefix, 'gate_up')
             down = self._stacked_experts(prefix, 'down')
             stride = gate[2][0]
@@ -1396,7 +1428,7 @@ class ResidentGLM:
         else:
             self._copy(self.moe_sum, self.zeros, self.hidden)
             self._host_experts(prefix, x, k)
-        if int(c.get('n_shared_experts', 1)) > 0:
+        if int(c.get('n_shared_experts', 1)) > 0 and not self._folds_shared(prefix):
             self._mlp(prefix + '.shared_experts', x, self.mlp_out)
             self._add(self.moe_sum, self.moe_sum, self.mlp_out, self.hidden)
         if self.fuse_glue:
@@ -1606,14 +1638,14 @@ class ResidentGLM:
             if self.device_experts:
                 fused = self._fused_experts(f + '.experts.0')
                 for n in (('gate_up', 'down') if fused else ('gate_proj', 'up_proj', 'down_proj')):
-                    self._stacked_experts(f, n)
+                    self._stacked_experts(f, n, shared=self._folds_shared(f))
             for e in range(0 if self.device_experts else int(c['n_routed_experts'])):
                 if self._fused_experts(f'{f}.experts.{e}'):
                     self._weight(f + '.experts.gate_up_proj')
                     self._weight(f + '.experts.down_proj')
                 else:
                     mlp(f'{f}.experts.{e}')
-            if int(c.get('n_shared_experts', 1)) > 0:
+            if int(c.get('n_shared_experts', 1)) > 0 and not self._folds_shared(f):
                 mlp(f + '.shared_experts')
         self._weight('model.norm.weight')
         linear('model.embed_tokens' if c.get('tie_word_embeddings', False) else 'lm_head')
@@ -1894,7 +1926,7 @@ class ResidentGLM:
                 self._copy(self.moe_sum, self.zeros, self.hidden)
                 self._host_experts(prefix, row, k)
             self._copy(self._many_row(moe, i), self.moe_sum, self.hidden)
-        if int(c.get('n_shared_experts', 1)) > 0:
+        if int(c.get('n_shared_experts', 1)) > 0 and not self._folds_shared(prefix):
             shared = self._mlp_many(prefix + '.shared_experts', x, self._many('mlp_out', self.hidden), count)
             for i in range(count):
                 self._add(self._many_row(moe, i), self._many_row(moe, i), self._many_row(shared, i), self.hidden)

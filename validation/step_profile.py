@@ -7,8 +7,8 @@ between cuProfilerStart and cuProfilerStop (twice), for nsys's kernel durations:
 FP8 Linears through the cvt kernels, matvec_kernels='x4', norm_block 1024, a bf16 lm_head, index_topk
 2048, random weights. One dense layer by default (as evidence/h200-20261116-m to -q); --layers 2
 --moe gives a dense layer then a MoE one (16 routed experts), so a layer boundary and a MoE output are
-in the step for fuse_glue's fusions there. --long-topk, --no-fuse-glue and --index-kernel select
-ResidentGLM's options, for an A/B in one build (#32, #39)."""
+in the step for fuse_glue's fusions there. --long-topk, --no-fuse-glue, --index-kernel and --fold-shared
+select ResidentGLM's options, for an A/B in one build (#32, #39); --fold-shared needs --moe."""
 import argparse
 import time
 
@@ -30,6 +30,7 @@ def main():
     p.add_argument('--index-kernel', choices=['simt', 'tc', 'mma', 'fp8', 'mma16'], default='mma')
     p.add_argument('--layers', type=int, default=1)
     p.add_argument('--moe', action='store_true', help='layers past the first are MoE (16 routed experts)')
+    p.add_argument('--fold-shared', action='store_true', help="ResidentGLM(fold_shared=True): the shared expert in the routed launches")
     p.add_argument('--repeats', type=int, default=2)
     args = p.parse_args()
     config = full_geometry(args.layers, topk=2048)
@@ -43,7 +44,8 @@ def main():
     tokens = [int(t) for t in np.random.default_rng(1).integers(0, config['vocab_size'], args.context + args.repeats)]
     r = ResidentGLM(model, max_tokens=args.context + 8, device_experts=True, graph=True, fused_attention=True,
                     mla_kernel=args.mla_kernel, fp8_kernels='cvt', matvec_kernels='x4', norm_block=1024,
-                    long_topk=args.long_topk, fuse_glue=args.fuse_glue, index_kernel=args.index_kernel)
+                    long_topk=args.long_topk, fuse_glue=args.fuse_glue, index_kernel=args.index_kernel,
+                    fold_shared=args.fold_shared)
     t0 = time.time()
     for t in tokens[:args.context]:
         r.forward(t, logits=False)
