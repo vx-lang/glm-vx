@@ -1,0 +1,66 @@
+{
+  "ranks": 8,
+  "gpus": 1,
+  "n": 6144,
+  "norm": true,
+  "norm_blocks": 8,
+  "ok": false,
+  "results": [
+    {
+      "rank": 0,
+      "failures": [
+        "exit 1"
+      ],
+      "failed": 1
+    },
+    {
+      "rank": 1,
+      "failures": [
+        "exit 1"
+      ],
+      "failed": 1
+    },
+    {
+      "rank": 2,
+      "failures": [
+        "exit 1"
+      ],
+      "failed": 1
+    },
+    {
+      "rank": 3,
+      "failures": [
+        "exit 1"
+      ],
+      "failed": 1
+    },
+    {
+      "rank": 4,
+      "failures": [
+        "exit 1"
+      ],
+      "failed": 1
+    },
+    {
+      "rank": 5,
+      "failures": [
+        "exit 1"
+      ],
+      "failed": 1
+    },
+    {
+      "rank": 6,
+      "failures": [
+        "exit 1"
+      ],
+      "failed": 1
+    },
+    {
+      "rank": 7,
+      "failures": [
+        "exit 1"
+      ],
+      "failed": 1
+    }
+  ]
+}

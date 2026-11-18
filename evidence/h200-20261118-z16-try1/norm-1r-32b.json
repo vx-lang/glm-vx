@@ -1,0 +1,17 @@
+{
+  "ranks": 1,
+  "gpus": 1,
+  "n": 6144,
+  "norm": true,
+  "norm_blocks": 32,
+  "ok": false,
+  "results": [
+    {
+      "rank": 0,
+      "failures": [
+        "exit 1"
+      ],
+      "failed": 1
+    }
+  ]
+}

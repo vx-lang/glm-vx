@@ -1,0 +1,3 @@
+name, driver_version, memory.total [MiB], compute_cap
+NVIDIA H200, 580.173.02, 143771 MiB, 9.0
+repo 95f7b7a + server --tp-option at --tp 1; spawn kernels: Vx 3609 (local build, sm_80 PTX, ptxas sm_90 checked)

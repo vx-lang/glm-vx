@@ -81,8 +81,14 @@ token n:
 
 **Bits.** The same as item 1. The arithmetic is unchanged; only where it runs changes.
 
-**Status: written, tested on the emulator only, not yet run on a GPU.** Enable it with
-`--tp-option device_decode=true`.
+**Status: committed (3fc7f53); run on one H200, not yet under TP** (`evidence/h200-20261118-z16`, GLM-5.3's
+first 4 trained layers). Enable it with `--tp-option device_decode=true` (since 0852e7b also at `--tp 1`).
+
+- One GPU: the same tokens as item 1's server on every prompt. Decode drops from 1.673 to 1.248 ms a token at
+  about 1000 tokens of context, and from 1.790 to 1.369 at 3000: about −0.42 ms a token.
+- The loop one step ahead costs 0.01 ms a step more than the GPU's own back-to-back step (1.259 against 1.249 ms),
+  so the served time is the GPU's.
+- Still unrun: the NCCL all-gather inside the graph and the followers' commands (z13 in `z12.sh`).
 
 - Kernels: gpu/spawn/decode_inputs and gpu/spawn/decode_next.
 - ResidentGLM: `device_step`, `device_token` and `rewind`.
@@ -116,8 +122,15 @@ SGLang fuses the same pair.
 **Bits.** The same, provided the order of the sum and of the norm's reduction is kept. Verify with gpu/test_tp's
 bit-exact tests and `real4-8` on the node.
 
-**Status: written, tested on one rank on the CPU only.** Enable it with `--tp-option fuse_tp_norm=B`, where B is
-the number of blocks.
+**Status: committed (95f7b7a, with the 447e1d5 fix); bits checked on one H200, not timed under TP.** Enable it with
+`--tp-option fuse_tp_norm=B`, where B is the number of blocks.
+
+- `evidence/h200-20261118-z16`: the same bits as the NumPy model on 8, 4 and 2 ranks sharing one GPU, at 8, 16
+  and 32 blocks, both eager and replayed from a graph.
+- On one rank the kernel takes 6.06 us a call, against 3.09 us for `tp_all_reduce`; z5's `residual_rmsnorm8`
+  took 2.9 us. So the fusion alone saves no local work, and any gain at 8 ranks has to come from the single
+  NVLink crossing.
+- The first GPU launch found a bug: `norm_arguments` left out the kernel's `arrivals` count. Fixed in 447e1d5.
 
 What gpu/spawn/tp_sum_rmsnorm does:
 
@@ -165,6 +178,13 @@ Today these kernels convert FP8 to float32 and multiply on the CUDA cores.
 - Run W1, ShareGPT and W3 again.
 
 These kernels are also what item 5b needs.
+
+**Probe (z16, CUDA, not glm-vx code).** `mma.sync.m16n8k32.e4m3` with the FP8 weights loaded straight into each
+lane's registers takes 20.0 us a MoE layer at one rank of 8: gate_up 11.7 us, down 8.1 us. Today's kernels take
+about 30.5 us, and SGLang about 50 us.
+- 30.5 to 20 us over 75 layers is about −0.8 ms a token. The probe is untuned, so this is not the limit.
+- Vx's tile matmul needs FP8 operands, and an A operand that skips shared memory. Asked of the Vx peers on
+  2026-11-18: vx-94 for FP8 (awaiting its priority), vx-7e for NVFP4 / MX on Blackwell (not for GLM).
 
 ### 5. The prompt under tensor parallelism (TTFT)
 

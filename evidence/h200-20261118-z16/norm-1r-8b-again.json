@@ -1,0 +1,18 @@
+{
+  "ranks": 1,
+  "gpus": 1,
+  "n": 6144,
+  "norm": true,
+  "norm_blocks": 8,
+  "ok": true,
+  "results": [
+    {
+      "rank": 0,
+      "kernel": "tp_sum_rmsnorm",
+      "blocks": 8,
+      "failures": [],
+      "failed": 0,
+      "us_per_call": 6.060683999976391
+    }
+  ]
+}
