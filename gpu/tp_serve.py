@@ -7,6 +7,9 @@ ranks. Rank 0 holds its ResidentGLM behind Lockstep, which writes each call as o
 follower's stdin before making it:
 
     F <token> <0|1|2> forward(token, logits=False / True / 'greedy')  (followers discard what it returns)
+    D <token>         device_step(token)  (device_decode=True: a step whose token the device chooses)
+    S                 device_step()  (the next step, from the token the device chose; never read here)
+    W <position>      rewind(position)
     R                 reset()
     P                 preload()
     Q                 close, then exit
@@ -109,6 +112,14 @@ class Lockstep:
         self._send(b'F %d %d\n' % (int(token_id), 2 if logits == 'greedy' else 1 if logits else 0))
         return self.resident.forward(token_id, logits=logits)
 
+    def device_step(self, token_id=None):
+        self._send(b'S\n' if token_id is None else b'D %d\n' % int(token_id))
+        return self.resident.device_step(token_id)
+
+    def rewind(self, position):
+        self._send(b'W %d\n' % int(position))
+        return self.resident.rewind(position)
+
     def reset(self):
         self._send(b'R\n')
         return self.resident.reset()
@@ -199,6 +210,12 @@ def follower_main(argv=None):
             op = line.split()
             if op[0] == b'F':
                 resident.forward(int(op[1]), logits={b'0': False, b'1': True, b'2': 'greedy'}[op[2]])
+            elif op[0] == b'D':
+                resident.device_step(int(op[1]), readback=False)
+            elif op[0] == b'S':
+                resident.device_step(readback=False)
+            elif op[0] == b'W':
+                resident.rewind(int(op[1]))
             elif op[0] == b'R':
                 resident.reset()
             elif op[0] == b'P':

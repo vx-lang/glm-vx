@@ -1,0 +1,41 @@
+// glm_vx_spawn_decode_inputs: a greedy decode step's inputs made on the device (#63; docs/TP-SERVING-PLAN.md
+// item 2), so the step can be launched before the host has read the token it starts from.
+// state = [token, position] (int32): the host writes it for the first device step of a sequence,
+// decode_next after every step. inputs[0 .. hidden) = the token's embedding row: bfloat16 bits from
+// embed16 (wide == 0, the bits glm_vx.model's host lookup makes of them: a bf16 to f32 shift is
+// exact) or float32 bits from embed32 (wide != 0). Then inputs[hidden .. hidden + width) =
+// table[position * width ..]: the position's cos, sin and step buffer, the host's own values,
+// uploaded once as bits. A token outside the vocabulary (decode_next's -1, a non-finite logit)
+// reads row 0, and a position outside the table its row 0: the host raises for that step, and no
+// load leaves its tensor.
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_decode_inputs(inputs: &mut Tensor<f32, [?], Memory::HBM>, embed16: &Tensor<u16, [?], Memory::HBM>,
+                                  embed32: &Tensor<i32, [?], Memory::HBM>, table: &Tensor<i32, [?], Memory::HBM>,
+                                  state: &Tensor<i32, [?], Memory::HBM>, hidden: i32, width: i32, vocab: i32,
+                                  positions: i32, wide: i32) -> void {
+  spawn on(Topology::Device) {
+    for blk in 0..(hidden + width - 1) / 256 + 1 across blocks {
+      for t in 0..256 across lanes {
+        let i: i32 = blk * 256 + t;
+        let mut token: i32 = state[0];
+        if token < 0 || token >= vocab { token = 0; }
+        let mut position: i32 = state[1];
+        if position < 0 || position >= positions { position = 0; }
+        if i < hidden {
+          let at: i64 = (token as i64) * (hidden as i64) + (i as i64);
+          if wide != 0 {
+            inputs[i] = f32::from_bits(embed32[at] as u32);
+          } else {
+            inputs[i] = bf16_decode!(embed16[at] as i32);
+          }
+        } else {
+          if i < hidden + width {
+            inputs[i] = f32::from_bits(table[(position as i64) * (width as i64) + ((i - hidden) as i64)] as u32);
+          }
+        }
+      }
+    }
+  }
+  return;
+}

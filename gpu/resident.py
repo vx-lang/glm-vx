@@ -193,7 +193,8 @@ class ResidentGLM:
                  device_topk=True, device_experts=False, fused_attention=False, graph=False, fp8_kernels='hand',
                  topk='auto', long_topk='position', mla_kernel='decode', matvec_kernels='hand', mtp=False,
                  norm_block=256, fuse_glue=True, index_kernel='mma',
-                 topk_blocks_from=65536, fold_shared=False, fuse_router=False, moe_down2=False, tp=None):
+                 topk_blocks_from=65536, fold_shared=False, fuse_router=False, moe_down2=False, device_decode=False,
+                 tp=None):
         if getattr(model, 'packed_weights', False):
             raise NotImplementedError('ResidentGLM supports expanded float32 weights only')
         if getattr(model, 'expert_placement', None) is not None:
@@ -294,6 +295,13 @@ class ResidentGLM:
         # libdevice's expf: on the GPU the weights differ in the last bits (as fused_attention's); on the
         # CPU emulator the logits equal the hand path's bit for bit.
         self.fuse_router = bool(fuse_router)
+        # device_decode (#63; docs/TP-SERVING-PLAN.md item 2): device_step, a greedy decode step whose inputs
+        # (gpu/spawn/decode_inputs) and token (argmax_pair, under tensor parallelism the ranks' pairs
+        # gathered, then decode_next) are made on the device inside the step's graph, so the host can
+        # launch a step before it has read the token of the step before. The arithmetic is forward()'s.
+        self.device_decode = bool(device_decode)
+        if self.device_decode and not graph:
+            raise ValueError('device_decode needs graph=True')
         if mla_kernel not in ('decode', 'chunks', 'heads', 'flash', 'tc'):
             raise ValueError("mla_kernel must be 'decode', 'chunks', 'heads', 'flash' or 'tc'")
         self.mla_kernel = mla_kernel
@@ -329,6 +337,9 @@ class ResidentGLM:
         # False: graph=True's steps always run their launches eagerly (the warm path, the replay's bits),
         # never captured. For a reference whose collective cannot be captured (validation/tp_decode_check).
         self._capture = True
+        # device_step's buffers (_device_setup), and the position its device state holds (None: the host
+        # must give the step's token, as after reset, rewind or a forward()).
+        self._device, self._device_position = None, None
         # forward_many's graphs by token count, mtp_step's by reuse_selection: run eagerly the first
         # time, captured the second, replayed after (_replay).
         self._graphs, self._warmed = {}, set()
@@ -734,6 +745,16 @@ class ResidentGLM:
         """Start a new sequence. Device caches are overwritten as positions are reused."""
         self.position = 0
         self.selected_count = 0
+        self._device_position = None
+
+    def rewind(self, position):
+        """Drop the steps from `position` on (at most the current position), as a step launched ahead
+        and not wanted: the caches' rows from there are overwritten as the positions are reused."""
+        if not 0 <= int(position) <= self.position:
+            raise ValueError(f'cannot rewind to {position} from {self.position}')
+        self.position = int(position)
+        self.selected_count = min(self.index_topk, self.position)
+        self._device_position = None
 
     # ---------------------------------------------------------------- op helpers
     def _matvec(self, weight, x, out):
@@ -1575,6 +1596,7 @@ class ResidentGLM:
             raise ValueError(f'sequence exceeds max_tokens={self.max_tokens}')
         if position >= int(c.get('max_position_embeddings', 2 ** 31 - 1)):
             raise ValueError('Request exceeds max_position_embeddings')
+        self._device_position = None
         embedding = np.ascontiguousarray(m._embedding(int(token_id)), dtype=np.float32)
         cosine, sine = _cached_rope_coefficients(self.rot, float(position), float(m.theta))
         cosine, sine = (np.ascontiguousarray(v, dtype=np.float32) for v in (cosine, sine))
@@ -1630,6 +1652,126 @@ class ResidentGLM:
                 return int(pairs[best, 1:].view(np.int32)[0])
             self.tp.collective.all_gather(self.logits_local, self.logits, stream=self.stream)
         return np.frombuffer(self.logits.download(), dtype=np.float32).copy()
+
+    DEVICE_SLOTS = 4  # device_step tickets that can be outstanding: the host slots their tokens land in
+
+    def device_step(self, token_id=None, *, readback=True):
+        """One greedy decode step (device_decode=True) launched without waiting for anything: its inputs
+        come from the device state [token, position], which the step before left (decode_next) or, given
+        token_id, uploaded here; its token is chosen on the device and left in that state for the next.
+        Returns a ticket for device_token(); with readback=False (a tensor-parallel follower, which never
+        reads the token) None. The token is forward(token_id, logits='greedy')'s: the same kernels on the
+        same inputs."""
+        m, c = self.model, self.config
+        if self._closed:
+            raise RuntimeError('ResidentGLM is closed')
+        if not self.device_decode:
+            raise RuntimeError('device_step needs device_decode=True')
+        position = self.position
+        if position >= self.max_tokens:
+            raise ValueError(f'sequence exceeds max_tokens={self.max_tokens}')
+        if position >= int(c.get('max_position_embeddings', 2 ** 31 - 1)):
+            raise ValueError('Request exceeds max_position_embeddings')
+        d = self._device_setup()
+        if token_id is None:
+            if self._device_position != position:
+                raise RuntimeError('device_step without a token must follow a device_step')
+        else:
+            if not isinstance(token_id, (int, np.integer)) or not 0 <= int(token_id) < int(c['vocab_size']):
+                raise ValueError('token_id must be an integer in the vocabulary')
+            d['state'].upload(np.array([int(token_id), position], np.int32))
+        count = min(self.index_topk, position + 1)
+        short = position + 1 <= self.index_topk  # as forward(): every cached token selected (#43)
+        if self._multi_block_topk(position + 1):
+            short = 'blocks'
+        body = lambda: self._device_body(position)
+        if self._capture:
+            self._replay(('device', short), body)
+        else:
+            body()
+        self.selected_count = count
+        self.position += 1
+        self._device_position = self.position
+        if not readback:
+            return None
+        number = d['tickets']
+        d['tickets'] += 1
+        slot = number % self.DEVICE_SLOTS
+        d['state'].download_async(d['host'], stream=self.stream, offset=8 * slot)
+        d['events'][slot].record(self.stream)
+        return number, position
+
+    def device_token(self, ticket):
+        """The token of device_step's `ticket`, waiting for that step only. A largest logit that is not
+        finite raises ValueError, as forward(logits='greedy') does."""
+        number, position = ticket
+        d = self._device
+        if d is None or not d['tickets'] - self.DEVICE_SLOTS <= number < d['tickets']:
+            raise RuntimeError(f'device_step ticket {number} is no longer held')
+        slot = number % self.DEVICE_SLOTS
+        d['events'][slot].synchronize()
+        token, after = (int(v) for v in np.frombuffer(d['host'].read(8 * slot, 8), dtype=np.int32))
+        if after != position + 1:
+            raise RuntimeError(f'device_step at {position} left position {after}')
+        if token < 0:
+            raise ValueError('nonfinite logits')
+        return token
+
+    def _device_setup(self):
+        """device_step's buffers, made once: the embedding table on the device (its bfloat16 bits as the
+        checkpoint stores them, else float32), every position's cos, sin and step buffer (the host's
+        values, as forward() uploads them), the state [token, position], and the host slots the state is
+        read back into."""
+        if self._device is not None:
+            return self._device
+        m, c = self.model, self.config
+        if c.get('tie_word_embeddings', False) and self.tp is not None:
+            raise NotImplementedError('device_decode under tensor parallelism needs an embedding not tied to lm_head')
+        t = self._tensor
+        if self._is_bf16('model.embed_tokens'):
+            embed16, _ = self._bf16_weight('model.embed_tokens')
+            embed32, wide = t((1,), 'int32'), 0
+        else:
+            table = np.ascontiguousarray(m._weight('model.embed_tokens.weight'), dtype=np.float32)
+            embed16, wide = t((1,), 'uint16'), 1
+            embed32 = self._upload_weight('model.embed_tokens:decode', table.view(np.int32), 'int32')
+        rows = []
+        for position in range(self.max_tokens):
+            cosine, sine = self._rope_inputs(position)
+            rows.append(np.concatenate([cosine, sine, self._step_buffer(position, min(self.index_topk, position + 1))]))
+        rows = np.ascontiguousarray(np.stack(rows), dtype=np.float32)
+        if self.tp is None:
+            self._greedy_pair = t((2,))
+        self._device = dict(
+            embed16=embed16, embed32=embed32, wide=wide, width=rows.shape[1],
+            positions=t(rows.shape, 'int32', rows.view(np.int32).tobytes()), state=t((2,), 'int32'),
+            host=self.ctx.host_buffer(8 * self.DEVICE_SLOTS),
+            events=[self.ctx.event(timing=False) for _ in range(self.DEVICE_SLOTS)], tickets=0)
+        return self._device
+
+    def _device_body(self, position):
+        """device_step's launches, what its graph holds: decode_inputs, the layers, the final norm and
+        lm_head, argmax_pair (each rank over its vocabulary rows; the pairs gathered), decode_next."""
+        m, c, d = self.model, self.config, self._device
+        vocab = int(c['vocab_size'])
+        self._spawn('decode_inputs', inputs=self.step_inputs, embed16=d['embed16'], embed32=d['embed32'],
+                    table=d['positions'].view((d['positions'].shape[0] * d['width'],), 'int32'), state=d['state'],
+                    hidden=self.hidden, width=d['width'], vocab=vocab, positions=self.max_tokens, wide=d['wide'])
+        self._layers(position)
+        self._rmsnorm(self.x, self._weight('model.norm.weight'), self.norm, m.eps)
+        head = 'model.embed_tokens' if c.get('tie_word_embeddings', False) else 'lm_head'
+        if self.tp is None:
+            self._project(head, self.norm, self.logits)
+            self._spawn('argmax_pair', out=self._greedy_pair, x=self.logits, dim=vocab, offset=0, threads=1024)
+            pairs, ranks = self._greedy_pair, 1
+        else:
+            self._project(head, self.norm, self.logits_local)
+            rows = self.logits_local.shape[0]
+            self._spawn('argmax_pair', out=self._greedy_pair, x=self.logits_local, dim=rows,
+                        offset=self.tp.rank * rows, threads=1024)
+            self.tp.collective.all_gather(self._greedy_pair, self._greedy_pairs, stream=self.stream)
+            pairs, ranks = self._greedy_pairs, self.tp.size
+        self._spawn('decode_next', state=d['state'], pairs=pairs.view((2 * ranks,), 'int32'), ranks=ranks)
 
     def _splits(self, count):
         """The MLA splits of a step that selects `count` tokens: about 8 tokens a split for mla_flash_at,
@@ -1724,6 +1866,8 @@ class ResidentGLM:
             planned = self._plan
         finally:
             self._room = self._plan = None
+        if planned is None and self.device_decode:
+            self._device_setup()
         if planned is not None:
             self._weights = {k: v for k, v in self._weights.items() if not _planned(v)}
             needed = self.weight_bytes - before + planned
@@ -1905,6 +2049,7 @@ class ResidentGLM:
         start, count = self.position, len(tokens)
         if start + count > self.max_tokens:
             raise ValueError(f'sequence exceeds max_tokens={self.max_tokens}')
+        self._device_position = None
         if start + count > int(c.get('max_position_embeddings', 2 ** 31 - 1)):
             raise ValueError('Request exceeds max_position_embeddings')
         hidden = self.hidden
@@ -2095,6 +2240,11 @@ class ResidentSequenceModel:
     guards against a stale request touching the caches after another one took them over.
     ``config['max_position_embeddings']`` is clamped to ``max_tokens`` so the scheduler rejects
     requests that do not fit the caches. Prompt tokens before the last skip lm_head.
+
+    With a ResidentGLM(device_decode=True), forward_greedy runs one step ahead (greedy_ahead): it
+    launches the step after the one whose token it returns before it reads that token, so the GPUs
+    never wait for the host between greedy steps. A step launched ahead and not used (the request
+    stopped, or the next call gives another token) is rewound; at most one is in flight.
     """
 
     def __init__(self, model, resident):
@@ -2103,11 +2253,21 @@ class ResidentSequenceModel:
         limit = int(self.config.get('max_position_embeddings', resident.max_tokens))
         self.config['max_position_embeddings'] = min(limit, int(resident.max_tokens))
         self._current = None
+        # The scheduler passes forward_greedy last= when this is set (glm_vx/scheduler.py).
+        self.greedy_ahead = bool(getattr(resident, 'device_decode', False))
+        self._ahead = None  # (the token it starts from, its device_step ticket)
 
     def new_cache(self):
+        self._ahead = None  # reset() drops it with every other position
         self.resident.reset()
         self._current = object()
         return self._current
+
+    def _settle(self):
+        """Rewind the step launched ahead, before a step that does not start from its token."""
+        if self._ahead is not None:
+            self._ahead = None
+            self.resident.rewind(self.resident.position - 1)
 
     def _check(self, cache):
         if cache is None or cache is not self._current:
@@ -2115,18 +2275,41 @@ class ResidentSequenceModel:
 
     def prefill_token(self, token_id, cache):
         self._check(cache)
+        self._settle()
         self.resident.forward(token_id, logits=False)
 
     def forward(self, token_id, cache):
         self._check(cache)
+        self._settle()
         # Logits come back so the scheduler samples on the host; device-side sampling is #17.
         return self.resident.forward(token_id)
 
-    def forward_greedy(self, token_id, cache):
+    def forward_greedy(self, token_id, cache, *, last=False):
         """The next token of a greedy request (temperature 0), chosen on the device: numpy.argmax of
-        forward's logits, without them coming back (the scheduler calls it in place of forward)."""
+        forward's logits, without them coming back (the scheduler calls it in place of forward).
+        With greedy_ahead, the step after it is launched first unless `last` (the request ends with
+        this token) or the caches are full."""
         self._check(cache)
-        return self.resident.forward(token_id, logits='greedy')
+        r = self.resident
+        if not self.greedy_ahead:
+            return r.forward(token_id, logits='greedy')
+        ahead, self._ahead = self._ahead, None
+        if ahead is not None and ahead[0] != int(token_id):
+            r.rewind(r.position - 1)
+            ahead = None
+        ticket = ahead[1] if ahead is not None else r.device_step(int(token_id))
+        following = None
+        if not last and r.position < self.config['max_position_embeddings']:
+            following = r.device_step()  # from the token the device chose: launched before it is read
+        try:
+            token = r.device_token(ticket)
+        except BaseException:
+            if following is not None:
+                r.rewind(r.position - 1)
+            raise
+        if following is not None:
+            self._ahead = (token, following)
+        return token
 
     def close(self):
         self.resident.close()

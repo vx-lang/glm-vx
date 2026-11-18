@@ -311,3 +311,79 @@ def test_simt_preload_uploads_everything_decode_uses_and_reports_a_misfit():
     # Decode after preload uploads nothing more.
     full.prefill([3, 17, 5, 5, 9, 200])
     assert full.weight_bytes == needed and set(full._weights) == keys
+
+
+class AheadResident:
+    """ResidentGLM's device_step contract on the host: the token after t at position p is (7 t + p) % 50."""
+    device_decode, max_tokens = True, 64
+
+    def __init__(self):
+        self.position, self.state, self.calls, self.bad = 0, None, [], False
+
+    def reset(self):
+        self.position, self.state = 0, None
+        self.calls.append('reset')
+
+    def rewind(self, position):
+        self.position, self.state = position, None
+        self.calls.append(('rewind', position))
+
+    def forward(self, token_id, *, logits=True):
+        self.position, self.state = self.position + 1, None
+        self.calls.append(('forward', token_id))
+
+    def device_step(self, token_id=None):
+        self.calls.append(('step', token_id))
+        token_id = self.state if token_id is None else token_id
+        ticket = (self.position, (7 * token_id + self.position) % 50)
+        self.position, self.state = self.position + 1, ticket[1]
+        return ticket
+
+    def device_token(self, ticket):
+        self.calls.append(('read', ticket[0]))
+        if self.bad:
+            raise ValueError('nonfinite logits')
+        return ticket[1]
+
+
+def test_forward_greedy_runs_a_step_ahead():
+    # With device_decode, the step from the token being returned is launched before it is read; the last one
+    # launches none; another token than the one returned rewinds the step launched ahead; so does a host step.
+    class Config:
+        config = {'vocab_size': 50, 'max_position_embeddings': 64}
+    resident = AheadResident()
+    model = ResidentSequenceModel(Config, resident)
+    assert model.greedy_ahead
+    cache = model.new_cache()
+    model.prefill_token(3, cache)
+    token, got = 4, []
+    for i in range(3):
+        token = model.forward_greedy(token, cache, last=i == 2)
+        got.append(token)
+    want, t = [], 4
+    for p in (1, 2, 3):
+        t = (7 * t + p) % 50
+        want.append(t)
+    assert got == want and resident.position == 4
+    assert resident.calls == ['reset', ('forward', 3), ('step', 4), ('step', None), ('read', 1), ('step', None),
+                              ('read', 2), ('read', 3)]
+    resident.calls.clear()
+    first = model.forward_greedy(token, cache)
+    assert model.forward_greedy(first + 1, cache) == (7 * (first + 1) + 5) % 50
+    assert resident.calls == [('step', token), ('step', None), ('read', 4), ('rewind', 5), ('step', first + 1),
+                              ('step', None), ('read', 5)]
+    resident.calls.clear()
+    model.forward(9, cache)
+    assert resident.calls == [('rewind', 6), ('forward', 9)] and resident.position == 7
+    # A step that fails rewinds the one launched after it.
+    resident.calls.clear()
+    resident.bad = True
+    with pytest.raises(ValueError, match='nonfinite'):
+        model.forward_greedy(1, cache)
+    assert resident.calls == [('step', 1), ('step', None), ('read', 7), ('rewind', 8)] and resident.position == 8
+    # A new request drops the step ahead with every other position.
+    resident.bad = False
+    model.forward_greedy(2, cache)
+    resident.calls.clear()
+    model.new_cache()
+    assert resident.calls == ['reset'] and model._ahead is None

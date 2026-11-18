@@ -90,3 +90,20 @@ def test_greedy_requests_take_the_device_token():
         collect(g.submit([1,2,3],3,temperature=0.5,seed=1))
         assert greedy.forward_calls==5 and greedy.greedy_calls==6
     finally:s.close();g.close()
+
+class AheadModel(GreedyModel):
+    """forward_greedy that would launch the next step before returning (greedy_ahead): the flags it was given."""
+    greedy_ahead=True
+    def __init__(self):super().__init__();self.lasts=[]
+    def forward_greedy(self,t,c,*,last=False):
+        self.lasts.append(last); return super().forward_greedy(t,c)
+
+def test_greedy_ahead_is_told_when_no_step_follows():
+    # last=True where no step starts from the returned token: the prompt's tokens before its last (this model
+    # has no prefill_token) and the request's last token; the same tokens as without.
+    plain,ahead=Model(),AheadModel()
+    s,a=Scheduler(plain,prefill_chunk=1),Scheduler(ahead,prefill_chunk=1)
+    try:
+        assert collect(a.submit([1,2,3],4))[0]==collect(s.submit([1,2,3],4))[0]
+        assert ahead.lasts==[True,True,False,False,False,True]
+    finally:s.close();a.close()

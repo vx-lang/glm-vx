@@ -157,6 +157,10 @@ class CUDADriver:
             "cuIpcGetMemHandle": [C.POINTER(IpcMemHandle), _U64],
             "cuIpcOpenMemHandle_v2": [C.POINTER(_U64), IpcMemHandle, _U32],
             "cuIpcCloseMemHandle": [_U64],
+            # Page-locked host memory and copies into it that do not wait for the context: a step's token
+            # read back while the next step runs (ResidentGLM.device_step).
+            "cuMemAllocHost_v2": [C.POINTER(_P), _SIZE], "cuMemFreeHost": [_P],
+            "cuMemcpyDtoHAsync_v2": [_P, _U64, _SIZE, _P],
         }
         for name, argtypes in optional.items():
             fn = getattr(self.library, name, None)
@@ -361,6 +365,10 @@ class CUDAContext:
     def allocate(self, nbytes):
         return DeviceBuffer(self, nbytes)
 
+    def host_buffer(self, nbytes):
+        """Page-locked host memory of nbytes, for DeviceTensor.download_async."""
+        return HostBuffer(self, nbytes)
+
     def tensor(self, shape, dtype="float32", data=None):
         """Allocate uninitialized contiguous device storage; optionally upload bytes."""
         shape, dtype, nbytes = DeviceTensor._layout(shape, dtype)
@@ -532,6 +540,38 @@ class DeviceBuffer(_Resource):
         self._pointer = _U64()
 
 
+class HostBuffer(_Resource):
+    """Context-owned page-locked host memory (cuMemAllocHost), the destination of
+    DeviceTensor.download_async; read() copies its bytes out without synchronizing."""
+    def __init__(self, context, nbytes):
+        _integer(nbytes, "nbytes", minimum=1, maximum=min((1 << 63) - 1, C.c_size_t(-1).value))
+        if context.driver.cuMemAllocHost_v2 is None or context.driver.cuMemcpyDtoHAsync_v2 is None:
+            raise CUDAUnavailable("the NVIDIA driver has no cuMemAllocHost_v2 / cuMemcpyDtoHAsync_v2")
+        self.nbytes = nbytes
+        self._pointer = _P()
+        with context._activate():
+            context.driver.call("cuMemAllocHost_v2", C.byref(self._pointer), nbytes)
+            self._setup(context)
+
+    @property
+    def pointer(self):
+        self._ensure_open()
+        return self._pointer.value
+
+    def read(self, offset=0, nbytes=None):
+        _integer(offset, "offset")
+        nbytes = self.nbytes - offset if nbytes is None else nbytes
+        _integer(nbytes, "nbytes")
+        if offset + nbytes > self.nbytes:
+            raise ValueError("read exceeds the host buffer")
+        return C.string_at(self.pointer + offset, nbytes)
+
+    def _destroy_current(self):
+        self.context.driver.call("cuMemFreeHost", self._pointer)
+        self._mark_closed()
+        self._pointer = _P()
+
+
 class PeerBuffer(DeviceBuffer):
     """Another process's allocation (DeviceBuffer.ipc_handle there, nbytes long) mapped into this
     context: on another GPU, reached over NVLink (peer access enabled lazily). Closing unmaps it; the
@@ -642,6 +682,23 @@ class DeviceTensor:
             self.allocation._ensure_open()
             source.allocation._ensure_open()
             self.context.driver.call("cuMemcpyDtoDAsync_v2", self.pointer, source.pointer, self.nbytes,
+                                     _stream_handle(self.context, stream))
+        return self
+
+    def download_async(self, host, *, stream, offset=0):
+        """Enqueue a copy of this tensor's bytes into HostBuffer `host` at byte `offset` on `stream`, with
+        no synchronization: read host after an event recorded behind it has completed."""
+        if not isinstance(host, HostBuffer):
+            raise TypeError("host must be a HostBuffer")
+        if host.context is not self.context:
+            raise ValueError("host buffer belongs to another context")
+        _integer(offset, "offset")
+        if offset + self.nbytes > host.nbytes:
+            raise ValueError("copy exceeds the host buffer")
+        with self.context._activate():
+            self.allocation._ensure_open()
+            host._ensure_open()
+            self.context.driver.call("cuMemcpyDtoHAsync_v2", host.pointer + offset, self.pointer, self.nbytes,
                                      _stream_handle(self.context, stream))
         return self
 

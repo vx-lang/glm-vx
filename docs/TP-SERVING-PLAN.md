@@ -81,6 +81,19 @@ token n:
 
 **Bits.** The same as item 1. The arithmetic is unchanged; only where it runs changes.
 
+**Status: written, tested on the emulator only, not yet run on a GPU.** Enable it with
+`--tp-option device_decode=true`.
+
+- Kernels: gpu/spawn/decode_inputs and gpu/spawn/decode_next.
+- ResidentGLM: `device_step`, `device_token` and `rewind`.
+- Followers: the D, S and W commands.
+- `ResidentSequenceModel.forward_greedy` runs a step ahead, and the scheduler passes `last=`.
+- Runtime: page-locked `HostBuffer` and `DeviceTensor.download_async`.
+- Tests: `gpu/test_tp.py::test_device_steps_give_the_greedy_tokens_one_step_ahead` gives `forward(logits='greedy')`'s
+  tokens on one GPU and on two emulated ranks.
+- The server's pair gather is NCCL's all-gather inside the step's graph. It has not been captured on GPUs yet.
+- Next run: z13 in `z12.sh`.
+
 **Done when:**
 - z5's prompt gives z12's tokens;
 - W1's served TPOT is within 0.1 ms of tp_real's step at the same context;

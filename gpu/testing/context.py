@@ -41,7 +41,25 @@ class Tensor:
         def work():self.data.view(np.uint8).reshape(-1)[...]=source.data.view(np.uint8).reshape(-1)
         _run(stream,work)
         return self
+    def download_async(self,host,*,stream,offset=0):
+        """The bytes into HostBuffer host at offset, in stream order (recorded into a capture)."""
+        assert not self.closed and offset+self.nbytes<=host.nbytes
+        def work():host.data[offset:offset+self.nbytes]=self.data.tobytes()
+        _run(stream,work)
+        return self
     def close(self):self._closed=True
+class HostBuffer:
+    """gpu/runtime.HostBuffer's read() over a bytearray."""
+    def __init__(self,nbytes):self.nbytes=nbytes;self.data=bytearray(nbytes)
+    def read(self,offset=0,nbytes=None):
+        nbytes=self.nbytes-offset if nbytes is None else nbytes
+        assert offset+nbytes<=self.nbytes
+        return bytes(self.data[offset:offset+nbytes])
+class Event:
+    """Work here runs when it is launched, so an event is complete when recorded."""
+    def record(self,stream=None):return self
+    def synchronize(self):pass
+    def query(self):return True
 class Graph:
     """A capture's launches, run again in order by launch(), on the tensors' contents then."""
     def __init__(self):self.work=[]
@@ -137,6 +155,8 @@ class Context:
     def spawn_kernel(self,path):return SpawnKernel(self,path)
     def load_ptx(self,path):return Module(self)
     def stream(self):return Stream(self)
+    def host_buffer(self,nbytes):return HostBuffer(nbytes)
+    def event(self,*,timing=True):return Event()
     def tensor(self,shape,dtype='float32',data=None):
         if self.capturing:raise RuntimeError('cannot allocate while a stream captures a CUDA graph')
         t=Tensor(shape,dtype,data);t.ctx=self;self.tensors.append(t);return t

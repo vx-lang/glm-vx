@@ -1,0 +1,37 @@
+// glm_vx_spawn_decode_next: the end of a greedy decode step on the device (#63; docs/TP-SERVING-PLAN.md
+// item 2). pairs = the ranks' argmax_pair outputs gathered in rank order, [value, index] each, read
+// as int32 bits. The token is the index of the first largest value (so the lower rank on a tie), as
+// numpy.argmax over the values gives; it goes to state[0], and state[1] (the position) moves one on,
+// so decode_inputs makes the next step's inputs from them. A NaN value, or a largest value that is
+// infinite, gives token -1, for which the host raises ValueError as forward(logits='greedy') does.
+// One lane.
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_decode_next(state: &mut Tensor<i32, [?], Memory::HBM>, pairs: &Tensor<i32, [?], Memory::HBM>,
+                                ranks: i32) -> void {
+  spawn on(Topology::Device) {
+    for block in 0..1 across blocks {
+      for t in 0..1 across lanes {
+        let mut best: i32 = 0;
+        let mut bad: i32 = 0;
+        if ranks < 1 { bad = 1; }
+        let mut r: i32 = 0;
+        while r < ranks {
+          let bits: i32 = pairs[2 * r];
+          // |bits| above infinity's: a NaN.
+          if (bits & 2147483647) > 2139095040 { bad = 1; }
+          if f32::from_bits(bits as u32) > f32::from_bits(pairs[2 * best] as u32) { best = r; }
+          r = r + 1;
+        }
+        if ranks >= 1 {
+          if (pairs[2 * best] & 2147483647) >= 2139095040 { bad = 1; }
+        }
+        let mut token: i32 = -1;
+        if bad == 0 { token = pairs[2 * best + 1]; }
+        state[0] = token;
+        state[1] = state[1] + 1;
+      }
+    }
+  }
+  return;
+}

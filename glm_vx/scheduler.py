@@ -138,7 +138,13 @@ class Scheduler:
         """The model's next-token logits; for a greedy request on a model that picks the token on the
         device (forward_greedy: numpy.argmax of the logits, without them), that token, an int."""
         greedy = getattr(self.model, "forward_greedy", None)
-        if req.temperature == 0 and callable(greedy): return int(greedy(token, req.cache))
+        if req.temperature == 0 and callable(greedy):
+            if getattr(self.model, "greedy_ahead", False):
+                # The model launches the step that starts from the token it returns before returning it:
+                # last=True when no step will (a prompt token before the last, or the request's last token).
+                last = req.cursor < len(req.tokens)-1 or req.generated+1 >= req.max_tokens
+                return int(greedy(token, req.cache, last=last))
+            return int(greedy(token, req.cache))
         return self.model.forward(token, req.cache)
 
     def _sample(self, logits, req):

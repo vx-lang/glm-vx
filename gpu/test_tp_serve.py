@@ -24,6 +24,13 @@ class FakeResident:
     def reset(self):
         self.log.append(('reset',))
 
+    def device_step(self, token_id=None, *, readback=True):
+        self.log.append(('device_step', token_id, readback))
+        return ('ticket', token_id) if readback else None
+
+    def rewind(self, position):
+        self.log.append(('rewind', position))
+
     def preload(self):
         self.log.append(('preload',))
         return 7
@@ -113,6 +120,19 @@ def test_lockstep_sends_each_call_before_making_it():
     assert all(f.waited for f in followers)
 
 
+def test_lockstep_sends_device_steps_and_rewinds():
+    # device_decode's steps: D with the token the step starts from, S for one from the device's own token
+    # (the followers never read it), W to rewind; the token is read on rank 0 only.
+    log = []
+    step = tp_serve.Lockstep(FakeResident(log), FakeTP(log), [FakeFollower(log)])
+    assert step.device_step(12) == ('ticket', 12)
+    assert step.device_step() == ('ticket', None)
+    step.rewind(30)
+    assert log == [('sent', b'D 12\n'), ('device_step', 12, True), ('sent', b'S\n'), ('device_step', None, True),
+                   ('sent', b'W 30\n'), ('rewind', 30)]
+    step.close()
+
+
 def test_follower_replays_the_commands(monkeypatch):
     log = []
     monkeypatch.setattr(tp_serve, 'load_model', lambda checkpoint, layers=None: ('model', checkpoint, layers))
@@ -122,13 +142,13 @@ def test_follower_replays_the_commands(monkeypatch):
         built.append((model, rank, ranks, max_tokens, one_shot, options))
         return FakeResident(log), FakeTP(log)
     monkeypatch.setattr(tp_serve, 'build_rank', build_rank)
-    monkeypatch.setattr(sys, 'stdin', pipe_with(b'P\nR\nF 3 0\nF 4 1\nF 6 2\nQ\nF 5 1\n'))
+    monkeypatch.setattr(sys, 'stdin', pipe_with(b'P\nR\nF 3 0\nF 4 1\nF 6 2\nD 8\nS\nW 9\nQ\nF 5 1\n'))
     tp_serve.follower_main(['--checkpoint', 'ck', '--rank', '2', '--ranks', '8', '--max-tokens', '64', '--sum', 'nccl',
                             '--layers', '4', '--option', 'moe_down2=true', '--option', 'norm_block=512'])
     assert built == [(('model', 'ck', 4), 2, 8, 64, False, dict(moe_down2=True, norm_block=512))]
     # Nothing after Q runs; the graphs close before NCCL's teardown.
     assert log == [('preload',), ('reset',), ('forward', 3, False), ('forward', 4, True), ('forward', 6, 'greedy'),
-                   ('close',), ('finish',)]
+                   ('device_step', 8, False), ('device_step', None, False), ('rewind', 9), ('close',), ('finish',)]
 
 
 def test_follower_rejects_an_unknown_command(monkeypatch):

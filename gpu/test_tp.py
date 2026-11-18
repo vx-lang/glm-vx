@@ -225,6 +225,112 @@ def test_greedy_picks_the_logits_argmax_on_one_and_two_ranks():
     assert all(r[1] > 0 for r in results)
 
 
+def test_device_steps_give_the_greedy_tokens_one_step_ahead():
+    # device_decode (#63): each step's inputs and token made on the device, the next step launched before
+    # the token of the one before is read; the tokens are forward(logits='greedy')'s, on one GPU and on
+    # two ranks (rank 1 never reads them), under graph replay. Rewinding a step and giving its token
+    # again gives the same token; so does ResidentSequenceModel's forward_greedy, a step ahead.
+    from gpu.resident import ResidentSequenceModel
+    model = aligned_fp8_model(53, 2)
+    options = dict(device_experts=True, fp8_kernels='cvt', fold_shared=True, graph=True, fused_attention=True,
+                   mla_kernel='chunks')
+    prompt, steps = TOKENS[:3], 5
+    reference_glm = ResidentGLM(model, ctx=Context(), max_tokens=32, **options)
+    try:
+        for t in prompt[:-1]:
+            reference_glm.forward(t, logits=False)
+        want, token = [], prompt[-1]
+        for _ in range(steps):
+            token = reference_glm.forward(token, logits='greedy')
+            want.append(token)
+    finally:
+        reference_glm.close()
+
+    def ahead(resident, readback=True):
+        for t in prompt[:-1]:
+            resident.forward(t, logits=False)
+        got, ticket = [], resident.device_step(prompt[-1], readback=readback)
+        for i in range(steps):
+            following = resident.device_step(readback=readback) if i < steps - 1 else None
+            got.append(resident.device_token(ticket) if readback else None)
+            ticket = following
+        resident.rewind(resident.position - 1)
+        again = resident.device_step(want[-2], readback=readback)
+        return got, resident.device_token(again) if readback else None
+
+    one = ResidentGLM(model, ctx=Context(), max_tokens=32, device_decode=True, **options)
+    try:
+        assert ahead(one) == (want, want[-1])
+        assert one.replays > 0
+        sequence = ResidentSequenceModel(model, one)
+        cache = sequence.new_cache()
+        for t in prompt[:-1]:
+            sequence.prefill_token(t, cache)
+        token, got = prompt[-1], []
+        for i in range(steps):
+            token = sequence.forward_greedy(token, cache, last=i == steps - 1)
+            got.append(token)
+        assert got == want and one.position == len(prompt) - 1 + steps
+    finally:
+        one.close()
+    job = LocalJob(2)
+
+    def rank_main(rank):
+        resident = ResidentGLM(model, ctx=Context(), max_tokens=32, tp=TensorParallel(rank, 2, job.member(rank)),
+                               device_decode=True, **options)
+        try:
+            return ahead(resident, readback=rank == 0), resident.replays
+        finally:
+            resident.close()
+    results = run_ranks(job, rank_main)
+    assert results[0][0] == (want, want[-1]) and all(r[1] > 0 for r in results)
+
+
+@needs_spawn
+def test_decode_next_takes_the_first_largest_and_refuses_nonfinite():
+    # decode_next: the index of the first largest of the ranks' values (the lower rank on a tie) and the
+    # position one on; a NaN anywhere, or an infinite largest value, gives -1.
+    from gpu.test_resident import SPAWN
+    context = Context()
+    kernel = context.spawn_kernel(SPAWN / 'decode_next.ptx')
+
+    def run(values, ids, position=4):
+        pairs = np.stack([np.array(values, np.float32).view(np.int32), np.array(ids, np.int32)], 1).ravel()
+        state = context.tensor((2,), 'int32', np.array([123, position], np.int32).tobytes())
+        kernel.launch(state=state, pairs=context.tensor(pairs.shape, 'int32', pairs.tobytes()), ranks=len(values))
+        return [int(v) for v in np.frombuffer(state.download(), np.int32)]
+    assert run([1.5, 2.5, 2.5, -1.0], [0, 7, 9, 3]) == [7, 5]
+    assert run([-np.inf, 0.5], [4, 6]) == [6, 5]
+    assert run([0.5], [11], position=0) == [11, 1]
+    for values in ([1.0, np.nan], [np.nan, 1.0], [np.inf, 1.0], [-np.inf, -np.inf]):
+        assert run(values, [1, 2]) == [-1, 5], values
+
+
+@needs_spawn
+def test_decode_inputs_copies_the_token_row_and_the_position_row():
+    # decode_inputs: the token's embedding row (bf16 bits shifted, or float32 bits) then the position's
+    # table row, bit for bit; a token or position out of range reads row 0.
+    from gpu.test_resident import SPAWN
+    context = Context()
+    kernel = context.spawn_kernel(SPAWN / 'decode_inputs.ptx')
+    rng = np.random.default_rng(9)
+    hidden, width, vocab, positions = 300, 68, 5, 9
+    bits16 = rng.integers(0, 2 ** 16, size=vocab * hidden).astype(np.uint16)
+    bits32 = rng.integers(-2 ** 31, 2 ** 31, size=vocab * hidden).astype(np.int32)
+    table = rng.integers(-2 ** 31, 2 ** 31, size=positions * width).astype(np.int32)
+    device = lambda a: context.tensor(a.shape, str(a.dtype), a.tobytes())
+    for token, position, wide in ((3, 7, 0), (4, 2, 1), (-1, 99, 0), (5, 9, 1)):
+        inputs = context.tensor((hidden + width,))
+        kernel.launch(inputs=inputs, embed16=device(bits16), embed32=device(bits32), table=device(table),
+                      state=device(np.array([token, position], np.int32)), hidden=hidden, width=width, vocab=vocab,
+                      positions=positions, wide=wide)
+        t = token if 0 <= token < vocab else 0
+        p = position if 0 <= position < positions else 0
+        row = bits32[t * hidden:(t + 1) * hidden].view(np.uint32) if wide else bits16[t * hidden:(t + 1) * hidden].astype(np.uint32) << 16
+        np.testing.assert_array_equal(np.frombuffer(inputs.download(), np.uint32),
+                                      np.concatenate([row, table[p * width:(p + 1) * width].view(np.uint32)]))
+
+
 @needs_spawn
 def test_argmax_pair_takes_the_first_largest():
     # argmax_pair: the largest value and offset + its index, the first on a tie, as float32 bits.
