@@ -26,7 +26,7 @@ class FakeResident:
 
     def __init__(self, model, *, max_tokens=4096, **kwargs):
         self.model, self.max_tokens = model, max_tokens
-        self.resets, self.headless, self.closed, self.preloaded = 0, 0, False, False
+        self.resets, self.headless, self.greedy, self.closed, self.preloaded = 0, 0, 0, False, False
         self.reset()
 
     def preload(self):
@@ -40,6 +40,9 @@ class FakeResident:
     def forward(self, token_id, *, logits=True):
         if self.position >= self.max_tokens: raise ValueError('sequence exceeds max_tokens')
         self.position += 1
+        if logits == 'greedy':  # ResidentGLM's device-chosen token: numpy.argmax of the logits
+            self.greedy += 1
+            return int(np.argmax(self.model.forward(token_id, self.cache)))
         if logits: return self.model.forward(token_id, self.cache)
         self.headless += 1
         self.model.prefill_token(token_id, self.cache)
@@ -133,6 +136,8 @@ def test_outputs_equal_the_numpy_reference_and_prompt_skips_lm_head():
     finally: sched.close(); reference.close()
     assert resident.headless == sum(len(p) - 1 for p, _, _ in PROMPTS)
     assert resident.resets == 1 + len(PROMPTS)
+    # Greedy requests' tokens came from the device's choice (forward_greedy), sampled ones' from logits.
+    assert resident.greedy == sum(n for _, n, temperature in PROMPTS if temperature == 0)
 
 
 def test_reset_between_requests():
@@ -140,6 +145,8 @@ def test_reset_between_requests():
     resident = FakeResident(build(seed=5))
     logits = []
     class Recording(ResidentSequenceModel):
+        forward_greedy = None  # every next token through forward, so its logits are recorded
+
         def forward(self, token_id, cache):
             logits.append(super().forward(token_id, cache)); return logits[-1]
     sched = Scheduler(Recording(resident.model, resident), max_sequences=1)
@@ -165,6 +172,8 @@ def test_queued_request_waits_for_the_single_slot():
     resident = FakeResident(build())
     order, entered, release = [], threading.Event(), threading.Event()
     class Gated(ResidentSequenceModel):
+        forward_greedy = None  # every next token through the gated forward
+
         def forward(self, token_id, cache):
             order.append(cache); entered.set(); release.wait(5)
             return super().forward(token_id, cache)

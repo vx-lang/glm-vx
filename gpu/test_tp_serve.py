@@ -102,12 +102,14 @@ def test_lockstep_sends_each_call_before_making_it():
     step.reset()
     assert step.forward(5, logits=False) is None
     assert step.forward(9) == 'logits'
+    assert step.forward(4, logits='greedy') == 'logits'
     assert step.max_tokens == 64 and step.name == 'vx-gpu-resident'
     step.close()
     step.close()  # once only
     sent = lambda line: [('sent', line)] * 2
     assert log == (sent(b'P\n') + [('preload',)] + sent(b'R\n') + [('reset',)] + sent(b'F 5 0\n') + [('forward', 5, False)]
-                   + sent(b'F 9 1\n') + [('forward', 9, True)] + sent(b'Q\n') + [('close',), ('finish',)])
+                   + sent(b'F 9 1\n') + [('forward', 9, True)] + sent(b'F 4 2\n') + [('forward', 4, 'greedy')]
+                   + sent(b'Q\n') + [('close',), ('finish',)])
     assert all(f.waited for f in followers)
 
 
@@ -120,12 +122,13 @@ def test_follower_replays_the_commands(monkeypatch):
         built.append((model, rank, ranks, max_tokens, one_shot, options))
         return FakeResident(log), FakeTP(log)
     monkeypatch.setattr(tp_serve, 'build_rank', build_rank)
-    monkeypatch.setattr(sys, 'stdin', pipe_with(b'P\nR\nF 3 0\nF 4 1\nQ\nF 5 1\n'))
+    monkeypatch.setattr(sys, 'stdin', pipe_with(b'P\nR\nF 3 0\nF 4 1\nF 6 2\nQ\nF 5 1\n'))
     tp_serve.follower_main(['--checkpoint', 'ck', '--rank', '2', '--ranks', '8', '--max-tokens', '64', '--sum', 'nccl',
                             '--layers', '4', '--option', 'moe_down2=true', '--option', 'norm_block=512'])
     assert built == [(('model', 'ck', 4), 2, 8, 64, False, dict(moe_down2=True, norm_block=512))]
     # Nothing after Q runs; the graphs close before NCCL's teardown.
-    assert log == [('preload',), ('reset',), ('forward', 3, False), ('forward', 4, True), ('close',), ('finish',)]
+    assert log == [('preload',), ('reset',), ('forward', 3, False), ('forward', 4, True), ('forward', 6, 'greedy'),
+                   ('close',), ('finish',)]
 
 
 def test_follower_rejects_an_unknown_command(monkeypatch):

@@ -6,13 +6,14 @@ then replay rank 0's ResidentGLM calls in the same order, so every collective of
 ranks. Rank 0 holds its ResidentGLM behind Lockstep, which writes each call as one line to every
 follower's stdin before making it:
 
-    F <token> <0|1>   forward(token, logits=...)    (followers discard the logits)
+    F <token> <0|1|2> forward(token, logits=False / True / 'greedy')  (followers discard what it returns)
     R                 reset()
     P                 preload()
     Q                 close, then exit
 
 Between commands a follower polls its pipe for GLM_VX_TP_SPIN seconds (default 0.05) before it blocks.
-The logits flag must match on every rank: the lm_head's vocabulary all-gather is a collective. A
+The logits flag must match on every rank: the lm_head's vocabulary all-gather (or 'greedy''s gather of
+one pair a rank) is a collective. A
 follower that exits leaves rank 0 waiting inside a collective forever, so a watchdog thread stops
 the server when one does. The ranks find each other through VX_NCCL_ID_FILE (gpu.collective).
 """
@@ -105,7 +106,7 @@ class Lockstep:
             follower.stdin.flush()
 
     def forward(self, token_id, *, logits=True):
-        self._send(b'F %d %d\n' % (int(token_id), 1 if logits else 0))
+        self._send(b'F %d %d\n' % (int(token_id), 2 if logits == 'greedy' else 1 if logits else 0))
         return self.resident.forward(token_id, logits=logits)
 
     def reset(self):
@@ -197,7 +198,7 @@ def follower_main(argv=None):
         for line in commands(sys.stdin.fileno(), spin):  # end of input: rank 0 is gone
             op = line.split()
             if op[0] == b'F':
-                resident.forward(int(op[1]), logits=op[2] == b'1')
+                resident.forward(int(op[1]), logits={b'0': False, b'1': True, b'2': 'greedy'}[op[2]])
             elif op[0] == b'R':
                 resident.reset()
             elif op[0] == b'P':

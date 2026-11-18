@@ -192,3 +192,50 @@ def test_peer_sum_maps_every_rank_and_pads_to_eight():
     assert sum(1 for name, _ in library.fake.calls if name == 'cuIpcCloseMemHandle') == 2
     with pytest.raises(ValueError, match='1 to 8 ranks'):
         PeerSum(context, 0, 9, n, None)
+
+
+@needs_spawn
+def test_greedy_picks_the_logits_argmax_on_one_and_two_ranks():
+    # forward(logits='greedy'): numpy.argmax of forward()'s logits, chosen on the device: on one GPU through
+    # argmax_rows; under tensor parallelism each rank's argmax_pair over its vocabulary rows, the ranks'
+    # pairs gathered and the largest taken (the lower rank on a tie), under graph replay too.
+    model = aligned_fp8_model(53, 2)
+    options = dict(device_experts=True, fp8_kernels='cvt', fold_shared=True, graph=True, fused_attention=True,
+                   mla_kernel='chunks')
+    tokens = TOKENS[:6]
+    one = ResidentGLM(model, ctx=Context(), max_tokens=32, **options)
+    twin = ResidentGLM(model, ctx=Context(), max_tokens=32, **options)
+    try:
+        want = [int(np.argmax(one.forward(t))) for t in tokens]
+        assert [twin.forward(t, logits='greedy') for t in tokens] == want
+    finally:
+        one.close()
+        twin.close()
+    job = LocalJob(2)
+
+    def rank_main(rank):
+        resident = ResidentGLM(model, ctx=Context(), max_tokens=32, tp=TensorParallel(rank, 2, job.member(rank)), **options)
+        try:
+            got = [resident.forward(t, logits='greedy') for t in tokens]
+            return got, resident.replays
+        finally:
+            resident.close()
+    results = run_ranks(job, rank_main)
+    assert all(r[0] == want for r in results), (results, want)
+    assert all(r[1] > 0 for r in results)
+
+
+@needs_spawn
+def test_argmax_pair_takes_the_first_largest():
+    # argmax_pair: the largest value and offset + its index, the first on a tie, as float32 bits.
+    from gpu.test_resident import SPAWN
+    context = Context()
+    kernel = context.spawn_kernel(SPAWN / 'argmax_pair.ptx')
+    rng = np.random.default_rng(5)
+    for dim, offset in ((19360, 3 * 19360), (5, 0), (2049, 7)):
+        x = rng.normal(size=dim).astype(np.float32)
+        x[dim // 3] = x[dim - 1] = x.max() + 1  # a tie: the first wins
+        out = context.tensor((2,))
+        kernel.launch(out=out, x=context.tensor((dim,), 'float32', x.tobytes()), dim=dim, offset=offset, threads=1024)
+        pair = np.frombuffer(out.download(), dtype=np.float32)
+        assert pair[0] == x.max() and int(pair[1:].view(np.int32)[0]) == offset + int(np.argmax(x))

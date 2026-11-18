@@ -134,7 +134,15 @@ class Scheduler:
                        "prefix_seconds":req.prefix_seconds,
                        "queued_seconds":(req.admitted or time.monotonic())-req.created}}
 
+    def _forward(self, token, req):
+        """The model's next-token logits; for a greedy request on a model that picks the token on the
+        device (forward_greedy: numpy.argmax of the logits, without them), that token, an int."""
+        greedy = getattr(self.model, "forward_greedy", None)
+        if req.temperature == 0 and callable(greedy): return int(greedy(token, req.cache))
+        return self.model.forward(token, req.cache)
+
     def _sample(self, logits, req):
+        if isinstance(logits, int): return logits  # _forward's device-chosen greedy token
         logits = np.asarray(logits,dtype=np.float32)
         if logits.shape != (self.model.config['vocab_size'],) or not np.all(np.isfinite(logits)): raise ValueError("nonfinite or invalid logits")
         if req.temperature == 0: return int(np.argmax(logits))
@@ -177,7 +185,7 @@ class Scheduler:
                     if req.cursor < len(req.tokens)-1 and callable(prefill_token):
                         prefill_token(req.tokens[req.cursor],req.cache)
                     else:
-                        logits = self.model.forward(req.tokens[req.cursor],req.cache)
+                        logits = self._forward(req.tokens[req.cursor],req)
                     req.prefill_seconds += time.perf_counter()-start
                     req.cursor += 1
                     if req.cursor < end:
@@ -189,13 +197,13 @@ class Scheduler:
             if req.cursor < len(req.tokens): return True
             if self.closed or req.cancelled.is_set(): self._finish(req,"cancelled"); return False
             start = time.perf_counter()
-            self.prefix_cache.store(req.tokens, req.cache, logits)
+            if not isinstance(logits, int): self.prefix_cache.store(req.tokens, req.cache, logits)
             req.prefix_seconds += time.perf_counter()-start
         elif hit_logits is not None:
             logits = hit_logits
         else:
             start = time.perf_counter()
-            logits = self.model.forward(req.next_token,req.cache)
+            logits = self._forward(req.next_token,req)
             req.decode_seconds += time.perf_counter()-start
         if self.closed or req.cancelled.is_set(): self._finish(req,"cancelled"); return False
         token = self._sample(logits,req)

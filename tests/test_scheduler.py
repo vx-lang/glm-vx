@@ -68,3 +68,25 @@ def test_shutdown_does_not_claim_worker_stopped():
         release.set();s.close()
     assert not s.thread.is_alive()
     assert s.status()['reserved_tokens']==0
+
+class GreedyModel(Model):
+    """Model with forward_greedy: the token its forward's logits argmax to, counted."""
+    def __init__(self):self.greedy_calls=self.forward_calls=0
+    def forward(self,t,c):
+        self.forward_calls+=1; return Model.forward(self,t,c)
+    def forward_greedy(self,t,c):
+        self.greedy_calls+=1; return int(np.argmax(Model.forward(self,t,c)))
+
+def test_greedy_requests_take_the_device_token():
+    # temperature 0 with a model that picks on the device: forward_greedy for every forward (this model has no
+    # prefill_token, so the 3 prompt tokens too, then 3 decode steps), no logits back, the same tokens as from
+    # the logits; a sampled request still gets logits (3 prompt tokens and 2 decode steps for 3 tokens).
+    plain,greedy=Model(),GreedyModel()
+    s,g=Scheduler(plain,prefill_chunk=1),Scheduler(greedy,prefill_chunk=1)
+    try:
+        want=collect(s.submit([1,2,3],4))[0]
+        assert collect(g.submit([1,2,3],4))[0]==want
+        assert greedy.greedy_calls==6 and greedy.forward_calls==0
+        collect(g.submit([1,2,3],3,temperature=0.5,seed=1))
+        assert greedy.forward_calls==5 and greedy.greedy_calls==6
+    finally:s.close();g.close()

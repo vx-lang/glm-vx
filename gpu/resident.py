@@ -696,6 +696,9 @@ class ResidentGLM:
             # The rank's vocabulary rows of the logits, gathered into self.logits; the partial sums of
             # every rank, gathered for _tp_sum.
             self.logits_local = t((vocab // self.tp.size,))
+            # forward(logits='greedy'): this rank's (largest logit, its index) and every rank's, gathered.
+            self._greedy_pair = t((2,))
+            self._greedy_pairs = t((2 * self.tp.size,))
             self._tp_gathered = t((self.tp.size * self.hidden,))
             self._tp_peers = None
             if self.tp.one_shot:
@@ -1557,7 +1560,11 @@ class ResidentGLM:
 
     # ---------------------------------------------------------------- public
     def forward(self, token_id, *, logits=True):
-        """Append one token and return next-token logits (None with logits=False)."""
+        """Append one token and return next-token logits (None with logits=False). logits='greedy'
+        returns the next token instead, numpy.argmax of the logits when none is NaN, chosen on the
+        device: under tensor parallelism each rank takes the largest of its vocabulary rows
+        (gpu/spawn/argmax_pair) and the ranks gather one pair each, in place of every logit; on one GPU,
+        argmax_rows. A largest logit that is not finite raises ValueError."""
         m, c = self.model, self.config
         if self._closed:
             raise RuntimeError('ResidentGLM is closed')
@@ -1601,10 +1608,26 @@ class ResidentGLM:
             return None
         self._rmsnorm(self.x, self._weight('model.norm.weight'), self.norm, m.eps)
         head = 'model.embed_tokens' if c.get('tie_word_embeddings', False) else 'lm_head'
+        greedy = logits == 'greedy'
         if self.tp is None:
             self._project(head, self.norm, self.logits)
+            if greedy:
+                token = int(self._argmax(self.logits.view((1, self.logits.shape[0])), 1)[0])
+                if not np.isfinite(np.frombuffer(self.logits.download(), dtype=np.float32)[token]):
+                    raise ValueError('nonfinite logits')
+                return token
         else:
             self._project(head, self.norm, self.logits_local)
+            if greedy:
+                rows = self.logits_local.shape[0]
+                self._spawn('argmax_pair', out=self._greedy_pair, x=self.logits_local, dim=rows,
+                            offset=self.tp.rank * rows, threads=1024)
+                self.tp.collective.all_gather(self._greedy_pair, self._greedy_pairs, stream=self.stream)
+                pairs = np.frombuffer(self._greedy_pairs.download(), dtype=np.float32).reshape(self.tp.size, 2)
+                best = int(np.argmax(pairs[:, 0]))  # the first largest: the lower rank, so the lower id, on a tie
+                if not np.isfinite(pairs[best, 0]):
+                    raise ValueError('nonfinite logits')
+                return int(pairs[best, 1:].view(np.int32)[0])
             self.tp.collective.all_gather(self.logits_local, self.logits, stream=self.stream)
         return np.frombuffer(self.logits.download(), dtype=np.float32).copy()
 
@@ -2098,6 +2121,12 @@ class ResidentSequenceModel:
         self._check(cache)
         # Logits come back so the scheduler samples on the host; device-side sampling is #17.
         return self.resident.forward(token_id)
+
+    def forward_greedy(self, token_id, cache):
+        """The next token of a greedy request (temperature 0), chosen on the device: numpy.argmax of
+        forward's logits, without them coming back (the scheduler calls it in place of forward)."""
+        self._check(cache)
+        return self.resident.forward(token_id, logits='greedy')
 
     def close(self):
         self.resident.close()
