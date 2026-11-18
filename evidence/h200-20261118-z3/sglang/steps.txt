@@ -1,0 +1,13 @@
+profile-sglang-fp8-prefill-bs1-in1000 ok 290s
+stats-sglang-fp8-prefill-bs1-in1000 ok 0s
+profile-sglang-fp8-decode-bs1-in1000 ok 110s
+stats-sglang-fp8-decode-bs1-in1000 ok 1s
+profile-sglang-fp8-prefill-bs1-in3001 ok 116s
+stats-sglang-fp8-prefill-bs1-in3001 ok 0s
+profile-sglang-fp8-decode-bs1-in3001 ok 110s
+stats-sglang-fp8-decode-bs1-in3001 ok 0s
+profile-sglang-fp8-prefill-bs1-in32768 FAIL(1) 109s
+profile-sglang-fp8-prefill-bs1-in32768 ok 113s
+stats-sglang-fp8-prefill-bs1-in32768 ok 0s
+profile-sglang-fp8-decode-bs1-in32768 ok 110s
+stats-sglang-fp8-decode-bs1-in32768 ok 0s
