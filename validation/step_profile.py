@@ -9,7 +9,8 @@ routers (as the official FP8 checkpoint stores them), index_topk
 2048, random weights. One dense layer by default (as evidence/h200-20261116-m to -q); --layers 2
 --moe gives a dense layer then a MoE one (16 routed experts), so a layer boundary and a MoE output are
 in the step for fuse_glue's fusions there. --long-topk, --no-fuse-glue, --index-kernel, --fold-shared and
---fuse-router select ResidentGLM's options, for an A/B in one build (#32, #39); the last two need --moe."""
+--fuse-router select ResidentGLM's options, for an A/B in one build (#32, #39); the last two need --moe.
+--logits profiles steps that return logits (the lm_head too), as a decode step that samples does."""
 import argparse
 import time
 
@@ -34,6 +35,8 @@ def main():
     p.add_argument('--fold-shared', action='store_true', help="ResidentGLM(fold_shared=True): the shared expert in the routed launches")
     p.add_argument('--fuse-router', action='store_true', help='ResidentGLM(fuse_router=True): the router projection and router in one launch')
     p.add_argument('--repeats', type=int, default=2)
+    p.add_argument('--logits', action='store_true',
+                   help="the profiled steps return logits: the final norm, the bf16 lm_head and the logits' download")
     args = p.parse_args()
     config = full_geometry(args.layers, topk=2048)
     config['max_position_embeddings'] = max(1024, args.context + 64)
@@ -57,7 +60,7 @@ def main():
     for t in tokens[args.context:]:
         with ctx._activate():
             ctx.driver.call('cuProfilerStart')
-        r.forward(t, logits=False)
+        r.forward(t, logits=args.logits)
         ctx.synchronize()
         with ctx._activate():
             ctx.driver.call('cuProfilerStop')
