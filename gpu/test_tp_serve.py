@@ -1,6 +1,9 @@
 """gpu/tp_serve.py without GPUs: the lockstep protocol between rank 0 and its followers."""
 import io
+import os
 import sys
+import threading
+import time
 
 import pytest
 
@@ -61,6 +64,36 @@ class FakeFollower:
         return 0
 
 
+def pipe_with(data):
+    """A stdin whose fileno is a pipe holding `data`, then closed."""
+    r, w = os.pipe()
+    os.write(w, data)
+    os.close(w)
+    return io.TextIOWrapper(io.FileIO(r, 'rb'))
+
+
+def test_commands_spin_then_block_and_split_lines():
+    # Lines come out whole however the bytes arrive; after spin_seconds without a command the reads block
+    # (no CPU while the server is idle); end of input ends the commands.
+    r, w = os.pipe()
+    got = []
+
+    def writer():
+        os.write(w, b'F 1 1\nF 2')
+        time.sleep(0.01)
+        os.write(w, b' 0\nR\n')
+        time.sleep(0.2)  # longer than spin_seconds: the reader is blocked in select by now
+        os.write(w, b'Q\n')
+        os.close(w)
+    thread = threading.Thread(target=writer)
+    thread.start()
+    for line in tp_serve.commands(r, spin_seconds=0.05):
+        got.append((line, time.perf_counter()))
+    thread.join()
+    os.close(r)
+    assert [line for line, _ in got] == [b'F 1 1', b'F 2 0', b'R', b'Q']
+
+
 def test_lockstep_sends_each_call_before_making_it():
     log = []
     followers = [FakeFollower(log), FakeFollower(log)]
@@ -83,14 +116,14 @@ def test_follower_replays_the_commands(monkeypatch):
     monkeypatch.setattr(tp_serve, 'load_model', lambda checkpoint, layers=None: ('model', checkpoint, layers))
     built = []
 
-    def build_rank(model, rank, ranks, max_tokens, one_shot=True):
-        built.append((model, rank, ranks, max_tokens, one_shot))
+    def build_rank(model, rank, ranks, max_tokens, one_shot=True, options=None):
+        built.append((model, rank, ranks, max_tokens, one_shot, options))
         return FakeResident(log), FakeTP(log)
     monkeypatch.setattr(tp_serve, 'build_rank', build_rank)
-    monkeypatch.setattr(sys, 'stdin', io.TextIOWrapper(io.BytesIO(b'P\nR\nF 3 0\nF 4 1\nQ\nF 5 1\n')))
+    monkeypatch.setattr(sys, 'stdin', pipe_with(b'P\nR\nF 3 0\nF 4 1\nQ\nF 5 1\n'))
     tp_serve.follower_main(['--checkpoint', 'ck', '--rank', '2', '--ranks', '8', '--max-tokens', '64', '--sum', 'nccl',
-                            '--layers', '4'])
-    assert built == [(('model', 'ck', 4), 2, 8, 64, False)]
+                            '--layers', '4', '--option', 'moe_down2=true', '--option', 'norm_block=512'])
+    assert built == [(('model', 'ck', 4), 2, 8, 64, False, dict(moe_down2=True, norm_block=512))]
     # Nothing after Q runs; the graphs close before NCCL's teardown.
     assert log == [('preload',), ('reset',), ('forward', 3, False), ('forward', 4, True), ('close',), ('finish',)]
 
@@ -99,7 +132,7 @@ def test_follower_rejects_an_unknown_command(monkeypatch):
     log = []
     monkeypatch.setattr(tp_serve, 'load_model', lambda checkpoint, layers=None: None)
     monkeypatch.setattr(tp_serve, 'build_rank', lambda *a, **k: (FakeResident(log), FakeTP(log)))
-    monkeypatch.setattr(sys, 'stdin', io.TextIOWrapper(io.BytesIO(b'X\n')))
+    monkeypatch.setattr(sys, 'stdin', pipe_with(b'X\n'))
     with pytest.raises(ValueError, match='unknown command'):
         tp_serve.follower_main(['--checkpoint', 'ck', '--rank', '1', '--ranks', '2', '--max-tokens', '8'])
     assert log == [('close',), ('finish',)]
@@ -110,6 +143,8 @@ def test_follower_rejects_an_unknown_command(monkeypatch):
     (['--backend', 'vx', '--checkpoint', 'x', '--tp', '2'], '--tp applies to'),
     (['--backend', 'vx-gpu-resident', '--checkpoint', 'x', '--tp', '0'], '--tp must be positive'),
     (['--backend', 'vx-gpu-resident', '--checkpoint', 'x', '--layers', '4'], '--layers is a --tp smoke test'),
+    (['--backend', 'vx-gpu-resident', '--checkpoint', 'x', '--tp-option', 'moe_down2=true'], '--tp-option applies to --tp'),
+    (['--backend', 'vx-gpu-resident', '--checkpoint', 'x', '--tp', '2', '--tp-option', 'moe_down2'], 'expected KEY=VALUE'),
 ])
 def test_server_tp_arguments(argv, message, capsys):
     from glm_vx.server import parse_args
@@ -122,3 +157,6 @@ def test_server_tp_defaults():
     from glm_vx.server import parse_args
     args = parse_args(['--backend', 'vx-gpu-resident', '--checkpoint', 'x', '--tp', '8'])
     assert args.tp == 8 and args.tp_sum == 'one-shot' and args.max_sequences == 1 and args.max_context == 8192
+    args = parse_args(['--backend', 'vx-gpu-resident', '--checkpoint', 'x', '--tp', '8', '--tp-option', 'moe_down2=true',
+                       '--tp-option', 'fuse_router=false'])
+    assert args.tp_options == dict(moe_down2=True, fuse_router=False)

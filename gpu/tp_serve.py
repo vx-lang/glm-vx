@@ -11,6 +11,7 @@ follower's stdin before making it:
     P                 preload()
     Q                 close, then exit
 
+Between commands a follower polls its pipe for GLM_VX_TP_SPIN seconds (default 0.05) before it blocks.
 The logits flag must match on every rank: the lm_head's vocabulary all-gather is a collective. A
 follower that exits leaves rank 0 waiting inside a collective forever, so a watchdog thread stops
 the server when one does. The ranks find each other through VX_NCCL_ID_FILE (gpu.collective).
@@ -19,6 +20,7 @@ import argparse
 import ctypes as C
 import json
 import os
+import select
 import subprocess
 import sys
 import tempfile
@@ -47,8 +49,19 @@ def load_model(checkpoint, layers=None):
     return GlmMoeDsaModel(config, weights, NumpyBackend())
 
 
-def build_rank(model, rank, ranks, max_tokens, one_shot=True):
-    """This rank's ResidentGLM (on GPU `rank`) and its TensorParallel."""
+def parse_options(pairs):
+    """KEY=VALUE strings (VALUE as JSON: true, 3, "x") as ResidentGLM keyword arguments."""
+    options = {}
+    for pair in pairs or ():
+        key, sep, value = pair.partition('=')
+        if not sep or not key.isidentifier():
+            raise ValueError(f'expected KEY=VALUE, not {pair!r}')
+        options[key] = json.loads(value)
+    return options
+
+
+def build_rank(model, rank, ranks, max_tokens, one_shot=True, options=None):
+    """This rank's ResidentGLM (on GPU `rank`) and its TensorParallel; `options` override OPTIONS."""
     from gpu.collective import Collective
     from gpu.resident import ResidentGLM
     from gpu.runtime import CUDAContext
@@ -58,7 +71,7 @@ def build_rank(model, rank, ranks, max_tokens, one_shot=True):
     context = CUDAContext(rank, primary=True, minimum_compute_capability=(8, 0))
     collective = Collective(C.CDLL(os.environ['VX_DISPATCH_LIB']), context, rank, ranks)
     tp = TensorParallel(rank, ranks, collective, one_shot=one_shot)
-    return ResidentGLM(model, ctx=context, max_tokens=max_tokens, tp=tp, **OPTIONS), tp
+    return ResidentGLM(model, ctx=context, max_tokens=max_tokens, tp=tp, **{**OPTIONS, **(options or {})}), tp
 
 
 class Lockstep:
@@ -121,23 +134,49 @@ class Lockstep:
                 follower.kill()
 
 
-def start(checkpoint, ranks, max_tokens, *, one_shot=True, layers=None):
-    """Rank 0 in this process, ranks 1..ranks-1 as followers. Returns (host model, Lockstep)."""
+def start(checkpoint, ranks, max_tokens, *, one_shot=True, layers=None, options=None):
+    """Rank 0 in this process, ranks 1..ranks-1 as followers, every rank with OPTIONS updated by
+    `options`. Returns (host model, Lockstep)."""
     tmp = tempfile.mkdtemp(prefix='glm-vx-tp-')
     os.environ['VX_NCCL_ID_FILE'] = os.path.join(tmp, 'nccl-id')  # absent until rank 0 writes it
     command = [sys.executable, '-m', 'gpu.tp_serve', '--checkpoint', str(checkpoint), '--ranks', str(ranks),
                '--max-tokens', str(max_tokens), '--sum', 'one-shot' if one_shot else 'nccl']
     command += ['--layers', str(layers)] if layers is not None else []
+    for key, value in (options or {}).items():
+        command += ['--option', f'{key}={json.dumps(value)}']
     followers = [subprocess.Popen(command + ['--rank', str(r)], stdin=subprocess.PIPE, env=dict(os.environ))
                  for r in range(1, ranks)]
     try:
         model = load_model(checkpoint, layers)
-        resident, tp = build_rank(model, 0, ranks, max_tokens, one_shot)
+        resident, tp = build_rank(model, 0, ranks, max_tokens, one_shot, options)
     except BaseException:
         for follower in followers:
             follower.kill()
         raise
     return model, Lockstep(resident, tp, followers)
+
+
+def commands(fd, spin_seconds=0.05):
+    """rank 0's command lines from pipe `fd`, without the newline, until it closes. After each command
+    the reads spin (non-blocking) for spin_seconds before they block: a follower woken from a blocking
+    read can start its step late, and rank 0's first sum of the step waits for it."""
+    os.set_blocking(fd, False)
+    pending = b''
+    idle_since = time.perf_counter()
+    while True:
+        while b'\n' in pending:
+            line, pending = pending.split(b'\n', 1)
+            yield line
+            idle_since = time.perf_counter()  # the caller has finished the command
+        try:
+            chunk = os.read(fd, 65536)
+        except BlockingIOError:
+            if time.perf_counter() - idle_since > spin_seconds:
+                select.select([fd], [], [])
+            continue
+        if not chunk:
+            return
+        pending += chunk
 
 
 def follower_main(argv=None):
@@ -148,11 +187,14 @@ def follower_main(argv=None):
     p.add_argument('--max-tokens', type=int, required=True)
     p.add_argument('--sum', choices=['one-shot', 'nccl'], default='one-shot')
     p.add_argument('--layers', type=int)
+    p.add_argument('--option', action='append', help='KEY=VALUE: a ResidentGLM option over OPTIONS')
     args = p.parse_args(argv)
     resident, tp = build_rank(load_model(args.checkpoint, args.layers), args.rank, args.ranks, args.max_tokens,
-                              one_shot=args.sum == 'one-shot')
+                              one_shot=args.sum == 'one-shot', options=parse_options(args.option))
     try:
-        for line in sys.stdin.buffer:  # end of input: rank 0 is gone
+        # GLM_VX_TP_SPIN: the seconds of non-blocking reads after a command (0: block at once).
+        spin = float(os.environ.get('GLM_VX_TP_SPIN', '0.05'))
+        for line in commands(sys.stdin.fileno(), spin):  # end of input: rank 0 is gone
             op = line.split()
             if op[0] == b'F':
                 resident.forward(int(op[1]), logits=op[2] == b'1')
