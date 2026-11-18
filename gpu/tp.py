@@ -216,7 +216,7 @@ class PeerSum:
         pad = TP_ALL_REDUCE_RANKS - self.ranks
         data, flags = self.data + [self.data[self.rank]] * pad, self.flags + [self.flags[self.rank]] * pad
         values = dict(x=x, mine=self.data[self.rank], my_flags=self.flags[self.rank], epochs=self.epochs,
-                      rank=self.rank, ranks=self.ranks, n=self.n)
+                      ranks=self.ranks, n=self.n)
         values.update({f'd{r}': data[r] for r in range(TP_ALL_REDUCE_RANKS)})
         values.update({f'f{r}': flags[r] for r in range(TP_ALL_REDUCE_RANKS)})
         return values

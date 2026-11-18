@@ -46,6 +46,21 @@ def proxy_model(layers, moe_from):
     return GlmMoeDsaModel(config, fp8_source(weights, bf16_head=True, bf16_router=True), NumpyBackend())
 
 
+def model_for(args):
+    """The proxy, or with --checkpoint the real checkpoint's first --layers layers (its own per-layer
+    patterns: GLM-5.3's first 3 are dense), read lazily from its shards."""
+    if args.checkpoint is None:
+        return proxy_model(args.layers, args.moe_from)
+    from glm_vx.backend import NumpyBackend
+    from glm_vx.checkpoint import Checkpoint
+    from glm_vx.config import GLMConfig
+    from glm_vx.model import GlmMoeDsaModel
+    from validation.write_proxy import proxy_config
+    config = proxy_config(args.layers, base=json.loads((args.checkpoint / 'config.json').read_text()))
+    checkpoint = Checkpoint(args.checkpoint, block_size=GLMConfig.from_dict(config).weight_block_size)
+    return GlmMoeDsaModel(config, checkpoint, NumpyBackend())
+
+
 def tokens_for(model, count):
     return [int(t) for t in np.random.default_rng(7).integers(0, int(model.config['vocab_size']), count)]
 
@@ -56,7 +71,7 @@ def reference_main(args, out):
     from gpu.runtime import CUDAContext
     from gpu.testing.collective import DeviceJob, run_ranks
     from gpu.tp import TensorParallel
-    model = proxy_model(args.layers, args.moe_from)
+    model = model_for(args)
     tokens = tokens_for(model, args.context)
     context = CUDAContext(0, minimum_compute_capability=(8, 0))
     job = DeviceJob(args.ranks)
@@ -82,7 +97,7 @@ def rank_main(args, rank, out):
     from gpu.resident import ResidentGLM
     from gpu.runtime import CUDAContext
     from gpu.tp import TensorParallel
-    model = proxy_model(args.layers, args.moe_from)
+    model = model_for(args)
     tokens = tokens_for(model, args.context + args.time)
     context = CUDAContext(rank, primary=True, minimum_compute_capability=(8, 0))
     tp = None
@@ -117,6 +132,8 @@ def main():
     p.add_argument('--context', type=int, default=48, help='steps compared with the reference')
     p.add_argument('--time', type=int, default=50, help='steps timed after them')
     p.add_argument('--one-shot', action='store_true', help='TensorParallel(one_shot=True): gpu/spawn/tp_all_reduce')
+    p.add_argument('--checkpoint', type=Path, help="a real checkpoint (zai-org/GLM-5.3's layout): its first --layers layers")
+    p.add_argument('--skip-reference', action='store_true', help='time the ranks only (for a profiler): no bits compared')
     p.add_argument('--output', type=Path)
     p.add_argument('--role', help=argparse.SUPPRESS)
     p.add_argument('--out', help=argparse.SUPPRESS)
@@ -132,10 +149,11 @@ def main():
     command = [sys.executable, '-m', 'validation.tp_decode_check', '--ranks', str(args.ranks), '--layers', str(args.layers),
                '--moe-from', str(args.moe_from), '--context', str(args.context), '--time', str(args.time)]
     command += ['--one-shot'] if args.one_shot else []
+    command += ['--checkpoint', str(args.checkpoint)] if args.checkpoint is not None else []
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         reference = None
-        if args.ranks > 1:
+        if args.ranks > 1 and not args.skip_reference:
             done = subprocess.run(command + ['--role', 'reference', '--out', str(tmp / 'reference.npy')])
             if done.returncode:
                 raise SystemExit(f'reference failed: exit {done.returncode}')
@@ -156,7 +174,8 @@ def main():
                 result['bit_exact'] = differ.size == 0
             results.append(result)
     ok = all('error' not in r and r.get('bit_exact', True) for r in results)
-    summary = dict(ranks=args.ranks, layers=args.layers, context=args.context, one_shot=args.one_shot, ok=ok, results=results)
+    summary = dict(ranks=args.ranks, layers=args.layers, checkpoint=args.checkpoint and str(args.checkpoint), context=args.context, one_shot=args.one_shot,
+                   compared=reference is not None, ok=ok, results=results)
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(summary, indent=2) + '\n')

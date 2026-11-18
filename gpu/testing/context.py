@@ -48,6 +48,7 @@ class Graph:
     def launch(self,stream=None):
         for run in self.work:run()
         return self
+    def close(self):self.work=[]
 class Stream:
     def __init__(self,ctx=None):self.ctx,self.graph=ctx,None
     def synchronize(self):

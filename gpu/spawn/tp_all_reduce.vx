@@ -4,13 +4,16 @@
 //
 // One shot, over peer memory (NVLink): d0..d7 are the ranks' data buffers and f0..f7 their flags, each
 // rank's own among them, mapped into this process through CUDA IPC; `mine` and `my_flags` are this
-// rank's (the same memory as d<rank> and f<rank>). Up to 8 ranks; the parameters past `ranks` are not
-// read (pass any buffer). Block b owns elements 256 b .. 256 b + 255:
+// rank's (the same memory as d<rank> and f<rank>). Up to 8 ranks; the parameters past `ranks` are
+// loaded but not summed: pass this rank's own (mine, my_flags). Block b owns elements 256 b .. 256 b + 255:
 //   1. it copies its part of x into mine[parity half], parity = the call's epoch % 2;
 //   2. one lane stores the epoch to my_flags[b] (st.release.sys, after the block's barrier: the copies
-//      are visible first) and waits until every rank's flag b has reached it (ld.acquire.sys);
-//   3. every lane sums its element of each rank's half in rank order (ld.relaxed.sys loads, with
-//      -fweak-relaxed-atomics: not ld.global.nc, which could return a line from before the peer wrote).
+//      are visible first); then warp r's first lane waits until rank r's flag b has reached it
+//      (ld.acquire.sys), the ranks' waits in parallel (one NVLink round trip, not one a rank);
+//   3. every lane loads its element of all 8 buffers (ld.relaxed.sys, with -fweak-relaxed-atomics: not
+//      ld.global.nc, which could return a line from before the peer wrote), every load issued before
+//      the first add, then sums them in rank order. Buffers past `ranks` are padded with this rank's own
+//      (gpu/tp.PeerSum), so loading them is safe and the sum skips them.
 // No block waits on another block, only on the same block of the other ranks. Each block counts its
 // calls in epochs[b] (this rank's memory, zero once, as the flags), so a CUDA graph replays it with no
 // reset. Two halves: a rank's call e + 2 rewrites the half of call e only after every rank has raised
@@ -19,23 +22,10 @@
 // spawn-vxc: -fweak-relaxed-atomics
 import core::sync::atomic;
 
-// Rank r's element `at`: this rank's own partial `mine_value`, else a relaxed load of its buffer d.
-macro_rules! rank_value {
-    ($r:expr, $d:expr, $at:expr, $rank:expr, $mine_value:expr) => {
-        unsafe {
-          if $r == $rank { $mine_value } else { atomic_load_f32($d, $at, AtomicOrdering::Relaxed) }
-        }
-    };
-}
-
-// Spin until flag b of rank r has reached epoch e (a no-op past `ranks`).
+// Spin until flag b of rank r has reached epoch e.
 macro_rules! wait_flag {
-    ($r:expr, $f:expr, $b:expr, $e:expr, $ranks:expr) => {
-        unsafe {
-          if $r < $ranks {
-            while ((atomic_load_u32($f, $b, AtomicOrdering::Acquire) - $e) as i32 < 0) {}
-          }
-        }
+    ($f:expr, $b:expr, $e:expr) => {
+        unsafe { while ((atomic_load_u32($f, $b, AtomicOrdering::Acquire) - $e) as i32 < 0) {} }
     };
 }
 
@@ -49,7 +39,7 @@ pub fn glm_vx_spawn_tp_all_reduce(x: &mut Tensor<f32, [?], Memory::HBM>, mine: &
                                   f2: &Tensor<u32, [?], Memory::HBM>, f3: &Tensor<u32, [?], Memory::HBM>,
                                   f4: &Tensor<u32, [?], Memory::HBM>, f5: &Tensor<u32, [?], Memory::HBM>,
                                   f6: &Tensor<u32, [?], Memory::HBM>, f7: &Tensor<u32, [?], Memory::HBM>,
-                                  rank: i32, ranks: i32, n: i32) -> void {
+                                  ranks: i32, n: i32) -> void {
   spawn on(Topology::Device) {
     for b in 0..(n + 255) / 256 across blocks {
       // 1. This block's part of x into this call's half of mine.
@@ -60,37 +50,53 @@ pub fn glm_vx_spawn_tp_all_reduce(x: &mut Tensor<f32, [?], Memory::HBM>, mine: &
           atomic_store_f32(mine, ((e % 2u32) as i32) * n + i, x[i], AtomicOrdering::Relaxed);
         }
       }
-      // 2. Raise this rank's flag b, wait for every rank's.
+      // 2. Raise this rank's flag b.
       for l in 0..1 across lanes {
-        let e: u32 = epochs[b] + 1u32;
-        atomic_store_u32(my_flags, b, e, AtomicOrdering::Release);
-        wait_flag!(0, f0, b, e, ranks);
-        wait_flag!(1, f1, b, e, ranks);
-        wait_flag!(2, f2, b, e, ranks);
-        wait_flag!(3, f3, b, e, ranks);
-        wait_flag!(4, f4, b, e, ranks);
-        wait_flag!(5, f5, b, e, ranks);
-        wait_flag!(6, f6, b, e, ranks);
-        wait_flag!(7, f7, b, e, ranks);
-        epochs[b] = e;
+        atomic_store_u32(my_flags, b, epochs[b] + 1u32, AtomicOrdering::Release);
       }
-      // 3. The sum over the ranks in rank order.
+      // Wait for every rank's: warp r's first lane on rank r's flag, all at once.
       for l in 0..256 across lanes {
-        let e: u32 = epochs[b];
+        let e: u32 = epochs[b] + 1u32;
+        let w: i32 = l / 32;
+        if l % 32 == 0 && w < ranks {
+          if w == 0 { wait_flag!(f0, b, e); }
+          if w == 1 { wait_flag!(f1, b, e); }
+          if w == 2 { wait_flag!(f2, b, e); }
+          if w == 3 { wait_flag!(f3, b, e); }
+          if w == 4 { wait_flag!(f4, b, e); }
+          if w == 5 { wait_flag!(f5, b, e); }
+          if w == 6 { wait_flag!(f6, b, e); }
+          if w == 7 { wait_flag!(f7, b, e); }
+        }
+      }
+      // 3. The sum over the ranks in rank order: every load first, then the adds.
+      for l in 0..256 across lanes {
+        let e: u32 = epochs[b] + 1u32;
         let i: i32 = b * 256 + l;
         if i < n {
           let at: i32 = ((e % 2u32) as i32) * n + i;
-          let own: f32 = x[i];
-          let mut s: f32 = rank_value!(0, d0, at, rank, own);
-          if ranks > 1 { s = s + rank_value!(1, d1, at, rank, own); }
-          if ranks > 2 { s = s + rank_value!(2, d2, at, rank, own); }
-          if ranks > 3 { s = s + rank_value!(3, d3, at, rank, own); }
-          if ranks > 4 { s = s + rank_value!(4, d4, at, rank, own); }
-          if ranks > 5 { s = s + rank_value!(5, d5, at, rank, own); }
-          if ranks > 6 { s = s + rank_value!(6, d6, at, rank, own); }
-          if ranks > 7 { s = s + rank_value!(7, d7, at, rank, own); }
+          let v0: f32 = unsafe { atomic_load_f32(d0, at, AtomicOrdering::Relaxed) };
+          let v1: f32 = unsafe { atomic_load_f32(d1, at, AtomicOrdering::Relaxed) };
+          let v2: f32 = unsafe { atomic_load_f32(d2, at, AtomicOrdering::Relaxed) };
+          let v3: f32 = unsafe { atomic_load_f32(d3, at, AtomicOrdering::Relaxed) };
+          let v4: f32 = unsafe { atomic_load_f32(d4, at, AtomicOrdering::Relaxed) };
+          let v5: f32 = unsafe { atomic_load_f32(d5, at, AtomicOrdering::Relaxed) };
+          let v6: f32 = unsafe { atomic_load_f32(d6, at, AtomicOrdering::Relaxed) };
+          let v7: f32 = unsafe { atomic_load_f32(d7, at, AtomicOrdering::Relaxed) };
+          let mut s: f32 = v0;
+          if ranks > 1 { s = s + v1; }
+          if ranks > 2 { s = s + v2; }
+          if ranks > 3 { s = s + v3; }
+          if ranks > 4 { s = s + v4; }
+          if ranks > 5 { s = s + v5; }
+          if ranks > 6 { s = s + v6; }
+          if ranks > 7 { s = s + v7; }
           x[i] = s;
         }
+      }
+      // The call is done for this block: count it.
+      for l in 0..1 across lanes {
+        epochs[b] = epochs[b] + 1u32;
       }
     }
   }

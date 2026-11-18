@@ -376,6 +376,10 @@ class ResidentGLM:
     def close(self):
         if not self._closed:
             self._closed = True
+            # The graphs first: NCCL's ncclCommDestroy waits until every graph holding its
+            # operations is gone, so a tensor-parallel rank must close before collective.finish().
+            for graph in [*getattr(self, '_step_graphs', {}).values(), *getattr(self, '_graphs', {}).values()]:
+                graph.close()
             if getattr(self, '_tp_peers', None) is not None:
                 self._tp_peers.close()
             for matmul in getattr(self, '_lt_matmuls', {}).values():

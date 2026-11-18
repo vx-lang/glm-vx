@@ -44,8 +44,11 @@ def rank_main(rank, ranks, hidden, calls, replays):
             failures.append(name)
             print(f'rank {rank}: {name} FAILED, first {got.ravel()[:4]} want {want.ravel()[:4]}', flush=True)
 
-    def values(r, seed):  # integers in [-64, 64]: every sum over ranks is exact in f32 and bf16
-        return np.random.default_rng(seed * 1000 + r).integers(-64, 65, hidden).astype('f4')
+    limit = 256 // ranks  # integers in [-limit, limit]: every partial sum of the ranks' is within 256, so
+                          # exact in bf16 (8 significant bits) and f32, whatever order NCCL adds them in
+
+    def values(r, seed):
+        return np.random.default_rng(seed * 1000 + r).integers(-limit, limit + 1, hidden).astype('f4')
 
     every = lambda seed: [values(r, seed) for r in range(ranks)]
     mine = values(rank, 1)
@@ -69,9 +72,11 @@ def rank_main(rank, ranks, hidden, calls, replays):
         stream.synchronize()
         check(f'all_gather {dtype}', down(out), convert(np.concatenate(every(1))))
 
+    graphs = []  # closed before finish: ncclCommDestroy waits until no graph holds its operations
     x = up(mine)
     with stream.capture() as graph:
         collective.all_reduce_sum(x, stream=stream)
+    graphs.append(graph)
     for i in range(replays):
         x.upload(values(rank, 10 + i).tobytes())
         graph.launch(stream)
@@ -84,14 +89,17 @@ def rank_main(rank, ranks, hidden, calls, replays):
         with stream.capture() as graph:
             for _ in range(calls):
                 collective.all_reduce_sum(x, stream=stream)
+        graphs.append(graph)
         graph.launch(stream)
         stream.synchronize()
         start = time.perf_counter()
         graph.launch(stream)
         stream.synchronize()
         timings[dtype] = (time.perf_counter() - start) / calls * 1e6
-    collective.finish()
     print(json.dumps(dict(rank=rank, failures=failures, us_per_all_reduce=timings)), flush=True)
+    for graph in graphs:
+        graph.close()
+    collective.finish()
     return 1 if failures else 0
 
 

@@ -178,7 +178,7 @@ def test_peer_sum_maps_every_rank_and_pads_to_eight():
     sums = [PeerSum(context, r, ranks, n, lambda own: [handles[i] for i in range(ranks)]) for r in range(ranks)]
     peer = sums[1]
     args = peer.arguments(peer.data[1].view((n,)))
-    assert args['rank'] == 1 and args['ranks'] == 3 and args['n'] == n
+    assert 'rank' not in args and args['ranks'] == 3 and args['n'] == n
     assert peer.blocks == 2 and args['epochs'].size == 2
     # d0 and d2 are mappings of ranks 0 and 2's allocations, d1 this rank's own; d3..d7 repeat its own.
     assert library.opened[args['d0'].pointer] == owners[0].pointer

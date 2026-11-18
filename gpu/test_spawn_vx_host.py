@@ -1694,7 +1694,7 @@ def test_tp_all_reduce_one_rank(run, n):
     other = np.zeros(2 * n, F), np.zeros(blocks, np.uint32)
     for call in range(3):
         x = rng.normal(size=n).astype(F)
-        values = dict(x=x.copy(), mine=mine, my_flags=flags, epochs=epochs, rank=0, ranks=1, n=n)
+        values = dict(x=x.copy(), mine=mine, my_flags=flags, epochs=epochs, ranks=1, n=n)
         values.update({f'd{r}': mine if r == 0 else other[0] for r in range(8)})
         values.update({f'f{r}': flags if r == 0 else other[1] for r in range(8)})
         got = run('tp_all_reduce', **values)
