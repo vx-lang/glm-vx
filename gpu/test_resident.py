@@ -379,6 +379,21 @@ def test_moe_down2_gives_fp8_moe_cvt_down_bits():
         ResidentGLM(model, ctx=Context(), moe_down2=True)
 
 
+def test_moe_mma_needs_cvt_and_falls_back_without_fp8_tensor_cores():
+    # moe_mma's kernel is inline PTX for sm_89+ (gpu/test_moe_mma_hardware.py). The emulator has no compute
+    # capability, so the cvt kernels are the _ref builds and the down projection stays down2's.
+    model, _ = fp8_model(43, hidden_size=272, moe_intermediate_size=256)
+    resident = ResidentGLM(model, ctx=Context(), max_tokens=8, device_experts=True, fp8_kernels='cvt',
+                           moe_down2=True, moe_mma=True)
+    try:
+        resident.forward(TOKENS[0])
+        assert resident.launches.get('fp8_moe_cvt_down2_ref') and 'moe_mma/fp8_moe_mma_down_at' not in resident.launches
+    finally:
+        resident.close()
+    with pytest.raises(ValueError, match='moe_mma'):
+        ResidentGLM(model, ctx=Context(), moe_mma=True)
+
+
 def fp8_bf16_router_model(seed, **overrides):
     """fp8_model with each MoE router's gate in bfloat16, as the official FP8 checkpoint stores it."""
     from glm_vx.quant import BF16Weights, BlockFP8Weights

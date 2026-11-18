@@ -166,7 +166,7 @@ def test_follower_rejects_an_unknown_command(monkeypatch):
     (['--backend', 'vx', '--checkpoint', 'x', '--tp', '2'], '--tp applies to'),
     (['--backend', 'vx-gpu-resident', '--checkpoint', 'x', '--tp', '0'], '--tp must be positive'),
     (['--backend', 'vx-gpu-resident', '--checkpoint', 'x', '--layers', '4'], '--layers is a --tp smoke test'),
-    (['--backend', 'vx-gpu-resident', '--checkpoint', 'x', '--tp-option', 'moe_down2=true'], '--tp-option applies to --tp'),
+    (['--backend', 'vx-gpu-resident', '--tiny', '--tp-option', 'moe_down2=true'], '--tp-option loads --checkpoint'),
     (['--backend', 'vx-gpu-resident', '--checkpoint', 'x', '--tp', '2', '--tp-option', 'moe_down2'], 'expected KEY=VALUE'),
 ])
 def test_server_tp_arguments(argv, message, capsys):
