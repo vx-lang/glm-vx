@@ -1,0 +1,8 @@
+v= GUW=8 "us_per_layer": {"gate_up_and_down": 19.96, "gate_up": 11.67, "down": 8.14}, 
+v= GUW=12 "us_per_layer": {"gate_up_and_down": 23.28, "gate_up": 14.93, "down": 8.13}, 
+v= GUW=16 "us_per_layer": {"gate_up_and_down": 21.73, "gate_up": 13.43, "down": 8.14}, 
+v= GUW=24 "us_per_layer": {"gate_up_and_down": 22.64, "gate_up": 14.27, "down": 8.13}, 
+v=_v2 GUW=8 "us_per_layer": {"gate_up_and_down": 23.90, "gate_up": 15.48, "down": 8.16}, 
+v=_v2 GUW=12 "us_per_layer": {"gate_up_and_down": 22.88, "gate_up": 14.59, "down": 8.15}, 
+v=_v2 GUW=16 "us_per_layer": {"gate_up_and_down": 23.26, "gate_up": 14.84, "down": 8.15}, 
+v=_v2 GUW=24 "us_per_layer": {"gate_up_and_down": 27.78, "gate_up": 19.29, "down": 8.19}, 

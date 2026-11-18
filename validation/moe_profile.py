@@ -18,7 +18,13 @@ events, the median of 5, each after a 512 MB copy that evicts it from L2 and kee
 the launch is queued. That gives GPU time and
 the bandwidth the expected bytes imply, but no measured DRAM bytes or SM throughput.
 
+--inter 256 gives one rank's shapes under --tp 8 (each expert's slice of 2048), and --k 9 the 8 routed experts
+with the shared one folded in (fold_shared); fp8cvt2 is fp8cvt with fp8_moe_cvt_down2 (moe_down2), as served
+in #63. --detail adds the counters that tell what holds a kernel back: instructions, issue activity, the
+warps resident, and the stall reasons a warp waits on most.
+
   python -m validation.moe_profile --output run/moe.json [--formats f32 bf16 fp8 int4] [--k 1 2 4 8]
+  python -m validation.moe_profile --output run/moe-tp8.json --formats fp8cvt2 --inter 256 --k 9 --detail
 """
 import argparse
 import json
@@ -39,9 +45,26 @@ KERNELS = {'f32': ('moe_gate_up', 'moe_down'), 'bf16': ('bf16_moe_gate_up', 'bf1
            'fp8': ('fp8_moe_gate_up', 'fp8_moe_down'), 'fp8x4': ('fp8_moe4_gate_up', 'fp8_moe4_down'),
            'fp8fma': ('fp8_moe_fma_gate_up', 'fp8_moe_fma_down'),
            'fp8cvt': ('fp8_moe_cvt_gate_up', 'fp8_moe_cvt_down'),  # sm_90 (Hopper's conversion, glm-vx #38)
+           'fp8cvt2': ('fp8_moe_cvt_gate_up', 'fp8_moe_cvt_down2'),  # moe_down2: short tensor-parallel rows
            'int4': ('int4_moe_gate_up', 'int4_moe_down')}
-ELEMENT = {'f32': 4.0, 'bf16': 2.0, 'fp8': 1.0, 'fp8x4': 1.0, 'fp8fma': 1.0, 'fp8cvt': 1.0, 'int4': 0.5}
-FP8 = ('fp8', 'fp8x4', 'fp8fma', 'fp8cvt')  # one copy of the FP8 weights; fp8x4 and fp8fma view the codes as u32
+ELEMENT = {'f32': 4.0, 'bf16': 2.0, 'fp8': 1.0, 'fp8x4': 1.0, 'fp8fma': 1.0, 'fp8cvt': 1.0, 'fp8cvt2': 1.0, 'int4': 0.5}
+FP8 = ('fp8', 'fp8x4', 'fp8fma', 'fp8cvt', 'fp8cvt2')  # one copy of the FP8 weights; the others view the codes as u32
+DETAIL = ['sm__inst_executed.sum', 'smsp__issue_active.avg.pct_of_peak_sustained_active',
+          'sm__warps_active.avg.pct_of_peak_sustained_active',
+          'smsp__average_warp_latency_issue_stalled_long_scoreboard.ratio',
+          'smsp__average_warp_latency_issue_stalled_lg_throttle.ratio',
+          'smsp__average_warp_latency_issue_stalled_wait.ratio',
+          'smsp__average_warp_latency_issue_stalled_barrier.ratio',
+          'smsp__average_warp_latency_issue_stalled_math_pipe_throttle.ratio',
+          'smsp__average_warp_latency_issue_stalled_short_scoreboard.ratio',
+          'smsp__average_warp_latency_issue_stalled_not_selected.ratio',
+          'smsp__average_warp_latency_issue_stalled_selected.ratio']
+
+
+def shapes(args):
+    """The module's shapes from the arguments (child and parent agree)."""
+    global INTER, EXPERTS
+    INTER, EXPERTS = args.inter, args.experts
 
 
 def scale_bytes(fmt, rows, cols):
@@ -110,6 +133,7 @@ def event_us(ctx, stream, spawn, launch, repeats=5):
 
 
 def child(args):
+    shapes(args)
     from gpu.runtime import CUDAContext
     from gpu.spawn.launch import SpawnKernel
     spawn = Path(__file__).resolve().parent.parent / 'gpu' / 'build' / 'spawn'
@@ -121,7 +145,7 @@ def child(args):
     out = ctx.tensor((HIDDEN,), 'float32')
     fp8 = None  # the FP8 formats share one copy of the FP8 weights (fp8x4, fp8fma: a u32 view): all six
     for fmt in args.formats:  # formats at once would not fit in 80 GB
-        if fmt == 'fp8cvt' and tuple(ctx.compute_capability) < (8, 9):
+        if fmt in ('fp8cvt', 'fp8cvt2') and tuple(ctx.compute_capability) < (8, 9):
             continue  # sm_90 PTX (Hopper's e4m3x2 -> f16x2 conversion)
         if fmt in FP8 and fp8 is not None:
             codes = EXPERTS * INTER * HIDDEN  # each projection's code bytes
@@ -173,10 +197,14 @@ def main():
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--formats', nargs='+', choices=list(KERNELS), default=['f32', 'bf16', 'fp8', 'fp8x4', 'fp8fma', 'fp8cvt', 'int4'])
     p.add_argument('--k', nargs='+', type=int, default=[1, 2, 4, 8])
+    p.add_argument('--inter', type=int, default=INTER, help="each expert's width: 2048, or 256 for one rank of 8")
+    p.add_argument('--experts', type=int, default=EXPERTS)
+    p.add_argument('--detail', action='store_true', help='ncu: also the instruction, issue, occupancy and stall counters')
     p.add_argument('--seed', type=int, default=1)
     p.add_argument('--timer', choices=['ncu', 'events'], default='ncu', help='events: no ncu (see above)')
     p.add_argument('--launches', help=argparse.SUPPRESS)  # set when running under ncu
     args = p.parse_args()
+    shapes(args)
     if args.launches:
         return child(args)
     if args.output.exists():
@@ -192,7 +220,9 @@ def main():
     plan, rows = json.loads(launches.read_text()), parse(raw.read_text())
     if len(plan) != len(rows):
         raise SystemExit(f'ncu profiled {len(rows)} kernels, the plan launched {len(plan)}')
-    return write(args, [dict(m, timer='ncu', **measure(m, row)) for m, row in zip(plan, rows)])
+    return write(args, [dict(m, timer='ncu', **measure(m, row), **({k: number(row[k]) for k in DETAIL if k in row}
+                                                                    if args.detail else {}))
+                        for m, row in zip(plan, rows)])
 
 
 def counters(ncu, args, launches, raw):
@@ -200,9 +230,10 @@ def counters(ncu, args, launches, raw):
     if not (os.path.exists(ncu) or shutil.which(ncu)):
         return False
     done = subprocess.run([ncu, '--profile-from-start', 'off', '--clock-control', 'none', '--csv', '--page', 'raw',
-                           '--print-units', 'base', '--metrics', ','.join(METRICS), '--log-file', str(raw),
-                           sys.executable, '-m', 'validation.moe_profile', '--output', str(args.output),
+                           '--print-units', 'base', '--metrics', ','.join(METRICS + (DETAIL if args.detail else [])),
+                           '--log-file', str(raw), sys.executable, '-m', 'validation.moe_profile', '--output', str(args.output),
                            '--formats', *args.formats, '--k', *map(str, args.k), '--seed', str(args.seed),
+                           '--inter', str(args.inter), '--experts', str(args.experts),
                            '--launches', str(launches)])
     text = raw.read_text() if raw.exists() else ''
     if done.returncode != 0 or 'ERR_NVGPUCTRPERM' in text or '"ID"' not in text:
@@ -225,7 +256,7 @@ def measure(m, row):
 def events_report(args, launches):
     subprocess.run([sys.executable, '-m', 'validation.moe_profile', '--output', str(args.output),
                     '--formats', *args.formats, '--k', *map(str, args.k), '--seed', str(args.seed),
-                    '--timer', 'events', '--launches', str(launches)], check=True)
+                    '--inter', str(args.inter), '--experts', str(args.experts), '--timer', 'events', '--launches', str(launches)], check=True)
     plan = json.loads(launches.read_text())
     # Without counters the GB/s is what the expected bytes imply in the measured time.
     return write(args, [dict(m, timer='events', dram_mb=None, dram_pct=None, sm_pct=None, grid='', block='',

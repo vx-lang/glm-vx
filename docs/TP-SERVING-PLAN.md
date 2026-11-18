@@ -179,12 +179,51 @@ Today these kernels convert FP8 to float32 and multiply on the CUDA cores.
 
 These kernels are also what item 5b needs.
 
-**Probe (z16, CUDA, not glm-vx code).** `mma.sync.m16n8k32.e4m3` with the FP8 weights loaded straight into each
-lane's registers takes 20.0 us a MoE layer at one rank of 8: gate_up 11.7 us, down 8.1 us. Today's kernels take
-about 30.5 us, and SGLang about 50 us.
-- 30.5 to 20 us over 75 layers is about −0.8 ms a token. The probe is untuned, so this is not the limit.
-- Vx's tile matmul needs FP8 operands, and an A operand that skips shared memory. Asked of the Vx peers on
-  2026-11-18: vx-94 for FP8 (awaiting its priority), vx-7e for NVFP4 / MX on Blackwell (not for GLM).
+**Measured on one H200 (z16, z17), one rank of 8, k = 9.** The probe is CUDA, not glm-vx code: `mma.sync.m16n8k32.e4m3`
+with the FP8 weights loaded straight into each lane's registers. The floor is a kernel that only reads the bytes.
+
+| MoE layer | gate_up | down | both |
+|---|---|---|---|
+| ours today, ncu cold (`cvt` + `down2`) | 13.3 us, 4.4 M instructions | 18.1 us, 8.6 M | 31.4 us |
+| FP8 MMA probe, ncu cold | 13.7 us, 1.8 M | 9.8 us, 1.5 M | 23.5 us |
+| FP8 MMA probe, graph of 75 layers | 11.7 us | 8.1 us | 20.0 us |
+| floor, graph of 75 | 7.9 us (28.3 MB) | 4.75 us (14.2 MB) | 12.7 us (11.1 us as one kernel) |
+
+- **down is limited by instructions.** FP8 MMA cuts them 6x and the time by about half.
+- **gate_up waits on memory, not instructions.** At 26% of warp slots in use (14% in the probe), too few loads
+  are in flight. MMA alone does not fix it.
+- **The gain.** Over 75 layers, today to the probe is about −0.8 ms a token; today to the floor is about −1.4 ms.
+
+**Kernels to write, in order** (the time a step is z5's TP8 profile at 1000 tokens):
+
+1. **MoE down with FP8 MMA** (1.3 ms a step today, `down2`). Target 8 us a layer or less: about −0.7 ms a
+   token, the largest single item. It needs Vx's tile matmul with f8e4m3 operands, and the A operand straight
+   from registers (asked of vx-94). The probe's layout is the reference:
+   - 16 rows a warp;
+   - one warp an expert, 9 warps a block, the experts' sums added in expert order;
+   - h quantized in each warp's 128-groups.
+2. **MoE gate_up, more loads in flight** (990 us a step). Target about 9-10 us a layer: about −0.25 ms.
+   - The CUDA-core kernel could already gain here, from more blocks, or two k-blocks loaded ahead without more
+     registers.
+   - Then MMA for the instruction count.
+   - The probe's plain prefetch used more registers and got slower, so profile first: ncu's memory-in-flight
+     counters, `moe_profile --detail`.
+3. **tiles3 with FP8 MMA:** q_a + kv_a + the indexer's wk, the same on every rank (750 us a step, 9.6 us a
+   layer). It reads about 17 MB a call, so the floor is about 5.5 us: about −0.3 ms. Same form as gate_up.
+4. **`fp8_matvec_cvt_tiles`** (752 us a step, two calls a layer of 4.7 us): already near its bytes' floor. Only
+   once 1-3 are done.
+5. **The small absorb kernels**: `cols_cvt` and `heads_cvt`, 650 us a step together. They are bound by
+   latency, not bytes, so fusing them gains more than MMA would.
+
+Each changes bits:
+- check each layer against the float32 path;
+- run GSM8K 200 within SGLang's 0.915-0.935;
+- run W1, ShareGPT and W3 on the 8x H200.
+
+**Vx.** Its tile matmul takes bf16 and f16 tiles in shared memory only. Asked of the Vx peers on 2026-11-18:
+- vx-94: FP8 `mma.sync` m16n8k32 with register operands. It is waiting on the maintainer's priority, and will
+  send PTX and a test kernel for the H200.
+- vx-7e: NVFP4 / MX on Blackwell. Not for GLM-5.3, since FP4 is below SGLang's precision.
 
 ### 5. The prompt under tensor parallelism (TTFT)
 
