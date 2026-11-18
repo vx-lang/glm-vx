@@ -87,6 +87,14 @@ def test_resident_refuses_gguf_and_other_backends_refuse_max_context():
     with pytest.raises(SystemExit): parse_args(['--backend', 'numpy-reference', '--tiny', '--no-preload'])
 
 
+def test_tp_options_on_one_gpu_need_a_checkpoint():
+    # --tp 1 with --tp-option: one GPU through gpu/tp_serve.py with its options and no followers.
+    a = parse_args(['--backend', 'vx-gpu-resident', '--checkpoint', 'dir', '--tp-option', 'device_decode=true'])
+    assert (a.tp, a.tp_options) == (1, {'device_decode': True})
+    with pytest.raises(SystemExit):
+        parse_args(['--backend', 'vx-gpu-resident', '--tiny', '--tp-option', 'device_decode=true'])
+
+
 def test_defaults_per_backend():
     a = parse_args(['--backend', 'vx-gpu-resident', '--checkpoint', 'dir'])
     assert (a.max_sequences, a.max_waiting, a.max_context) == (1, 32, 8192)

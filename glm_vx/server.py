@@ -188,7 +188,7 @@ def parse_args(argv=None):
     p.add_argument('--gpu-tuning',help='verified shape-specific plan produced by python -m gpu.tune')
     p.add_argument('--tp',type=int,default=1,help=f'{RESIDENT} with --checkpoint: tensor parallel over GPUs 0..TP-1, this process rank 0 (gpu/tp_serve.py)')
     p.add_argument('--tp-sum',choices=['one-shot','nccl'],default='one-shot',help="--tp's cross-GPU sum: gpu/spawn/tp_all_reduce over CUDA IPC, or NCCL all-gather")
-    p.add_argument('--tp-option',action='append',metavar='KEY=VALUE',help="--tp: a ResidentGLM option over gpu/tp_serve.py's OPTIONS on every rank (VALUE as JSON), e.g. moe_down2=true")
+    p.add_argument('--tp-option',action='append',metavar='KEY=VALUE',help="a ResidentGLM option over gpu/tp_serve.py's OPTIONS on every rank (VALUE as JSON), e.g. moe_down2=true; with --tp 1, one GPU with those options")
     p.add_argument('--layers',type=int,help=argparse.SUPPRESS)  # --tp smoke tests: the first LAYERS layers only
     args=p.parse_args(argv)
     if args.packed_weights and (not args.gguf or args.backend != 'vx'):p.error('packed weights requires --gguf and --backend vx')
@@ -208,7 +208,7 @@ def parse_args(argv=None):
         if args.tp<1:p.error('--tp must be positive')
         if args.tp>1 and not args.checkpoint:p.error('--tp loads --checkpoint')
         if args.layers is not None and args.tp==1:p.error('--layers is a --tp smoke test')
-        if args.tp_option and args.tp==1:p.error('--tp-option applies to --tp')
+        if args.tp_option and not args.checkpoint:p.error('--tp-option loads --checkpoint')
         if args.tp_option:
             from gpu.tp_serve import parse_options
             try:args.tp_options=parse_options(args.tp_option)
@@ -252,8 +252,9 @@ def build_model(args):
         weights=GGUFCheckpoint(args.gguf,config,cache_bytes=args.decoded_cache_mib*1024**2,decode_threads=args.decode_threads)
         if not args.tokenizer and (directory/'tokenizer.json').exists():args.tokenizer=str(directory/'tokenizer.json')
         name='glm-gguf-vx-experimental'
-    elif args.backend==RESIDENT and args.tp>1:
-        # Rank 0 here, ranks 1..tp-1 in follower processes; each reads its slice of the checkpoint.
+    elif args.backend==RESIDENT and (args.tp>1 or args.tp_option):
+        # Rank 0 here, ranks 1..tp-1 in follower processes; each reads its slice of the checkpoint. --tp 1 with
+        # --tp-option: one GPU with gpu/tp_serve.py's options and no followers (ResidentGLM drops a 1-rank TP).
         from gpu import resident,tp_serve
         model,backend=tp_serve.start(args.checkpoint,args.tp,args.max_context,one_shot=args.tp_sum=='one-shot',layers=args.layers,
                                      options=getattr(args,'tp_options',None))
