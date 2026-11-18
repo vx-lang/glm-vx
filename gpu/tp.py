@@ -28,6 +28,8 @@ import re
 
 import numpy as np
 
+from glm_vx.checkpoint import SafetensorsCheckpoint
+
 ROWS, COLS = 'rows', 'cols'
 # A Linear's prefix (its name without '.weight') -> how it splits. Anything else is replicated.
 _RULES = [
@@ -146,8 +148,15 @@ class _ShardedWeights:
     def _kind(self, prefix):
         return split(prefix, self._model.tie)
 
+    def _uncopied(self, method, prefix):
+        """The base's arrays without its copy where it can give views (SafetensorsCheckpoint): a
+        rank copies its slice only, not every full tensor and then the slice."""
+        if self._kind(prefix) is not None and isinstance(self._base, SafetensorsCheckpoint):
+            return getattr(self._base, method)(prefix, copy=False)
+        return getattr(self._base, method)(prefix)
+
     def block_fp8(self, prefix):
-        codes, scales, block, shape = self._base.block_fp8(prefix)
+        codes, scales, block, shape = self._uncopied('block_fp8', prefix)
         kind = self._kind(prefix)
         if kind is None:
             return codes, scales, block, shape
@@ -165,7 +174,7 @@ class _ShardedWeights:
         return np.ascontiguousarray(codes), np.ascontiguousarray(scales), block, codes.shape
 
     def bf16(self, prefix):
-        bits, shape = self._base.bf16(prefix)
+        bits, shape = self._uncopied('bf16', prefix)
         kind = self._kind(prefix)
         if kind == ROWS:
             bits = bits[self._model.part(int(shape[0]))]

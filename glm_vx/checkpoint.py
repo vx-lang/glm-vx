@@ -172,8 +172,13 @@ class SafetensorsFile:
 
     def raw(self, name: str, *, rows: slice | None = None) -> np.ndarray:
         """Owned copy of the stored values without decoding (see RAW_DTYPES), e.g. packed INT4 words."""
+        return self.view(name, rows=rows).copy()
+
+    def view(self, name: str, *, rows: slice | None = None) -> np.ndarray:
+        """The stored values as a read-only view of the mapped file, valid while it is open: for a
+        caller that copies only part of a tensor (a tensor-parallel rank's slice)."""
         raw, shape = self._window(name, rows, decoded_itemsize=None)
-        return raw.copy().reshape(shape)
+        return raw.reshape(shape)
 
     def _window(self, name: str, rows: slice | None, decoded_itemsize: int | None):
         if self._map is None:
@@ -369,6 +374,9 @@ class SafetensorsCheckpoint:
     def raw(self, name: str, *, rows: slice | None = None) -> np.ndarray:
         return self._shard(name).raw(name, rows=rows)
 
+    def view(self, name: str, *, rows: slice | None = None) -> np.ndarray:
+        return self._shard(name).view(name, rows=rows)
+
     def is_block_fp8(self, prefix: str) -> bool:
         name = f"{prefix}.weight"
         return name in self and self.info(name).dtype in ("F8_E4M3", "F8_E4M3FN")
@@ -380,27 +388,28 @@ class SafetensorsCheckpoint:
         info = self.info(name)
         return info.dtype == "BF16" and len(info.shape) == 2
 
-    def bf16(self, prefix: str):
+    def bf16(self, prefix: str, *, copy: bool = True):
         """One BF16 Linear, undecoded: (bfloat16 bits uint16 [N, K], (N, K)), the operands of
-        glm_vx_gpu_bf16_matvec."""
+        glm_vx_gpu_bf16_matvec. copy=False: the bits as a read-only view of the file (see view)."""
         name = f"{prefix}.weight"
         info = self.info(name)
         if info.dtype != "BF16" or len(info.shape) != 2:
             raise CheckpointError(f"{name} is {info.dtype} {info.shape}, not a BF16 matrix")
-        return self.raw(name), info.shape
+        return (self.raw(name) if copy else self.view(name)), info.shape
 
-    def block_fp8(self, prefix: str):
+    def block_fp8(self, prefix: str, *, copy: bool = True):
         """One block-scaled FP8 Linear, e.g. ``model.layers.3.self_attn.o_proj``, undecoded.
 
         Returns (E4M3FN codes uint8 [N, K], scale multipliers float32 [ceil(N/br), ceil(K/bc)]
         from ``weight_scale_inv``, (br, bc), (N, K)): the operands of glm_vx_gpu_fp8_matvec.
+        copy=False: the codes as a read-only view of the file (see view).
         """
         name = f"{prefix}.weight"
         info = self.info(name)
         if info.dtype not in ("F8_E4M3", "F8_E4M3FN"):
             raise CheckpointError(f"{name} is {info.dtype}, not FP8")
         scales = self._fp8_scales(name, info)
-        return self.raw(name), scales, self.block_size, info.shape
+        return (self.raw(name) if copy else self.view(name)), scales, self.block_size, info.shape
 
     def compressed_int4(self, prefix: str):
         """One compressed-tensors pack-quantized INT4 Linear, e.g. ``model.layers.3.self_attn.o_proj``.

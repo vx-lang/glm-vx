@@ -186,6 +186,9 @@ def parse_args(argv=None):
     p.add_argument('--gpu-weight-cache-mib',type=int,help='vx-gpu device weight LRU; default 512')
     p.add_argument('--no-preload',dest='preload',action='store_false',help=f'{RESIDENT} only: upload weights on first use instead of at startup')
     p.add_argument('--gpu-tuning',help='verified shape-specific plan produced by python -m gpu.tune')
+    p.add_argument('--tp',type=int,default=1,help=f'{RESIDENT} with --checkpoint: tensor parallel over GPUs 0..TP-1, this process rank 0 (gpu/tp_serve.py)')
+    p.add_argument('--tp-sum',choices=['one-shot','nccl'],default='one-shot',help="--tp's cross-GPU sum: gpu/spawn/tp_all_reduce over CUDA IPC, or NCCL all-gather")
+    p.add_argument('--layers',type=int,help=argparse.SUPPRESS)  # --tp smoke tests: the first LAYERS layers only
     args=p.parse_args(argv)
     if args.packed_weights and (not args.gguf or args.backend != 'vx'):p.error('packed weights requires --gguf and --backend vx')
     if args.prefix_cache_mib<0:p.error('prefix cache must be nonnegative')
@@ -201,11 +204,15 @@ def parse_args(argv=None):
         if args.gguf:p.error(f'{RESIDENT} loads --checkpoint or --tiny, not --gguf')
         if args.gpu_tuning:p.error(f'{RESIDENT} does not use --gpu-tuning')
         if args.gpu_weight_cache_mib is not None:p.error(f'{RESIDENT} keeps every weight resident with no eviction; --gpu-weight-cache-mib applies to vx-gpu')
+        if args.tp<1:p.error('--tp must be positive')
+        if args.tp>1 and not args.checkpoint:p.error('--tp loads --checkpoint')
+        if args.layers is not None and args.tp==1:p.error('--layers is a --tp smoke test')
         if args.max_context is None:args.max_context=8192
         if args.max_context<1:p.error('max context must be positive')
         args.max_sequences=1
         if args.max_waiting is None:args.max_waiting=32
     else:
+        if args.tp!=1:p.error(f'--tp applies to --backend {RESIDENT} only')
         if args.max_context is not None:p.error(f'--max-context applies to --backend {RESIDENT} only')
         if not args.preload:p.error(f'--no-preload applies to --backend {RESIDENT} only')
         if args.gpu_weight_cache_mib is None:args.gpu_weight_cache_mib=512
@@ -239,6 +246,11 @@ def build_model(args):
         weights=GGUFCheckpoint(args.gguf,config,cache_bytes=args.decoded_cache_mib*1024**2,decode_threads=args.decode_threads)
         if not args.tokenizer and (directory/'tokenizer.json').exists():args.tokenizer=str(directory/'tokenizer.json')
         name='glm-gguf-vx-experimental'
+    elif args.backend==RESIDENT and args.tp>1:
+        # Rank 0 here, ranks 1..tp-1 in follower processes; each reads its slice of the checkpoint.
+        from gpu import resident,tp_serve
+        model,backend=tp_serve.start(args.checkpoint,args.tp,args.max_context,one_shot=args.tp_sum=='one-shot',layers=args.layers)
+        return preloaded(args,resident.ResidentSequenceModel(model,backend),backend),backend,model.weights,'glm-5.3-vx-experimental'
     else:
         from .checkpoint import Checkpoint
         from .config import GLMConfig
@@ -252,15 +264,18 @@ def build_model(args):
         # FP8 / INT4 / BF16 Linears stay packed on the device; weights upload on first use.
         from gpu import resident
         backend=resident.ResidentGLM(model,max_tokens=args.max_context,ptx_dir=args.gpu_ptx_dir,device=args.gpu_device)
-        model=resident.ResidentSequenceModel(model,backend)
-        if args.preload:
-            # Every layer and expert up front: lazy first-use uploads would never reach steady state.
-            start=time.perf_counter()
-            try:uploaded=backend.preload()
-            except MemoryError as exc:
-                backend.close(); raise SystemExit(f'error: {exc}') from exc
-            print(json.dumps({'preloaded_weight_bytes':uploaded,'preload_seconds':round(time.perf_counter()-start,3)}),flush=True)
+        model=preloaded(args,resident.ResidentSequenceModel(model,backend),backend)
     return model,backend,weights,name
+
+def preloaded(args,model,backend):
+    if args.preload:
+        # Every layer and expert up front: lazy first-use uploads would never reach steady state.
+        start=time.perf_counter()
+        try:uploaded=backend.preload()
+        except MemoryError as exc:
+            backend.close(); raise SystemExit(f'error: {exc}') from exc
+        print(json.dumps({'preloaded_weight_bytes':uploaded,'preload_seconds':round(time.perf_counter()-start,3)}),flush=True)
+    return model
 
 def main(argv=None):
     args=parse_args(argv)
