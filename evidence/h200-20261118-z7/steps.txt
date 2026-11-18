@@ -1,0 +1,3 @@
+bench-glm-vx-run-W1-vllm FAIL(1) 4s
+bench-glm-vx-run-W1-vllm ok 222s
+bench-glm-vx-run-W3-vllm FAIL(1) 13s

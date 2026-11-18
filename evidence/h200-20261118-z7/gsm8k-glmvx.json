@@ -1,0 +1,2013 @@
+{
+  "base_url": "http://127.0.0.1:8000",
+  "model": "glm-5.3-vx-experimental",
+  "num_questions": 200,
+  "num_shots": 5,
+  "max_tokens": 512,
+  "accuracy": 0.92,
+  "invalid": 0.0,
+  "seconds": 1568.3,
+  "median_ttft_s": 6.811444070000107,
+  "results": [
+    {
+      "i": 0,
+      "label": 18,
+      "pred": 18,
+      "correct": true,
+      "ttft_s": 6.892310575999545,
+      "seconds": 7.460222328999407,
+      "chunks": 56,
+      "text": " Janet sells 16 - 3 - 4 = <<16-3-4=9>>9 duck eggs a day.\nShe makes 9 * 2 = $<<9*2=18>>18 every day at the farmer\u2019s market.\n#### 18\n\n"
+    },
+    {
+      "i": 1,
+      "label": 3,
+      "pred": 3,
+      "correct": true,
+      "ttft_s": 6.553671656000006,
+      "seconds": 7.050729401999888,
+      "chunks": 49,
+      "text": " It takes 2/2=<<2/2=1>>1 bolt of white fiber\nSo the total amount of fabric is 2+1=<<2+1=3>>3 bolts of fabric\n#### 3\n\n"
+    },
+    {
+      "i": 2,
+      "label": 70000,
+      "pred": 70000,
+      "correct": true,
+      "ttft_s": 6.772313227999803,
+      "seconds": 8.12271782300013,
+      "chunks": 131,
+      "text": " The cost of the house and repairs came out to 80,000+50,000=$<<80000+50000=130000>>130,000\nHe increased the value of the house by 80,000*1.5=<<80000*1.5=120000>>120,000\nSo the new value of the house is 120,000+80,000=$<<120000+80000=200000>>200,000\nSo he made a profit of 200,000-130,000=$<<200000-130000=70000>>70,000\n#### 70000\n\n"
+    },
+    {
+      "i": 3,
+      "label": 540,
+      "pred": 540,
+      "correct": true,
+      "ttft_s": 6.633486418999382,
+      "seconds": 7.078916609999396,
+      "chunks": 44,
+      "text": " He sprints 3*3=<<3*3=9>>9 times\nSo he runs 9*60=<<9*60=540>>540 meters\n#### 540\n\n"
+    },
+    {
+      "i": 4,
+      "label": 20,
+      "pred": 20,
+      "correct": true,
+      "ttft_s": 7.322805496000001,
+      "seconds": 8.277847498000483,
+      "chunks": 94,
+      "text": " If each chicken eats 3 cups of feed per day, then for 20 chickens they would need 3*20=<<3*20=60>>60 cups of feed per day.\nIf she feeds the flock 15 cups of feed in the morning, and 25 cups in the afternoon, then the final meal would require 60-15-25=<<60-15-25=20>>20 cups of chicken feed.\n#### 20\n\n"
+    },
+    {
+      "i": 5,
+      "label": 64,
+      "pred": 64,
+      "correct": true,
+      "ttft_s": 6.813124731000244,
+      "seconds": 7.886402639000153,
+      "chunks": 105,
+      "text": " For every 2 glasses, Kylar pays 5 + 5*60/100 = 5 + 3 = $<<5+5*60/100=8>>8.\nKylar wants to buy 16 glasses, which means he needs to pay for 16/2 = <<16/2=8>>8 pairs of glasses.\nSo for 16 glasses, he needs to pay 8 * 8 = $<<8*8=64>>64.\n#### 64\n\n"
+    },
+    {
+      "i": 6,
+      "label": 260,
+      "pred": 260,
+      "correct": true,
+      "ttft_s": 6.690809116999844,
+      "seconds": 7.401149338000323,
+      "chunks": 70,
+      "text": " Charleston has 20 x 4 = <<20*4=80>>80 sheep.\nToulouse has 80 x 2 = <<80*2=160>>160 sheep.\nTherefore, they have a total of 160 + 80 + 20 = <<160+80+20=260>>260 sheep.\n#### 260\n\n"
+    },
+    {
+      "i": 7,
+      "label": 160,
+      "pred": 160,
+      "correct": true,
+      "ttft_s": 6.915698097999666,
+      "seconds": 7.851349192000271,
+      "chunks": 92,
+      "text": " It takes 200/2=<<200/2=100>>100 minutes to download the file\nThe first restart will happen 100*.4=<<100*.4=40>>40 minutes into the download\nThen she waits 20 minutes for the updates\nThe second download will take 100 minutes\nSo the total time is 40+20+100=<<40+20+100=160>>160 minutes\n#### 160\n\n"
+    },
+    {
+      "i": 8,
+      "label": 45,
+      "pred": 95,
+      "correct": false,
+      "ttft_s": 7.254094345999874,
+      "seconds": 8.969003650000559,
+      "chunks": 166,
+      "text": " When he turned around he was 3*60=<<3*60=180>>180 miles from home\nHe was only able to drive 4-2=<<4-2=2>>2 hours in the last part\nHe drove 2-1/2=<<2-1/2=1.5>>1.5 hours at 30mph\nSo he drove 1.5*30=<<1.5*30=45>>45 miles\nHe then drove another 1/2*80=<<1/2*80=40>>40 miles\nSo he drove 45+40=<<45+40=85>>85 miles\nSo he is 180-85=<<180-85=95>>95 miles away from home\n#### 95\n\n"
+    },
+    {
+      "i": 9,
+      "label": 460,
+      "pred": 460,
+      "correct": true,
+      "ttft_s": 6.841876685999523,
+      "seconds": 8.366711335999753,
+      "chunks": 149,
+      "text": " For the first 40 hours, Eliza earned $10/hour x 40 hours = $<<10*40=400>>400.\nHer hourly rate for the overtime pay is $10 x 1.2 = $<<10*1.2=12>>12.\nSince she worked 45 hours this week, she got 45 - 40 = <<45-40=5>>5 hours of overtime pay.\nThus, her pay for the overtime is $12/hour x 5 hours = $<<12*5=60>>60.\nTherefore, Eliza's total earnings for the week is $400 + $60 = $<<400+60=460>>460.\n#### 460\n\n"
+    },
+    {
+      "i": 10,
+      "label": 366,
+      "pred": 366,
+      "correct": true,
+      "ttft_s": 6.840895018999618,
+      "seconds": 8.006186257000081,
+      "chunks": 114,
+      "text": " The program had 60*3=<<60*3=180>>180 downloads in the second month.\nThe number of downloads in the third month was 180*0.3=<<180*0.3=54>>54 fewer than the second month.\nSo the number of downloads in the third month was 180-54=<<180-54=126>>126.\nThe total number of downloads over the three months is 60+180+126=<<60+180+126=366>>366.\n#### 366\n\n"
+    },
+    {
+      "i": 11,
+      "label": 694,
+      "pred": 694,
+      "correct": true,
+      "ttft_s": 6.866804314000547,
+      "seconds": 7.9369387030001235,
+      "chunks": 105,
+      "text": " The cost of the donuts is 3 x $68 = $<<3*68=204>>204.\nThe cost of the mini cupcakes is 2 x $80 = $<<2*80=160>>160.\nThe cost of the mini cheesecakes is 6 x $55 = $<<6*55=330>>330.\nTherefore the total cost is $204 + $160 + $330 = $<<204+160+330=694>>694.\n#### 694\n\n"
+    },
+    {
+      "i": 12,
+      "label": 13,
+      "pred": 13,
+      "correct": true,
+      "ttft_s": 6.9144312709995575,
+      "seconds": 8.04866276499979,
+      "chunks": 112,
+      "text": " He gets 7*1.5=$<<7*1.5=10.5>>10.5 each year from selling lemon\nSo he makes a profit of 10.5-3=$<<10.5-3=7.5>>7.5 each year\nSo it will take 90/7.5=<<90/7.5=12>>12 years to start earning money\nSo he will make money in 12+1=<<12+1=13>>13 years\n#### 13\n\n"
+    },
+    {
+      "i": 13,
+      "label": 18,
+      "pred": 36,
+      "correct": false,
+      "ttft_s": 6.826667186999657,
+      "seconds": 7.768894425999861,
+      "chunks": 93,
+      "text": " At the orange house, Melanie sold half of what was left, so she had 5*2=<<5*2=10>>10 vacuum cleaners left before that.\nBefore the red house, she had 10+2=<<10+2=12>>12 vacuum cleaners.\nShe sold a third of her vacuum cleaners at the green house, so she had 12/(1/3)=36 vacuum cleaners to start with.\n#### 36\n\n"
+    },
+    {
+      "i": 14,
+      "label": 60,
+      "pred": 60,
+      "correct": true,
+      "ttft_s": 6.751041636000082,
+      "seconds": 8.101628037999944,
+      "chunks": 132,
+      "text": " 20% of 20 students is 20/100*20 = <<20/100*20=4>>4 students.\nSo, 20 - 4 = <<20-4=16>>16 students are enrolled in either jazz or hip-hop.\n25% of 16 students is 25/100*16 = <<25/100*16=4>>4 students.\nSo, 16 - 4 = <<16-4=12>>12 students enrolled in hip-hop.\nThis is 12/20*100% = <<12/20*100=60>>60% of the entire students.\n#### 60\n\n"
+    },
+    {
+      "i": 15,
+      "label": 125,
+      "pred": 29,
+      "correct": false,
+      "ttft_s": 7.141480915999637,
+      "seconds": 8.316669214000285,
+      "chunks": 115,
+      "text": " If he buys the jewelry, the price would go up by 5,000*2.5% = $<<5000*2.5*.01=125>>125\nIf he buys the electronic gadget, the price would go up by 8,000*1.2% = $<<8000*1.2*.01=96>>96\nIf he buys the jewelry, the price would go up by 125-96 = $<<125-96=29>>29 more than if he buys the electronic gadget.\n#### 29\n\n"
+    },
+    {
+      "i": 16,
+      "label": 230,
+      "pred": 230,
+      "correct": true,
+      "ttft_s": 6.764275946000453,
+      "seconds": 7.277431202999651,
+      "chunks": 51,
+      "text": " When traveling westward, the two trains covered 80 miles each, and when traveling northwards, they covered 150 miles each, for a total of 80+150=<<80+150=230>>230 miles.\n#### 230\n\n"
+    },
+    {
+      "i": 17,
+      "label": 57500,
+      "pred": 57500,
+      "correct": true,
+      "ttft_s": 6.784240087999933,
+      "seconds": 8.410007574999327,
+      "chunks": 159,
+      "text": " First find the total amount Jill makes per week teaching: $20/hour * 35 hours/week = $<<20*35=700>>700/week\nThen find the total amount Jill makes per week cheerleading: $30/hour * 15 hours/week = $<<30*15=450>>450/week\nThen add those two amounts to find Jill's total weekly salary: $700/week + $450/week = $<<700+450=1150>>1150/week\nThen multiply that amount by the number of weeks in a year to find Jill's annual salary: $1150/week * 50 weeks/year = $<<1150*50=57500>>57,500/year\n#### 57500\n\n"
+    },
+    {
+      "i": 18,
+      "label": 7,
+      "pred": 7,
+      "correct": true,
+      "ttft_s": 6.557718580000255,
+      "seconds": 7.553700184000263,
+      "chunks": 98,
+      "text": " She eats 3 eggs each day and there are 7 days in a week so she eats 3*7 = <<3*7=21>>21 eggs a week\nAfter 4 weeks she will have eaten 4*21 = <<4*21=84>>84 eggs\nThere are 12 eggs in 1 dozen and she eats 84 eggs so that's 84/12 = <<84/12=7>>7 dozen eggs\n#### 7\n\n"
+    },
+    {
+      "i": 19,
+      "label": 6,
+      "pred": 6,
+      "correct": true,
+      "ttft_s": 6.896544102000007,
+      "seconds": 8.245416738999666,
+      "chunks": 132,
+      "text": " First find the total remaining time Marissa has to walk: 12 miles / 4 mph = <<12/4=3>>3 hours\nThen subtract the time she already spent walking: 3 hours - 1 hour - 1 hour = <<3-1-1=1>>1 hour\nThen subtract the distance she already covered: 12 miles - 4 miles - 2 miles = <<12-4-2=6>>6 miles\nThen divide the remaining distance by the remaining time to find her speed: 6 miles / 1 hour = <<6/1=6>>6 mph\n#### 6\n\n"
+    },
+    {
+      "i": 20,
+      "label": 15,
+      "pred": 15,
+      "correct": true,
+      "ttft_s": 6.8508306269995956,
+      "seconds": 8.703231529999357,
+      "chunks": 181,
+      "text": " There are 10*2/3=<<10*2/3=6.666666666666667>>6.666666666666667 liters of water from the 10 liters of orange drink.\nAfter spilling 1 liter of orange drink, there are 10-1=<<10-1=9>>9 liters of orange drink left.\nSo, there are 9*2/3=<<9*2/3=6>>6 liters of water from the remaining 9 liters of orange drink.\nThere are 15*3/5=<<15*3/5=9>>9 liters of water from the 15 liters of pineapple drink.\nTherefore, there are 6+9=<<6+9=15>>15 liters of water in the remaining 24 liters.\n#### 15\n\n"
+    },
+    {
+      "i": 21,
+      "label": 14,
+      "pred": 14,
+      "correct": true,
+      "ttft_s": 6.698174090999601,
+      "seconds": 7.517051781000191,
+      "chunks": 81,
+      "text": " Raymond is 6 years older than Samantha, so he is 31+6=<<31+6=37>>37 years old now.\nRaymond's son was born when he was 23 years old, so his son is now 37-23=<<37-23=14>>14 years old.\nThus, Raymond's son was born 14 years ago.\n#### 14\n\n"
+    },
+    {
+      "i": 22,
+      "label": 7,
+      "pred": 7,
+      "correct": true,
+      "ttft_s": 6.811444070000107,
+      "seconds": 7.448427744000583,
+      "chunks": 63,
+      "text": " His first 3 customers buy 3*1=<<3*1=3>>3 DVDs.\nHis next 2 buy 2*2=<<2*2=4>>4 DVDs.\nBilly sells 3+4=<<3+4=7>>7 DVDs.\n#### 7\n\n"
+    },
+    {
+      "i": 23,
+      "label": 8,
+      "pred": 8,
+      "correct": true,
+      "ttft_s": 6.647046374000638,
+      "seconds": 7.109489526000289,
+      "chunks": 46,
+      "text": " The candle burns for 5 - 1 = <<5-1=4>>4 hours.\nIt will melt 2 * 4 = <<2*4=8>>8 centimeters shorter.\n#### 8\n\n"
+    },
+    {
+      "i": 24,
+      "label": 26,
+      "pred": 26,
+      "correct": true,
+      "ttft_s": 6.632749362999675,
+      "seconds": 7.681308336999791,
+      "chunks": 103,
+      "text": " Since there is a 25% discount, Kyle only paid 100% - 25% = 75% of the original price.\nSince 75% is equal to $19.50, then 1% is equal to $19.50/75 = $<<19.50/75=0.26>>0.26.\nSo the original price of the book is $0.26 x 100 = $<<0.26*100=26>>26.\n#### 26\n\n"
+    },
+    {
+      "i": 25,
+      "label": 2,
+      "pred": 2,
+      "correct": true,
+      "ttft_s": 6.887625579000087,
+      "seconds": 8.22273402800056,
+      "chunks": 131,
+      "text": " Five packs of milk cost $3 x 5 = $<<3*5=15>>15.\nFour apples cost $1.50 x 4 = $<<1.5*4=6>>6.\nThe total cost of the chicken meal, milk, and apples is $12 + $15 + $6 = $<<12+15+6=33>>33.\nSo, the boxes of pizza cost $50 - $33 = $<<50-33=17>>17.\nTherefore, Marie ordered $17/$8.50 = <<17/8.5=2>>2 boxes of pizza.\n#### 2\n\n"
+    },
+    {
+      "i": 26,
+      "label": 243,
+      "pred": 243,
+      "correct": true,
+      "ttft_s": 6.885575466000773,
+      "seconds": 8.05560988400066,
+      "chunks": 115,
+      "text": " 3 shorts cost 3*16.5=<<3*16.5=49.5>>49.5 dollars.\n3 pairs of pants cost 3*22.5=<<3*22.5=67.5>>67.5 dollars.\n3 pairs of shoes cost 3*42=<<3*42=126>>126 dollars.\nIn total Mishka spent 49.5+67.5+126=<<49.5+67.5+126=243>>243 dollars.\n#### 243\n\n"
+    },
+    {
+      "i": 27,
+      "label": 16,
+      "pred": 16,
+      "correct": true,
+      "ttft_s": 6.808467487000598,
+      "seconds": 7.6755071430006865,
+      "chunks": 85,
+      "text": " She eats 1 serving per night and each carton has 15 servings so after 60 days she will have eaten 60/15 = <<60/15=4>>4 cartons\nEach carton costs $4.00 and she ate 4 cartons so she spent 4*4 = $<<4*4=16.00>>16.00 on ice cream\n#### 16\n\n"
+    },
+    {
+      "i": 28,
+      "label": 25,
+      "pred": 25,
+      "correct": true,
+      "ttft_s": 6.748227000000043,
+      "seconds": 7.6918551239996305,
+      "chunks": 75,
+      "text": " Henry traveled 60 - 20 = <<60-20=40>>40 miles before his first stop.\nThen he traveled 60 - 15 = <<60-15=45>>45 miles before his second stop.\nSo he traveled 45 - 20 = <<45-20=25>>25 miles between his first and second stops.\n#### 25\n\n"
+    },
+    {
+      "i": 29,
+      "label": 104,
+      "pred": 104,
+      "correct": true,
+      "ttft_s": 7.152081218000603,
+      "seconds": 8.161021171999892,
+      "chunks": 99,
+      "text": " First find the cost of the second pair of heels: $33 * 2 = $<<33*2=66>>66\nThen add that to the cost of the first pair of heels to find the total cost of both pairs of heels: $66 + $33 = $<<66+33=99>>99\nThen add five dollars to find the cost of the boots: $99 + $5 = $<<99+5=104>>104\n#### 104\n\n"
+    },
+    {
+      "i": 30,
+      "label": 109,
+      "pred": 109,
+      "correct": true,
+      "ttft_s": 6.624553210999693,
+      "seconds": 7.464749120999841,
+      "chunks": 83,
+      "text": " The total ratio representing their ages is 7+11=<<7+11=18>>18\nSince Allen's age is represented by 11, his age is 11/18*162=<<11/18*162=99>>99 years.\nTen years from now, Allen's age will be 99+10=<<99+10=109>>109 years\n#### 109\n\n"
+    },
+    {
+      "i": 31,
+      "label": 80,
+      "pred": 80,
+      "correct": true,
+      "ttft_s": 6.857442081999579,
+      "seconds": 7.700411339999846,
+      "chunks": 83,
+      "text": " The second friend guessed 80/2+20=<<80/2+20=60>>60 jelly beans.\nThe third friend guessed 80*1.25=<<80*1.25=100>>100 jelly beans.\nThe average of their guesses is (80+60+100)/3=<<80+60+100=3=80>>80 jelly beans.\n#### 80\n\n"
+    },
+    {
+      "i": 32,
+      "label": 35,
+      "pred": 35,
+      "correct": true,
+      "ttft_s": 6.668257010999696,
+      "seconds": 7.160323559000062,
+      "chunks": 49,
+      "text": " He spends 10*.5=<<10*.5=5>>5 hours per day taking care of the dogs\nSo he spends 5*7=<<5*7=35>>35 hours per week\n#### 35\n\n"
+    },
+    {
+      "i": 33,
+      "label": 70,
+      "pred": 70,
+      "correct": true,
+      "ttft_s": 6.545980813999449,
+      "seconds": 7.956568963999416,
+      "chunks": 137,
+      "text": " Gretchen has 60 gold coins because 110 - 30 = <<110-30=80>>80 and 80 / 2 = <<80/2=40>>40 and 40 + 30 = <<40+30=70>>70\nWait, let me recalculate. Let x be the number of silver coins. Then x + (x + 30) = 110. So 2x + 30 = 110. So 2x = 80. So x = 40. So there are 40 silver coins and 40 + 30 = <<40+30=70>>70 gold coins.\n#### 70\n\n"
+    },
+    {
+      "i": 34,
+      "label": 23,
+      "pred": 23,
+      "correct": true,
+      "ttft_s": 7.4705640319998565,
+      "seconds": 8.107729721999931,
+      "chunks": 63,
+      "text": " Half of Raymond's jewels is 40/2 = <<40/2=20>>20\nAaron has 20 + 5 = <<20+5=25>>25 jewels.\nSiobhan has 25 - 2 = <<25-2=23>>23 jewels.\n#### 23\n\n"
+    },
+    {
+      "i": 35,
+      "label": 9,
+      "pred": 5,
+      "correct": false,
+      "ttft_s": 6.745593769000152,
+      "seconds": 7.495331414999782,
+      "chunks": 74,
+      "text": " First find how many points Mike scores in the second period: 4 points * 25% = <<4*25*.01=1>>1 point\nThen add that to the number of points he scored in the first period to find the total: 1 point + 4 points = <<1+4=5>>5 points\n#### 5\n\n"
+    },
+    {
+      "i": 36,
+      "label": 75,
+      "pred": 75,
+      "correct": true,
+      "ttft_s": 6.657558237999183,
+      "seconds": 7.378893819000041,
+      "chunks": 71,
+      "text": " Terry eats 2 * 30 = <<2*30=60>>60 yogurts over 30 days.\nTerry spends 60 / 4 = <<60/4=15>>15 * $5.00 = $<<15*5=75.00>>75.00 on yogurt over 30 days.\n#### 75\n\n"
+    },
+    {
+      "i": 37,
+      "label": 2,
+      "pred": 11,
+      "correct": false,
+      "ttft_s": 6.857655073999922,
+      "seconds": 8.326030115999856,
+      "chunks": 144,
+      "text": " John sells 13 lego sets for $15 each, so he earns 13 * $15 = $<<13*15=195>>195\nHe buys 8 video games for $20 each, so he spends 8 * $20 = $<<8*20=160>>160\nHe has $5 left, so he had $195 - $160 - $5 = $<<195-160-5=30>>30 to spend on lego sets\nHe can buy $30 / $15 = <<30/15=2>>2 lego sets\nHe still has 13 - 2 = <<13-2=11>>11 lego sets\n#### 11\n\n"
+    },
+    {
+      "i": 38,
+      "label": 10,
+      "pred": 10,
+      "correct": true,
+      "ttft_s": 6.698520746000213,
+      "seconds": 7.5417677229997935,
+      "chunks": 83,
+      "text": " He runs 3/2=<<3/2=1.5>>1.5 hours the other two days\nSo he runs 3+1.5+1.5=<<3+1.5+1.5=6>>6 hours a week\nThat means he runs 60/6=<<60/6=10>>10 miles per hour\n#### 10\n\n"
+    },
+    {
+      "i": 39,
+      "label": 18,
+      "pred": 18,
+      "correct": true,
+      "ttft_s": 6.971197425000355,
+      "seconds": 9.191268194000259,
+      "chunks": 217,
+      "text": " If Dana can skip at half the speed she can run, then she can run at 3*2=<<3*2=6>>6 miles per hour.\nIf she can run at four times the speed she can walk, then she can walk at 6/4=<<6/4=1.5>>1.5 miles per hour.\nIn six hours, she would spend 1/3*6=<<1/3*6=2>>2 hours running.\nIn six hours, she would spend 2/3*6=<<2/3*6=4>>4 hours walking.\nIf she runs for two hours at 6 mph, she will cover 2*6=<<2*6=12>>12 miles.\nIf she walks for four hours at 1.5 mph, she will cover 4*1.5=<<4*1.5=6>>6 miles.\nIn total, she will cover 12+6=<<12+6=18>>18 miles.\n#### 18\n\n"
+    },
+    {
+      "i": 40,
+      "label": 8,
+      "pred": 8,
+      "correct": true,
+      "ttft_s": 6.704633915999693,
+      "seconds": 7.153602341999431,
+      "chunks": 45,
+      "text": " Ben's iPhone is 2*1=<<2*1=2>>2 years old.\nBrandon's iPhone is 4*2=<<4*2=8>>8 years old.\n#### 8\n\n"
+    },
+    {
+      "i": 41,
+      "label": 200,
+      "pred": 200,
+      "correct": true,
+      "ttft_s": 7.457216044999768,
+      "seconds": 8.433620009999686,
+      "chunks": 96,
+      "text": " When holding the sapphire gemstone, Polly can throw the gold javelin 400*3=<<400*3=1200>>1200 feet.\nSince the dragon can breathe fire upon anything within 1000 feet, Polly could stand outside of the reach of the dragon's flames and still hit the dragon 1200-1000=<<1200-1000=200>>200 feet outside of the reach of the dragon's flames.\n#### 200\n\n"
+    },
+    {
+      "i": 42,
+      "label": 26,
+      "pred": 26,
+      "correct": true,
+      "ttft_s": 7.0444090120008696,
+      "seconds": 7.712810569000794,
+      "chunks": 66,
+      "text": " Grandma made 5 pies, and each had 8 pieces, so she made 5*8=<<5*8=40>>40 pieces of pie.\nIf 14 pieces were left over, then guests ate 40-14=<<40-14=26>>26 pieces of pie.\n#### 26\n\n"
+    },
+    {
+      "i": 43,
+      "label": 48,
+      "pred": 48,
+      "correct": true,
+      "ttft_s": 6.797653242000706,
+      "seconds": 8.474370987000839,
+      "chunks": 164,
+      "text": " If your daily calorie target is 2000 and you have already consumed 1800 calories, you have 2000-1800=<<2000-1800=200>>200 calories left to consume.\nIf each serving of chips has 250 calories, then the 200 calories in your budget is equivalent to 200/250=<<200/250=0.8>>0.8 servings of chips.\nIf a 300g bag of chips has 5 servings, then one serving is 300/5=<<300/5=60>>60 grams of chips.\nIf one serving of chips is 60 grams, then 0.8 servings is equivalent to 0.8*60=<<0.8*60=48>>48 grams of chips.\n#### 48\n\n"
+    },
+    {
+      "i": 44,
+      "label": 20,
+      "pred": 20,
+      "correct": true,
+      "ttft_s": 6.968627575999562,
+      "seconds": 8.74884517099963,
+      "chunks": 174,
+      "text": " One pound of beeswax and the wicks makes 10 candles, and he wants to make 20 candles, so he needs 20/10 = <<20/10=2>>2 pounds of beeswax\nEach pound of beeswax and wicks cost $10.00 and he needs 2 pounds, so he will spend 2*10 = $<<2*10=20>>20.00 on supplies\nHe sells each candle for $2.00 and he is making 20 candles, so he will make 2*20 = $<<2*20=40>>40.00 from selling candles\nHe will spend $20.00 on supplies and make $40.00, so his net profit is 40-20 = $<<40-20=20>>20.00\n#### 20\n\n"
+    },
+    {
+      "i": 45,
+      "label": 104,
+      "pred": 104,
+      "correct": true,
+      "ttft_s": 7.158306927000012,
+      "seconds": 8.952953044999958,
+      "chunks": 175,
+      "text": " On Tuesday, she wrote 2/5 times more articles than on Monday, which is 2/5*5 = <<2/5*5=2>>2 more articles.\nThe number of articles she wrote on Tuesday is 5+2 = <<5+2=7>>7 articles.\nOn Wednesday, she wrote twice the number of articles she wrote on Tuesday, which is 2*7 = <<2*7=14>>14 articles.\nThe total number of articles she wrote in the three days is 5+7+14 = <<5+7+14=26>>26 articles.\nSince each article takes an average of 4 hours to research and write about, the total number of hours she spent writing articles in the three days is 4*26 = <<4*26=104>>104 hours.\n#### 104\n\n"
+    },
+    {
+      "i": 46,
+      "label": 163,
+      "pred": 163,
+      "correct": true,
+      "ttft_s": 7.1248558850002155,
+      "seconds": 7.7436135269999795,
+      "chunks": 61,
+      "text": " Let P be the number of Post-it notes in the package she purchased.\nSo 80 + P - 220 = 23.\nCombining like terms, we get P - 140 = 23.\nAdding 140 to both sides, we get P = 163.\n#### 163\n\n"
+    },
+    {
+      "i": 47,
+      "label": 800,
+      "pred": 800,
+      "correct": true,
+      "ttft_s": 6.724724663000416,
+      "seconds": 7.775318070000139,
+      "chunks": 103,
+      "text": " He bought 200/40=<<200/40=5>>5 blue ties\nHe bought 2*5=<<2*5=10>>10 red ties\nThe red ties cost 40*1.5=$<<40*1.5=60>>60 each\nSo he spent 10*60=$<<10*60=600>>600 on red ties\nSo he spent 600+200=$<<600+200=800>>800 on ties\n#### 800\n\n"
+    },
+    {
+      "i": 48,
+      "label": 8,
+      "pred": 8,
+      "correct": true,
+      "ttft_s": 6.629872516000432,
+      "seconds": 7.144138946000567,
+      "chunks": 50,
+      "text": " One foot = 12 inches, so 4 feet = 4 x 12 = <<4*12=48>>48 inches.\n48 inches \u00f7 6 inches = <<48/6=8>>8 pieces.\n#### 8\n\n"
+    },
+    {
+      "i": 49,
+      "label": 30,
+      "pred": 30,
+      "correct": true,
+      "ttft_s": 6.688459587999205,
+      "seconds": 7.647118786999272,
+      "chunks": 94,
+      "text": " The total number of units in the building is 15 floors * 8 units per floor = <<15*8=120>>120 units.\nSince 3/4 of the building is occupied, the number of occupied units is 120 * 3/4 = <<120*3/4=90>>90 units.\nThe number of unoccupied units is 120 - 90 = <<120-90=30>>30 units.\n#### 30\n\n"
+    },
+    {
+      "i": 50,
+      "label": 294,
+      "pred": 294,
+      "correct": true,
+      "ttft_s": 6.620149403999676,
+      "seconds": 7.321035258999473,
+      "chunks": 69,
+      "text": " Lloyd makes 252/12 = <<252/12=21>>21 dozens eggs per day.\nHe makes 21*2 = $<<21*2=42>>42 per day.\nSo he makes 42*7 = $<<42*7=294>>294 per week.\n#### 294\n\n"
+    },
+    {
+      "i": 51,
+      "label": 5,
+      "pred": 5,
+      "correct": true,
+      "ttft_s": 6.74346582599992,
+      "seconds": 7.439765402000376,
+      "chunks": 69,
+      "text": " He traveled for 3 hours because 4-1=<<4-1=3>>3\nHe traveled 30 miles because 10x3=<<10*3=30>>30\nIt takes 5 hours to get back because 30/6=<<30/6=5>>5\n#### 5\n\n"
+    },
+    {
+      "i": 52,
+      "label": 15,
+      "pred": 15,
+      "correct": true,
+      "ttft_s": 6.856957216999945,
+      "seconds": 7.713399319000018,
+      "chunks": 84,
+      "text": " 1/4 pound each x 30 comic books = <<1/4*30=7.5>>7.5 pounds\n15 pounds - 7.5 pounds = <<15-7.5=7.5>>7.5 pounds\n7.5 pounds / 1/2 pound each = <<7.5/(1/2)=15>>15 toys\n#### 15\n\n"
+    },
+    {
+      "i": 53,
+      "label": 40,
+      "pred": 40,
+      "correct": true,
+      "ttft_s": 7.204399358000046,
+      "seconds": 8.3904279340004,
+      "chunks": 116,
+      "text": " On Thursday, the mechanic earns 6*60=$<<6*60=360>>360 repairing truck tires.\nOn Thursday, the mechanic earns 4*40=$<<4*40=160>>160 repairing car tires.\nTotal revenue on Thursday is $360+$160=$<<360+160=520>>520\nOn Friday, the mechanic earns 12*40=$<<12*40=480>>480 repairing car tires.\nThe mechanic earned $520-$480=$<<520-480=40>>40 more revenue on Thursday than Friday.\n#### 40\n\n"
+    },
+    {
+      "i": 54,
+      "label": 40,
+      "pred": 40,
+      "correct": true,
+      "ttft_s": 7.052940454000236,
+      "seconds": 7.577000609000606,
+      "chunks": 52,
+      "text": " Patchy has had 3 x 7 = <<3*7=21>>21 kittens\nThe total number of kittens is 7 + 21 + 12 = <<7+21+12=40>>40 kittens\n#### 40\n\n"
+    },
+    {
+      "i": 55,
+      "label": 14,
+      "pred": 14,
+      "correct": true,
+      "ttft_s": 6.753616871000304,
+      "seconds": 7.197622057999979,
+      "chunks": 44,
+      "text": " Jean now has 30-2=<<30-2=28>>28 lollipops.\nJean can fill 28/2=<<28/2=14>>14 bags.\n#### 14\n\n"
+    },
+    {
+      "i": 56,
+      "label": 3,
+      "pred": 3,
+      "correct": true,
+      "ttft_s": 6.70725856899935,
+      "seconds": 7.208863260999351,
+      "chunks": 50,
+      "text": " Each time he goes to the movies he spends 7+7=$<<7+7=14>>14\nSo he can go to the movies 42/14=<<42/14=3>>3 times\n#### 3\n\n"
+    },
+    {
+      "i": 57,
+      "label": 83,
+      "pred": 83,
+      "correct": true,
+      "ttft_s": 6.980521260999922,
+      "seconds": 7.893112683999789,
+      "chunks": 90,
+      "text": " The combined weight of the driver and the empty truck is 3755 pounds, so the truck can carry 5000-3755=<<5000-3755=1245>>1245 pounds of boxes.\nEach box weighs 15 pounds, so the maximum number of boxes which can be loaded onto the truck is 1245/15=<<1245/15=83>>83 boxes.\n#### 83\n\n"
+    },
+    {
+      "i": 58,
+      "label": 57,
+      "pred": 57,
+      "correct": true,
+      "ttft_s": 7.037598886000524,
+      "seconds": 7.8162033400003565,
+      "chunks": 77,
+      "text": " The delivery fee and tip was 3+4=$<<3+4=7>>7\nThe 25% fee for his groceries was 40*0.25=$<<40*0.25=10>>10\nThe final price of his groceries was 40+7+10=$<<40+7+10=57>>57\n#### 57\n\n"
+    },
+    {
+      "i": 59,
+      "label": 187,
+      "pred": 187,
+      "correct": true,
+      "ttft_s": 6.571735605999493,
+      "seconds": 7.275277834999542,
+      "chunks": 70,
+      "text": " First find the total number of fruit in clusters: 6 clusters * 20 fruit/cluster = <<6*20=120>>120 fruit\nThen add the number of individual fruit to find the total number of raspberries: 120 fruit + 67 fruit = <<120+67=187>>187 raspberries\n#### 187\n\n"
+    },
+    {
+      "i": 60,
+      "label": 17,
+      "pred": 17,
+      "correct": true,
+      "ttft_s": 6.6323600360001365,
+      "seconds": 7.607328809000137,
+      "chunks": 96,
+      "text": " The number of unripe oranges is 20/100*25=<<20/100*25=5>>5.\nThe number of sour oranges is 2.\nThe number of bad oranges is 1.\nThe total number of oranges that are not good is 5+2+1=<<5+2+1=8>>8.\nThe number of good oranges is 25-8=<<25-8=17>>17.\n#### 17\n\n"
+    },
+    {
+      "i": 61,
+      "label": 1430,
+      "pred": 1430,
+      "correct": true,
+      "ttft_s": 6.820312101000127,
+      "seconds": 7.517334070000288,
+      "chunks": 69,
+      "text": " The cost before insurance was 500+800=$<<500+800=1300>>1300\nThe insurance was 1300*.1=$<<1300*.1=130>>130\nSo the total cost was 1300+130=$<<1300+130=1430>>1430\n#### 1430\n\n"
+    },
+    {
+      "i": 62,
+      "label": 25000,
+      "pred": 25000,
+      "correct": true,
+      "ttft_s": 6.872367484999813,
+      "seconds": 7.625709726999958,
+      "chunks": 74,
+      "text": " She is entitled to 5% of the pension's value after 20 years, so over 10 years she gets 5*10=<<5*10=50>>50% of the pension\nSo her annual pension is worth 50,000*.5=$<<50000*.5=25000>>25,000\n#### 25000\n\n"
+    },
+    {
+      "i": 63,
+      "label": 1596,
+      "pred": 1596,
+      "correct": true,
+      "ttft_s": 6.9152536749998035,
+      "seconds": 8.728843959999722,
+      "chunks": 177,
+      "text": " A year is made up of 12 months, half of the year is 12/2 = <<12/2=6>>6 months.\nAleena paid 6*$140 = $<<6*140=840>>840 for the first half of the year.\nIn the second half of the year, the company charged her 10% less money, which is $140-(10/100*$140) = $140-$14 = $<<140-(10/100*140)=126>>126 for the streaming service.\nIn the second half of the year, she paid a total of 6*$126 = $<<6*126=756>>756\nBy the end of the year, she had paid $840+$756 = $<<840+756=1596>>1596\n#### 1596\n\n"
+    },
+    {
+      "i": 64,
+      "label": 300,
+      "pred": 300,
+      "correct": true,
+      "ttft_s": 7.1332831290001195,
+      "seconds": 7.894010445999811,
+      "chunks": 75,
+      "text": " Sophia\u2019s car uses 4 gallons of gas per 100 miles, so her gas mileage is 100/4=<<100/4=25>>25 miles per gallon.\nHer tank holds 12 gallons of gas, so she can drive 25*12=<<25*12=300>>300 miles on a single tank of gas.\n#### 300\n\n"
+    },
+    {
+      "i": 65,
+      "label": 36,
+      "pred": 36,
+      "correct": true,
+      "ttft_s": 6.736987187999148,
+      "seconds": 7.653377576999446,
+      "chunks": 90,
+      "text": " He reads for 2/2=<<2/2=1>>1 hour\nSo he spends 2+1=<<2+1=3>>3 hours on each activity\nSo he spends 3*3=<<3*3=9>>9 hours on these activities\nSo in 4 weeks he spends 9*4=<<9*4=36>>36 hours on these activities\n#### 36\n\n"
+    },
+    {
+      "i": 66,
+      "label": 48,
+      "pred": 48,
+      "correct": true,
+      "ttft_s": 6.84097723999912,
+      "seconds": 8.023608393999893,
+      "chunks": 116,
+      "text": " There are 4 schools and each school sent a girls and boys team so 4*2=<<4*2=8>>8 teams\nEach team has 5 players and there are 8 teams so 5*8=<<5*8=40>>40 players\nEach team has 1 coach and there are 8 teams so 8*1=<<8*1=8>>8 coaches\nThere are 40 players and 8 coaches so 40+8=<<40+8=48>>48 people\n#### 48\n\n"
+    },
+    {
+      "i": 67,
+      "label": 595,
+      "pred": 595,
+      "correct": true,
+      "ttft_s": 6.772004973999174,
+      "seconds": 7.53556124699935,
+      "chunks": 75,
+      "text": " The treasure hunter found 175 diamonds - 35 = <<175-35=140>>140 rubies.\nHe found 2 x 140 = <<2*140=280>>280 emeralds.\nTherefore, there were 175 + 140 + 280 = <<175+140+280=595>>595 gems.\n#### 595\n\n"
+    },
+    {
+      "i": 68,
+      "label": 36,
+      "pred": 36,
+      "correct": true,
+      "ttft_s": 6.628740139000001,
+      "seconds": 7.196055050999348,
+      "chunks": 56,
+      "text": " There are 2*60=<<2*60=120>>120 boys.\nThere are 120+60=<<120+60=180>>180 students.\nThere are 180/5=<<180/5=36>>36 teachers.\n#### 36\n\n"
+    },
+    {
+      "i": 69,
+      "label": 60,
+      "pred": 60,
+      "correct": true,
+      "ttft_s": 6.750527322999915,
+      "seconds": 7.426455789999636,
+      "chunks": 67,
+      "text": " Bailey receives $5 per week for 8 weeks, so she receives a total of 5*8=$<<5*8=40>>40.\nIf she has $100 at the end of 8 weeks, then she started with 100-40=$<<100-40=60>>60.\n#### 60\n\n"
+    },
+    {
+      "i": 70,
+      "label": 7425,
+      "pred": 1245,
+      "correct": false,
+      "ttft_s": 6.753890619000231,
+      "seconds": 7.736641626999699,
+      "chunks": 97,
+      "text": " On weekdays Judy makes 15x$15=$<<15*15=225>>225 per day.\nSince weekdays are 5 days, she makes $225x5 = $<<225*5=1125>>1125\nOn Saturday she makes 8x$15=$<<8*15=120>>120\nIn one week, she makes $1125+$120 = $<<1125+120=1245>>1245\n#### 1245\n\n"
+    },
+    {
+      "i": 71,
+      "label": 60,
+      "pred": 60,
+      "correct": true,
+      "ttft_s": 6.689393359999485,
+      "seconds": 7.203626916999383,
+      "chunks": 51,
+      "text": " The second recipe has 2*20 = <<2*20=40>>40 instructions.\nTherefore, Kelian has to read 20+40 = <<20+40=60>>60 instructions to prepare the two dishes.\n#### 60\n\n"
+    },
+    {
+      "i": 72,
+      "label": 221,
+      "pred": 221,
+      "correct": true,
+      "ttft_s": 6.735600152000188,
+      "seconds": 7.523426220000147,
+      "chunks": 77,
+      "text": " Tommy raises 43 * 3 = $<<43*3=129>>129 from selling brownies.\nTommy raises 23 * 4 = $<<23*4=92>>92 from selling cheesecakes.\nTherefore, Tommy raises 129 + 92 = $<<129+92=221>>221 for his charity.\n#### 221\n\n"
+    },
+    {
+      "i": 73,
+      "label": 255,
+      "pred": 255,
+      "correct": true,
+      "ttft_s": 6.684962346000248,
+      "seconds": 8.105510997999772,
+      "chunks": 139,
+      "text": " Shiela will pay $150 x 5 = $<<150*5=750>>750 for five cell phones.\nThe interest for each unit is $150 x 2/100 = $<<150*2/100=3>>3.\nSo, the interest of the 5 cell phones is $3 x 5 = $<<3*5=15>>15.\nTherefore, the total amount she will pay is $750 + $15 = $<<750+15=765>>765.\nSo, Shiela will pay $765 / 3 = $<<765/3=255>>255 each month for 3 months.\n#### 255\n\n"
+    },
+    {
+      "i": 74,
+      "label": 88,
+      "pred": 88,
+      "correct": true,
+      "ttft_s": 7.423556087000179,
+      "seconds": 8.686300963000576,
+      "chunks": 124,
+      "text": " Marigolds will cost $3 per pot, petunias will cost $2 per pot and begonias will cost $2 per pot.\nMarigolds will cost 12 x 3 = $<<12*3=36>>36.\nPetunias will cost 9 x 2 = $<<9*2=18>>18.\nBegonias will cost 17 x 2 = $<<17*2=34>>34.\nArtie will make 36 + 18 + 34 = $<<36+18+34=88>>88.\n#### 88\n\n"
+    },
+    {
+      "i": 75,
+      "label": 60,
+      "pred": 60,
+      "correct": true,
+      "ttft_s": 6.903320204999545,
+      "seconds": 8.288927812999646,
+      "chunks": 136,
+      "text": " If the top level is 16 square feet, then the second level is 16*2=<<16*2=32>>32 square feet.\nThe third level is 32*2=<<32*2=64>>64 square feet.\nAnd the fourth, and largest, level is 64*2=<<64*2=128>>128 square feet.\nIn total, the square footage is 16+32+64+128=<<16+32+64+128=240>>240 square feet.\nTherefore, on average, each level is 240/4=<<240/4=60>>60 square feet.\n#### 60\n\n"
+    },
+    {
+      "i": 76,
+      "label": 5,
+      "pred": 5,
+      "correct": true,
+      "ttft_s": 7.068180575000042,
+      "seconds": 8.811967114000254,
+      "chunks": 170,
+      "text": " In the first 180 days, the puppy will eat 1 cup of dog food per day, so it will eat 1*180=<<1*180=180>>180 cups of dog food.\nFor the rest of the year, the puppy will eat 2 cups of dog food per day. There are 365 days in a year, so the puppy will eat 2*(365-180)=<<2*(365-180)=370>>370 cups of dog food.\nIn total, the puppy will eat 180+370=<<180+370=550>>550 cups of dog food in the first year.\nIf one bag of dog food contains 110 cups, then Cecilia will use 550/110=<<550/110=5>>5 bags of dog food in the first year.\n#### 5\n\n"
+    },
+    {
+      "i": 77,
+      "label": 100,
+      "pred": 100,
+      "correct": true,
+      "ttft_s": 6.699703487000079,
+      "seconds": 7.68676293199951,
+      "chunks": 97,
+      "text": " If Sarah does 4 times as much laundry as David, then David does 1/4*400 = <<400/4=100>>100 pounds of laundry.\nSince Raymond does half as much laundry as Sarah, Raymond does 1/2*400 = <<400/2=200>>200 pounds of laundry.\nThe difference in the amount of laundry Raymond and David do is 200-100 = <<200-100=100>>100 pounds.\n#### 100\n\n"
+    },
+    {
+      "i": 78,
+      "label": 6,
+      "pred": 6,
+      "correct": true,
+      "ttft_s": 6.670891791999566,
+      "seconds": 8.419662844999948,
+      "chunks": 171,
+      "text": " First find the number of packages of 3 flowers Vincent could buy: 18 flowers / 3 flowers/package = <<18/3=6>>6 packages\nThen multiply that number by the cost per package: 6 packages * $2.50/package = $<<6*2.5=15>>15\nThen find the number of packages of 2 flowers Vincent could buy: 18 flowers / 2 flowers/package = <<18/2=9>>9 packages\nThen multiply that number by the cost per package: 9 packages * $1/package = $<<9*1=9>>9\nThen subtract the cost of the packages of 2 from the cost of the packages of 3 to find the difference: $15 - $9 = $<<15-9=6>>6\n#### 6\n\n"
+    },
+    {
+      "i": 79,
+      "label": 70,
+      "pred": 70,
+      "correct": true,
+      "ttft_s": 6.716357498000434,
+      "seconds": 7.147014220000528,
+      "chunks": 43,
+      "text": " The discount saves him 100*.3=$<<100*.3=30>>30\nSo the groomers charge him 100-30=$<<100-30=70>>70\n#### 70\n\n"
+    },
+    {
+      "i": 80,
+      "label": 10,
+      "pred": 10,
+      "correct": true,
+      "ttft_s": 6.6133476169998175,
+      "seconds": 7.663174656999217,
+      "chunks": 103,
+      "text": " Each girl got 24 x 1/6 = <<24*1/6=4>>4 liters of water.\nSo, the two girls got a total of 4 x 2 = <<4*2=8>>8 liters.\nSince a boy got 6 liters, 8 + 6 = <<8+6=14>>14 liters were given.\nTherefore, 24 - 14 = <<24-14=10>>10 liters of water were left.\n#### 10\n\n"
+    },
+    {
+      "i": 81,
+      "label": 17,
+      "pred": 17,
+      "correct": true,
+      "ttft_s": 6.8137728290003,
+      "seconds": 7.913751858999603,
+      "chunks": 108,
+      "text": " After buying 21 stickers, Charlie has 10+21=<<10+21=31>>31 stickers.\nAfter getting 23 stickers for his birthday, Charlie has 31+23=<<31+23=54>>54 stickers.\nAfter giving 9 stickers to his sister, Charlie has 54-9=<<54-9=45>>45 stickers.\nAfter using 28 stickers to decorate a greeting card, Charlie has 45-28=<<45-28=17>>17 stickers.\n#### 17\n\n"
+    },
+    {
+      "i": 82,
+      "label": 623,
+      "pred": 623,
+      "correct": true,
+      "ttft_s": 6.5568436960002145,
+      "seconds": 7.079095729000073,
+      "chunks": 52,
+      "text": " Alex weighs 4*125-2=<<4*125-2=498>>498 pounds\nTheir combined weights are 125+498=<<125+498=623>>623 pounds\n#### 623\n\n"
+    },
+    {
+      "i": 83,
+      "label": 600,
+      "pred": 600,
+      "correct": true,
+      "ttft_s": 6.581831694000357,
+      "seconds": 7.034099027000593,
+      "chunks": 45,
+      "text": " There are 25*8=<<25*8=200>>200 thorns per bush.\nSo there are 200*3=<<200*3=600>>600 thorns total\n#### 600\n\n"
+    },
+    {
+      "i": 84,
+      "label": 15,
+      "pred": 15,
+      "correct": true,
+      "ttft_s": 6.510152782999285,
+      "seconds": 7.251278908999666,
+      "chunks": 73,
+      "text": " Let losses be x.\nThen wins = x + 8.\nSo x + x + 8 = 22\n2x = 22 - 8\n2x = 14\nx = <<14/2=7>>7\nSo wins = 7 + 8 = <<7+8=15>>15\n#### 15\n\n"
+    },
+    {
+      "i": 85,
+      "label": 44,
+      "pred": 44,
+      "correct": true,
+      "ttft_s": 7.054232159000094,
+      "seconds": 7.699523043999761,
+      "chunks": 64,
+      "text": " Gene has been on 34-23=<<34-23=11>>11 years of vacations.\nHe goes on 4 vacations every year, so he has been on 11*4=<<11*4=44>>44 vacations.\nThat means he has 44 quilt blocks.\n#### 44\n\n"
+    },
+    {
+      "i": 86,
+      "label": 22,
+      "pred": 22,
+      "correct": true,
+      "ttft_s": 7.119539698999688,
+      "seconds": 7.837695827999596,
+      "chunks": 71,
+      "text": " The second time, it rang 4*3=<<4*3=12>>12 times.\nThe third time, it rang 12/2=<<12/2=6>>6 times.\nIn all, it rang 4+12+6=<<4+12+6=22>>22 times.\n#### 22\n\n"
+    },
+    {
+      "i": 87,
+      "label": 9360,
+      "pred": 10080,
+      "correct": false,
+      "ttft_s": 7.010645827999724,
+      "seconds": 8.170856945000196,
+      "chunks": 114,
+      "text": " Sylvie's monthly salary after 5 years is $600 + (10/100)*$600 = $600 + $60 = $660\nHer annual salary after 5 years is $660*12 = $<<660*12=7920>>7920\nAfter three more years, her annual salary will be $7920 + 3*($60*12) = $7920 + $2160 = $<<7920+2160=10080>>10080\n#### 10080\n\n"
+    },
+    {
+      "i": 88,
+      "label": 8000,
+      "pred": 8000,
+      "correct": true,
+      "ttft_s": 6.612968144000661,
+      "seconds": 7.220625695000308,
+      "chunks": 60,
+      "text": " Let x be the number of copies Harald sold\nMarilyn sold 10x copies\n10x + x = 88,000\n11x = 88,000\nx = 8,000\nHarald sold 8,000 copies\n#### 8000\n\n"
+    },
+    {
+      "i": 89,
+      "label": 24,
+      "pred": 24,
+      "correct": true,
+      "ttft_s": 6.735896337000668,
+      "seconds": 7.22738986100012,
+      "chunks": 49,
+      "text": " There will be 16 * .75 = <<16*.75=12>>12 guests at the party.\nShe will spend 12 * 2 = $<<12*2=24>>24 on gift bags.\n#### 24\n\n"
+    },
+    {
+      "i": 90,
+      "label": 225,
+      "pred": 225,
+      "correct": true,
+      "ttft_s": 7.086474624000402,
+      "seconds": 8.317922852000265,
+      "chunks": 121,
+      "text": " An adult dinosaur will eat 10 lbs of potato salad, and a child will eat half as much, 10/2=<<10/2=5>>5 lbs.\nTed needs to bring enough potato salad for 20 adults, 20*10=<<20*10=200>>200 lbs.\nHe also needs to bring enough for 5 children, 5*5=<<5*5=25>>25 lbs.\nTherefore, Ted needs to bring 200+25=<<200+25=225>>225 lbs of potato salad to the picnic.\n#### 225\n\n"
+    },
+    {
+      "i": 91,
+      "label": 28,
+      "pred": 28,
+      "correct": true,
+      "ttft_s": 6.630313192999893,
+      "seconds": 7.277238636999755,
+      "chunks": 64,
+      "text": " Marcia has 4+2=<<4+2=6>>6 pets.\nJan has 3*6=<<3*6=18>>18 pets.\nSo in total they have 6+18+4=<<6+18+4=28>>28 pets.\n#### 28\n\n"
+    },
+    {
+      "i": 92,
+      "label": 4,
+      "pred": 4,
+      "correct": true,
+      "ttft_s": 6.763667208999323,
+      "seconds": 7.704024591999769,
+      "chunks": 93,
+      "text": " James is 10 and is 1 year younger than Corey, so Corey is 10+1=<<10+1=11>>11 years old.\nAmy is 2 years younger than Corey, so Amy is 11-2=<<11-2=9>>9 years old.\nAmy is 5 years older than Jackson, so Jackson is 9-5=<<9-5=4>>4 years old.\n#### 4\n\n"
+    },
+    {
+      "i": 93,
+      "label": 36,
+      "pred": 36,
+      "correct": true,
+      "ttft_s": 6.9917024699998365,
+      "seconds": 7.954854882000291,
+      "chunks": 95,
+      "text": " Lee runs the 400-meter hurdles in 38 seconds, so Gerald used to run it in 38+2=<<38+2=40>>40 seconds.\nGerald improved his speed by 10%, which is 40*0.10=<<40*0.10=4>>4 seconds.\nSo Gerald can now run the 400-meter hurdles in 40-4=<<40-4=36>>36 seconds.\n#### 36\n\n"
+    },
+    {
+      "i": 94,
+      "label": 348,
+      "pred": 348,
+      "correct": true,
+      "ttft_s": 6.764809455999966,
+      "seconds": 7.512877649999609,
+      "chunks": 74,
+      "text": " The number of cats is 2*60=<<2*60=120>>120\nThe number of rabbits is 120+60-12=<<120+60-12=168>>168\nThe total number of pets is 120+60+168=<<120+60+168=348>>348\n#### 348\n\n"
+    },
+    {
+      "i": 95,
+      "label": 40,
+      "pred": 40,
+      "correct": true,
+      "ttft_s": 6.668084682999506,
+      "seconds": 7.7360621509997145,
+      "chunks": 105,
+      "text": "There are 200 x 2/5 = <<200*2/5=80>>80 boys.\nSo, 200 - 80 = <<200-80=120>>120 are girls.\nOut of the 120 girls, there are 120 x 2/3 = <<120*2/3=80>>80 girls who are in the girl scout.\nTherefore, 120 - 80 = <<120-80=40>>40 girls are not in the girl scout.\n#### 40\n\n"
+    },
+    {
+      "i": 96,
+      "label": 3,
+      "pred": 3,
+      "correct": true,
+      "ttft_s": 6.591837803999624,
+      "seconds": 7.074389327000063,
+      "chunks": 48,
+      "text": " James slept 9 * 2/3 = <<9*2/3=6>>6 hours.\nHarry slept 9 - 6 = <<9-6=3>>3 more hours than James.\n#### 3\n\n"
+    },
+    {
+      "i": 97,
+      "label": 12,
+      "pred": 12,
+      "correct": true,
+      "ttft_s": 6.780313432999719,
+      "seconds": 7.65311305799969,
+      "chunks": 86,
+      "text": " To make 32 ounces of sauce, she needs 32*2=<<32*2=64>>64 ounces of tomatoes\nSince each can of tomatoes is 16 ounces, she needs 64/16=<<64/16=4>>4 cans of tomatoes\nEach can contains 3 tomatoes, so she used 4*3=<<4*3=12>>12 tomatoes\n#### 12\n\n"
+    },
+    {
+      "i": 98,
+      "label": 5,
+      "pred": 5,
+      "correct": true,
+      "ttft_s": 7.146666747000381,
+      "seconds": 8.036889912999868,
+      "chunks": 88,
+      "text": " There were originally 30 cars on the motorway, and 5 cars took an exit, so 30 - 5 = <<30-5=25>>25 cars remained in the traffic jam.\nIn the remaining 15 minutes, 20 cars drove through, so in the first 15 minutes, 25 - 20 = <<25-20=5>>5 cars drove through the traffic jam.\n#### 5\n\n"
+    },
+    {
+      "i": 99,
+      "label": 58,
+      "pred": 58,
+      "correct": true,
+      "ttft_s": 7.043926768000347,
+      "seconds": 8.123603441999876,
+      "chunks": 106,
+      "text": " Mary has 2*40=<<2*40=80>>80 potted plants right now.\nShe will give away 1*40=<<1*40=40>>40 potted plants tomorrow.\nAfter giving away 40 potted plants, she will remain with 80-40=<<80-40=40>>40 potted plants.\nAfter receiving the new potted plants, she will have 40+18=<<40+18=58>>58 potted plants.\n#### 58\n\n"
+    },
+    {
+      "i": 100,
+      "label": 175,
+      "pred": 175,
+      "correct": true,
+      "ttft_s": 7.146099667000271,
+      "seconds": 8.408601919999455,
+      "chunks": 124,
+      "text": " The second friend pressed on the doorbell 1/4*20=<<1/4*20=5>>5 more times than the first friend.\nThe total number of times the second friend pressed on the doorbell is 20+5=<<20+5=25>>25 times.\nThe third friend pressed on the doorbell 60+10=<<60+10=70>>70 times.\nThe total number of doorbell rings for the four friends is 20+25+70+60=<<20+25+70+60=175>>175 times.\n#### 175\n\n"
+    },
+    {
+      "i": 101,
+      "label": 6,
+      "pred": 6,
+      "correct": true,
+      "ttft_s": 6.990469812000811,
+      "seconds": 7.992228244000216,
+      "chunks": 98,
+      "text": " Solo has to read a total of 4 + 20 + 7 + 8 = <<4+20+7+8=39>>39 pages.\nHe has already read 15 pages, so he has 39 - 15 = <<39-15=24>>24 pages left.\nHe has 4 days left to read, so he has to read 24 / 4 = <<24/4=6>>6 pages per day.\n#### 6\n\n"
+    },
+    {
+      "i": 102,
+      "label": 26,
+      "pred": 23,
+      "correct": false,
+      "ttft_s": 6.9074537540000165,
+      "seconds": 7.596369367000079,
+      "chunks": 68,
+      "text": " John drinks 4 glasses of water on weekdays\nSo he drinks 4*5=<<4*5=20>>20 glasses on weekdays\nOn the weekend he drinks 3 glasses of water\nSo in total he drinks 20+3=<<20+3=23>>23 glasses of water\n#### 23\n\n"
+    },
+    {
+      "i": 103,
+      "label": 140,
+      "pred": 140,
+      "correct": true,
+      "ttft_s": 6.87950921599986,
+      "seconds": 7.587186147000466,
+      "chunks": 70,
+      "text": " The city is 42 miles across, and the fog covers 3 miles in 10 minutes, so it will take 42/3 = <<42/3=14>>14 sets of 10 minutes.\n14 sets of 10 minutes is 14*10 = <<14*10=140>>140 minutes.\n#### 140\n\n"
+    },
+    {
+      "i": 104,
+      "label": 500,
+      "pred": 500,
+      "correct": true,
+      "ttft_s": 6.722590215999844,
+      "seconds": 7.581136635999428,
+      "chunks": 85,
+      "text": " Poppy has placed 1000/4 = <<1000/4=250>>250 pieces.\nRemaining pieces after Poppy = 1000-250 = <<1000-250=750>>750\nMom places 750/3 = <<750/3=250>>250 pieces\nPieces left to place = 750-250 = <<750-250=500>>500 pieces\n#### 500\n\n"
+    },
+    {
+      "i": 105,
+      "label": 20,
+      "pred": 20,
+      "correct": true,
+      "ttft_s": 6.565048526999817,
+      "seconds": 7.138878038000257,
+      "chunks": 57,
+      "text": " Amir eats 5 cookies, and Cody eats 3 times as many, so Cody eats 5*3=<<5*3=15>>15 cookies.\nTogether, they eat 5+15=<<5+15=20>>20 cookies.\n#### 20\n\n"
+    },
+    {
+      "i": 106,
+      "label": 72,
+      "pred": 144,
+      "correct": false,
+      "ttft_s": 6.703988552000737,
+      "seconds": 7.733369844000663,
+      "chunks": 101,
+      "text": " Each box is 5-1*2=<<5-1*2=3>>3 inches long on the inside\nThey are 6-2=<<6-2=4>>4 inches wide inside\nSo the inner volume is 3*4*4=<<3*4*4=48>>48 cubic inches\nSo the total volume of all 3 boxes is 48*3=<<48*3=144>>144 cubic inches\n#### 144\n\n"
+    },
+    {
+      "i": 107,
+      "label": 3,
+      "pred": 3,
+      "correct": true,
+      "ttft_s": 7.33705351000026,
+      "seconds": 9.598479089000648,
+      "chunks": 221,
+      "text": " On Monday and Tuesday, Frankie watched 1 hour each night, for 2*1=<<2*1=2>>2 hours of TV.\nOn Thursday, he watched 1 hour plus 30 minutes, for 1+0.5=<<1+0.5=1.5>>1.5 hours of TV.\nOn Friday, he watched two 1-hour episodes, for 2*1=<<2*1=2>>2 hours of TV.\nIn all, Frankie watched 2+1.5+2=<<2+1.5+2=5.5>>5.5 hours of TV on Monday, Tuesday, Thursday and Friday.\nThus, he watched 7-5.5=<<7-5.5=1.5>>1.5 hours of TV on Wednesday.\nSince each show was 30 minutes, or 0.5 hours, long, he watched 1.5/0.5=<<1.5/0.5=3>>3 episodes on Wednesday.\n#### 3\n\n"
+    },
+    {
+      "i": 108,
+      "label": 50,
+      "pred": 50,
+      "correct": true,
+      "ttft_s": 7.013617020000311,
+      "seconds": 7.650255185000788,
+      "chunks": 63,
+      "text": " Henry baked 110 + 5 = <<110+5=115>>115 cookies.\nHenry meant to bake 115 - 15 = <<115-15=100>>100 cookies.\nHenry baked 100 / 2 = <<100/2=50>>50 cookies last year.\n#### 50\n\n"
+    },
+    {
+      "i": 109,
+      "label": 28,
+      "pred": 28,
+      "correct": true,
+      "ttft_s": 6.836219073000393,
+      "seconds": 7.743514258000687,
+      "chunks": 89,
+      "text": " The gas costs $3.00 a gallon, and you get $0.20 off per gallon, so that's 3-.20=$<<3-.20=2.80>>2.80 a gallon\nIt's $2.80 a gallon and this person buys 10 gallons, that's 2.80*10=$<<2.80*10=28.00>>28.00\n#### 28\n\n"
+    },
+    {
+      "i": 110,
+      "label": 45,
+      "pred": 45,
+      "correct": true,
+      "ttft_s": 7.090778767000302,
+      "seconds": 7.934407056000055,
+      "chunks": 83,
+      "text": " Beatrice's roll-ups were 2*24=<<2*24=48>>48 total\nMarcell's roll-ups were 3*14=<<3*14=42>>42 total\nTogether they ate 48+42=<<48+42=90>>90\nSo on average they ate 90/2=<<90/2=45>>45\n#### 45\n\n"
+    },
+    {
+      "i": 111,
+      "label": 16,
+      "pred": 16,
+      "correct": true,
+      "ttft_s": 6.928382899999633,
+      "seconds": 7.8647034440000425,
+      "chunks": 92,
+      "text": " The shore was 64 seconds away, which means Julia rowed 64/16 = <<64/16=4>>4 sets of twenty feet.\nEach set of twenty feet resulted in 2*2 = <<2*2=4>>4 liters of water entering the boat.\nTherefore, the boat took on 4*4 = <<4*4=16>>16 liters of water by the time Julia reached shore.\n#### 16\n\n"
+    },
+    {
+      "i": 112,
+      "label": 24,
+      "pred": 24,
+      "correct": true,
+      "ttft_s": 6.878734046000318,
+      "seconds": 7.5655005520002305,
+      "chunks": 68,
+      "text": " Each teacher has 2 lessons per day, so 4 teachers have 4*2=<<4*2=8>>8 lessons per day.\nThe whiteboard is cleaned 3 times per lesson, so it is cleaned 8*3=<<8*3=24>>24 times per day.\n#### 24\n\n"
+    },
+    {
+      "i": 113,
+      "label": 25,
+      "pred": 25,
+      "correct": true,
+      "ttft_s": 6.565251173999968,
+      "seconds": 7.1792608039995685,
+      "chunks": 61,
+      "text": " Ryan plants 2 flowers a day for 15 days, so he plants 2*15=<<2*15=30>>30 flowers.\n5 of the flowers did not grow, so he has 30-5=<<30-5=25>>25 flowers.\n#### 25\n\n"
+    },
+    {
+      "i": 114,
+      "label": 6,
+      "pred": 6,
+      "correct": true,
+      "ttft_s": 7.0173947489993225,
+      "seconds": 7.540903471000092,
+      "chunks": 52,
+      "text": " Brittany's phone can hold 1800/6=<<1800/6=300>>300 photographs.\nThe number of birds in Jamal's duck photograph is 300/50=<<300/50=6>>6 ducks.\n#### 6\n\n"
+    },
+    {
+      "i": 115,
+      "label": 90,
+      "pred": 90,
+      "correct": true,
+      "ttft_s": 7.113202259999525,
+      "seconds": 9.452138489999925,
+      "chunks": 228,
+      "text": " The 2 x 4 x 10 boards cost 10*10=$<<10*10=100>>100.\nThe 4 x 4 x 10 boards cost 16*5=$<<16*5=80>>80.\nSo all the lumber cost 100+80=$<<100+80=180>>180.\nThe price of the lumber went up 50% so 2 x 4 x 10 boards now sell for 10*1.5=$<<10*1.5=15>>15 each.\nSo 10 boards sell for 15*10=$<<15*10=150>>150.\nThe 4 x 4 x 10 boards sell for 16*1.5=$<<16*1.5=24>>24 each.\nSo 5 boards sell for 24*5=$<<24*5=120>>120.\nThat means she sells them all for 150+120=$<<150+120=270>>270.\nSo she made a profit of 270-180=$<<270-180=90>>90.\n#### 90\n\n"
+    },
+    {
+      "i": 116,
+      "label": 42,
+      "pred": 42,
+      "correct": true,
+      "ttft_s": 6.739883528000064,
+      "seconds": 7.478332151000359,
+      "chunks": 73,
+      "text": " The total ratio representing the number of teaspoons of sugar and cups of water she uses is 7+13=<<7+13=20>>20\nSince the fraction of the mixture representing sugar is 7/20, she used 7/20*120 = <<7/20*120=42>>42 teaspoons of sugar.\n#### 42\n\n"
+    },
+    {
+      "i": 117,
+      "label": 360,
+      "pred": 360,
+      "correct": true,
+      "ttft_s": 6.563161973000206,
+      "seconds": 6.9753105670006335,
+      "chunks": 41,
+      "text": " He bought 2*3=<<2*3=6>>6 pairs of shoes\nSo he paid 6*60=$<<6*60=360>>360\n#### 360\n\n"
+    },
+    {
+      "i": 118,
+      "label": 4,
+      "pred": 4,
+      "correct": true,
+      "ttft_s": 6.969256847999532,
+      "seconds": 8.152959707000264,
+      "chunks": 116,
+      "text": " On the first day, the number of vehicles in the two containers is 2*5=<<2*5=10>>10 vehicles.\nWhen more containers were brought in the second day, the number of vehicles increased to 30, which means the number of vehicles that were brought in that day is 30-10=<<30-10=20>>20 vehicles.\nSince each container has 5 vehicles, the number of containers that were imported on the second day is 20/5=<<20/5=4>>4 containers.\n#### 4\n\n"
+    },
+    {
+      "i": 119,
+      "label": 95200,
+      "pred": 95200,
+      "correct": true,
+      "ttft_s": 7.024527177999516,
+      "seconds": 10.176003231000323,
+      "chunks": 307,
+      "text": " If Adrien's salary was 40% more than what he was earning four years ago, then he was earning 40/100*40000 = $<<40/100*40000=16000>>16000 more four years later.\nThe total amount Adrien was earning four years later is $16000+$40000 = $<<16000+40000=56000>>56000\nIf Adrien's total salary was 30% higher than Lylah's salary four years ago, then Lylah's salary was 30/100 less than Adrien's salary, which is $40000*(30/100) = $<<40000*(30/100)=12000>>12000\nLylah's salary four years ago is $40000-$12000 = $<<40000-12000=28000>>28000\nIf Lylah's salary increased by the same percentage as Adrien's, then her salary increased by 40/100*28000 = $<<40/100*28000=11200>>11200\nThe total amount Lylah was earning four years later is $28000+$11200 = $<<28000+11200=39200>>39200\nThe total amount Adrien and Lylah were earning four years later is $39200+$56000 = $<<39200+56000=95200>>95200\n#### 95200\n\n"
+    },
+    {
+      "i": 120,
+      "label": 240,
+      "pred": 240,
+      "correct": true,
+      "ttft_s": 6.646281949000695,
+      "seconds": 7.1678128900002775,
+      "chunks": 52,
+      "text": " Miguel uses 2 x 30 = <<2*30=60>>60 sheets of paper in a week.\nSo he uses 60 x 4 = <<60*4=240>>240 sheets of paper in a month.\n#### 240\n\n"
+    },
+    {
+      "i": 121,
+      "label": 27,
+      "pred": 27,
+      "correct": true,
+      "ttft_s": 6.790608727999825,
+      "seconds": 8.202718841000205,
+      "chunks": 139,
+      "text": " Morisette brought a total of 5 + 8 = <<5+8=13>>13 fruits.\nKael brought twice the amount of apples than Morisette, so he brought 5 x 2 = <<5*2=10>>10 apples.\nKael brought half the number of oranges than Morisette, so he brought 8/2 = <<8/2=4>>4 oranges.\nSo, Kael brought a total of 10 + 4 = <<10+4=14>>14 fruits.\nTherefore, they have a total of 13 + 14 = <<13+14=27>>27 fruits altogether.\n#### 27\n\n"
+    },
+    {
+      "i": 122,
+      "label": 48,
+      "pred": 48,
+      "correct": true,
+      "ttft_s": 6.863229980999677,
+      "seconds": 8.703332627999771,
+      "chunks": 180,
+      "text": " Sadie slept 8 hours on Monday.\nFor the next two days, she slept 2 hours less each day, so she slept 8-2=<<8-2=6>>6 hours on Tuesday and 6 hours on Wednesday.\nFor the rest of the week (Thursday, Friday, Saturday, Sunday), she slept 1 hour more than those two days, so she slept 6+1=<<6+1=7>>7 hours each day.\nThe total hours she slept from Monday to Wednesday is 8+6+6=<<8+6+6=20>>20 hours.\nThe total hours she slept from Thursday to Sunday is 7*4=<<7*4=28>>28 hours.\nSo, in total, she slept 20+28=<<20+28=48>>48 hours throughout the week.\n#### 48\n\n"
+    },
+    {
+      "i": 123,
+      "label": 50,
+      "pred": 50,
+      "correct": true,
+      "ttft_s": 6.620462290999967,
+      "seconds": 7.99320873600027,
+      "chunks": 134,
+      "text": " First find the distance Rosie runs in the first 3 hours: 10 miles/hour * 3 hours = <<10*3=30>>30 miles\nThen find how many hours she runs at 5 miles per hour: 7 hours - 3 hours = <<7-3=4>>4 hours\nThen find the distance she runs at 5 miles per hour: 5 miles/hour * 4 hours = <<5*4=20>>20 miles\nThen add the two distances to find the total distance she runs: 30 miles + 20 miles = <<30+20=50>>50 miles\n#### 50\n\n"
+    },
+    {
+      "i": 124,
+      "label": 10,
+      "pred": 10,
+      "correct": true,
+      "ttft_s": 6.929374860999815,
+      "seconds": 7.587570742000025,
+      "chunks": 65,
+      "text": " First find how many letters Jennie stamps: 60 letters / 3 = <<60/3=20>>20 letters\nThen subtract that number from the number of letters in the pile at the end: 30 letters - 20 letters = <<30-20=10>>10 letters\n#### 10\n\n"
+    },
+    {
+      "i": 125,
+      "label": 10,
+      "pred": 10,
+      "correct": true,
+      "ttft_s": 7.374378675999651,
+      "seconds": 7.8776079660001415,
+      "chunks": 50,
+      "text": " Julia had 12-5=<<12-5=7>>7 spoons after removing the spoons her husband bought.\nJulia bought 7+3=<<7+3=10>>10 spoons\n#### 10\n\n"
+    },
+    {
+      "i": 126,
+      "label": 82,
+      "pred": 82,
+      "correct": true,
+      "ttft_s": 6.788433570999587,
+      "seconds": 7.292555209999591,
+      "chunks": 50,
+      "text": " Dylan bought 38 + 6 = <<38+6=44>>44 fish sausages.\nSo, he bought 38 + 44 = <<38+44=82>>82 sausages in all.\n#### 82\n\n"
+    },
+    {
+      "i": 127,
+      "label": 120,
+      "pred": 120,
+      "correct": true,
+      "ttft_s": 6.602663914000004,
+      "seconds": 7.035465546000523,
+      "chunks": 43,
+      "text": " Amy made 50+20=<<50+20=70>>70 friends\nLily and Amy have 70+50=<<70+50=120>>120 friends together.\n#### 120\n\n"
+    },
+    {
+      "i": 128,
+      "label": 880,
+      "pred": 880,
+      "correct": true,
+      "ttft_s": 7.056200775999969,
+      "seconds": 8.736056646999714,
+      "chunks": 164,
+      "text": " If each pepper costs 15$, a watermelon costs 3*15 = $<<3*15=45>>45\nAn orange costs 5 less than what a watermelon cost, which is 45-5 = $<<45-5=40>>40\nDillon will spend 45*4 = $<<45*4=180>>180 on buying 4 watermelons\nHe'll spend 15*20 = $<<15*20=300>>300 on buying 20 peppers\nThe cost of buying 10 oranges is 40*10 = $<<40*10=400>>400\nThe total amount of money he will spend is 400+300+180 = $<<400+300+180=880>>880\n#### 880\n\n"
+    },
+    {
+      "i": 129,
+      "label": 10000,
+      "pred": 10000,
+      "correct": true,
+      "ttft_s": 6.818724060000022,
+      "seconds": 8.012320636000368,
+      "chunks": 117,
+      "text": " The hospital sees 500*24=<<500*24=12000>>12,000 minutes of patients\nThat is 12000/60=<<12000/60=200>>200 hours of patients\nThe hospital charges 200*200=$<<200*200=40000>>40,000\nThe doctors cost 200*150=$<<200*150=30000>>30,000\nSo the profit is 40,000-30,000=$<<40000-30000=10000>>10,000\n#### 10000\n\n"
+    },
+    {
+      "i": 130,
+      "label": 30,
+      "pred": 30,
+      "correct": true,
+      "ttft_s": 6.788687141999617,
+      "seconds": 7.746832808999898,
+      "chunks": 94,
+      "text": " First find the number of elves that quit after the vomit incidents: 60 elves / 3 = <<60/3=20>>20 elves\nThen subtract that number from the starting number of elves: 60 elves - 20 elves = <<60-20=40>>40 elves\nThen subtract the number that quit after the shin kicks: 40 elves - 10 elves = <<40-10=30>>30 elves\n#### 30\n\n"
+    },
+    {
+      "i": 131,
+      "label": 940,
+      "pred": 940,
+      "correct": true,
+      "ttft_s": 6.584246489000179,
+      "seconds": 7.18096105099994,
+      "chunks": 59,
+      "text": " His expenditure in June was 500 - 60 = $<<500-60=440>>440.\nTherefore, his total expenditure for the two months is $500 + $440 = $<<500+440=940>>940.\n#### 940\n\n"
+    },
+    {
+      "i": 132,
+      "label": 60,
+      "pred": 60,
+      "correct": true,
+      "ttft_s": 6.829561879000721,
+      "seconds": 8.177226739000616,
+      "chunks": 132,
+      "text": " Pam used 2 rides x 6 tickets = <<2*6=12>>12 tickets for the roller coaster.\nFred used 4 rides x 6 tickets = <<4*6=24>>24 tickets for the roller coaster.\nPam used 2 rides x 6 tickets = <<2*6=12>>12 tickets for the luge.\nFred used 2 rides x 6 tickets = <<2*6=12>>12 tickets for the luge.\nThey used 12 + 24 + 12 + 12 = <<12+24+12+12=60>>60 tickets that day.\n#### 60\n\n"
+    },
+    {
+      "i": 133,
+      "label": 13,
+      "pred": 13,
+      "correct": true,
+      "ttft_s": 6.716862795999987,
+      "seconds": 7.352095804999408,
+      "chunks": 63,
+      "text": " Tuesday he walked 4*6=<<4*6=24>>24 miles\nFor Monday and Tuesday combined he walked 4+24=<<4+24=28>>28 miles\nWednesday he walked 41-28=<<41-28=13>>13 miles\n#### 13\n\n"
+    },
+    {
+      "i": 134,
+      "label": 720,
+      "pred": 720,
+      "correct": true,
+      "ttft_s": 6.546058932000051,
+      "seconds": 6.966209261000586,
+      "chunks": 42,
+      "text": " He pays 4*15=$<<4*15=60>>60 per month\nSo he pays 60*12=$<<60*12=720>>720 per year\n#### 720\n\n"
+    },
+    {
+      "i": 135,
+      "label": 40,
+      "pred": 40,
+      "correct": true,
+      "ttft_s": 6.715037692999431,
+      "seconds": 7.754154702999585,
+      "chunks": 102,
+      "text": " Brian lost 5 video games, so he has 20 - 5 = <<20-5=15>>15 video games.\nBobby has 3 times as many video games as Brian, so Bobby has 3 * 15 = <<3*15=45>>45 video games.\nBobby has 5 fewer than 3 times as many video games as Brian, so Bobby has 45 - 5 = <<45-5=40>>40 video games.\n#### 40\n\n"
+    },
+    {
+      "i": 136,
+      "label": 6,
+      "pred": 3,
+      "correct": false,
+      "ttft_s": 6.697023254999294,
+      "seconds": 7.136836373999358,
+      "chunks": 44,
+      "text": " Scottish Highlands:27/3=<<27/3=9>>9 unicorns\nFemale Scottish Unicorns:9/3=<<9/3=3>>3 unicorns\n#### 3\n\n"
+    },
+    {
+      "i": 137,
+      "label": 29,
+      "pred": 29,
+      "correct": true,
+      "ttft_s": 6.9419882820002385,
+      "seconds": 9.139442593999775,
+      "chunks": 215,
+      "text": " The subs will cost 7.50 x 2 = $<<7.5*2=15.00>>15.00.\nThe chips will cost 1.50 x 2 = $<<1.5*2=3.00>>3.00.\nThe cookies will cost 1.00 x 2 = $<<1*2=2.00>>2.00.\nThe total order cost is 15.00 + 3.00 + 2.00 = $<<15+3+2=20.00>>20.00.\nThe delivery fee is 20.00 x 20% = $<<20*0.20=4.00>>4.00.\nThe total cost with the delivery fee is 20.00 + 4.00 = $<<20+4=24.00>>24.00.\nThe total cost with the tip is 24.00 + 5.00 = $<<24+5=29.00>>29.00.\n#### 29\n\n"
+    },
+    {
+      "i": 138,
+      "label": 105,
+      "pred": 21,
+      "correct": false,
+      "ttft_s": 6.9481987070003015,
+      "seconds": 8.60170013700008,
+      "chunks": 162,
+      "text": " Mark completed 75 questions at a rate of 5 questions per hour, so he took 75/5 = <<75/5=15>>15 hours to complete the first test.\nHe had 8 hours to complete the first test, so he left 15-8 = <<15-8=7>>7 questions incomplete.\nMark completed 100 questions at a rate of 5 questions per hour, so he took 100/5 = <<100/5=20>>20 hours to complete the second test.\nHe had 6 hours to complete the second test, so he left 20-6 = <<20-6=14>>14 questions incomplete.\nIn total, Mark left 7+14 = <<7+14=21>>21 questions incomplete.\n#### 21\n\n"
+    },
+    {
+      "i": 139,
+      "label": 70,
+      "pred": 70,
+      "correct": true,
+      "ttft_s": 6.703882632000386,
+      "seconds": 7.196106506000433,
+      "chunks": 49,
+      "text": " Four times the number of blue gumballs is 12*4=<<12*4=48>>48\nThere are 48+22=<<48+22=70>>70 pink gumballs\n#### 70\n\n"
+    },
+    {
+      "i": 140,
+      "label": 20,
+      "pred": 20,
+      "correct": true,
+      "ttft_s": 6.636506292999911,
+      "seconds": 7.229938559000402,
+      "chunks": 59,
+      "text": " The number of semi-automatic cars is 20-12-4 = <<20-12-4=4>>4.\nThis means that the percentage of semi-automatic cars is 4/20*100 = <<4/20*100=20>>20%.\n#### 20\n\n"
+    },
+    {
+      "i": 141,
+      "label": 400,
+      "pred": 400,
+      "correct": true,
+      "ttft_s": 6.649629318999359,
+      "seconds": 8.109603274999245,
+      "chunks": 143,
+      "text": " Let q be the number of queens, b be the number of babies, and w be the number of workers.\nThen, b = 2q and w = 2b = 2(2q) = 4q.\nThe total number of bees is q + b + w = q + 2q + 4q = 7q = 700.\nSo, q = 700/7 = <<700/7=100>>100.\nThen, b = 2(100) = <<2*100=200>>200 and w = 4(100) = <<4*100=400>>400.\nThere are 400 worker bees.\n#### 400\n\n"
+    },
+    {
+      "i": 142,
+      "label": 140,
+      "pred": 140,
+      "correct": true,
+      "ttft_s": 6.715200375999302,
+      "seconds": 7.382508435000091,
+      "chunks": 66,
+      "text": " Jordan plays video games for 2 hours every day, so in one week he plays 2*7=<<2*7=14>>14 hours.\nIf Jordan worked instead of playing video games, he would earn 14*$10=$<<14*10=140>>140 in one week.\n#### 140\n\n"
+    },
+    {
+      "i": 143,
+      "label": 16,
+      "pred": 16,
+      "correct": true,
+      "ttft_s": 6.818062698000176,
+      "seconds": 7.877596305999759,
+      "chunks": 104,
+      "text": " The milk and eggs cost 2+3=<<2+3=5>>5 dollars\nThe nonfood items cost 3+3+4=<<3+3+4=10>>10 dollars\nThe tax was 10*.1=$<<10*.1=1>>1\nSo the nonfood cost 10+1=$<<10+1=11>>11\nSo the total cost was 11+5=$<<11+5=16>>16\n#### 16\n\n"
+    },
+    {
+      "i": 144,
+      "label": 20,
+      "pred": 20,
+      "correct": true,
+      "ttft_s": 7.531101737999961,
+      "seconds": 9.543239204000201,
+      "chunks": 197,
+      "text": " Kim has 3 clients and is adding 5 more, so he will have 3+5 = <<3+5=8>>8 clients.\nEach client needs 2 bottles of bleach, so 8 clients x 2 bottles = <<8*2=16>>16 bottles of bleach.\nEach bottle of bleach costs $2, so 16 bottles x $2 = $<<16*2=32>>32.\nEach client needs a pack of cloths, so 8 clients x 1 pack = <<8*1=8>>8 packs of cloths.\nEach pack of cloths costs $5, so 8 packs x $5 = $<<8*5=40>>40.\nHis total expenses are $32 + $40 = $<<32+40=72>>72.\nHis total income is $92, so his profit is $92 - $72 = $<<92-72=20>>20.\n#### 20\n\n"
+    },
+    {
+      "i": 145,
+      "label": 4000,
+      "pred": 4000,
+      "correct": true,
+      "ttft_s": 6.715645926999969,
+      "seconds": 7.2782350299994505,
+      "chunks": 56,
+      "text": " John has 10 x 100 = <<10*100=1000>>1000 pineapples.\nHe can harvest 1000 x 4 = <<1000*4=4000>>4000 pineapples within a year.\n#### 4000\n\n"
+    },
+    {
+      "i": 146,
+      "label": 2125,
+      "pred": 2125,
+      "correct": true,
+      "ttft_s": 7.023368119999759,
+      "seconds": 7.752279538999574,
+      "chunks": 72,
+      "text": " The second box has 500*3=<<500*3=1500>>1500 pieces\nThe third box has 500/4=<<500/4=125>>125 pieces\nJohnny picks up 500+1500+125=<<500+1500+125=2125>>2125 pieces\n#### 2125\n\n"
+    },
+    {
+      "i": 147,
+      "label": 75,
+      "pred": 75,
+      "correct": true,
+      "ttft_s": 7.463091031000658,
+      "seconds": 8.553087503000825,
+      "chunks": 106,
+      "text": " In the first 6 hours, 30 bees left the hive.\nIn the next 6 hours, 1/2 of 30 = <<30/2=15>>15 bees returned to the hive.\nIn the next 6 hours, 2 times 30 = <<2*30=60>>60 bees left the hive.\nIn the last 6 hours, 30 + 60 - 15 = <<30+60-15=75>>75 bees returned to the hive.\n#### 75\n\n"
+    },
+    {
+      "i": 148,
+      "label": 30,
+      "pred": 30,
+      "correct": true,
+      "ttft_s": 6.8857590950001395,
+      "seconds": 7.358781072999591,
+      "chunks": 47,
+      "text": " The total cost of admission is 12+10=$<<12+10=22>>22.\nBrittany's mom gave the cashier 22+8=$<<22+8=30>>30.\n#### 30\n\n"
+    },
+    {
+      "i": 149,
+      "label": 16,
+      "pred": 16,
+      "correct": true,
+      "ttft_s": 6.669591580000088,
+      "seconds": 7.07781929399971,
+      "chunks": 41,
+      "text": " Dorothy has 12/3=<<12/3=4>>4 Facebook friends.\nJames has 4*4=<<4*4=16>>16 Facebook friends.\n#### 16\n\n"
+    },
+    {
+      "i": 150,
+      "label": 4,
+      "pred": 4,
+      "correct": true,
+      "ttft_s": 7.138844144999894,
+      "seconds": 8.829502921000312,
+      "chunks": 165,
+      "text": " Steve lives 3 miles from school, so he has to travel 3*5280=<<3*5280=15840>>15840 feet.\nAt a rate of 440 feet per minute, it takes Steve 15840/440=<<15840/440=36>>36 minutes to get home.\nTim lives 2 miles from school, so he has to travel 2*5280=<<2*5280=10560>>10560 feet.\nAt a rate of 264 feet per minute, it takes Tim 10560/264=<<10560/264=40>>40 minutes to get home.\nTherefore, Steve is waiting at home for 40-36=<<40-36=4>>4 minutes.\n#### 4\n\n"
+    },
+    {
+      "i": 151,
+      "label": 5,
+      "pred": 5,
+      "correct": true,
+      "ttft_s": 7.129303658000026,
+      "seconds": 8.69477352300055,
+      "chunks": 154,
+      "text": " The 5 people on bicycles each had 2 tires, so 5*2=<<5*2=10>>10 tires.\nThe 3 people on tricycles each had 3 tires, so 3*3=<<3*3=9>>9 tires.\nThe one person on a unicycle had 1 tire, so 1*1=<<1*1=1>>1 tire.\nIn total, she inflated 10+9+1=<<10+9+1=20>>20 tires.\nAt 25 cents per tire, she made 20*25=<<20*25=500>>500 cents.\n500 cents is equal to $<<500/100=5>>5.\n#### 5\n\n"
+    },
+    {
+      "i": 152,
+      "label": 4,
+      "pred": 4,
+      "correct": true,
+      "ttft_s": 6.654802218999976,
+      "seconds": 7.268540400000347,
+      "chunks": 61,
+      "text": " Carl buys 10*6=<<10*6=60>>60 cookies\nThe cookies cost 60*0.10=$<<60*0.10=6>>6\nCarl receives 10-6=$<<10-6=4>>4 as change\n#### 4\n\n"
+    },
+    {
+      "i": 153,
+      "label": 48,
+      "pred": 48,
+      "correct": true,
+      "ttft_s": 7.257159613999647,
+      "seconds": 8.645878646999336,
+      "chunks": 136,
+      "text": " The seagull ate 14/2=<<14/2=7>>7 fries.\nThe pigeons ate 3*3=<<3*3=9>>9 fries.\nThe raccoon ate 2/3 of the remaining fries, so 1/3 of the fries were left, which is 5+1=<<5+1=6>>6 fries.\nSo the raccoon ate 6*2=<<6*2=12>>12 fries.\nSo the pack had 14+7+9+12+6=<<14+7+9+12+6=48>>48 fries.\n#### 48\n\n"
+    },
+    {
+      "i": 154,
+      "label": 272,
+      "pred": 272,
+      "correct": true,
+      "ttft_s": 6.949532839000312,
+      "seconds": 8.25889833600013,
+      "chunks": 128,
+      "text": " On Mondays, Wednesdays, and Fridays, Kimo spends 3 * 1 = <<3*1=3>>3 hours in class each day.\nOn Tuesdays and Thursdays, he spends 2 * 2 = <<2*2=4>>4 hours in class each day.\nIn one week, he spends 3 * 3 + 2 * 4 = <<3*3+2*4=17>>17 hours in class.\nIn one semester, he spends 17 * 16 = <<17*16=272>>272 hours in class.\n#### 272\n\n"
+    },
+    {
+      "i": 155,
+      "label": 280,
+      "pred": 280,
+      "correct": true,
+      "ttft_s": 6.941570332000083,
+      "seconds": 8.670038375000331,
+      "chunks": 169,
+      "text": " The rolls are 4 inches long, so 300 rolls = 300*4 = <<300*4=1200>>1200 inches\nThe croissants are 6 inches long, so 120 croissants = 120*6 = <<120*6=720>>720 inches\nThe baguettes are two feet long, so 60 baguettes = 60*2 = <<60*2=120>>120 feet\nThe rolls and croissants are in inches, so 1200+720 = <<1200+720=1920>>1920 inches\n1920 inches is 1920/12 = <<1920/12=160>>160 feet\nSo the total length is 160+120 = <<160+120=280>>280 feet\n#### 280\n\n"
+    },
+    {
+      "i": 156,
+      "label": 1400,
+      "pred": 1400,
+      "correct": true,
+      "ttft_s": 6.931301395999981,
+      "seconds": 7.680372800999976,
+      "chunks": 74,
+      "text": " The number of bananas needed by monkeys, gorillas and baboons is 200 + 400 + 100 = <<200+400+100=700>>700 bananas every month.\nTherefore, the total number of bananas needed for 2 months is 700 x 2 = <<700*2=1400>>1400 bananas.\n#### 1400\n\n"
+    },
+    {
+      "i": 157,
+      "label": 80,
+      "pred": 280,
+      "correct": false,
+      "ttft_s": 7.2031193650000205,
+      "seconds": 8.484574623000299,
+      "chunks": 126,
+      "text": " Blake runs 100*2=<<100*2=200>>200 yards each time he runs back and forth.\nSo he runs 200*15=<<200*15=3000>>3000 yards\nKelly runs 40*2=<<40*2=80>>80 yards each time she runs to the 40-yard line and back\nSo she runs 80*34=<<80*34=2720>>2720 yards\nSo the winner runs 3000-2720=<<3000-2720=280>>280 yards farther\n#### 280\n\n"
+    },
+    {
+      "i": 158,
+      "label": 34,
+      "pred": 34,
+      "correct": true,
+      "ttft_s": 6.751260205000108,
+      "seconds": 7.522176580000632,
+      "chunks": 76,
+      "text": " Raphael spent 4 x $1.5 = $<<4*1.5=6>>6 on pens.\nHe spent 2 x $4 = $<<2*4=8>>8 on notebooks.\nSo, Raphael spent $6 + $8 + $20 = $<<6+8+20=34>>34 on everything.\n#### 34\n\n"
+    },
+    {
+      "i": 159,
+      "label": 15,
+      "pred": 15,
+      "correct": true,
+      "ttft_s": 6.826024451000194,
+      "seconds": 7.34030965599959,
+      "chunks": 51,
+      "text": " Finn sees 11+6=<<11+6=17>>17 tadpoles come out of hiding.\nThen 17-2=<<17-2=15>>15 tadpoles are visible in the pond.\n#### 15\n\n"
+    },
+    {
+      "i": 160,
+      "label": 16,
+      "pred": 16,
+      "correct": true,
+      "ttft_s": 6.8001900999997815,
+      "seconds": 7.374472274000254,
+      "chunks": 57,
+      "text": " On Tuesday, the tank had 17 + 7 = <<17+7=24>>24 feet of water.\nOn Wednesday, the tank had 24 * 2/3 = <<24*2/3=16>>16 feet of water.\n#### 16\n\n"
+    },
+    {
+      "i": 161,
+      "label": 32,
+      "pred": 32,
+      "correct": true,
+      "ttft_s": 6.958330827000282,
+      "seconds": 8.548926991999906,
+      "chunks": 155,
+      "text": " Anakin caught 10 starfish + 6 sea horses + 3 clownfish = <<10+6+3=19>>19 fish.\nLocsin caught 10 starfish - 5 = <<10-5=5>>5 starfish.\nLocsin caught 6 sea horses - 3 = <<6-3=3>>3 sea horses.\nLocsin caught 3 clownfish + 2 = <<3+2=5>>5 clownfish.\nLocsin caught 5 starfish + 3 sea horses + 5 clownfish = <<5+3+5=13>>13 fish.\nAnakin and Locsin caught 19 fish + 13 fish = <<19+13=32>>32 fish.\n#### 32\n\n"
+    },
+    {
+      "i": 162,
+      "label": 92,
+      "pred": 92,
+      "correct": true,
+      "ttft_s": 6.655325900999742,
+      "seconds": 7.723392066000088,
+      "chunks": 105,
+      "text": " The price of the bag of marbles increases by 20/100*20=$<<20/100*20=4>>4 every two months.\nAfter 36 months, the price will have increased 36/2=<<36/2=18>>18 times.\nThe total increase in price is 18*4=$<<18*4=72>>72\nThe new price of the bag of marbles is 20+72=$<<20+72=92>>92\n#### 92\n\n"
+    },
+    {
+      "i": 163,
+      "label": 50,
+      "pred": 50,
+      "correct": true,
+      "ttft_s": 6.815147098000125,
+      "seconds": 7.883926757999689,
+      "chunks": 105,
+      "text": " One action figure costs $5, so three action figures cost 3 * 5 = $<<3*5=15>>15.\nThe doll costs as much as three action figures, which means it costs 15 dollars.\nOne red car costs $4, so five red cars cost 5 * 4 = $<<5*4=20>>20.\nSo all toys are worth 20 + 15 + 15 = $<<20+15+15=50>>50.\n#### 50\n\n"
+    },
+    {
+      "i": 164,
+      "label": 15,
+      "pred": 15,
+      "correct": true,
+      "ttft_s": 6.902195849000236,
+      "seconds": 7.423134644000129,
+      "chunks": 52,
+      "text": " Doing taxes herself will cost her 3*$35=$<<3*35=105>>105 in lost income.\nSo hiring the accountant will leave her with $105-$90=$<<105-90=15>>15 more money.\n#### 15\n\n"
+    },
+    {
+      "i": 165,
+      "label": 77,
+      "pred": 77,
+      "correct": true,
+      "ttft_s": 7.297132402999523,
+      "seconds": 8.037745008999991,
+      "chunks": 73,
+      "text": " The total cost of the computer and accessories is 1090 + 157 + 74 + 102 = <<1090+157+74+102=1423>>1423 euros.\nElvira will have 1500 - 1423 = <<1500-1423=77>>77 euros left for her clothing.\n#### 77\n\n"
+    },
+    {
+      "i": 166,
+      "label": 5,
+      "pred": 4,
+      "correct": false,
+      "ttft_s": 6.845565714000259,
+      "seconds": 7.891383741000027,
+      "chunks": 103,
+      "text": " To make 15 Spanish flans, Sandra will need 15 flans*3 eggs per flan = <<15*3=45>>45 eggs.\nSince she already has a basket of 9 eggs, she will need 45 eggs - 9 eggs = <<45-9=36>>36 more eggs.\nSince her neighbor gives her 9 eggs per babysitting, she will have to babysit 36/9 = <<36/9=4>>4 times.\n#### 4\n\n"
+    },
+    {
+      "i": 167,
+      "label": 16,
+      "pred": 16,
+      "correct": true,
+      "ttft_s": 6.552816635999989,
+      "seconds": 8.540278399000272,
+      "chunks": 194,
+      "text": " Let B = Brooke's age and S = Seth's age.\nSeth is twice as old as Brooke, so S = 2B.\nIn 2 years, their ages will be S+2 and B+2.\nThe sum of their ages in 2 years will be 28, so (S+2) + (B+2) = 28.\nSubstituting S = 2B, we get (2B+2) + (B+2) = 28.\nCombining like terms, 3B + 4 = 28.\nSubtracting 4 from both sides, 3B = 24.\nDividing both sides by 3, B = 8.\nSo Brooke is 8 years old.\nSeth is twice as old as Brooke, so S = 2*8 = <<2*8=16>>16.\nSeth is 16 years old.\n#### 16\n\n"
+    },
+    {
+      "i": 168,
+      "label": 18,
+      "pred": 18,
+      "correct": true,
+      "ttft_s": 6.547121866000452,
+      "seconds": 6.980756699000267,
+      "chunks": 43,
+      "text": "Twice the money Ethel has is $8*2=$<<8*2=16>>16\nJimmy has $16+$2=$<<16+2=18>>18\n#### 18\n\n"
+    },
+    {
+      "i": 169,
+      "label": 120,
+      "pred": 120,
+      "correct": true,
+      "ttft_s": 6.557167927000592,
+      "seconds": 7.171316790000674,
+      "chunks": 61,
+      "text": " He walks 20*5=<<20*5=100>>100 miles on weekdays\nHe walks 10*2=<<10*2=20>>20 miles on weekends\nSo he walks 100+20=<<100+20=120>>120 miles\n#### 120\n\n"
+    },
+    {
+      "i": 170,
+      "label": 150,
+      "pred": 150,
+      "correct": true,
+      "ttft_s": 6.798234566999781,
+      "seconds": 7.607508104999397,
+      "chunks": 80,
+      "text": " The hat costs $25.\nThe jacket costs 3 * $25 = $<<3*25=75>>75.\nThe pants cost ($25 + $75) / 2 = $<<(25+75)/2=50>>50.\nEach uniform costs $25 + $75 + $50 = $<<25+75+50=150>>150.\n#### 150\n\n"
+    },
+    {
+      "i": 171,
+      "label": 1210,
+      "pred": 1210,
+      "correct": true,
+      "ttft_s": 6.790159746000427,
+      "seconds": 8.310590482000407,
+      "chunks": 149,
+      "text": " First find the total number of spider legs: 80 spiders * 8 legs/spider = <<80*8=640>>640 legs\nThen find the total number of insect legs: 90 insects * 6 legs/insect = <<90*6=540>>540 legs\nThen find the total number of mutant invertebrate legs: 3 invertebrates * 10 legs/invertebrate = <<3*10=30>>30 legs\nThen add the number of legs from each group of animals to find the total number of legs: 640 + 540 + 30 = <<640+540+30=1210>>1210 legs\n#### 1210\n\n"
+    },
+    {
+      "i": 172,
+      "label": 51,
+      "pred": 51,
+      "correct": true,
+      "ttft_s": 6.87609109099958,
+      "seconds": 8.1628689449999,
+      "chunks": 126,
+      "text": " If Sally Thirtytwo is 8 years old, then Sally Four is also 8 years old since they are the same age.\nGranny Red is two times as old as Sally Four, so Granny Red is 2*8=<<2*8=16>>16 years old.\nSally Two is three years older than Granny Red, so Sally Two is 16+3=<<16+3=19>>19 years old.\nThe total age of the four birds is 8+8+16+19=<<8+8+16+19=51>>51 years old.\n#### 51\n\n"
+    },
+    {
+      "i": 173,
+      "label": 18000,
+      "pred": 18000,
+      "correct": true,
+      "ttft_s": 6.962558665999495,
+      "seconds": 8.316703107999274,
+      "chunks": 133,
+      "text": " First find the total minimum monthly payment: $300 + $200 + $500 = $<<300+200+500=1000>>1000/month\nThen multiply the minimum payment by 1 + 50% = 1.5 to find the monthly payment Jessica wants to make: $1000 * 1.5 = $<<1000*1.5=1500>>1500/month\nThen multiply that number by the number of months in a year to find the yearly payment: $1500/month * 12 months/year = $<<1500*12=18000>>18,000/year\n#### 18000\n\n"
+    },
+    {
+      "i": 174,
+      "label": 95,
+      "pred": 95,
+      "correct": true,
+      "ttft_s": 7.216466964000574,
+      "seconds": 8.492747582000447,
+      "chunks": 125,
+      "text": " It takes Billy 1.5 minutes to peel a potato, so peeling 60 potatoes will take 60*1.5=<<60*1.5=90>>90 minutes.\nIt takes Billy 5 seconds to cut a potato, so cutting 60 potatoes will take 60*5=<<60*5=300>>300 seconds.\n300 seconds is 300/60=<<300/60=5>>5 minutes.\nSo in total, it will take Billy 90+5=<<90+5=95>>95 minutes to finish prepping the potatoes.\n#### 95\n\n"
+    },
+    {
+      "i": 175,
+      "label": 15,
+      "pred": 5,
+      "correct": false,
+      "ttft_s": 6.875610387000052,
+      "seconds": 7.832167923999805,
+      "chunks": 94,
+      "text": " Each gallon costs 3+2=$<<3+2=5>>5 to make\nThey get 20*.5=$<<20*.5=10>>10 per gallon\nSo they made 25/10=<<25/10=2.5>>2.5 gallons\nSo they spent 2.5*3=$<<2.5*3=7.5>>7.5 on lemons\n#### 7.5\n\n"
+    },
+    {
+      "i": 176,
+      "label": 100,
+      "pred": 100,
+      "correct": true,
+      "ttft_s": 6.680837122999947,
+      "seconds": 7.135136149000573,
+      "chunks": 45,
+      "text": " There were 240-80=<<240-80=160>>160 Chinese.\nIf 60 were boys, then 160-60=<<160-60=100>>100 were girls.\n#### 100\n\n"
+    },
+    {
+      "i": 177,
+      "label": 350,
+      "pred": 350,
+      "correct": true,
+      "ttft_s": 7.110918968999613,
+      "seconds": 8.620771439000237,
+      "chunks": 148,
+      "text": " Rent = (1/4)*6000 = <<(1/4)*6000=1500>>1500$\nCar fuel = (1/3)*6000 = <<(1/3)*6000=2000>>2000$\nRemaining amount = 6000-(1500+2000) = <<6000-(1500+2000)=2500>>2500$\nAmount donated to charity = (1/2)*2500 = <<(1/2)*2500=1250>>1250$\nAmount left after all expenses and donations = 2500-1250-200-700 = <<2500-1250-200-700=350>>350$\n#### 350\n\n"
+    },
+    {
+      "i": 178,
+      "label": 122,
+      "pred": 122,
+      "correct": true,
+      "ttft_s": 6.677915616000064,
+      "seconds": 7.74242022999988,
+      "chunks": 105,
+      "text": " Monic has 4 fewer crabs than Bo, who has 40 crabs, meaning Monic has 40-4 = <<40-4=36>>36 crabs.\nRani has ten more crabs than Monic, meaning Rani has 36+10 = <<36+10=46>>46 crabs.\nThe total number of crabs the three have together is 40+36+46 = <<40+36+46=122>>122 crabs\n#### 122\n\n"
+    },
+    {
+      "i": 179,
+      "label": 130,
+      "pred": 130,
+      "correct": true,
+      "ttft_s": 6.678103060000467,
+      "seconds": 7.448157685999831,
+      "chunks": 76,
+      "text": " For the first week, he earned $10 x 5 = $<<10*5=50>>50.\nFor the second week, he earned $10 x 8 = $<<10*8=80>>80.\nTherefore, he earned $50 + $80 = $<<50+80=130>>130 for the first two weeks.\n#### 130\n\n"
+    },
+    {
+      "i": 180,
+      "label": 20,
+      "pred": 20,
+      "correct": true,
+      "ttft_s": 6.744268605000798,
+      "seconds": 7.410592347000602,
+      "chunks": 66,
+      "text": " The winner got 3/4 of the total votes, which is 3/4*80 = <<3/4*80=60>>60 votes\nThe total number of votes is 80, so the loser got 80-60 = <<80-60=20>>20 votes\n#### 20\n\n"
+    },
+    {
+      "i": 181,
+      "label": 160,
+      "pred": 160,
+      "correct": true,
+      "ttft_s": 7.157369229000324,
+      "seconds": 7.617964185000346,
+      "chunks": 46,
+      "text": " The number of white carnations is 200/5=<<200/5=40>>40.\nThe number of red roses is 40*4=<<40*4=160>>160.\n#### 160\n\n"
+    },
+    {
+      "i": 182,
+      "label": 23,
+      "pred": 23,
+      "correct": true,
+      "ttft_s": 6.618209633999868,
+      "seconds": 7.65600085099959,
+      "chunks": 102,
+      "text": " Two years ago Jan was 30-2=<<30-2=28>>28\nHalf of Jan's age two years ago is 28/2=<<28/2=14>>14\nSo two years ago Mark was 14+5=<<14+5=19>>19\nSo now Mark is 19+2=<<19+2=21>>21\nSo Jean is 21+2=<<21+2=23>>23\n#### 23\n\n"
+    },
+    {
+      "i": 183,
+      "label": 2,
+      "pred": 2,
+      "correct": true,
+      "ttft_s": 7.456040793999819,
+      "seconds": 8.305338975000268,
+      "chunks": 84,
+      "text": " The well-rounded team will run the relay in 55*4=<<55*4=220>>220 seconds.\nThe less well-rounded team will run the relay in 60+57+54+51=<<60+57+54+51=222>>222 seconds.\nThe well-rounded team will win by 222-220=<<222-220=2>>2 seconds.\n#### 2\n\n"
+    },
+    {
+      "i": 184,
+      "label": 25,
+      "pred": 25,
+      "correct": true,
+      "ttft_s": 6.676478394999322,
+      "seconds": 7.623159578000013,
+      "chunks": 93,
+      "text": " There are 3 numbers greater than 3 on a six-sided die, so the probability of rolling a number greater than 3 is 3/6 = 50%.\nThe probability of rolling two even numbers in a row is (3/6)*(3/6) = 25%.\nTherefore, it is 50% - 25% = 25% more likely that he rolls a number greater than 3.\n#### 25\n\n"
+    },
+    {
+      "i": 185,
+      "label": 30,
+      "pred": 30,
+      "correct": true,
+      "ttft_s": 6.652114282000184,
+      "seconds": 7.165617958999974,
+      "chunks": 51,
+      "text": " Since Jenna picked half as many apples as her mom, she picked 20/2 = <<20/2=10>>10 apples.\nThey both picked 10+20 = <<10+20=30>>30 apples.\n#### 30\n\n"
+    },
+    {
+      "i": 186,
+      "label": 5,
+      "pred": 5,
+      "correct": true,
+      "ttft_s": 7.34495015199991,
+      "seconds": 8.537510352999561,
+      "chunks": 116,
+      "text": " The 10 hamsters use 10*5=<<10*5=50>>50 pieces of straw.\nThe rabbits use 20 pieces of straw.\nSo the rats use 160-50-20=<<160-50-20=90>>90 pieces of straw.\nEach rat uses 6 pieces of straw, so there are 90/6=<<90/6=15>>15 rats.\nThere are 3 cages, so there are 15/3=<<15/3=5>>5 rats in each cage.\n#### 5\n\n"
+    },
+    {
+      "i": 187,
+      "label": 106,
+      "pred": 1208,
+      "correct": false,
+      "ttft_s": 6.655455990000519,
+      "seconds": 8.863323105000745,
+      "chunks": 215,
+      "text": " For the first month, the interest is $100 x 2% = $<<100*0.02=2>>2.\nSo, the amount to be paid after a month is $100 + $2 = $<<100+2=102>>102.\nFor the second month, the interest is $102 x 2% = $<<102*0.02=2.04>>2.04.\nSo, the amount to be paid after 2 months is $102 + $2.04 = $<<102+2.04=104.04>>104.04.\nFor the third month, the interest is $104.04 x 2% = $<<104.04*0.02=2.0808>>2.0808.\nSo, the total amount to be paid after 3 months is $104.04 + $2.0808 = $<<104.04+2.0808=106.1208>>106.1208.\n#### 106.1208\n\n"
+    },
+    {
+      "i": 188,
+      "label": 50,
+      "pred": 50,
+      "correct": true,
+      "ttft_s": 6.908702796000398,
+      "seconds": 8.338609481000276,
+      "chunks": 140,
+      "text": " Let's say the number of bags the trader bought is x.\nThe cost of buying the bags is x*$20 = $20x\nThe cost of transporting the bags is x*$2 = $2x\nThe total cost of buying and transporting the bags is $20x + $2x = $22x\nThe selling price of the bags is x*$30 = $30x\nThe profit made is $30x - $22x = $8x\nSince the profit made is $400, then $8x = $400\nx = $400/$8 = <<400/8=50>>50\nThe trader sold 50 bags.\n#### 50\n\n"
+    },
+    {
+      "i": 189,
+      "label": 34,
+      "pred": 34,
+      "correct": true,
+      "ttft_s": 6.898509742999522,
+      "seconds": 8.071738356999958,
+      "chunks": 115,
+      "text": " The cost of the food is $20.25 - $4.50 = $<<20.25-4.5=15.75>>15.75.\nThe cost of the rides is $33 x 2 = $<<33*2=66>>66.\nThe total cost is $20.25 + $15.75 + $66 = $<<20.25+15.75+66=102>>102.\nSo, each of them paid $102/3 = $<<102/3=34>>34.\n#### 34\n\n"
+    },
+    {
+      "i": 190,
+      "label": 360,
+      "pred": 360,
+      "correct": true,
+      "ttft_s": 6.570675017000212,
+      "seconds": 6.990655210000114,
+      "chunks": 42,
+      "text": " He collects for 3*60=<<3*60=180>>180 minutes\nSo he collects 180*2=<<180*2=360>>360 peaches\n#### 360\n\n"
+    },
+    {
+      "i": 191,
+      "label": 5,
+      "pred": 5,
+      "correct": true,
+      "ttft_s": 6.6385240359995805,
+      "seconds": 7.5256347699996695,
+      "chunks": 87,
+      "text": " One duck needs 3.5 pounds of insects a week and there are 10 ducks so they need 3.5*10 = <<3.5*10=35>>35 pounds of insects a week\nThey need 35 pounds a week and there are 7 days in a week so they need 35/7 = <<35/7=5>>5 pounds of insects per day\n#### 5\n\n"
+    },
+    {
+      "i": 192,
+      "label": 91,
+      "pred": 56,
+      "correct": false,
+      "ttft_s": 6.776129466999919,
+      "seconds": 7.681276330000401,
+      "chunks": 89,
+      "text": " He gains 10-2=<<10-2=8>>8 trees a year\nSo he has 8*10=<<8*10=80>>80 trees after 10 years\n30% of those trees die so 80*.3=<<80*.3=24>>24 trees die\nThat means he has 80-24=<<80-24=56>>56 trees left\n#### 56\n\n"
+    },
+    {
+      "i": 193,
+      "label": 24,
+      "pred": 24,
+      "correct": true,
+      "ttft_s": 7.412419790000058,
+      "seconds": 8.716523799999777,
+      "chunks": 128,
+      "text": " To start, 18 pink flamingos were placed out on Sue's front yard.\nOn Saturday, one third of 18, or 18/3=<<18/3=6>>6 flamingos were painted white.\nOn Sunday, 18 more pink flamingos were added to the yard.\nThus, at noon on Sunday, there were 18-6+18=<<18-6+18=30>>30 pink flamingos and 6 white flamingos.\nTherefore, there were 30-6=<<30-6=24>>24 more pink flamingos than white flamingos.\n#### 24\n\n"
+    },
+    {
+      "i": 194,
+      "label": 10,
+      "pred": 10,
+      "correct": true,
+      "ttft_s": 6.6629178790008154,
+      "seconds": 7.54433647299993,
+      "chunks": 87,
+      "text": " Violetta wants to buy crayons in 5 different colors, so she will buy 5 * 1 = <<5*1=5>>5 crayons.\nSo she will spend 5 * 2 = $<<5*2=10>>10 on crayons.\nThat means she will be left with 20 - 10 = $<<20-10=10>>10 in change.\n#### 10\n\n"
+    },
+    {
+      "i": 195,
+      "label": 12,
+      "pred": 12,
+      "correct": true,
+      "ttft_s": 6.6529079490001095,
+      "seconds": 7.2611995639999805,
+      "chunks": 60,
+      "text": " A pen costs 1.20 + 0.30 = $<<1.20+0.30=1.50>>1.50.\n8 pens will cost 1.50 x 8 = $<<1.5*8=12>>12.\n#### 12\n\n"
+    },
+    {
+      "i": 196,
+      "label": 120,
+      "pred": 120,
+      "correct": true,
+      "ttft_s": 6.667704687999503,
+      "seconds": 7.17271751699991,
+      "chunks": 50,
+      "text": " 40 restaurants * 2 pounds of carrots = <<40*2=80>>80 pounds of carrots\n200 pounds of carrots - 80 pounds of carrots = <<200-80=120>>120 pounds of carrots\n#### 120\n\n"
+    },
+    {
+      "i": 197,
+      "label": 6277,
+      "pred": 6277,
+      "correct": true,
+      "ttft_s": 6.737657304000095,
+      "seconds": 7.448540145000152,
+      "chunks": 70,
+      "text": " The total number of men and women is 8417 + 9092 = <<8417+9092=17509>>17509.\nThe number of children is 23786 - 17509 = <<23786-17509=6277>>6277.\n#### 6277\n\n"
+    },
+    {
+      "i": 198,
+      "label": 320,
+      "pred": 320,
+      "correct": true,
+      "ttft_s": 6.97714304100009,
+      "seconds": 8.208694706000642,
+      "chunks": 121,
+      "text": " In the first month, Elaine collected 20 x 3 = <<20*3=60>>60 pokemon cards.\nIn the second month, she collected 60 - 20 = <<60-20=40>>40 pokemon cards.\nIn the third month, she collected (60 + 40) x 2 = <<(60+40)*2=200>>200 pokemon cards.\nTherefore, the total number of pokemon cards she has now is 20 + 60 + 40 + 200 = <<20+60+40+200=320>>320.\n#### 320\n\n"
+    },
+    {
+      "i": 199,
+      "label": 7500,
+      "pred": 7500,
+      "correct": true,
+      "ttft_s": 7.008634808000352,
+      "seconds": 8.424683660000483,
+      "chunks": 139,
+      "text": " Mark edits 1000/2=<<1000/2=500>>500 sentences for each publisher.\nAt 5 cents per sentence, Mark makes 500*5=<<500*5=2500>>2500 cents from Publisher A.\nPublisher B pays twice as much, or 5*2=<<5*2=10>>10 cents per sentence.\nAt 10 cents per sentence, Mark makes 500*10=<<500*10=5000>>5000 cents from Publisher B.\nIn total, Mark makes 2500+5000=<<2500+5000=7500>>7500 cents per week.\n#### 7500\n\n"
+    }
+  ]
+}

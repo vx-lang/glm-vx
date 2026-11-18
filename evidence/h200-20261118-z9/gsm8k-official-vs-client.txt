@@ -1,0 +1,19 @@
+states 200
+{'same_text': 45, 'official_right': 187}
+official right 187 client-on-SGLang right 183 glm-vx right 184
+official vs client on SGLang: same answer 186 of 200
+questions where the two SGLang runs answer differently: 14
+  q7: label 160 official 120 client-on-SGLang 160 glm-vx 160
+  q15: label 125 official 125 client-on-SGLang 2971 glm-vx 29
+  q37: label 2 official 15 client-on-SGLang 5 glm-vx 11
+  q70: label 7425 official 7425 client-on-SGLang 2085 glm-vx 1245
+  q87: label 9360 official 10080 client-on-SGLang 9360 glm-vx 10080
+  q99: label 58 official 58 client-on-SGLang 40 glm-vx 58
+  q115: label 90 official 90 client-on-SGLang 270 glm-vx 90
+  q119: label 95200 official 100000 client-on-SGLang 80000 glm-vx 95200
+  q147: label 75 official 90 client-on-SGLang 75 glm-vx 75
+  q153: label 48 official 48 client-on-SGLang 33 glm-vx 48
+  q155: label 280 official 280 client-on-SGLang 160 glm-vx 280
+  q186: label 5 official 5 client-on-SGLang 15 glm-vx 5
+  q187: label 106 official 106 client-on-SGLang 1208 glm-vx 1208
+  q193: label 24 official 30 client-on-SGLang 24 glm-vx 24

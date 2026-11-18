@@ -1,0 +1,1 @@
+/home/aditya/glm-h200/sglang-venv/bin/python -m sglang.launch_server --model-path /home/aditya/glm-h200/GLM-5.3 --tokenizer-path /home/aditya/glm-h200/GLM-5.3 --tp 1 --mem-fraction-static 0.8 --random-seed 0 --kv-cache-dtype bfloat16 --tp 8 --host 127.0.0.1 --port 30000

@@ -1,0 +1,1 @@
+engine=glm-vx url=http://127.0.0.1:8000 model=glm-5.3-vx-experimental backend=vllm

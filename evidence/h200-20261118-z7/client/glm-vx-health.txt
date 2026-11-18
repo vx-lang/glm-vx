@@ -1,0 +1,1 @@
+{"status": "ok", "model": "glm-5.3-vx-experimental", "backend": "vx-gpu-resident", "active_requests": 0, "waiting_requests": 0, "reserved_tokens": 0, "max_sequences": 1, "token_budget": 8192, "max_pending_events": 64, "batched_prefill": false, "prefix_cache": {"budget_bytes": 0, "retained_bytes": 0, "entries": 0, "hits": 0, "misses": 0, "evictions": 0, "rejected": 0}}

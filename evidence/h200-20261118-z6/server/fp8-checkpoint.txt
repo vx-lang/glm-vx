@@ -1,0 +1,1 @@
+/home/aditya/glm-h200/GLM-5.3: 78 layers (3 dense), 118629 tensors, fp8=True, layers beyond num_hidden_layers (MTP, skipped with speculation off): [78]
