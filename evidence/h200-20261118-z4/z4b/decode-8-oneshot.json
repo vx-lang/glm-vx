@@ -1,0 +1,73 @@
+{
+  "ranks": 8,
+  "layers": 4,
+  "context": 48,
+  "one_shot": true,
+  "ok": true,
+  "results": [
+    {
+      "rank": 0,
+      "us_per_step": 1520.593270839754,
+      "replays": 97,
+      "sums": 16,
+      "steps_differing": [],
+      "bit_exact": true
+    },
+    {
+      "rank": 1,
+      "us_per_step": 1520.4744791693277,
+      "replays": 97,
+      "sums": 16,
+      "steps_differing": [],
+      "bit_exact": true
+    },
+    {
+      "rank": 2,
+      "us_per_step": 1520.4633124975924,
+      "replays": 97,
+      "sums": 16,
+      "steps_differing": [],
+      "bit_exact": true
+    },
+    {
+      "rank": 3,
+      "us_per_step": 1520.3286666671072,
+      "replays": 97,
+      "sums": 16,
+      "steps_differing": [],
+      "bit_exact": true
+    },
+    {
+      "rank": 4,
+      "us_per_step": 1520.8978541731237,
+      "replays": 97,
+      "sums": 16,
+      "steps_differing": [],
+      "bit_exact": true
+    },
+    {
+      "rank": 5,
+      "us_per_step": 1520.5966458324838,
+      "replays": 97,
+      "sums": 16,
+      "steps_differing": [],
+      "bit_exact": true
+    },
+    {
+      "rank": 6,
+      "us_per_step": 1520.0736041739067,
+      "replays": 97,
+      "sums": 16,
+      "steps_differing": [],
+      "bit_exact": true
+    },
+    {
+      "rank": 7,
+      "us_per_step": 1519.7527499992702,
+      "replays": 97,
+      "sums": 16,
+      "steps_differing": [],
+      "bit_exact": true
+    }
+  ]
+}

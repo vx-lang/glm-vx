@@ -1,0 +1,25 @@
+{
+  "ranks": 2,
+  "layers": 4,
+  "context": 48,
+  "one_shot": false,
+  "ok": true,
+  "results": [
+    {
+      "rank": 0,
+      "us_per_step": 1535.1156249986768,
+      "replays": 97,
+      "sums": 16,
+      "steps_differing": [],
+      "bit_exact": true
+    },
+    {
+      "rank": 1,
+      "us_per_step": 1535.1734791693161,
+      "replays": 97,
+      "sums": 16,
+      "steps_differing": [],
+      "bit_exact": true
+    }
+  ]
+}

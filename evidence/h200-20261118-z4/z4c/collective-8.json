@@ -1,0 +1,72 @@
+{
+  "ranks": 8,
+  "hidden": 6144,
+  "calls": 200,
+  "ok": true,
+  "results": [
+    {
+      "rank": 0,
+      "failures": [],
+      "us_per_all_reduce": {
+        "float32": 19.828125000458385,
+        "uint16": 19.044830000893853
+      }
+    },
+    {
+      "rank": 1,
+      "failures": [],
+      "us_per_all_reduce": {
+        "float32": 19.833450000987796,
+        "uint16": 19.036700000469864
+      }
+    },
+    {
+      "rank": 2,
+      "failures": [],
+      "us_per_all_reduce": {
+        "float32": 19.985050000741467,
+        "uint16": 19.021074999727716
+      }
+    },
+    {
+      "rank": 3,
+      "failures": [],
+      "us_per_all_reduce": {
+        "float32": 19.822579999981826,
+        "uint16": 19.04243999888422
+      }
+    },
+    {
+      "rank": 4,
+      "failures": [],
+      "us_per_all_reduce": {
+        "float32": 19.969180000316555,
+        "uint16": 19.040399999994406
+      }
+    },
+    {
+      "rank": 5,
+      "failures": [],
+      "us_per_all_reduce": {
+        "float32": 19.848024999191693,
+        "uint16": 19.020370000362163
+      }
+    },
+    {
+      "rank": 6,
+      "failures": [],
+      "us_per_all_reduce": {
+        "float32": 19.85235500114868,
+        "uint16": 19.043564998355578
+      }
+    },
+    {
+      "rank": 7,
+      "failures": [],
+      "us_per_all_reduce": {
+        "float32": 19.838035000248055,
+        "uint16": 19.042300000364776
+      }
+    }
+  ]
+}

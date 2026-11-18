@@ -1,0 +1,56 @@
+{
+  "ranks": 8,
+  "hidden": 6144,
+  "calls": 200,
+  "ok": false,
+  "results": [
+    {
+      "rank": 0,
+      "failures": [
+        "exit 1"
+      ]
+    },
+    {
+      "rank": 1,
+      "failures": [
+        "exit 1"
+      ]
+    },
+    {
+      "rank": 2,
+      "failures": [
+        "exit 1"
+      ]
+    },
+    {
+      "rank": 3,
+      "failures": [
+        "exit 1"
+      ]
+    },
+    {
+      "rank": 4,
+      "failures": [
+        "exit 1"
+      ]
+    },
+    {
+      "rank": 5,
+      "failures": [
+        "exit 1"
+      ]
+    },
+    {
+      "rank": 6,
+      "failures": [
+        "exit 1"
+      ]
+    },
+    {
+      "rank": 7,
+      "failures": [
+        "exit 1"
+      ]
+    }
+  ]
+}

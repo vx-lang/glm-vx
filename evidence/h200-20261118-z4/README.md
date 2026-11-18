@@ -11,9 +11,9 @@ Files here:
   (allreduce-*) and single-GPU decode passed in that run.
 - build/, tests/: pod_validate's build and GPU test steps. test-spawn-vx-host "FAIL" = every test skipped: the
   kernel bundle has PTX but no host libraries.
-- z4b.sh, z4c.sh: the reruns. The node became unreachable (probably preempted) before their result
-  directories were copied back. The numbers below are from their run logs as they printed. z4c/ holds the nsys
-  logs and GPU 0's last three steps of each profile.
+- z4b/, z4c/: the reruns (z4b.sh, z4c.sh), their logs and JSON. The node was preempted before they were copied
+  back; its disk survived the restart and they were fetched afterwards. z4c/ also holds the nsys logs, nsys's
+  per-kernel sums, and GPU 0's last three steps of each profile (the full traces, 1.8 GB, are not committed).
 
 ## z4b (NCCL_NVLS_ENABLE=0; graphs closed before collective.finish)
 - decode-8 (NCCL all-gather + sum_ranks): PASS, bit_exact on all 8 ranks, 48 steps; 968.1 us/step (4 layers, ctx 48)
