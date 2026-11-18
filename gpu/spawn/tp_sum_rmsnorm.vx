@@ -1,0 +1,129 @@
+// Tensor parallelism's cross-rank sum, the residual add and RMSNorm after it, in one launch (#63;
+// docs/TP-SERVING-PLAN.md item 3): residual_out = (((p0 + p1) + p2) + ..) + residual and out =
+// RMSNorm(residual_out) * weight. The bits of tp_all_reduce, then residual_rmsnorm8 launched with
+// 1024 threads (ResidentGLM's norm_block=1024): the same adds in the same order.
+//
+// The sum pushes instead of pulling. Every rank stores each value of its partial, with the call's
+// epoch, as one 64-bit word into every rank's inbox (peer memory through CUDA IPC, its own among
+// them), then polls its own inbox until every rank's word of each of its elements carries the epoch.
+// A value crosses NVLink once and the polling reads local memory; there is no flag (tp_all_reduce
+// stores a flag, waits for every rank's, then loads their data over NVLink). A word's epoch is exact,
+// so a value of another call is never taken. Inbox r is [2 halves][8 ranks][n] words, call e in half
+// e % 2: a rank's call e + 2 rewrites a half only after every rank has finished reading call e, which
+// each did before it wrote call e + 1 (tp_all_reduce's argument). epochs[b] counts block b's calls
+// (this rank's memory, zero once, as the inboxes), so a CUDA graph replays the kernel with no reset.
+//
+// The norm needs every element. residual_rmsnorm8's 1024 threads: thread t holds elements t, t + 1024,
+// .. up to 8. Here they are split over `blocks` blocks of per = 1024 / blocks threads, block b's lane
+// j holding element k = j / per of thread t = per b + j % per; lanes j < per then sum their thread's
+// squares in residual_rmsnorm8's order into ss[t]. The last block to finish adds ss as
+// residual_rmsnorm8's block sum does (lanes::sum over 1024) and normalizes every element. Ranks past
+// `ranks` are not pushed to or read: pass this rank's inbox for them. x is the partial's float32 bits. Nothing runs unless 1024 %
+// blocks == 0, n <= 8192 and blocks >= (n + 1023) / 1024 (each lane one element).
+// spawn-include: device.vx
+// spawn-vxc: -fweak-relaxed-atomics
+import core::sync::atomic;
+
+// The value of rank r's word for this element once it carries epoch e (r < ranks), else +0.0.
+macro_rules! taken {
+    ($inbox:expr, $at:expr, $e:expr, $live:expr) => {
+        unsafe {
+          let mut dv_value: f32 = 0.0;
+          if $live {
+            let mut dv_word: u64 = atomic_load_u64($inbox, $at, AtomicOrdering::Relaxed);
+            while ((dv_word >> 32u64) as u32) != $e { dv_word = atomic_load_u64($inbox, $at, AtomicOrdering::Relaxed); }
+            dv_value = f32::from_bits(dv_word as u32);
+          }
+          dv_value
+        }
+    };
+}
+
+pub fn glm_vx_spawn_tp_sum_rmsnorm(out: &mut Tensor<f32, [?], Memory::HBM>, residual_out: &mut Tensor<f32, [?], Memory::HBM>,
+                                   x: &Tensor<u32, [?], Memory::HBM>, residual: &Tensor<f32, [?], Memory::HBM>,
+                                   weight: &Tensor<f32, [?], Memory::HBM>, ss: &mut Tensor<f32, [?], Memory::HBM>,
+                                   epochs: &mut Tensor<u32, [?], Memory::HBM>, inbox: &Tensor<u64, [?], Memory::HBM>,
+                                   p0: &mut Tensor<u64, [?], Memory::HBM>, p1: &mut Tensor<u64, [?], Memory::HBM>,
+                                   p2: &mut Tensor<u64, [?], Memory::HBM>, p3: &mut Tensor<u64, [?], Memory::HBM>,
+                                   p4: &mut Tensor<u64, [?], Memory::HBM>, p5: &mut Tensor<u64, [?], Memory::HBM>,
+                                   p6: &mut Tensor<u64, [?], Memory::HBM>, p7: &mut Tensor<u64, [?], Memory::HBM>,
+                                   rank: i32, ranks: i32, n: i32, eps: f32, blocks: i32) -> void {
+  spawn on(Topology::Device) {
+    for b in 0..blocks across blocks {
+      let mut sv = unsafe { Tensor<f32, [1024], Memory::SMEM>::uninit() };
+      // 1. Push this rank's values to every rank, 2. take every rank's, sum them in rank order, add the residual.
+      for j in 0..1024 across lanes {
+        let ok: bool = blocks >= 1 && blocks <= 1024 && 1024 % blocks == 0 && n > 0 && n <= 8192
+                       && blocks >= (n + 1023) / 1024 && ranks >= 1 && ranks <= 8 && rank >= 0 && rank < ranks && eps > 0.0;
+        let per: i32 = 1024 / blocks;
+        let d: i32 = per * b + j % per + 1024 * (j / per);
+        let e: u32 = epochs[b] + 1u32;
+        let half: i32 = (e % 2u32) as i32;
+        let mut v: f32 = 0.0;
+        if ok && d < n {
+          let word: u64 = ((e as u64) << 32u64) | (x[d] as u64);
+          let at: i32 = (half * 8 + rank) * n + d;
+          atomic_store_u64(p0, at, word, AtomicOrdering::Relaxed);
+          if ranks > 1 { atomic_store_u64(p1, at, word, AtomicOrdering::Relaxed); }
+          if ranks > 2 { atomic_store_u64(p2, at, word, AtomicOrdering::Relaxed); }
+          if ranks > 3 { atomic_store_u64(p3, at, word, AtomicOrdering::Relaxed); }
+          if ranks > 4 { atomic_store_u64(p4, at, word, AtomicOrdering::Relaxed); }
+          if ranks > 5 { atomic_store_u64(p5, at, word, AtomicOrdering::Relaxed); }
+          if ranks > 6 { atomic_store_u64(p6, at, word, AtomicOrdering::Relaxed); }
+          if ranks > 7 { atomic_store_u64(p7, at, word, AtomicOrdering::Relaxed); }
+          let base: i32 = half * 8 * n + d;
+          let v0: f32 = taken!(inbox, base, e, true);
+          let v1: f32 = taken!(inbox, base + n, e, ranks > 1);
+          let v2: f32 = taken!(inbox, base + 2 * n, e, ranks > 2);
+          let v3: f32 = taken!(inbox, base + 3 * n, e, ranks > 3);
+          let v4: f32 = taken!(inbox, base + 4 * n, e, ranks > 4);
+          let v5: f32 = taken!(inbox, base + 5 * n, e, ranks > 5);
+          let v6: f32 = taken!(inbox, base + 6 * n, e, ranks > 6);
+          let v7: f32 = taken!(inbox, base + 7 * n, e, ranks > 7);
+          let mut s: f32 = v0;
+          if ranks > 1 { s = s + v1; }
+          if ranks > 2 { s = s + v2; }
+          if ranks > 3 { s = s + v3; }
+          if ranks > 4 { s = s + v4; }
+          if ranks > 5 { s = s + v5; }
+          if ranks > 6 { s = s + v6; }
+          if ranks > 7 { s = s + v7; }
+          v = s + residual[d];
+          atomic_store_f32(residual_out, d, v, AtomicOrdering::Relaxed);
+        }
+        sv[j] = v;
+      }
+      // 3. Each thread's squares in residual_rmsnorm8's order (a square past the row is +0.0 there, and
+      // its sum starts at +0.0, so leaving it out changes nothing).
+      for j in 0..1024 across lanes {
+        let per: i32 = 1024 / blocks;
+        if blocks >= 1 && blocks <= 1024 && 1024 % blocks == 0 && j < per {
+          let mut sq: f32 = 0.0;
+          let mut k: i32 = 0;
+          while k < blocks && k < 8 {
+            if per * b + j + 1024 * k < n {
+              let v: f32 = sv[j + per * k];
+              sq = sq + v * v;
+            }
+            k = k + 1;
+          }
+          atomic_store_f32(ss, per * b + j, sq, AtomicOrdering::Relaxed);
+        }
+      }
+      for j in 0..1 across lanes {
+        epochs[b] = epochs[b] + 1u32;
+      }
+    }
+    // The last block to finish: residual_rmsnorm8's block sum of the 1024 threads' squares, then every element.
+    let mut a = unsafe { Tensor<f32, [1024], Memory::SMEM>::uninit() };
+    for t in 0..1024 across lanes { a[t] = ss[t]; }
+    let total: f32 = lanes::sum(&a, 1024);
+    let ok: bool = blocks >= 1 && blocks <= 1024 && 1024 % blocks == 0 && n > 0 && n <= 8192
+                   && blocks >= (n + 1023) / 1024 && ranks >= 1 && ranks <= 8 && rank >= 0 && rank < ranks && eps > 0.0;
+    for d in 0..(if ok { n } else { 0 }) across lanes(1024) {
+      let inv: f32 = 1.0 / (total / (n as f32) + eps).sqrt();
+      out[d] = residual_out[d] * inv * weight[d];
+    }
+  }
+  return;
+}

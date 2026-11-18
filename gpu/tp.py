@@ -198,25 +198,35 @@ class PeerSum:
     every other rank's mapped through CUDA IPC (gpu.runtime.PeerBuffer), and this rank's call count a
     block. exchange(handle) takes this rank's 64-byte IPC handle and returns every rank's in rank
     order (handles_by_collective, or handles_by_files for ranks sharing one GPU, where NCCL will not
-    run). Every rank must make its PeerSum at the same point, and call it the same number of times."""
+    run). Every rank must make its PeerSum at the same point, and call it the same number of times.
 
-    def __init__(self, context, rank, ranks, n, exchange):
+    The same allocation holds this rank's inbox of gpu/spawn/tp_sum_rmsnorm (the sum with the residual
+    RMSNorm after it, pushed rather than pulled): [2 halves][8 ranks][n] 64-bit words, zero at first;
+    norm_arguments gives that kernel's arguments, with its own call count a block (norm_blocks blocks)
+    and its 1024 sums of squares. Its calls and tp_all_reduce's are counted apart, so the two mix."""
+
+    def __init__(self, context, rank, ranks, n, exchange, *, norm_blocks=8):
         from .runtime import DeviceTensor, PeerBuffer
         if not 1 <= ranks <= TP_ALL_REDUCE_RANKS or not 0 <= rank < ranks:
             raise ValueError(f'tp_all_reduce takes 1 to {TP_ALL_REDUCE_RANKS} ranks, not rank {rank} of {ranks}')
         self.rank, self.ranks, self.n = rank, ranks, n
         self.blocks = -(-n // 256)
         data = -(-2 * n * 4 // 256) * 256
-        total = data + self.blocks * 4
+        inbox = data + -(-self.blocks * 4 // 256) * 256
+        total = inbox + 2 * TP_ALL_REDUCE_RANKS * n * 8
         own = context.allocate(total)
         own.upload(bytes(total))
         self.epochs = context.tensor((self.blocks,), 'uint32', bytes(self.blocks * 4))
+        self.norm_blocks = int(norm_blocks)
+        self.norm_epochs = context.tensor((self.norm_blocks,), 'uint32', bytes(self.norm_blocks * 4))
+        self.squares = context.tensor((1024,), 'float32')
         handles = exchange(own.ipc_handle())
         if len(handles) != ranks:
             raise ValueError(f'the exchange gave {len(handles)} handles for {ranks} ranks')
         self.buffers = [own if r == rank else PeerBuffer(context, handles[r], total) for r in range(ranks)]
         self.data = [DeviceTensor(b, (2 * n,), 'float32') for b in self.buffers]
         self.flags = [DeviceTensor(b, (self.blocks,), 'uint32', offset=data) for b in self.buffers]
+        self.inboxes = [DeviceTensor(b, (2 * TP_ALL_REDUCE_RANKS * n,), 'uint64', offset=inbox) for b in self.buffers]
 
     def arguments(self, x):
         """tp_all_reduce's arguments to sum x (n floats) over the ranks, in place."""
@@ -228,6 +238,19 @@ class PeerSum:
                       ranks=self.ranks, n=self.n)
         values.update({f'd{r}': data[r] for r in range(TP_ALL_REDUCE_RANKS)})
         values.update({f'f{r}': flags[r] for r in range(TP_ALL_REDUCE_RANKS)})
+        return values
+
+    def norm_arguments(self, x, residual, weight, out, residual_out, eps):
+        """tp_sum_rmsnorm's arguments: residual_out = the sum of x over the ranks + residual, out = its
+        RMSNorm by weight (residual_rmsnorm8's bits at 1024 threads)."""
+        if x.size != self.n:
+            raise ValueError(f'this PeerSum sums {self.n} floats, not {x.size}')
+        pad = TP_ALL_REDUCE_RANKS - self.ranks
+        inboxes = self.inboxes + [self.inboxes[self.rank]] * pad
+        values = dict(out=out, residual_out=residual_out, x=x.view(tuple(x.shape), 'uint32'), residual=residual,
+                      weight=weight, ss=self.squares, epochs=self.norm_epochs, inbox=self.inboxes[self.rank],
+                      rank=self.rank, ranks=self.ranks, n=self.n, eps=float(eps), blocks=self.norm_blocks)
+        values.update({f'p{r}': inboxes[r] for r in range(TP_ALL_REDUCE_RANKS)})
         return values
 
     def close(self):

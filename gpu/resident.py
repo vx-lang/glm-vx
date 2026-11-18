@@ -194,7 +194,7 @@ class ResidentGLM:
                  topk='auto', long_topk='position', mla_kernel='decode', matvec_kernels='hand', mtp=False,
                  norm_block=256, fuse_glue=True, index_kernel='mma',
                  topk_blocks_from=65536, fold_shared=False, fuse_router=False, moe_down2=False, device_decode=False,
-                 tp=None):
+                 fuse_tp_norm=0, tp=None):
         if getattr(model, 'packed_weights', False):
             raise NotImplementedError('ResidentGLM supports expanded float32 weights only')
         if getattr(model, 'expert_placement', None) is not None:
@@ -302,6 +302,19 @@ class ResidentGLM:
         self.device_decode = bool(device_decode)
         if self.device_decode and not graph:
             raise ValueError('device_decode needs graph=True')
+        # fuse_tp_norm (#63; docs/TP-SERVING-PLAN.md item 3): a block count > 0 sums a layer's partials across
+        # the ranks together with the residual RMSNorm that follows (gpu/spawn/tp_sum_rmsnorm in that many
+        # blocks: each value pushed to every rank over NVLink with the call's epoch, polled locally), in place
+        # of tp_all_reduce then residual_rmsnorm8, with their bits. True is 8 blocks. Needs one-shot sums
+        # (TensorParallel(one_shot=True)), fuse_glue=True and norm_block=1024.
+        self.fuse_tp_norm = 8 if fuse_tp_norm is True else int(fuse_tp_norm)
+        if self.fuse_tp_norm:
+            if tp is None or not tp.one_shot:
+                raise ValueError('fuse_tp_norm needs tensor parallelism with one-shot sums')
+            if not fuse_glue or norm_block != 1024:
+                raise ValueError('fuse_tp_norm needs fuse_glue=True and norm_block=1024')
+            if not 1 <= self.fuse_tp_norm <= 1024 or 1024 % self.fuse_tp_norm:
+                raise ValueError('fuse_tp_norm must be 0 or a block count dividing 1024')
         if mla_kernel not in ('decode', 'chunks', 'heads', 'flash', 'tc'):
             raise ValueError("mla_kernel must be 'decode', 'chunks', 'heads', 'flash' or 'tc'")
         self.mla_kernel = mla_kernel
@@ -714,8 +727,12 @@ class ResidentGLM:
             self._tp_peers = None
             if self.tp.one_shot:
                 from .tp import PeerSum, handles_by_collective
+                if self.fuse_tp_norm and (self.hidden > 8192 or self.fuse_tp_norm < -(-self.hidden // 1024)):
+                    raise ValueError(f'fuse_tp_norm: a hidden size of {self.hidden} needs at most 8192 floats and '
+                                     f'at least {-(-self.hidden // 1024)} blocks')
                 self._tp_peers = PeerSum(self.ctx, self.tp.rank, self.tp.size, self.hidden,
-                                         handles_by_collective(self.tp.collective, self.ctx, self.stream))
+                                         handles_by_collective(self.tp.collective, self.ctx, self.stream),
+                                         norm_blocks=self.fuse_tp_norm or 8)
         self.token_ids = t((MANY_TOKENS,), 'int32')  # argmax_rows' greedy tokens (greedy=True)
         # Per-layer caches, all rows the caller has produced so far stay on the device.
         # With mtp=True, one more of each for the MTP layer, at index n_layers.
@@ -1380,7 +1397,7 @@ class ResidentGLM:
             kv_t = self._upload_weight(kv_name + ':nope_t', np.ascontiguousarray(kv[:, :self.nope, :].transpose(0, 2, 1)))
         return kv_t
 
-    def _attention(self, layer, x, position, shared_ok, reuse_selection=False):
+    def _attention(self, layer, x, position, shared_ok, reuse_selection=False, defer_sum=False):
         prefix = f'model.layers.{layer}.self_attn'
         bias = bool(self.config.get('attention_bias', False))
         full = self.model.indexer_type(layer) == 'full' and not reuse_selection
@@ -1407,7 +1424,8 @@ class ResidentGLM:
         self._attention_core(layer, position, shared_ok, self.query, self.compressed,
                              (self.iq, self.ik, self.head_weights_raw) if full else None, kv_normed=self.fuse_glue)
         self._linear(prefix + '.o_proj', self.heads_out, self.attn_out, bias)
-        self._tp_sum(self.attn_out)
+        if not defer_sum:  # else the caller sums it with the residual RMSNorm after it (fuse_tp_norm)
+            self._tp_sum(self.attn_out)
 
     def _attention_core(self, layer, position, shared_ok, query, compressed, index, kv_normed=False):
         """One token's attention after its projections: its cache rows, the indexer's top-k (index:
@@ -1834,17 +1852,32 @@ class ResidentGLM:
         prefix = f'model.layers.{layer}'
         if not normed:
             self._rmsnorm(self.x, self._weight(prefix + '.input_layernorm.weight'), self.norm, m.eps)
-        self._attention(layer, self.norm, position, have_selection or reuse_selection, reuse_selection)
-        post = self._residual_rmsnorm8 if self._fuse_norms() else self._residual_rmsnorm
+        fused = self._fused_tp_norm()
+        self._attention(layer, self.norm, position, have_selection or reuse_selection, reuse_selection, defer_sum=fused)
+        post = (self._tp_sum_rmsnorm if fused else self._residual_rmsnorm8 if self._fuse_norms()
+                else self._residual_rmsnorm)
         post(self.attn_out, self.x, self._weight(prefix + '.post_attention_layernorm.weight'), self.norm, self.x_next, m.eps)
         self.x, self.x_next = self.x_next, self.x
         out = self._feed_forward(layer, self.norm)
-        self._tp_sum(out)
-        if next_norm is not None:
-            self._residual_rmsnorm8(self.x, out, self._weight(next_norm), self.norm, self.x_next, m.eps)
+        if next_norm is not None and fused:
+            self._tp_sum_rmsnorm(out, self.x, self._weight(next_norm), self.norm, self.x_next, m.eps)
         else:
-            self._add(self.x_next, self.x, out, self.hidden)
+            self._tp_sum(out)
+            if next_norm is not None:
+                self._residual_rmsnorm8(self.x, out, self._weight(next_norm), self.norm, self.x_next, m.eps)
+            else:
+                self._add(self.x_next, self.x, out, self.hidden)
         self.x, self.x_next = self.x_next, self.x
+
+    def _fused_tp_norm(self):
+        """Whether a layer's cross-rank sums go through tp_sum_rmsnorm with the RMSNorm after them."""
+        return bool(self.fuse_tp_norm) and getattr(self, '_tp_peers', None) is not None and self._fuse_norms()
+
+    def _tp_sum_rmsnorm(self, partial, residual, weight, out, residual_out, eps):
+        """_tp_sum(partial), then _residual_rmsnorm8(partial, residual, weight, out, residual_out, eps), in one
+        launch with their bits (a + b and b + a are the same float); partial is left unsummed."""
+        self._spawn('tp_sum_rmsnorm', **self._tp_peers.norm_arguments(partial, residual, weight, out, residual_out,
+                                                                      _f32(eps, 'epsilon', True)))
 
     def preload(self, reserve_bytes=256 * 1024 ** 2):
         """Upload every weight decode can use (all layers, every routed expert, the final norm and

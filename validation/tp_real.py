@@ -62,7 +62,8 @@ def rank_main(args, rank, job):
         collective = Collective(C.CDLL(os.environ['VX_DISPATCH_LIB']), context, rank, args.ranks)
         tp = TensorParallel(rank, args.ranks, collective, one_shot=args.one_shot)
     longest = max([len(job['prompt']) + args.new] + [n + args.time for n in args.contexts])
-    r = ResidentGLM(model, ctx=context, max_tokens=longest + 8, tp=tp, **OPTIONS)
+    from gpu.tp_serve import parse_options
+    r = ResidentGLM(model, ctx=context, max_tokens=longest + 8, tp=tp, **{**OPTIONS, **parse_options(args.option)})
     result = dict(rank=rank)
 
     def note(**values):
@@ -127,6 +128,7 @@ def main():
     p.add_argument('--contexts', type=int, nargs='*', default=[1000, 3001])
     p.add_argument('--time', type=int, default=50, help='steps timed at each context')
     p.add_argument('--output', type=Path)
+    p.add_argument('--option', action='append', help='KEY=VALUE (JSON): a ResidentGLM option over OPTIONS, e.g. fuse_tp_norm=8')
     p.add_argument('--role', help=argparse.SUPPRESS)
     p.add_argument('--job', help=argparse.SUPPRESS)
     args = p.parse_args()
@@ -142,6 +144,8 @@ def main():
     command = [sys.executable, '-m', 'validation.tp_real', '--checkpoint', str(args.checkpoint), '--ranks', str(args.ranks),
                '--new', str(args.new), '--time', str(args.time), '--contexts', *map(str, args.contexts)]
     command += ['--one-shot'] if args.one_shot else []
+    for option in args.option or ():
+        command += ['--option', option]
     command += ['--layers', str(args.layers)] if args.layers is not None else []
     started = time.time()
     with tempfile.TemporaryDirectory() as tmp:
@@ -158,7 +162,9 @@ def main():
     ok = all('error' not in r for r in results)
     if ok:  # every rank all-gathers the same logits: the same greedy tokens
         ok = all(r['generated'] == results[0]['generated'] for r in results)
-    summary = dict(checkpoint=str(args.checkpoint), layers=args.layers, ranks=args.ranks, one_shot=args.one_shot, options=OPTIONS, ok=ok,
+    from gpu.tp_serve import parse_options
+    summary = dict(checkpoint=str(args.checkpoint), layers=args.layers, ranks=args.ranks, one_shot=args.one_shot,
+                   options={**OPTIONS, **parse_options(args.option)}, ok=ok,
                    wall_s=round(time.time() - started, 1), prompt=args.prompt, prompt_ids=prompt)
     if 'error' not in results[0]:
         summary.update(generated=results[0]['generated'], text=tokenizer.decode(results[0]['generated']),

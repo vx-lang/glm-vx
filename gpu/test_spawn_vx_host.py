@@ -1705,6 +1705,29 @@ def test_tp_all_reduce_one_rank(run, n):
         bits_equal(mine[half * n:(half + 1) * n], x)
 
 
+@pytest.mark.parametrize('n,blocks', [(6144, 8), (6144, 16), (300, 1), (1029, 2)])
+def test_tp_sum_rmsnorm_one_rank(run, n, blocks):
+    # One rank (the host path cannot run several: a rank spins until the others' words arrive): the sum is x;
+    # residual_out = x + residual and out its RMSNorm in residual_rmsnorm8's order at 1024 threads, bit for bit;
+    # each call pushes x's bits with the call's epoch into its half of the inbox and counts the call.
+    rng = np.random.default_rng(n + blocks)
+    inbox, epochs, ss = np.zeros(2 * 8 * n, np.uint64), np.zeros(blocks, np.uint32), np.zeros(1024, F)
+    for call in range(3):
+        x, r, w = (rng.normal(size=n).astype(F) for _ in range(3))
+        values = dict(out=np.zeros(n, F), residual_out=np.zeros(n, F), x=x.view(np.uint32), residual=r, weight=w,
+                      ss=ss, epochs=epochs, inbox=inbox, rank=0, ranks=1, n=n, eps=1e-5, blocks=blocks,
+                      arrivals=np.zeros(1, np.int32))
+        values.update({f'p{i}': inbox for i in range(8)})  # the ranks past `ranks` get this rank's own
+        got = run('tp_sum_rmsnorm', **values)
+        bits_equal(got['residual_out'], x + r)
+        bits_equal(got['out'], rms_reference((x + r)[None], w, 1e-5, 1024)[0])
+        epochs, inbox, ss = got['epochs'], got['p0'], got['ss']
+        assert (epochs == call + 1).all()
+        words = inbox[(call + 1) % 2 * 8 * n:][:n]
+        assert ((words >> np.uint64(32)) == call + 1).all()
+        assert ((words & np.uint64(0xFFFFFFFF)).astype(np.uint32) == x.view(np.uint32)).all()
+
+
 @pytest.mark.parametrize('kernel', ['tc', 'flash'])
 def test_mla_padded_heads_do_not_change_the_real_ones(run, kernel):
     # Tensor parallelism over 8 GPUs leaves GLM-5.3 8 heads a rank; ResidentGLM pads them to the 16 of

@@ -286,6 +286,21 @@ def test_device_steps_give_the_greedy_tokens_one_step_ahead():
     assert results[0][0] == (want, want[-1]) and all(r[1] > 0 for r in results)
 
 
+def test_fuse_tp_norm_and_device_decode_refuse_what_they_cannot_run():
+    # fuse_tp_norm needs one-shot sums (its kernel pushes over CUDA IPC), fuse_glue and norm_block=1024
+    # (residual_rmsnorm8's bits), and a block count dividing 1024; device_decode needs graph=True.
+    model = build(seed=3)
+    job = LocalJob(2)
+    one_shot, gathered = (TensorParallel(0, 2, job.member(0), one_shot=s) for s in (True, False))
+    norms = dict(fuse_glue=True, norm_block=1024)
+    for options, match in ((dict(fuse_tp_norm=8, **norms), 'one-shot'), (dict(fuse_tp_norm=8, tp=gathered, **norms), 'one-shot'),
+                           (dict(fuse_tp_norm=8, tp=one_shot, fuse_glue=True, norm_block=256), 'norm_block'),
+                           (dict(fuse_tp_norm=3, tp=one_shot, **norms), 'dividing 1024'),
+                           (dict(device_decode=True), 'graph=True')):
+        with pytest.raises(ValueError, match=match):
+            ResidentGLM(model, ctx=Context(), max_tokens=8, **options)
+
+
 @needs_spawn
 def test_decode_next_takes_the_first_largest_and_refuses_nonfinite():
     # decode_next: the index of the first largest of the ranks' values (the lower rank on a tie) and the

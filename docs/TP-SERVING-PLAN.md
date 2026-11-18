@@ -116,6 +116,26 @@ SGLang fuses the same pair.
 **Bits.** The same, provided the order of the sum and of the norm's reduction is kept. Verify with gpu/test_tp's
 bit-exact tests and `real4-8` on the node.
 
+**Status: written, tested on one rank on the CPU only.** Enable it with `--tp-option fuse_tp_norm=B`, where B is
+the number of blocks.
+
+What gpu/spawn/tp_sum_rmsnorm does:
+
+- **The sum pushes instead of pulling.** Each value goes to every rank's inbox as a 64-bit word that carries the
+  call number, and each rank polls only its own memory. The value crosses NVLink once and there is no flag.
+  `tp_all_reduce` pulls: it raises a flag, waits for every rank's, then loads the data over NVLink, which costs
+  two remote round trips.
+- **The norm runs in the last block to finish.** It reproduces `residual_rmsnorm8`'s order at 1024 threads
+  exactly. The same `lanes::sum` tree is the hand kernels' `vxk_block_sum`, and `sqrt.rn` and `rcp.rn` are used.
+
+Checked so far:
+
+- On the CPU host path at one rank, `residual_out` and `out` match the NumPy model of the hand order bit for bit
+  (`gpu/test_spawn_vx_host.py::test_tp_sum_rmsnorm_one_rank`).
+- Several ranks need GPUs. The run is `validation/tp_all_reduce_check.py --norm --norm-blocks B`, z14 in `z12.sh`.
+
+Whether pushing beats today's 6.8 + 2.9 us a pair is the open question; z14 measures it.
+
 ### 4. FP8 tensor cores for the experts and the replicated projections
 
 **Why.** At TP8 these kernels are limited by instruction issue, not memory bandwidth (ncu: DRAM 12-13%):

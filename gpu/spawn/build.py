@@ -19,7 +19,7 @@ import argparse, hashlib, json, os, re, subprocess, sys, tempfile
 from pathlib import Path
 
 SCALARS = {'i32': '.u32', 'i64': '.u64', 'f32': '.f32'}
-ELEMENT_BITS = {'f32': 32, 'i32': 32, 'i64': 64, 'u32': 32, 'u16': 16, 'u8': 8, 'bf16': 16}
+ELEMENT_BITS = {'f32': 32, 'i32': 32, 'i64': 64, 'u64': 64, 'u32': 32, 'u16': 16, 'u8': 8, 'bf16': 16}
 INCLUDE = re.compile(r'^//\s*spawn-include:\s*(\S+)\s*$', re.M)
 # `// spawn-vxc: -fFEATURE`: a vxc feature flag for this kernel only (Vx's -f values).
 VXC_FLAG = re.compile(r'^//\s*spawn-vxc:\s*(-f[\w-]+)\s*$', re.M)
