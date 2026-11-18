@@ -123,6 +123,13 @@ four consecutive u32 words a step (32 INT4 codes or 8 bfloat16 weights), the sha
 default path's, not equal; gpu/test_spawn_vx_host.py pins each order. INT4 widths that are not a
 multiple of 128 and BF16 widths that are not a multiple of 8 keep the hand kernels.
 
+``tp`` (a gpu/tp.TensorParallel, #34) makes this object one rank of a tensor-parallel job on its slice of
+the model: its heads, intermediate columns and vocabulary rows (gpu/tp.py has the split). After o_proj and
+after each MLP / MoE the ranks' partial sums are all-gathered and added in rank order, so every rank
+keeps the same residual stream bit for bit and n GPUs give the bits of n ranks emulated on one;
+``one_shot`` does that sum in one launch over CUDA IPC peer buffers (gpu/spawn/tp_all_reduce). The
+logits are gathered from the ranks' vocabulary rows. forward() only so far: no forward_many or MTP.
+
 Not a performance claim: no timing is made here.
 ``device_experts`` needs the gpu/spawn kernels built (gpu/spawn/build.sh into ptx_dir/spawn) with a
 vxc that has Vx's lanes:: reductions (see gpu/spawn/README.md); it has not run on a GPU yet.
@@ -182,13 +189,24 @@ class ResidentGLM:
                  device_topk=True, device_experts=False, fused_attention=False, graph=False, fp8_kernels='hand',
                  topk='auto', long_topk='position', mla_kernel='decode', matvec_kernels='hand', mtp=False,
                  norm_block=256, fuse_glue=True, index_kernel='mma',
-                 topk_blocks_from=65536, fold_shared=False, fuse_router=False):
+                 topk_blocks_from=65536, fold_shared=False, fuse_router=False, tp=None):
         if getattr(model, 'packed_weights', False):
             raise NotImplementedError('ResidentGLM supports expanded float32 weights only')
         if getattr(model, 'expert_placement', None) is not None:
             raise NotImplementedError('ResidentGLM does not support expert placement')
         if type(max_tokens) is not int or max_tokens < 1:
             raise ValueError('max_tokens must be a positive integer')
+        # tp (a gpu/tp.TensorParallel, #34): this object is one rank of a tensor-parallel job and holds
+        # that rank's slice of the model (gpu/tp.ShardedModel): its heads, its intermediate columns and
+        # its vocabulary rows. After o_proj and after the MLP / MoE every rank all-gathers the partial
+        # sums and adds them in rank order (_tp_sum), so the ranks' residual streams stay identical bit
+        # for bit; the logits are gathered from the ranks' vocabulary rows. A size of 1 is no split.
+        self.tp = tp if tp is not None and tp.size > 1 else None
+        if self.tp is not None:
+            if mtp:
+                raise NotImplementedError('tensor parallelism does not run the MTP layer yet')
+            from .tp import ShardedModel
+            model = ShardedModel(model, self.tp.rank, self.tp.size)
         self.model, self.config = model, model.config
         self.max_tokens = max_tokens
         # mtp: also the checkpoint's MTP layer (model.layers.{num_hidden_layers}, #16), for mtp_step.
@@ -299,6 +317,9 @@ class ResidentGLM:
         # The step graph, one for steps whose every cached token is selected (no indexer scores or
         # top-k, #43) and one for longer contexts: each runs eagerly first, is captured the second time.
         self._step_graphs, self._step_warm = {}, set()
+        # False: graph=True's steps always run their launches eagerly (the warm path, the replay's bits),
+        # never captured. For a reference whose collective cannot be captured (validation/tp_decode_check).
+        self._capture = True
         # forward_many's graphs by token count, mtp_step's by reuse_selection: run eagerly the first
         # time, captured the second, replayed after (_replay).
         self._graphs, self._warmed = {}, set()
@@ -355,6 +376,8 @@ class ResidentGLM:
     def close(self):
         if not self._closed:
             self._closed = True
+            if getattr(self, '_tp_peers', None) is not None:
+                self._tp_peers.close()
             for matmul in getattr(self, '_lt_matmuls', {}).values():
                 matmul.close()
             if getattr(self, '_lt', None) is not None:
@@ -515,9 +538,17 @@ class ResidentGLM:
         self.hidden, self.heads = m.hidden, m.heads
         if self.mla_kernel == 'heads' and self.heads % 4:
             raise ValueError(f"mla_kernel='heads' needs a multiple of 4 heads, the model has {self.heads}")
-        if self.mla_kernel in ('flash', 'tc') and (self.heads % 16 or m.rank != 512 or m.rot != 64):
-            raise ValueError(f"mla_kernel={self.mla_kernel!r} needs a multiple of 16 heads, rank 512 and rope 64; the "
-                             f"model has {self.heads} heads, rank {m.rank}, rope {m.rot}")
+        # mla_heads: the heads mla_flash_at and mla_tc_at run, a multiple of 16 (a tile's rows). A rank of a
+        # tensor-parallel job may hold fewer (GLM-5.3 over 8 GPUs: 8): its query rows are padded with heads
+        # of zeros, whose results nothing reads (#57). mla_tc_at's tile is 16 rows either way, so the padding
+        # costs it no loads; mla_flash_at runs the padded heads as real ones.
+        self.mla_heads = self.heads
+        if self.mla_kernel in ('flash', 'tc'):
+            self.mla_heads = -(-self.heads // 16) * 16
+            if (self.mla_heads != self.heads and self.tp is None) or m.rank != 512 or m.rot != 64:
+                raise ValueError(f"mla_kernel={self.mla_kernel!r} needs a multiple of 16 heads, rank 512 and rope 64 (or "
+                                 f"tensor parallelism, which pads the heads); the model has {self.heads} heads, rank "
+                                 f"{m.rank}, rope {m.rot}")
         if self.mla_kernel == 'tc' and m.index_topk > 2048:
             raise ValueError(f"mla_kernel='tc' needs index_topk <= 2048 (64 splits of 32), the model has {m.index_topk}")
         self.rank, self.nope, self.rot, self.value_dim = m.rank, m.nope, m.rot, m.value_dim
@@ -567,14 +598,16 @@ class ResidentGLM:
         self.q_a, self.q_res = t((q_rank,)), t((q_rank,))
         self.query = t((self.heads * qk,))
         self.compressed = t((self.rank + self.rot,))
-        self.latent_q, self.rot_q = t((self.heads, self.rank)), t((self.heads, self.rot))
+        hp = self.mla_heads  # the padded heads' query rows stay zero: nothing writes them
+        self.latent_q = t((hp, self.rank), 'float32', bytes(hp * self.rank * 4))
+        self.rot_q = t((hp, self.rot), 'float32', bytes(hp * self.rot * 4))
         # mla_flash_at takes up to 64 splits of about 8 tokens (evidence/h200-20261115-i); the others 16 of 256.
         self.splits_max = 64 if self.mla_kernel in ('flash', 'tc') else 16
         if self.mla_kernel == 'tc':  # the step's queries in bf16, in mla_tc_at's tile layout (mla_q_bf16_at)
-            self.q_t, self.qr_t = t((self.heads // 16, 1024, 8), 'uint16'), t((self.heads // 16, 128, 8), 'uint16')
-        self.numerator = t((self.heads, self.splits_max, self.rank))
-        self.stats = t((self.heads, self.splits_max, 2))
-        self.attended = t((self.heads, self.rank))
+            self.q_t, self.qr_t = t((hp // 16, 1024, 8), 'uint16'), t((hp // 16, 128, 8), 'uint16')
+        self.numerator = t((hp, self.splits_max, self.rank))
+        self.stats = t((hp, self.splits_max, 2))
+        self.attended = t((hp, self.rank))
         if self.fused_attention:  # mla_decode's per-head arrival counts: zero once, its last splits re-zero them
             self.arrivals = t((self.heads,), 'int32', np.zeros(self.heads, np.int32))
         self.heads_out = t((self.heads * self.value_dim,))
@@ -646,6 +679,16 @@ class ResidentGLM:
                 self.moe_act = t((slots * int(c['moe_intermediate_size']),))
         vocab = int(c['vocab_size'])
         self.logits = t((vocab,))
+        if self.tp is not None:
+            # The rank's vocabulary rows of the logits, gathered into self.logits; the partial sums of
+            # every rank, gathered for _tp_sum.
+            self.logits_local = t((vocab // self.tp.size,))
+            self._tp_gathered = t((self.tp.size * self.hidden,))
+            self._tp_peers = None
+            if self.tp.one_shot:
+                from .tp import PeerSum, handles_by_collective
+                self._tp_peers = PeerSum(self.ctx, self.tp.rank, self.tp.size, self.hidden,
+                                         handles_by_collective(self.tp.collective, self.ctx, self.stream))
         self.token_ids = t((MANY_TOKENS,), 'int32')  # argmax_rows' greedy tokens (greedy=True)
         # Per-layer caches, all rows the caller has produced so far stay on the device.
         # With mtp=True, one more of each for the MTP layer, at index n_layers.
@@ -868,6 +911,26 @@ class ResidentGLM:
 
     def _add(self, out, a, b, n):
         self._launch('add', self._grid(n), _ELEMENTWISE_BLOCK, [out, a, b, I(n)])
+
+    def _tp_sum(self, partial):
+        """With tp: partial (this rank's part of a sum over the ranks, [hidden]) becomes the whole sum,
+        ((p0 + p1) + p2) + .., the same bits on every rank and on any number of GPUs (gpu/tp.py)."""
+        if self.tp is None:
+            return
+        if self._tp_peers is not None:
+            self._spawn('tp_all_reduce', **self._tp_peers.arguments(partial))
+            return
+        n, ranks = partial.shape[0], self.tp.size
+        gathered = self._tp_gathered.view((ranks * n,))
+        self.tp.collective.all_gather(partial, gathered, stream=self.stream)
+        self.launches['tp_all_gather'] = self.launches.get('tp_all_gather', 0) + 1
+        if self.spawn_built('sum_ranks'):  # one launch, the adds' bits
+            self._spawn('sum_ranks', out=partial, gathered=gathered, ranks=ranks, n=n)
+            return
+        rows = [gathered.view((n,), offset=r * n * 4) for r in range(ranks)]
+        self._add(partial, rows[0], rows[1], n)
+        for row in rows[2:]:
+            self._add(partial, partial, row, n)
 
     def _copy(self, out, x, n):
         self._launch('copy', self._grid(n), _ELEMENTWISE_BLOCK, [out, x, I(n)])
@@ -1306,6 +1369,7 @@ class ResidentGLM:
         self._attention_core(layer, position, shared_ok, self.query, self.compressed,
                              (self.iq, self.ik, self.head_weights_raw) if full else None, kv_normed=self.fuse_glue)
         self._linear(prefix + '.o_proj', self.heads_out, self.attn_out, bias)
+        self._tp_sum(self.attn_out)
 
     def _attention_core(self, layer, position, shared_ok, query, compressed, index, kv_normed=False):
         """One token's attention after its projections: its cache rows, the indexer's top-k (index:
@@ -1355,30 +1419,30 @@ class ResidentGLM:
         scale = F(_f32(qk ** -0.5, 'MLA scale', True))
         tokens = position + 1
         if self.fused_attention and self.graph and self.mla_kernel == 'tc':
-            groups = self.heads // 16
+            groups = self.mla_heads // 16
             numerator = self.numerator.view((groups, self.splits_max, 16 * self.rank))
             stats = self.stats.view((groups, self.splits_max, 32))
             self._spawn('mla_q_bf16_at', q_t=self.q_t, qr_t=self.qr_t, q_latent=self.latent_q, q_rope=self.rot_q,
-                        heads=self.heads, rank=self.rank, rope_dim=self.rot)
+                        heads=self.mla_heads, rank=self.rank, rope_dim=self.rot)
             self._spawn('mla_tc_at', numerator=numerator.view((groups * self.splits_max * 16, self.rank)),
                         stats=stats.view((groups * self.splits_max, 32)), q_t=self.q_t.view((groups * 1024, 8)),
                         qr_t=self.qr_t.view((groups * 128, 8)), cache_latent=self.latents[layer],
                         cache_rope=self.rope_keys[layer], selected=self.selected, step=self.step,
-                        heads=self.heads, rank=self.rank, rope_dim=self.rot, selection_stride=0, splits_max=self.splits_max,
+                        heads=self.mla_heads, rank=self.rank, rope_dim=self.rot, selection_stride=0, splits_max=self.splits_max,
                         scale=scale.value)
             self._spawn('mla_flash_merge_at', out=self.attended, numerator=numerator, stats=stats, step=self.step,
-                        heads=self.heads, rank=self.rank, splits_max=self.splits_max)
+                        heads=self.mla_heads, rank=self.rank, splits_max=self.splits_max)
         elif self.fused_attention and self.graph and self.mla_kernel == 'flash':
             # The per-head buffers viewed per group of 16 heads (mla_flash_at.vx).
-            groups = self.heads // 16
+            groups = self.mla_heads // 16
             numerator = self.numerator.view((groups, self.splits_max, 16 * self.rank))
             stats = self.stats.view((groups, self.splits_max, 32))
             self._spawn('mla_flash_at', numerator=numerator, stats=stats, q_latent=self.latent_q, q_rope=self.rot_q,
                         cache_latent=self.latents[layer], cache_rope=self.rope_keys[layer], selected=self.selected,
-                        step=self.step, heads=self.heads, rank=self.rank, rope_dim=self.rot, selection_stride=0,
+                        step=self.step, heads=self.mla_heads, rank=self.rank, rope_dim=self.rot, selection_stride=0,
                         splits_max=self.splits_max, scale=scale.value)
             self._spawn('mla_flash_merge_at', out=self.attended, numerator=numerator, stats=stats, step=self.step,
-                        heads=self.heads, rank=self.rank, splits_max=self.splits_max)
+                        heads=self.mla_heads, rank=self.rank, splits_max=self.splits_max)
         elif self.fused_attention and self.graph and self.mla_kernel == 'heads':
             # The per-head buffers viewed per group of four heads (mla_heads_at.vx).
             groups = self.heads // 4
@@ -1504,7 +1568,7 @@ class ResidentGLM:
                 graph.launch(self.stream)
                 self.replays += 1
                 self.selected_count = count
-            elif short not in self._step_warm:
+            elif short not in self._step_warm or not self._capture:
                 self._layers(position)  # uploads every weight and loads every kernel the capture needs
                 self._step_warm.add(short)
             else:
@@ -1523,7 +1587,11 @@ class ResidentGLM:
             return None
         self._rmsnorm(self.x, self._weight('model.norm.weight'), self.norm, m.eps)
         head = 'model.embed_tokens' if c.get('tie_word_embeddings', False) else 'lm_head'
-        self._project(head, self.norm, self.logits)
+        if self.tp is None:
+            self._project(head, self.norm, self.logits)
+        else:
+            self._project(head, self.norm, self.logits_local)
+            self.tp.collective.all_gather(self.logits_local, self.logits, stream=self.stream)
         return np.frombuffer(self.logits.download(), dtype=np.float32).copy()
 
     def _splits(self, count):
@@ -1592,6 +1660,7 @@ class ResidentGLM:
         post(self.attn_out, self.x, self._weight(prefix + '.post_attention_layernorm.weight'), self.norm, self.x_next, m.eps)
         self.x, self.x_next = self.x_next, self.x
         out = self._feed_forward(layer, self.norm)
+        self._tp_sum(out)
         if next_norm is not None:
             self._residual_rmsnorm8(self.x, out, self._weight(next_norm), self.norm, self.x_next, m.eps)
         else:
@@ -1791,6 +1860,8 @@ class ResidentGLM:
         m, c = self.model, self.config
         if self._closed:
             raise RuntimeError('ResidentGLM is closed')
+        if self.tp is not None:
+            raise NotImplementedError('tensor parallelism runs forward() only so far')
         tokens = [int(t) for t in token_ids]
         if not 1 <= len(tokens) <= MANY_TOKENS or any(not 0 <= t < int(c['vocab_size']) for t in token_ids):
             raise ValueError(f'forward_many takes 1 to {MANY_TOKENS} tokens of the vocabulary')

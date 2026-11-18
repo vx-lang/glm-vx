@@ -236,7 +236,7 @@ def check_params(ptx: str, entry: str, params):
         raise ValueError(f'PTX parameters {got} do not match the vxc manifest {expected}')
     # The aligned pointer (second descriptor field) is the one the kernel dereferences.
     body = ptx[head.end():]
-    stored = set()
+    stored, atomic_stored = set(), set()
     for index, p in enumerate(params):
         if p['kind'] != 'memref':
             continue
@@ -257,6 +257,11 @@ def check_params(ptx: str, entry: str, params):
                or re.search(rf'(?:atom|red)\.global(?:\.\w+)+\s+(?:%\w+,\s*)?\[{re.escape(a)}([+-]\d+)?\]', body)
                for a in addresses):
             stored.add(p['name'])
+        # An atomic store (st.relaxed.sys.global, st.release.sys.global) may go to a `&` tensor (topk_select_*'s
+        # out_ids) or a `&mut` one (tp_all_reduce's buffers): it satisfies a mut tensor, it does not demand one.
+        if any(re.search(rf'st\.(?:relaxed|release)\.(?:sys|gpu|cta)\.global(?:\.v[24])?\.\w+\s+\[{re.escape(a)}([+-]\d+)?\]', body)
+               for a in addresses):
+            atomic_stored.add(p['name'])
         # Element width: loads through this tensor must be as wide as its element in the manifest,
         # which catches a manifest whose read-only tensors of different types are out of place.
         widths = {int(w) for a in addresses
@@ -266,8 +271,9 @@ def check_params(ptx: str, entry: str, params):
         if widths - allowed:
             raise ValueError(f'{p["name"]} is {p["element"]} in the manifest but loaded {sorted(widths)} bits wide')
     declared = {p['name'] for p in params if p['kind'] == 'memref' and p['mut']}
-    if stored != declared:
-        raise ValueError(f'kernel stores to {sorted(stored)} but the manifest marks {sorted(declared)} mut')
+    if not stored <= declared or not declared <= stored | atomic_stored:
+        raise ValueError(f'kernel stores to {sorted(stored)} (atomically to {sorted(atomic_stored)}) but the manifest '
+                         f'marks {sorted(declared)} mut')
 
 
 def main() -> int:

@@ -2,7 +2,9 @@
 section 3.7). Every cross-GPU call of the model goes through Collective, so a Vx-native
 all-reduce can replace NCCL here alone.
 
-A job runs one process per GPU (CUDA_VISIBLE_DEVICES=<rank>), each one rank. The functions come
+A job runs one process per GPU, each one rank. Tensor parallelism's one-shot sum (gpu/tp.PeerSum)
+maps the other ranks' memory through CUDA IPC, which needs their GPUs visible: there every process
+sees every GPU and rank r takes device r (CUDAContext(r, primary=True)). The functions come
 from Vx's dispatch library, looked up in a kernel library's dependencies as VxKernel looks up
 vx_cuda_set_stream, so they share the stream that the kernels' copy of the library sets. Each
 call goes on the stream given, so a CUDA graph can record it; the Collective must be made (it

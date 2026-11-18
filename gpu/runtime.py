@@ -87,6 +87,11 @@ _I32 = C.c_int32
 _SIZE = C.c_size_t
 
 
+class IpcMemHandle(C.Structure):
+    """CUipcMemHandle: 64 opaque bytes."""
+    _fields_ = [("reserved", C.c_ubyte * 64)]
+
+
 class CUDADriver:
     """Load and bind NVIDIA's driver library. ``_library`` is for mock tests only."""
     def __init__(self, *, _library=None):
@@ -147,6 +152,11 @@ class CUDADriver:
                                        C.POINTER(_U32), C.POINTER(_U32), _I32, _I32, _I32, _I32],
             # Bound what a profiler (ncu --profile-from-start off) measures: validation/layer_profile.py.
             "cuProfilerStart": [], "cuProfilerStop": [],
+            # CUDA IPC (tensor parallelism's peer buffers, gpu/tp.py): a cuMemAlloc allocation's handle,
+            # opened in another process (another GPU's, over NVLink) as a device pointer of its own.
+            "cuIpcGetMemHandle": [C.POINTER(IpcMemHandle), _U64],
+            "cuIpcOpenMemHandle_v2": [C.POINTER(_U64), IpcMemHandle, _U32],
+            "cuIpcCloseMemHandle": [_U64],
         }
         for name, argtypes in optional.items():
             fn = getattr(self.library, name, None)
@@ -505,8 +515,45 @@ class DeviceBuffer(_Resource):
                 self.context.driver.call("cuMemcpyDtoH_v2", host, self._pointer.value + offset, nbytes)
             return host.raw
 
+    def ipc_handle(self):
+        """This allocation's CUDA IPC handle (64 bytes), for PeerBuffer in another process."""
+        driver = self.context.driver
+        if driver.cuIpcGetMemHandle is None:
+            raise CUDAUnavailable("the NVIDIA driver has no cuIpcGetMemHandle")
+        handle = IpcMemHandle()
+        with self.context._activate():
+            self._ensure_open()
+            driver.call("cuIpcGetMemHandle", C.byref(handle), self._pointer.value)
+        return bytes(handle.reserved)
+
     def _destroy_current(self):
         self.context.driver.call("cuMemFree_v2", self._pointer)
+        self._mark_closed()
+        self._pointer = _U64()
+
+
+class PeerBuffer(DeviceBuffer):
+    """Another process's allocation (DeviceBuffer.ipc_handle there, nbytes long) mapped into this
+    context: on another GPU, reached over NVLink (peer access enabled lazily). Closing unmaps it; the
+    owner frees it."""
+    def __init__(self, context, handle, nbytes):
+        _integer(nbytes, "nbytes", minimum=1)
+        if len(handle) != 64:
+            raise ValueError("a CUDA IPC handle is 64 bytes")
+        if context.driver.cuIpcOpenMemHandle_v2 is None:
+            raise CUDAUnavailable("the NVIDIA driver has no cuIpcOpenMemHandle")
+        self.nbytes = nbytes
+        self._pointer = _U64()
+        with context._activate():
+            context.driver.call("cuIpcOpenMemHandle_v2", C.byref(self._pointer),
+                                IpcMemHandle((C.c_ubyte * 64)(*bytes(handle))), 1)
+            self._setup(context)
+
+    def ipc_handle(self):
+        raise TypeError("a PeerBuffer is another process's allocation")
+
+    def _destroy_current(self):
+        self.context.driver.call("cuIpcCloseMemHandle", self._pointer)
         self._mark_closed()
         self._pointer = _U64()
 

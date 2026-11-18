@@ -1682,3 +1682,73 @@ def test_index_scores_tc_at_writes_nothing_off_its_shape(run, heads, dim):
               keys=rng.normal(size=(128, dim)).astype(F), weights=np.ones(max(heads, 1), F),
               step=np.array([99, 100, 0, 0], np.int32), max_tokens=128, heads=heads, dim=dim, scale=0.1)['out']
     assert (out == 7).all()
+
+
+@pytest.mark.parametrize('n', [256, 300, 6144])
+def test_tp_all_reduce_one_rank(run, n):
+    # One rank (the host path cannot run several: a rank waits on the others' flags): x stays x, and
+    # each call copies x into the half of its epoch's parity, raises every block's flag to the epoch.
+    blocks = -(-n // 256)
+    rng = np.random.default_rng(n)
+    mine, flags, epochs = np.full(2 * n, -1.0, F), np.zeros(blocks, np.uint32), np.zeros(blocks, np.uint32)
+    other = np.zeros(2 * n, F), np.zeros(blocks, np.uint32)
+    for call in range(3):
+        x = rng.normal(size=n).astype(F)
+        values = dict(x=x.copy(), mine=mine, my_flags=flags, epochs=epochs, rank=0, ranks=1, n=n)
+        values.update({f'd{r}': mine if r == 0 else other[0] for r in range(8)})
+        values.update({f'f{r}': flags if r == 0 else other[1] for r in range(8)})
+        got = run('tp_all_reduce', **values)
+        bits_equal(got['x'], x)
+        mine, flags, epochs = got['mine'], got['my_flags'], got['epochs']
+        assert (epochs == call + 1).all() and (flags == call + 1).all()
+        half = (call + 1) % 2
+        bits_equal(mine[half * n:(half + 1) * n], x)
+
+
+@pytest.mark.parametrize('kernel', ['tc', 'flash'])
+def test_mla_padded_heads_do_not_change_the_real_ones(run, kernel):
+    # Tensor parallelism over 8 GPUs leaves GLM-5.3 8 heads a rank; ResidentGLM pads them to the 16 of
+    # mla_tc_at's tile (and mla_flash_at's group) with query rows of zeros (#57). Heads 0..7's results must
+    # be the same bits whatever rows 8..15 hold.
+    heads, real, rank, rope, tokens, splits_max = 16, 8, 512, 64, 300, 4
+    rng = np.random.default_rng(57)
+    q, qr = rng.normal(size=(heads, rank)).astype(F), rng.normal(size=(heads, rope)).astype(F)
+    kv, kr = rng.normal(size=(tokens, rank)), rng.normal(size=(tokens, rope))
+    if kernel == 'tc':
+        kv, kr = to_bf16(kv), to_bf16(kr)
+    else:
+        kv, kr = kv.astype(F), kr.astype(F)
+    count, splits = 100, 4
+    selected = rng.integers(0, tokens, size=128).astype(np.int32)
+    step = np.array([tokens - 1, tokens, count, splits], np.int32)
+    outs = []
+    for pad in ('zeros', 'noise'):
+        q2, qr2 = q.copy(), qr.copy()
+        if pad == 'zeros':
+            q2[real:], qr2[real:] = 0, 0
+        common = dict(cache_latent=kv, cache_rope=kr, selected=selected, step=step, heads=heads, rank=rank, rope_dim=rope,
+                      selection_stride=0, splits_max=splits_max, scale=rank ** -0.5)
+        numerator, stats = np.zeros((1, splits_max, 16 * rank), F), np.zeros((1, splits_max, 32), F)
+        if kernel == 'tc':
+            qs = run('mla_q_bf16_at', q_t=np.zeros((1, 1024, 8), np.uint16), qr_t=np.zeros((1, 128, 8), np.uint16),
+                     q_latent=q2, q_rope=qr2, heads=heads, rank=rank, rope_dim=rope)
+            got = run('mla_tc_at', numerator=numerator.reshape(splits_max * 16, rank), stats=stats.reshape(splits_max, 32),
+                      q_t=qs['q_t'].reshape(-1, 8), qr_t=qs['qr_t'].reshape(-1, 8), **common)
+        else:
+            got = run('mla_flash_at', numerator=numerator, stats=stats, q_latent=q2, q_rope=qr2, **common)
+        out = run('mla_flash_merge_at', out=np.zeros((heads, rank), F), numerator=got['numerator'].reshape(1, splits_max, -1),
+                  stats=got['stats'].reshape(1, splits_max, 32), step=step, heads=heads, rank=rank, splits_max=splits_max)['out']
+        assert np.isfinite(out).all()
+        outs.append(out[:real])
+    assert np.abs(outs[0]).max() > 0
+    bits_equal(outs[0], outs[1])
+
+
+@pytest.mark.parametrize('ranks,n', [(2, 6144), (3, 300), (8, 257)])
+def test_sum_ranks_adds_in_rank_order(run, ranks, n):
+    g = np.random.default_rng(ranks * n).normal(size=(ranks, n)).astype(F) * np.logspace(-3, 3, ranks, dtype=F)[:, None]
+    want = g[0] + g[1]
+    for r in range(2, ranks):
+        want = want + g[r]
+    got = run('sum_ranks', out=np.zeros(n, F), gathered=g, ranks=ranks, n=n)['out']
+    bits_equal(got, want)

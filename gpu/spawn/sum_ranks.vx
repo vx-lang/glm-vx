@@ -1,0 +1,24 @@
+// Tensor parallelism's cross-rank sum after an all-gather (gpu/tp.py, ResidentGLM._tp_sum): out[i] =
+// ((g[0][i] + g[1][i]) + g[2][i]) + .. over the ranks' rows of gathered ([ranks, n], rank order), the bits of
+// the add launches it replaces (out = g0 + g1, then out = out + g_r for each further rank). out may be
+// the rank's own partial: a separate buffer from gathered.
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_sum_ranks(out: &mut Tensor<f32, [?], Memory::HBM>, gathered: &Tensor<f32, [?], Memory::HBM>,
+                              ranks: i32, n: i32) -> void {
+  spawn on(Topology::Device) {
+    for blk in 0..(n - 1) / 256 + 1 across blocks {
+      for t in 0..256 across lanes {
+        let i: i32 = blk * 256 + t;
+        if i < n {
+          let mut s: f32 = gathered[i];
+          for r in 1..ranks {
+            s = s + gathered[r * n + i];
+          }
+          out[i] = s;
+        }
+      }
+    }
+  }
+  return;
+}
