@@ -194,6 +194,27 @@ def test_peer_sum_maps_every_rank_and_pads_to_eight():
         PeerSum(context, 0, 9, n, None)
 
 
+def test_peer_sum_gives_every_parameter_of_its_kernels():
+    # The built manifests' parameters, arrivals included (a kernel with code after its blocks loop takes the
+    # count of its last block): a launch refuses a missing one.
+    import json
+    from pathlib import Path
+    from gpu.runtime import CUDAContext, CUDADriver
+    from gpu.tp import PeerSum
+    spawn = Path(__file__).parent / 'build' / 'spawn'
+    if not all((spawn / f'{k}.json').exists() for k in ('tp_all_reduce', 'tp_sum_rmsnorm')):
+        pytest.skip('gpu/spawn/build.sh has not built tp_all_reduce and tp_sum_rmsnorm')
+    context = CUDAContext(_driver=CUDADriver(_library=IpcLibrary()))
+    peer = PeerSum(context, 0, 1, 300, lambda own: [own])
+    x, w = context.tensor((300,), 'float32'), context.tensor((300,), 'float32')
+    calls = dict(tp_all_reduce=peer.arguments(x), tp_sum_rmsnorm=peer.norm_arguments(x, w, w, x, x, 1e-5))
+    for kernel, args in calls.items():
+        params = json.loads((spawn / f'{kernel}.json').read_text())['params']
+        assert sorted(args) == sorted(p['name'] for p in params), kernel
+    assert calls['tp_sum_rmsnorm']['arrivals'].size == 1
+    peer.close()
+
+
 @needs_spawn
 def test_greedy_picks_the_logits_argmax_on_one_and_two_ranks():
     # forward(logits='greedy'): numpy.argmax of forward()'s logits, chosen on the device: on one GPU through

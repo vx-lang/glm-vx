@@ -202,8 +202,9 @@ class PeerSum:
 
     The same allocation holds this rank's inbox of gpu/spawn/tp_sum_rmsnorm (the sum with the residual
     RMSNorm after it, pushed rather than pulled): [2 halves][8 ranks][n] 64-bit words, zero at first;
-    norm_arguments gives that kernel's arguments, with its own call count a block (norm_blocks blocks)
-    and its 1024 sums of squares. Its calls and tp_all_reduce's are counted apart, so the two mix."""
+    norm_arguments gives that kernel's arguments, with its own call count a block (norm_blocks blocks),
+    its 1024 sums of squares and its last block's arrival count. Its calls and tp_all_reduce's are
+    counted apart, so the two mix."""
 
     def __init__(self, context, rank, ranks, n, exchange, *, norm_blocks=8):
         from .runtime import DeviceTensor, PeerBuffer
@@ -220,6 +221,7 @@ class PeerSum:
         self.norm_blocks = int(norm_blocks)
         self.norm_epochs = context.tensor((self.norm_blocks,), 'uint32', bytes(self.norm_blocks * 4))
         self.squares = context.tensor((1024,), 'float32')
+        self.norm_arrivals = context.tensor((1,), 'int32', bytes(4))  # its last block's count, zero between calls
         handles = exchange(own.ipc_handle())
         if len(handles) != ranks:
             raise ValueError(f'the exchange gave {len(handles)} handles for {ranks} ranks')
@@ -249,7 +251,8 @@ class PeerSum:
         inboxes = self.inboxes + [self.inboxes[self.rank]] * pad
         values = dict(out=out, residual_out=residual_out, x=x.view(tuple(x.shape), 'uint32'), residual=residual,
                       weight=weight, ss=self.squares, epochs=self.norm_epochs, inbox=self.inboxes[self.rank],
-                      rank=self.rank, ranks=self.ranks, n=self.n, eps=float(eps), blocks=self.norm_blocks)
+                      rank=self.rank, ranks=self.ranks, n=self.n, eps=float(eps), blocks=self.norm_blocks,
+                      arrivals=self.norm_arrivals)
         values.update({f'p{r}': inboxes[r] for r in range(TP_ALL_REDUCE_RANKS)})
         return values
 
