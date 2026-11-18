@@ -1,0 +1,20 @@
+{
+  "ranks": 2,
+  "gpus": 2,
+  "n": 6144,
+  "ok": true,
+  "results": [
+    {
+      "rank": 0,
+      "failures": [],
+      "failed": 0,
+      "us_per_call": 4.818741000008231
+    },
+    {
+      "rank": 1,
+      "failures": [],
+      "failed": 0,
+      "us_per_call": 4.818178000050466
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "ranks": 1,
+  "layers": 4,
+  "context": 48,
+  "one_shot": false,
+  "ok": true,
+  "results": [
+    {
+      "rank": 0,
+      "us_per_step": 1425.5917291663422,
+      "replays": 97,
+      "sums": 0
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+pod_validate 2026-11-18T09:06:34Z, NVIDIA H200
+test-spawn-vx-host           FAIL     1s
+test-resident-graph          ok      25s
+failed steps: 1

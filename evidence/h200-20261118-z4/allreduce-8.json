@@ -1,0 +1,56 @@
+{
+  "ranks": 8,
+  "gpus": 8,
+  "n": 6144,
+  "ok": true,
+  "results": [
+    {
+      "rank": 0,
+      "failures": [],
+      "failed": 0,
+      "us_per_call": 16.84630200003312
+    },
+    {
+      "rank": 1,
+      "failures": [],
+      "failed": 0,
+      "us_per_call": 16.844342000013057
+    },
+    {
+      "rank": 2,
+      "failures": [],
+      "failed": 0,
+      "us_per_call": 16.85006100001374
+    },
+    {
+      "rank": 3,
+      "failures": [],
+      "failed": 0,
+      "us_per_call": 16.848833999972612
+    },
+    {
+      "rank": 4,
+      "failures": [],
+      "failed": 0,
+      "us_per_call": 16.84539100000393
+    },
+    {
+      "rank": 5,
+      "failures": [],
+      "failed": 0,
+      "us_per_call": 16.84294400001818
+    },
+    {
+      "rank": 6,
+      "failures": [],
+      "failed": 0,
+      "us_per_call": 16.844796999976097
+    },
+    {
+      "rank": 7,
+      "failures": [],
+      "failed": 0,
+      "us_per_call": 16.848680000009608
+    }
+  ]
+}

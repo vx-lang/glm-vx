@@ -1,0 +1,41 @@
+{
+  "ranks": 8,
+  "layers": 4,
+  "context": 48,
+  "one_shot": false,
+  "ok": false,
+  "results": [
+    {
+      "rank": 0,
+      "error": "exit -6"
+    },
+    {
+      "rank": 1,
+      "error": "exit -6"
+    },
+    {
+      "rank": 2,
+      "error": "exit -6"
+    },
+    {
+      "rank": 3,
+      "error": "exit -6"
+    },
+    {
+      "rank": 4,
+      "error": "exit -6"
+    },
+    {
+      "rank": 5,
+      "error": "exit -6"
+    },
+    {
+      "rank": 6,
+      "error": "exit -6"
+    },
+    {
+      "rank": 7,
+      "error": "exit -6"
+    }
+  ]
+}

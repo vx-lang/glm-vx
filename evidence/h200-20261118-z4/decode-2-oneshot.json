@@ -1,0 +1,17 @@
+{
+  "ranks": 2,
+  "layers": 4,
+  "context": 48,
+  "one_shot": true,
+  "ok": false,
+  "results": [
+    {
+      "rank": 0,
+      "error": "exit -6"
+    },
+    {
+      "rank": 1,
+      "error": "exit -6"
+    }
+  ]
+}

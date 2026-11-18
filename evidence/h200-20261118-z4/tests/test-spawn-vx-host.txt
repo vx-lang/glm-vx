@@ -1,0 +1,86 @@
+ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 21%]
+ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 42%]
+ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 63%]
+ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss [ 84%]
+ssssssssssssssssssssssssssssssssssssssssssssssssssss                     [100%]
+=========================== short test summary info ============================
+SKIPPED [3] gpu/test_spawn_vx_host.py:113: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [3] gpu/test_spawn_vx_host.py:124: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [3] gpu/test_spawn_vx_host.py:144: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [3] gpu/test_spawn_vx_host.py:156: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [1] gpu/test_spawn_vx_host.py:165: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [2] gpu/test_spawn_vx_host.py:175: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [3] gpu/test_spawn_vx_host.py:206: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [4] gpu/test_spawn_vx_host.py:241: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [1] gpu/test_spawn_vx_host.py:267: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [5] gpu/test_spawn_vx_host.py:298: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [2] gpu/test_spawn_vx_host.py:309: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [6] gpu/test_spawn_vx_host.py:346: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [2] gpu/test_spawn_vx_host.py:361: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [16] gpu/test_spawn_vx_host.py:386: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [3] gpu/test_spawn_vx_host.py:406: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [1] gpu/test_spawn_vx_host.py:416: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [30] gpu/test_spawn_vx_host.py:460: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [9] gpu/test_spawn_vx_host.py:476: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [6] gpu/test_spawn_vx_host.py:488: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [3] gpu/test_spawn_vx_host.py:502: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [3] gpu/test_spawn_vx_host.py:519: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [1] gpu/test_spawn_vx_host.py:535: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [2] gpu/test_spawn_vx_host.py:565: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [5] gpu/test_spawn_vx_host.py:584: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [1] gpu/test_spawn_vx_host.py:599: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [3] gpu/test_spawn_vx_host.py:612: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [3] gpu/test_spawn_vx_host.py:630: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [3] gpu/test_spawn_vx_host.py:641: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [6] gpu/test_spawn_vx_host.py:653: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [3] gpu/test_spawn_vx_host.py:671: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [1] gpu/test_spawn_vx_host.py:686: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [2] gpu/test_spawn_vx_host.py:693: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [20] gpu/test_spawn_vx_host.py:762: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [5] gpu/test_spawn_vx_host.py:777: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [6] gpu/test_spawn_vx_host.py:807: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [12] gpu/test_spawn_vx_host.py:847: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [2] gpu/test_spawn_vx_host.py:872: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [2] gpu/test_spawn_vx_host.py:889: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [1] gpu/test_spawn_vx_host.py:912: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [1] gpu/test_spawn_vx_host.py:926: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [2] gpu/test_spawn_vx_host.py:938: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [2] gpu/test_spawn_vx_host.py:954: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [1] gpu/test_spawn_vx_host.py:969: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [3] gpu/test_spawn_vx_host.py:992: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [6] gpu/test_spawn_vx_host.py:1005: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [3] gpu/test_spawn_vx_host.py:1027: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [4] gpu/test_spawn_vx_host.py:1063: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [2] gpu/test_spawn_vx_host.py:1072: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [2] gpu/test_spawn_vx_host.py:1082: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [4] gpu/test_spawn_vx_host.py:1095: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [1] gpu/test_spawn_vx_host.py:1108: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [4] gpu/test_spawn_vx_host.py:1115: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [4] gpu/test_spawn_vx_host.py:1135: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [8] gpu/test_spawn_vx_host.py:1150: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [1] gpu/test_spawn_vx_host.py:1163: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [7] gpu/test_spawn_vx_host.py:1182: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [7] gpu/test_spawn_vx_host.py:1194: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [8] gpu/test_spawn_vx_host.py:1232: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [6] gpu/test_spawn_vx_host.py:1248: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [12] gpu/test_spawn_vx_host.py:1267: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [5] gpu/test_spawn_vx_host.py:1288: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [3] gpu/test_spawn_vx_host.py:1302: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [5] gpu/test_spawn_vx_host.py:1324: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [4] gpu/test_spawn_vx_host.py:1346: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [5] gpu/test_spawn_vx_host.py:1358: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [5] gpu/test_spawn_vx_host.py:1420: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [6] gpu/test_spawn_vx_host.py:1446: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [2] gpu/test_spawn_vx_host.py:1488: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [3] gpu/test_spawn_vx_host.py:1511: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [2] gpu/test_spawn_vx_host.py:1549: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [2] gpu/test_spawn_vx_host.py:1581: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [4] gpu/test_spawn_vx_host.py:1611: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [1] gpu/test_spawn_vx_host.py:1623: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [2] gpu/test_spawn_vx_host.py:1635: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [5] gpu/test_spawn_vx_host.py:1663: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [3] gpu/test_spawn_vx_host.py:1678: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [3] gpu/test_spawn_vx_host.py:1687: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [2] gpu/test_spawn_vx_host.py:1708: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+SKIPPED [3] gpu/test_spawn_vx_host.py:1747: no kernel libraries: run gpu/spawn/build.sh with VX_DISPATCH_LIB set
+340 skipped in 0.25s
