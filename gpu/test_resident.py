@@ -353,6 +353,32 @@ def test_fold_shared_gives_the_same_bits_in_fewer_launches():
         ResidentGLM(model, ctx=Context(), fold_shared=True)
 
 
+def test_moe_down2_gives_fp8_moe_cvt_down_bits():
+    # moe_down2: the routed experts' down projection through fp8_moe_cvt_down2 (two rows and two experts a
+    # subgroup, for tensor parallelism's short expert rows): each expert's dot and the ascending-order sum
+    # are fp8_moe_cvt_down's, so the logits are the same bits, alone, with the folded shared expert (an odd
+    # k + 1) and under graph replay; every MoE layer launches it in place of fp8_moe_cvt_down.
+    model, _ = fp8_model(43, hidden_size=272, moe_intermediate_size=144)
+    moe_layers = sum(model.mlp_type(i) != 'dense' for i in range(model.n_layers))
+    assert moe_layers > 0
+    for options in (dict(), dict(fold_shared=True), dict(fold_shared=True, graph=True)):
+        runs = {}
+        for down2 in (False, True):
+            resident = ResidentGLM(model, ctx=Context(), max_tokens=32, device_experts=True, fp8_kernels='cvt',
+                                   moe_down2=down2, **options)
+            try:
+                runs[down2] = (np.stack([resident.forward(t) for t in TOKENS[:6]]), dict(resident.launches))
+            finally:
+                resident.close()
+        (old, before), (new, after) = runs[False], runs[True]
+        np.testing.assert_array_equal(new.view(np.uint32), old.view(np.uint32))
+        if not options.get('graph'):
+            assert after.get('fp8_moe_cvt_down2_ref') == before.get('fp8_moe_cvt_down_ref') == moe_layers * 6, (before, after)
+            assert 'fp8_moe_cvt_down_ref' not in after
+    with pytest.raises(ValueError, match='moe_down2'):
+        ResidentGLM(model, ctx=Context(), moe_down2=True)
+
+
 def fp8_bf16_router_model(seed, **overrides):
     """fp8_model with each MoE router's gate in bfloat16, as the official FP8 checkpoint stores it."""
     from glm_vx.quant import BF16Weights, BlockFP8Weights

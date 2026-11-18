@@ -261,6 +261,7 @@ CVT_PAIRS = {
     'fp8_matvec_cvt_tiles3': lambda rng: _cvt_tiles3_args(rng),
     'fp8_moe_cvt_gate_up': lambda rng: _cvt_moe_args(rng, 'gate_up'),
     'fp8_moe_cvt_down': lambda rng: _cvt_moe_args(rng, 'down'),
+    'fp8_moe_cvt_down2': lambda rng: _cvt_moe_args(rng, 'down'),
 }
 
 

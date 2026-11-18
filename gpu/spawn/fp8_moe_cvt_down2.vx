@@ -1,0 +1,107 @@
+// fp8_moe_cvt_down for short expert rows (glm-vx #63). Tensor parallelism splits each expert's
+// intermediate columns, so under TP8 a row of an expert's down matrix is 256 codes, 64 words: less than one
+// 128-word lane pass. fp8_moe_cvt_down's subgroup of four rows then goes through the k experts one at a
+// time with a few loads in flight (H200, GLM-5.3 at TP8: 21.4 us for 12.6 MB). Here a subgroup takes two
+// rows and two experts at a time, a block eight rows: twice the subgroups, twice the loads in flight each.
+// Each expert's dot is fp8_moe_cvt_down's when a row has at most 96 words (its lanes' fmas through
+// fp8t_pair_group!, lanes::sum, then weight * dot added in ascending expert order), so the bits are the
+// same there. Arguments as fp8_moe_cvt_down.
+// spawn-include: device.vx
+// spawn-variant: - fp8_cvt_sm90.vx machine-sm90.vx
+// spawn-variant: _ref fp8_cvt_ref.vx
+// spawn-maxnreg: 128
+
+pub fn glm_vx_spawn_fp8_moe_cvt_down2(out: &mut Tensor<f32, [?], Memory::HBM>, down: &Tensor<u32, [?], Memory::HBM>, scales: &Tensor<f32, [?], Memory::HBM>,
+                                       act: &Tensor<f32, [?], Memory::HBM>, weights: &Tensor<f32, [?], Memory::HBM>,
+                                       ids: &Tensor<i32, [?], Memory::HBM>, k: i32, experts: i32, rows: i32, cols: i32) -> void {
+  spawn on(Topology::Device) {
+    for rb in 0..(rows - 1) / 8 + 1 across blocks {
+      let mut ranks = unsafe { Tensor<i32, [4, 32], Memory::SMEM>::uninit() };
+      // a, b: rows 0 and 1 of the subgroup against expert s0; c, d: against s1 = s0 + 1.
+      let mut a = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
+      let mut b = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
+      let mut c = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
+      let mut d = unsafe { Tensor<f32, [4, 32], Memory::SMEM>::uninit() };
+      // sums[w][j]: row rb * 8 + w * 2 + j's sum over the experts so far.
+      let mut sums = unsafe { Tensor<f32, [4, 2], Memory::SMEM>::uninit() };
+      for w in 0..4 across subgroups {
+        for lane in 0..32 across lanes {
+          ranks[w][lane] = id_rank!(ids, k, lane);
+          if lane < 2 { sums[w][lane] = 0.0; }
+        }
+        for h in 0..(k + 1) / 2 {
+          for lane in 0..32 across lanes {
+            let mut sa: f32 = 0.0;
+            let mut sb: f32 = 0.0;
+            let mut sc: f32 = 0.0;
+            let mut sd: f32 = 0.0;
+            let row: i64 = (rb * 8 + w * 2) as i64;
+            if row < (rows as i64) && cols % 16 == 0 {
+              let n: i64 = cols as i64;
+              let tiles: i64 = (n + 127) / 128;
+              let words: i64 = n / 4;
+              let rw: i64 = (n / 16) * 4;
+              let srows: i64 = ((rows as i64) + 127) / 128;
+              let s0: i32 = 2 * h;
+              let s1: i32 = 2 * h + 1;
+              let e0: i32 = ids[slot_of_rank!(ranks, w, k, s0)];
+              let e1: i32 = if s1 < k { ids[slot_of_rank!(ranks, w, k, s1)] } else { -1 };
+              if e0 >= 0 && e0 < experts {
+                let ra: i64 = ((e0 as i64) * (rows as i64) + row) * rw;
+                let rb2: i64 = if row + 1 < (rows as i64) { ra + rw } else { ra };
+                let sbase: i64 = ((e0 as i64) * srows + row / 128) * tiles;
+                let xo: i64 = (s0 as i64) * ((cols as i64) / 4) * 4;
+                let mut word: i64 = lane as i64;
+                while word < words {
+                  fp8t_pair_group!(sa, sb, down, scales, down, scales, act, xo, ra, rb2, sbase, sbase, word, words);
+                  fp8t_pair_group!(sa, sb, down, scales, down, scales, act, xo, ra, rb2, sbase, sbase, word + 32, words);
+                  fp8t_pair_group!(sa, sb, down, scales, down, scales, act, xo, ra, rb2, sbase, sbase, word + 64, words);
+                  fp8t_pair_group!(sa, sb, down, scales, down, scales, act, xo, ra, rb2, sbase, sbase, word + 96, words);
+                  word = word + 128;
+                }
+              }
+              if e1 >= 0 && e1 < experts {
+                let rc: i64 = ((e1 as i64) * (rows as i64) + row) * rw;
+                let rd: i64 = if row + 1 < (rows as i64) { rc + rw } else { rc };
+                let tbase: i64 = ((e1 as i64) * srows + row / 128) * tiles;
+                let xo1: i64 = (s1 as i64) * ((cols as i64) / 4) * 4;
+                let mut word: i64 = lane as i64;
+                while word < words {
+                  fp8t_pair_group!(sc, sd, down, scales, down, scales, act, xo1, rc, rd, tbase, tbase, word, words);
+                  fp8t_pair_group!(sc, sd, down, scales, down, scales, act, xo1, rc, rd, tbase, tbase, word + 32, words);
+                  fp8t_pair_group!(sc, sd, down, scales, down, scales, act, xo1, rc, rd, tbase, tbase, word + 64, words);
+                  fp8t_pair_group!(sc, sd, down, scales, down, scales, act, xo1, rc, rd, tbase, tbase, word + 96, words);
+                  word = word + 128;
+                }
+              }
+            }
+            a[w][lane] = sa;
+            b[w][lane] = sb;
+            c[w][lane] = sc;
+            d[w][lane] = sd;
+          }
+          let ta: f32 = lanes::sum(&a[w], 32);
+          let tb: f32 = lanes::sum(&b[w], 32);
+          let tc: f32 = lanes::sum(&c[w], 32);
+          let td: f32 = lanes::sum(&d[w], 32);
+          for lane in 0..32 across lanes {
+            if lane == 0 {
+              let wt: f32 = weights[slot_of_rank!(ranks, w, k, 2 * h)];
+              sums[w][0] = sums[w][0] + ta * wt;
+              sums[w][1] = sums[w][1] + tb * wt;
+              if 2 * h + 1 < k {
+                let wu: f32 = weights[slot_of_rank!(ranks, w, k, 2 * h + 1)];
+                sums[w][0] = sums[w][0] + tc * wu;
+                sums[w][1] = sums[w][1] + td * wu;
+              }
+            }
+          }
+        }
+      }
+      for t in 0..8 across lanes {
+        if rb * 8 + t < rows && cols >= 0 { out[rb * 8 + t] = sums[t / 2][t % 2]; }
+      }
+    }
+  }
+  return;
+}

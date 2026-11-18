@@ -59,6 +59,10 @@ in the last bits.
 inside the routed experts' two launches, as expert ``n_routed_experts`` with weight 1.0 in route slot k:
 the same bits as its own three launches.
 
+``moe_down2=True`` (with ``fp8_kernels='cvt'``) runs the routed experts' down projection through
+fp8_moe_cvt_down2, which spreads the short rows of a tensor-parallel slice over more subgroups: the same
+bits.
+
 ``graph=True`` captures the decode step's layers into a CUDA graph (#26) and replays it every token:
 one upload of the step's inputs (the embedding row, cos, sin and the step buffer), one graph launch,
 then the final norm, lm_head and the logits down. What changes per token comes from the step buffer
@@ -189,7 +193,7 @@ class ResidentGLM:
                  device_topk=True, device_experts=False, fused_attention=False, graph=False, fp8_kernels='hand',
                  topk='auto', long_topk='position', mla_kernel='decode', matvec_kernels='hand', mtp=False,
                  norm_block=256, fuse_glue=True, index_kernel='mma',
-                 topk_blocks_from=65536, fold_shared=False, fuse_router=False, tp=None):
+                 topk_blocks_from=65536, fold_shared=False, fuse_router=False, moe_down2=False, tp=None):
         if getattr(model, 'packed_weights', False):
             raise NotImplementedError('ResidentGLM supports expanded float32 weights only')
         if getattr(model, 'expert_placement', None) is not None:
@@ -277,6 +281,11 @@ class ResidentGLM:
         self.fold_shared = bool(fold_shared)
         if self.fold_shared and not (self.device_experts and fp8_kernels == 'cvt'):
             raise ValueError("fold_shared needs device_experts=True and fp8_kernels='cvt'")
+        # moe_down2: the routed experts' down projection through gpu/spawn/fp8_moe_cvt_down2 (two rows and two
+        # experts a subgroup), the bits of fp8_moe_cvt_down: for the short expert rows of tensor parallelism.
+        self.moe_down2 = bool(moe_down2)
+        if self.moe_down2 and not (self.device_experts and fp8_kernels == 'cvt'):
+            raise ValueError("moe_down2 needs device_experts=True and fp8_kernels='cvt'")
         # fuse_router: a MoE layer's router projection and the router in one launch (gpu/spawn/router_bf16:
         # a block a row in the hand bf16_matvec's order, then the router's choice in the last block to
         # finish). For a BF16 gate, as the official checkpoints store it; another gate keeps the two
@@ -1133,7 +1142,8 @@ class ResidentGLM:
         act = self.moe_act.view((k * inter,))
         self._spawn(kernel + 'gate_up' + suffix, act=act, x=x, inter=inter, up_row=up_row, stride=stride, cols=hidden,
                     **gate_args, **common)
-        self._spawn(kernel + 'down' + suffix, out=self.moe_sum, act=act, weights=self.route_weights, rows=hidden,
+        down_kernel = kernel + ('down2' if self.moe_down2 and kernel == 'fp8_moe_cvt_' else 'down') + suffix
+        self._spawn(down_kernel, out=self.moe_sum, act=act, weights=self.route_weights, rows=hidden,
                     cols=inter, **down_args, **common)
 
     # ---------------------------------------------------------------- blocks

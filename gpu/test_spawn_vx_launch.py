@@ -329,7 +329,7 @@ def on_device(context, values):
 # The FP8 conversion kernels (glm-vx #38) take the arguments of the kernels they mirror: the sm_90 builds
 # and their _ref builds alike.
 for mirror, names in {'fp8_matvec_fma_tiles': ('fp8_matvec_cvt_tiles',), 'fp8_matvec_fma_tiles3': ('fp8_matvec_cvt_tiles3',),
-                      'fp8_moe_fma_gate_up': ('fp8_moe_cvt_gate_up',), 'fp8_moe_fma_down': ('fp8_moe_cvt_down',)}.items():
+                      'fp8_moe_fma_gate_up': ('fp8_moe_cvt_gate_up',), 'fp8_moe_fma_down': ('fp8_moe_cvt_down', 'fp8_moe_cvt_down2')}.items():
     for name in names:
         CASES[name] = CASES[name + '_ref'] = CASES[mirror]
 
