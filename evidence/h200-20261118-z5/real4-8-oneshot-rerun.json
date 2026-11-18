@@ -1,0 +1,75 @@
+{
+  "ranks": 8,
+  "layers": 4,
+  "checkpoint": "/home/aditya/glm-h200/GLM-5.3",
+  "context": 48,
+  "one_shot": true,
+  "compared": true,
+  "ok": true,
+  "results": [
+    {
+      "rank": 0,
+      "us_per_step": 863.8217708304788,
+      "replays": 97,
+      "sums": 16,
+      "steps_differing": [],
+      "bit_exact": true
+    },
+    {
+      "rank": 1,
+      "us_per_step": 864.9145416654846,
+      "replays": 97,
+      "sums": 16,
+      "steps_differing": [],
+      "bit_exact": true
+    },
+    {
+      "rank": 2,
+      "us_per_step": 864.4563750029496,
+      "replays": 97,
+      "sums": 16,
+      "steps_differing": [],
+      "bit_exact": true
+    },
+    {
+      "rank": 3,
+      "us_per_step": 864.4061875031639,
+      "replays": 97,
+      "sums": 16,
+      "steps_differing": [],
+      "bit_exact": true
+    },
+    {
+      "rank": 4,
+      "us_per_step": 864.3383750002916,
+      "replays": 97,
+      "sums": 16,
+      "steps_differing": [],
+      "bit_exact": true
+    },
+    {
+      "rank": 5,
+      "us_per_step": 864.172229171345,
+      "replays": 97,
+      "sums": 16,
+      "steps_differing": [],
+      "bit_exact": true
+    },
+    {
+      "rank": 6,
+      "us_per_step": 864.3811666596927,
+      "replays": 97,
+      "sums": 16,
+      "steps_differing": [],
+      "bit_exact": true
+    },
+    {
+      "rank": 7,
+      "us_per_step": 863.877104166022,
+      "replays": 97,
+      "sums": 16,
+      "steps_differing": [],
+      "bit_exact": true
+    }
+  ]
+}

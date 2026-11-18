@@ -1,0 +1,261 @@
+{
+  "checkpoint": "/home/aditya/glm-h200/GLM-5.3",
+  "layers": null,
+  "ranks": 8,
+  "one_shot": true,
+  "options": {
+    "device_experts": true,
+    "graph": true,
+    "fused_attention": true,
+    "mla_kernel": "tc",
+    "fp8_kernels": "cvt",
+    "matvec_kernels": "x4",
+    "norm_block": 1024,
+    "long_topk": "ilp_hist",
+    "fuse_glue": true,
+    "index_kernel": "mma",
+    "fold_shared": true
+  },
+  "ok": true,
+  "wall_s": 348.1,
+  "prompt": "The history of the transistor begins in 1947 at Bell Labs, where John Bardeen, Walter Brattain and William Shockley",
+  "prompt_ids": [
+    785,
+    3840,
+    315,
+    279,
+    97113,
+    12027,
+    304,
+    220,
+    98729,
+    19,
+    22,
+    518,
+    17857,
+    40416,
+    11,
+    1380,
+    3757,
+    4716,
+    64015,
+    11,
+    32061,
+    3240,
+    1587,
+    466,
+    323,
+    12369,
+    46693,
+    3179
+  ],
+  "generated": [
+    35316
+  ],
+  "text": " invented",
+  "tops": [
+    {
+      "ids": [
+        35316,
+        11100,
+        3465,
+        20416,
+        7881
+      ],
+      "logits": [
+        22.011396408081055,
+        19.224014282226562,
+        19.22278594970703,
+        18.895584106445312,
+        18.559627532958984
+      ],
+      "logprobs": [
+        -0.2856604437870125,
+        -3.0730425696415047,
+        -3.074270902161036,
+        -3.4014727454227547,
+        -3.737429318909083
+      ]
+    }
+  ],
+  "timings": {
+    "1000": {
+      "fill_tokens_per_s": 93.9,
+      "us_per_step_median": 11174.7,
+      "us_per_step_mean": 11198.0,
+      "us_per_step_min": 10769.0
+    }
+  },
+  "setup_s": 9.4,
+  "first_step_s": 323.5,
+  "ranks_results": [
+    {
+      "rank": 0,
+      "setup_s": 9.4,
+      "first_step_s": 323.5,
+      "device_bytes": null,
+      "context_1000": {
+        "fill_tokens_per_s": 93.9,
+        "us_per_step_median": 11174.7,
+        "us_per_step_mean": 11198.0,
+        "us_per_step_min": 10769.0
+      },
+      "timings": {
+        "1000": {
+          "fill_tokens_per_s": 93.9,
+          "us_per_step_median": 11174.7,
+          "us_per_step_mean": 11198.0,
+          "us_per_step_min": 10769.0
+        }
+      },
+      "replays": 1048
+    },
+    {
+      "rank": 1,
+      "setup_s": 9.4,
+      "first_step_s": 323.5,
+      "device_bytes": null,
+      "context_1000": {
+        "fill_tokens_per_s": 93.9,
+        "us_per_step_median": 11174.2,
+        "us_per_step_mean": 11204.9,
+        "us_per_step_min": 10774.6
+      },
+      "timings": {
+        "1000": {
+          "fill_tokens_per_s": 93.9,
+          "us_per_step_median": 11174.2,
+          "us_per_step_mean": 11204.9,
+          "us_per_step_min": 10774.6
+        }
+      },
+      "replays": 1048
+    },
+    {
+      "rank": 2,
+      "setup_s": 9.4,
+      "first_step_s": 323.5,
+      "device_bytes": null,
+      "context_1000": {
+        "fill_tokens_per_s": 93.9,
+        "us_per_step_median": 11172.2,
+        "us_per_step_mean": 11205.1,
+        "us_per_step_min": 10753.4
+      },
+      "timings": {
+        "1000": {
+          "fill_tokens_per_s": 93.9,
+          "us_per_step_median": 11172.2,
+          "us_per_step_mean": 11205.1,
+          "us_per_step_min": 10753.4
+        }
+      },
+      "replays": 1048
+    },
+    {
+      "rank": 3,
+      "setup_s": 9.4,
+      "first_step_s": 323.5,
+      "device_bytes": null,
+      "context_1000": {
+        "fill_tokens_per_s": 93.9,
+        "us_per_step_median": 11174.2,
+        "us_per_step_mean": 11204.7,
+        "us_per_step_min": 10764.6
+      },
+      "timings": {
+        "1000": {
+          "fill_tokens_per_s": 93.9,
+          "us_per_step_median": 11174.2,
+          "us_per_step_mean": 11204.7,
+          "us_per_step_min": 10764.6
+        }
+      },
+      "replays": 1048
+    },
+    {
+      "rank": 4,
+      "setup_s": 9.4,
+      "first_step_s": 323.5,
+      "device_bytes": null,
+      "context_1000": {
+        "fill_tokens_per_s": 93.9,
+        "us_per_step_median": 11172.9,
+        "us_per_step_mean": 11204.7,
+        "us_per_step_min": 10752.6
+      },
+      "timings": {
+        "1000": {
+          "fill_tokens_per_s": 93.9,
+          "us_per_step_median": 11172.9,
+          "us_per_step_mean": 11204.7,
+          "us_per_step_min": 10752.6
+        }
+      },
+      "replays": 1048
+    },
+    {
+      "rank": 5,
+      "setup_s": 9.4,
+      "first_step_s": 323.5,
+      "device_bytes": null,
+      "context_1000": {
+        "fill_tokens_per_s": 93.9,
+        "us_per_step_median": 11169.1,
+        "us_per_step_mean": 11204.2,
+        "us_per_step_min": 10767.8
+      },
+      "timings": {
+        "1000": {
+          "fill_tokens_per_s": 93.9,
+          "us_per_step_median": 11169.1,
+          "us_per_step_mean": 11204.2,
+          "us_per_step_min": 10767.8
+        }
+      },
+      "replays": 1048
+    },
+    {
+      "rank": 6,
+      "setup_s": 9.4,
+      "first_step_s": 323.5,
+      "device_bytes": null,
+      "context_1000": {
+        "fill_tokens_per_s": 93.9,
+        "us_per_step_median": 11171.9,
+        "us_per_step_mean": 11204.9,
+        "us_per_step_min": 10755.2
+      },
+      "timings": {
+        "1000": {
+          "fill_tokens_per_s": 93.9,
+          "us_per_step_median": 11171.9,
+          "us_per_step_mean": 11204.9,
+          "us_per_step_min": 10755.2
+        }
+      },
+      "replays": 1048
+    },
+    {
+      "rank": 7,
+      "setup_s": 9.4,
+      "first_step_s": 323.5,
+      "device_bytes": null,
+      "context_1000": {
+        "fill_tokens_per_s": 93.9,
+        "us_per_step_median": 11173.4,
+        "us_per_step_mean": 11204.5,
+        "us_per_step_min": 10767.3
+      },
+      "timings": {
+        "1000": {
+          "fill_tokens_per_s": 93.9,
+          "us_per_step_median": 11173.4,
+          "us_per_step_mean": 11204.5,
+          "us_per_step_min": 10767.3
+        }
+      },
+      "replays": 1048
+    }
+  ]
+}

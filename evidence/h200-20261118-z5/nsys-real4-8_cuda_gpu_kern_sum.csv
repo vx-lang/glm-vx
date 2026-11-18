@@ -1,0 +1,22 @@
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+40.4,102628420,2176,47163.8,5824.0,4800,3062685,247246.6,glm_vx_spawn_tp_all_reduce
+19.1,48455395,280,173055.0,16688.0,16032,10825799,910891.8,ncclDevKernel_AllGather_RING(ncclDevKernelArgsStorage<(unsigned long)4096>)
+7.6,19238993,544,35365.8,35456.0,7424,64321,26139.9,glm_vx_spawn_bf16_matvec4
+5.5,14052392,2992,4696.7,4576.0,3744,6752,650.6,glm_vx_spawn_fp8_matvec_cvt_tiles
+4.8,12067309,1088,11091.3,10912.0,10016,14336,843.5,glm_vx_spawn_fp8_moe_cvt_gate_up
+4.1,10451596,1088,9606.2,9568.0,9184,10816,243.8,glm_vx_spawn_fp8_matvec_cvt_tiles3
+3.5,8756418,1088,8048.2,8032.0,7680,8832,163.0,glm_vx_spawn_mla_tc_at
+2.3,5770240,272,21214.1,21120.0,20512,23712,456.2,glm_vx_spawn_fp8_moe_cvt_down
+2.1,5308227,1904,2787.9,2784.0,2496,3424,88.4,glm_vx_gpu_residual_rmsnorm8
+1.8,4682986,1088,4304.2,4288.0,3584,5120,146.3,glm_vx_spawn_fp8_matvec_cols_cvt
+1.7,4378439,1088,4024.3,4000.0,3552,4768,123.5,glm_vx_spawn_fp8_matvec_heads_cvt
+1.1,2865476,1088,2633.7,2624.0,2304,3360,86.7,glm_vx_gpu_rmsnorm_pair
+0.9,2395299,1088,2201.6,2208.0,1984,2592,136.2,glm_vx_spawn_mla_flash_merge_at
+0.9,2172257,1088,1996.6,1952.0,1536,2880,121.8,glm_vx_spawn_mla_q_bf16_at
+0.9,2167105,1088,1991.8,1952.0,1728,2880,142.7,glm_vx_spawn_kv_rows_bf16_at
+0.8,1937730,816,2374.7,2336.0,2016,3136,108.8,glm_vx_gpu_index_key_at
+0.7,1707968,544,3139.6,3120.5,2592,3744,213.6,glm_vx_gpu_rmsnorm
+0.6,1593314,272,5857.8,5856.0,5600,6657,112.2,glm_vx_gpu_router
+0.6,1427555,1088,1312.1,1312.0,1184,1376,44.6,glm_vx_gpu_rope_strided
+0.5,1209792,816,1482.6,1472.0,1152,2304,116.8,glm_vx_gpu_copy
+0.2,520257,272,1912.7,1888.0,1312,2560,142.6,glm_vx_gpu_add
