@@ -6,7 +6,9 @@ down projection on the FP8 tensor cores, against
      in float64, times the weight and act scales, the router weights, the experts in ascending id order. Only
      the tensor cores' f32 sums differ, so the error must be small (--tolerance, relative to max |out|);
   1b. the same for fp8_moe_mma16_down_at, act in f16 (a power of two a group, then f16 rounding);
-  2. fp8_moe_cvt_down2, the kernel they replace (act in f32 on the CUDA cores): the difference is what quantizing
+  1c. fp8_moe_mma16_gate_up_at (gate, up and SwiGLU, x in f16) the same way, at the transposed shapes (inter
+      rows of each, the hidden size of columns);
+  2. fp8_moe_cvt_down2 / fp8_moe_cvt_gate_up, the kernels they replace (act in f32 on the CUDA cores): the difference is what quantizing
      act to E4M3 costs, reported, not checked;
 
 then the GPU time of each (CUDA events, the median of --repeats, L2 flushed before each launch).
@@ -54,6 +56,55 @@ def model(codes, scales, act, weights, ids, rows, cols, mode='e4m3'):
         ws = scales[e].reshape(srows, tiles)[np.arange(rows) // 128]  # [rows, tiles]
         out += float(weights[slot]) * (dots * ws * scale[None, :]).sum(1)
     return out
+
+
+def gate_up_model(gate, up, gate_scales, up_scales, x, ids, inter, cols):
+    """fp8_moe_mma16_gate_up_at's arithmetic in float64: act [k * inter], expert s (ascending id order) at s * inter."""
+    table = e4m3_values()
+    tiles, srows = cols // GROUP, -(-inter // 128)
+    q, scale = act_codes(x.astype(np.float32).reshape(tiles, GROUP), 'f16')
+    out = []
+    for e in np.sort(ids):
+        rowblocks = np.arange(inter) // 128
+        dots = lambda w, sc: ((np.einsum('rtk,tk->rt', table[w[e]].astype(np.float64).reshape(inter, tiles, GROUP), q)
+                               * sc[e].reshape(srows, tiles)[rowblocks] * scale[None, :]).sum(1))
+        g, u = dots(gate, gate_scales), dots(up, up_scales)
+        out.append(g / (1 + np.exp(-g)) * u)
+    return np.concatenate(out)
+
+
+def run_gate_up(ctx, stream, spawn, rng, inter, cols, experts, k, repeats):
+    """fp8_moe_mma16_gate_up_at against gate_up_model and fp8_moe_cvt_gate_up (x in f32), and their times."""
+    from gpu.spawn.launch import SpawnKernel
+    from validation.moe_profile import event_us
+    codes = lambda: (lambda c: np.where((c & 0x7F) == 0x7F, 0, c).astype(np.uint8))(
+        rng.integers(0, 256, size=(experts, inter, cols), dtype=np.uint8))
+    gate, up = codes(), codes()
+    nscale = -(-inter // 128) * (cols // 128)
+    gate_scales, up_scales = (rng.uniform(0.5e-3, 2e-3, size=(experts, nscale)).astype(np.float32) for _ in range(2))
+    x = rng.standard_normal(cols).astype(np.float32)
+    ids = np.concatenate([rng.choice(experts - 1, size=k - 1, replace=False), [experts - 1]]).astype(np.int32)
+    t = lambda a, dtype: ctx.tensor((a.size,), dtype, np.ascontiguousarray(a).tobytes())
+    args = dict(gate=ctx.tensor((gate.size // 4,), 'uint32', gate.tobytes()), up=ctx.tensor((up.size // 4,), 'uint32', up.tobytes()),
+                gate_scales=t(gate_scales, 'float32'), up_scales=t(up_scales, 'float32'), x=t(x, 'float32'),
+                ids=t(ids, 'int32'), k=k, experts=experts, inter=inter, up_row=0, stride=inter, cols=cols)
+    kernels = {'gu16': SpawnKernel(ctx, spawn / 'moe_mma' / 'fp8_moe_mma16_gate_up_at.ptx'),
+               'cvt': SpawnKernel(ctx, spawn / 'fp8_moe_cvt_gate_up.ptx')}
+    outs, times = {}, {}
+    for name, kernel in kernels.items():
+        act = ctx.tensor((k * inter,), 'float32', np.full(k * inter, np.nan, np.float32).tobytes())
+        kernel.launch(stream=stream, act=act, **args)
+        stream.synchronize()
+        outs[name] = np.frombuffer(act.download(), np.float32).astype(np.float64)
+        times[name] = event_us(ctx, stream, spawn, lambda: kernel.launch(stream=stream, act=act, **args), repeats)
+    ref = gate_up_model(gate, up, gate_scales, up_scales, x, ids, inter, cols)
+    peak = float(np.abs(ref).max())
+    rel = lambda a, b: float(np.abs(a - b).max() / peak)
+    return dict(kernel='gate_up', inter=inter, cols=cols, experts=experts, k=k, max_abs_out=peak,
+                finite=bool(np.isfinite(outs['gu16']).all()), gu16_vs_model=rel(outs['gu16'], ref),
+                cvt_vs_model=rel(outs['cvt'], ref), gu16_vs_cvt=rel(outs['gu16'], outs['cvt']),
+                weight_mb=2 * k * inter * cols / 1e6, us=times,
+                tb_per_s={n: 2 * k * inter * cols / us / 1e6 for n, us in times.items()})
 
 
 def run(ctx, stream, spawn, rng, rows, cols, experts, k, repeats, kernel=None):
@@ -113,8 +164,11 @@ def main(argv=None):
     stream = ctx.stream()
     rng = np.random.default_rng(args.seed)
     results = [run(ctx, stream, spawn, rng, args.rows, c, args.experts, args.k, args.repeats, args.kernel) for c in args.cols]
+    gate_ups = [run_gate_up(ctx, stream, spawn, rng, c, args.rows, args.experts, args.k, args.repeats) for c in args.cols]
     ctx.close()
     ok = all(r['finite'] and r['mma_vs_model'] <= args.tolerance and r['mma16_vs_model'] <= args.tolerance for r in results)
+    ok = ok and all(r['finite'] and r['gu16_vs_model'] <= args.tolerance for r in gate_ups)
+    results += gate_ups
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(dict(ok=ok, tolerance=args.tolerance, kernel=str(args.kernel or 'moe_mma/fp8_moe_mma_down_at.ptx'),
                                            results=results), indent=2) + '\n')
