@@ -2578,7 +2578,7 @@ class ResidentGLM:
 
     def _prefill_mha(self, layer, x, start, count):
         """prefill_attention='mha': the projections over the rows; the chunk's cache rows in one launch
-        (kv_rows_prefill: forward()'s latent and rope rows); the indexer's key rows a token at a time; past
+        (kv_rows_prefill: forward()'s latent and rope rows); the indexer's key rows (index_key_rows); past
         index_topk, a full indexer's selection for every query (_prefill_select; shared layers reuse it); the queries
         with RoPE (q_rows_prefill); kv_b_proj over every cached latent row, 0 to start + count, for the keys' k_nope
         and values; one causal mha_prefill launch (mha_prefill_sparse past index_topk); o_proj. The same attention
@@ -2603,17 +2603,24 @@ class ResidentGLM:
         if self.model.indexer_type(layer) == 'full':  # the key rows later steps score
             ik = rows('ik', self.index_dim)
             self._prefill_linear(prefix + '.indexer.wk', x, ik, count)
-            inputs = (self.cos, self.sin, getattr(self, 'step', None))
-            try:
-                for i in range(count):
-                    self.cos, self.sin, step = self._prefill_steps(i)
-                    if self.graph:
-                        self.step = step
-                    self._index_key(layer, prefix + '.indexer', start + i, self._prefill_row(ik, i))
-            finally:
-                self.cos, self.sin = inputs[0], inputs[1]
-                if inputs[2] is not None:
-                    self.step = inputs[2]
+            if not (self.index_fp8 or self.index_bf16):  # the float32 key rows in one launch (index_key_at's bits)
+                keys = self.index_keys[layer]
+                self._spawn('index_key_rows', keys=keys.view((keys.shape[0], self.index_dim)), ik=ik,
+                            weight=self._weight(prefix + '.indexer.k_norm.weight'),
+                            bias=self._weight(prefix + '.indexer.k_norm.bias'), steps=steps, start=start, rows=count,
+                            dim=self.index_dim, rot=self.rot, eps=_f32(1e-6, 'epsilon', True), threads=256)
+            else:  # their FP8 / bf16 copies too: a token at a time
+                inputs = (self.cos, self.sin, getattr(self, 'step', None))
+                try:
+                    for i in range(count):
+                        self.cos, self.sin, step = self._prefill_steps(i)
+                        if self.graph:
+                            self.step = step
+                        self._index_key(layer, prefix + '.indexer', start + i, self._prefill_row(ik, i))
+                finally:
+                    self.cos, self.sin = inputs[0], inputs[1]
+                    if inputs[2] is not None:
+                        self.step = inputs[2]
             if long:
                 self._prefill_select(prefix + '.indexer', x, q_res, steps, start, count)
         elif long and getattr(self, '_prefill_selected_layer', None) is None:

@@ -1,0 +1,61 @@
+// glm_vx_spawn_index_key_rows (#63, item 5b): the DSA indexer's key rows of a prefill chunk, one block a token: wk's
+// output ik[t] LayerNormed (weight, bias, eps; the hand index_key_at's sums with `threads` lanes: a thread's strided
+// partials, then the block's), its first rot values RoPE'd with token t's cos and sin (steps[t]) in the packed
+// [rotated even, rotated odd] order, and stored at keys[start + t]: what index_key_at writes a step at a time.
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_index_key_rows(keys: &mut Tensor<f32, [?, ?], Memory::HBM>, ik: &Tensor<f32, [?, ?], Memory::HBM>,
+                                   weight: &Tensor<f32, [?], Memory::HBM>, bias: &Tensor<f32, [?], Memory::HBM>,
+                                   steps: &Tensor<f32, [?, ?], Memory::HBM>, start: i32, rows: i32, dim: i32, rot: i32,
+                                   eps: f32, threads: i32) -> void {
+  spawn on(Topology::Device) {
+    for t in 0..rows across blocks {
+      if dim > 0 && eps > 0.0 && rot >= 0 && rot <= dim && rot % 2 == 0 && threads >= 32 && threads <= 1024 && threads % 32 == 0 {
+        let mut a = unsafe { Tensor<f32, [1024], Memory::SMEM>::uninit() };
+        let mut b = unsafe { Tensor<f32, [1024], Memory::SMEM>::uninit() };
+        for l in 0..1024 across lanes {
+          let mut s: f32 = 0.0;
+          if l < threads {
+            let mut d: i32 = l;
+            while d < dim { s = s + ik[t][d]; d = d + threads; }
+          }
+          a[l] = s;
+        }
+        let total: f32 = lanes::sum(&a, threads);
+        let mean: f32 = total / (dim as f32);
+        for l in 0..1024 across lanes {
+          let mut ss: f32 = 0.0;
+          if l < threads {
+            let mut d: i32 = l;
+            while d < dim {
+              let c: f32 = ik[t][d] - mean;
+              ss = ss + c * c;
+              d = d + threads;
+            }
+          }
+          b[l] = ss;
+        }
+        let squares: f32 = lanes::sum(&b, threads);
+        let var: f32 = squares / (dim as f32);
+        for d in 0..dim across lanes(256) {
+          let inv: f32 = 1.0 / (var + eps).sqrt();
+          let pairs: i32 = rot / 2;
+          if d >= rot {
+            keys[start + t][d] = (ik[t][d] - mean) * inv * weight[d] + bias[d];
+          } else {
+            let p: i32 = d % pairs;
+            let e: i32 = p * 2;
+            let x0: f32 = (ik[t][e] - mean) * inv * weight[e] + bias[e];
+            let x1: f32 = (ik[t][e + 1] - mean) * inv * weight[e + 1] + bias[e + 1];
+            let c: f32 = steps[t][p];
+            let s: f32 = steps[t][pairs + p];
+            let mut v: f32 = x0 * c - x1 * s;
+            if d >= pairs { v = x1 * c + x0 * s; }
+            keys[start + t][d] = v;
+          }
+        }
+      }
+    }
+  }
+  return;
+}
