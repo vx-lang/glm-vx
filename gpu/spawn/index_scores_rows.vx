@@ -1,0 +1,31 @@
+// glm_vx_spawn_index_scores_rows (#63, item 5b): the DSA indexer's scores for each query of a prefill chunk, a plain
+// float32 version on the CUDA cores (vx-94's tensor-core kernel replaces it): scores[i][j] = sum_h weights[i][h] *
+// relu(dot(q[i][h], keys[j]) * scale) for the keys j <= start + i (index_scores' formula; weights already times
+// heads^-0.5), raw float32 bits for topk_select_rows; keys past start + i are not written. A block a (query, 256
+// keys): lane l scores key 256 * kb + l.
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_index_scores_rows(scores: &mut Tensor<f32, [?, ?], Memory::HBM>, q: &Tensor<f32, [?, ?, ?], Memory::HBM>,
+                                      keys: &Tensor<f32, [?, ?], Memory::HBM>, weights: &Tensor<f32, [?, ?], Memory::HBM>,
+                                      start: i32, queries: i32, heads: i32, dim: i32, scale: f32) -> void {
+  spawn on(Topology::Device) {
+    for i in 0..queries across blocks {
+      for kb in 0..(start + queries + 255) / 256 across blocks {
+        for l in 0..256 across lanes {
+          let j: i32 = kb * 256 + l;
+          if j <= start + i {
+            let mut score: f32 = 0.0;
+            for h in 0..heads {
+              let mut dot: f32 = 0.0;
+              for d in 0..dim { dot = dot + q[i][h][d] * keys[j][d]; }
+              let r: f32 = dot * scale;
+              score = score + weights[i][h] * (if r > 0.0 { r } else { 0.0 });
+            }
+            scores[i][j] = score;
+          }
+        }
+      }
+    }
+  }
+  return;
+}

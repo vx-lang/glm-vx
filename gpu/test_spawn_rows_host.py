@@ -129,3 +129,51 @@ def test_q_rows_and_mha_prefill_are_causal_attention(run):
             p = np.exp(score - score.max())
             want[i, h] = p @ kv[:n, h, nope:] / p.sum()
     np.testing.assert_allclose(o, want, rtol=2e-5, atol=2e-6)
+
+
+def test_index_scores_and_topk_rows_are_each_querys_stable_top_k(run):
+    # index_scores_rows: query i's scores over keys 0..start + i (sum_h w * relu(q.k * scale)); topk_select_rows: the
+    # stable top-k set of each row in position order, nothing for a row with tokens <= k. Ties: repeated keys.
+    rng = np.random.default_rng(17)
+    heads, dim, start, queries, k = 4, 16, 9, 6, 5
+    keys = rng.normal(size=(start + queries, dim)).astype(F)
+    keys[3] = keys[7]  # equal scores: the lower position first
+    q = rng.normal(size=(queries, heads, dim)).astype(F)
+    w = rng.random(size=(queries, heads)).astype(F)
+    scale = F(dim ** -0.5)
+    cols = 32
+    scores = run('index_scores_rows', scores=np.full((queries, cols), -7.0, F), q=q, keys=keys, weights=w, start=start,
+                 queries=queries, heads=heads, dim=dim, scale=scale)['scores']
+    for i in range(queries):
+        n = start + i + 1
+        want = (np.maximum((q[i].astype(np.float64) @ keys[:n].T) * scale, 0) * w[i][:, None]).sum(0)
+        np.testing.assert_allclose(scores[i, :n], want, rtol=2e-5, atol=1e-6)
+        assert (scores[i, n:] == -7.0).all()
+    ids = run('topk_select_rows', out_ids=np.full((queries, k), -1, np.int32), scores=scores.view(np.int32), start=start,
+              rows=queries, k=k)['out_ids']
+    for i in range(queries):
+        n = start + i + 1
+        np.testing.assert_array_equal(ids[i], np.sort(np.argsort(-scores[i, :n], kind='stable')[:k]))
+
+
+def test_mha_prefill_sparse_attends_to_each_querys_selection(run):
+    rng = np.random.default_rng(19)
+    heads, nope, rot, value, start, queries, topk = 2, 8, 4, 8, 3, 5, 4
+    keys = start + queries
+    q = rng.normal(size=(queries, heads, nope + rot)).astype(F)
+    kv = rng.normal(size=(keys, heads, nope + value)).astype(F)
+    k_rope = rng.normal(size=(keys, rot)).astype(F)
+    selected = np.zeros((queries, topk), np.int32)
+    for i in range(queries):
+        if start + i + 1 > topk:
+            selected[i] = np.sort(rng.choice(start + i + 1, topk, replace=False))
+    scale = F((nope + rot) ** -0.5)
+    o = run('mha_prefill_sparse', o=np.zeros((queries, heads, value), F), q=q, kv=kv, k_rope=k_rope, selected=selected,
+            start=start, queries=queries, heads=heads, nope=nope, rot=rot, value=value, topk=topk, scale=scale)['o']
+    for i in range(queries):
+        n = start + i + 1
+        pick = np.arange(n) if n <= topk else selected[i]
+        for h in range(heads):
+            score = (kv[pick, h, :nope].astype(np.float64) @ q[i, h, :nope] + k_rope[pick] @ q[i, h, nope:]) * scale
+            p = np.exp(score - score.max())
+            np.testing.assert_allclose(o[i, h], p @ kv[pick, h, nope:] / p.sum(), rtol=2e-5, atol=2e-6)

@@ -243,3 +243,22 @@ def test_mha_attention_is_the_absorbed_attention(graph):
         else:
             np.testing.assert_allclose(chunk_caches[key], caches[key], rtol=1e-4, atol=1e-5, err_msg=str(key))
     assert launches.get('mha_prefill', 0) == 2 * model.n_layers
+
+
+@pytest.mark.parametrize('graph', [False, True])
+def test_mha_attention_past_index_topk_selects_per_query(graph):
+    # index_topk 4, a 10-token prompt in chunks of 3 and 7: the second chunk's queries at positions 3.. score the keys
+    # up to themselves (index_scores_rows), keep their top 4 in position order (topk_select_rows; the first, at
+    # position 3, sees only 4 keys and takes them all) and attend to those (mha_prefill_sparse); shared layers reuse
+    # the full layer's selection. forward()'s attention and selection a token at a time, in another order.
+    model = build(seed=3)
+    options = dict(graph=True, fused_attention=True, device_experts=True) if graph else {}
+    (last, after, caches, _), (chunk_last, chunk_after, chunk_caches, launches) = run(
+        model, [PROMPT[:3], PROMPT[3:]], prefill_attention='mha', **options)
+    np.testing.assert_allclose(chunk_last, last, rtol=1e-4, atol=1e-4 * float(np.abs(last).max()))
+    np.testing.assert_allclose(chunk_after, after, rtol=1e-4, atol=1e-4 * float(np.abs(after).max()))
+    for key in caches:
+        np.testing.assert_allclose(chunk_caches[key], caches[key], rtol=1e-4, atol=1e-5, err_msg=str(key))
+    full = sum(model.indexer_type(i) == 'full' for i in range(model.n_layers))
+    assert launches.get('mha_prefill', 0) == model.n_layers and launches.get('mha_prefill_sparse', 0) == model.n_layers
+    assert launches.get('topk_select_rows', 0) == full and launches.get('index_scores_rows', 0) == full

@@ -1,0 +1,61 @@
+// glm_vx_spawn_mha_prefill_sparse (#63, item 5b): mha_prefill for queries past index_topk: query i (position start + i)
+// attends to its DSA selection, the keys selected[i][0 .. topk) (topk_select_rows' set in position order), or, while
+// start + i + 1 <= topk, to every key 0..start + i as mha_prefill does (#43). The same float32 arithmetic.
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_mha_prefill_sparse(o: &mut Tensor<f32, [?, ?, ?], Memory::HBM>, q: &Tensor<f32, [?, ?, ?], Memory::HBM>,
+                                       kv: &Tensor<f32, [?, ?, ?], Memory::HBM>, k_rope: &Tensor<f32, [?, ?], Memory::HBM>,
+                                       selected: &Tensor<i32, [?, ?], Memory::HBM>, start: i32, queries: i32, heads: i32,
+                                       nope: i32, rot: i32, value: i32, topk: i32, scale: f32) -> void {
+  spawn on(Topology::Device) {
+    for i in 0..queries across blocks {
+      for h in 0..heads across blocks {
+        let mut sc = unsafe { Tensor<f32, [4096], Memory::SMEM>::uninit() };
+        let mut part = unsafe { Tensor<f32, [256], Memory::SMEM>::uninit() };
+        let tokens: i32 = start + i + 1;
+        let keys: i32 = if tokens <= topk { tokens } else { topk };
+        for l in 0..256 across lanes {
+          let mut m: f32 = -3.0e38;
+          for k in 0..16 {
+            let j: i32 = l + 256 * k;
+            if j < keys && keys <= 4096 {
+              let key: i32 = if tokens <= topk { j } else { selected[i][j] };
+              let mut s: f32 = 0.0;
+              for d in 0..nope { s = s + q[i][h][d] * kv[key][h][d]; }
+              for d in 0..rot { s = s + q[i][h][nope + d] * k_rope[key][d]; }
+              s = s * scale;
+              sc[j] = s;
+              m = if s > m { s } else { m };
+            }
+          }
+          part[l] = m;
+        }
+        let peak: f32 = lanes::max(&part, 256);
+        for l in 0..256 across lanes {
+          let mut z: f32 = 0.0;
+          for k in 0..16 {
+            let j: i32 = l + 256 * k;
+            if j < keys && keys <= 4096 {
+              let e: f32 = (sc[j] - peak).fast_exp();
+              sc[j] = e;
+              z = z + e;
+            }
+          }
+          part[l] = z;
+        }
+        let total: f32 = lanes::sum(&part, 256);
+        for d in 0..value across lanes(256) {
+          let mut acc: f32 = 0.0;
+          if keys <= 4096 {
+            for j in 0..keys {
+              let key: i32 = if tokens <= topk { j } else { selected[i][j] };
+              acc = acc + sc[j] * kv[key][h][nope + d];
+            }
+          }
+          o[i][h][d] = acc / total;
+        }
+      }
+    }
+  }
+  return;
+}
