@@ -1,0 +1,73 @@
+// glm_vx_spawn_router_logits_rows (#63, item 5b): router_bf16's logits for each of `tokens` rows of x, one launch:
+// logits[t][e] = W x[t], W the [experts, cols] BF16 gate as raw bits viewed as u32 (cols % 8 == 0), one block of
+// 1024 lanes for each (token, expert), with router_bf16's products and sum order, so its bits. router_topk_rows
+// then picks each token's experts.
+// spawn-include: device.vx
+// spawn-maxnreg: 32
+
+pub fn glm_vx_spawn_router_logits_rows(logits: &mut Tensor<f32, [?, ?], Memory::HBM>, gate: &Tensor<u32, [?], Memory::HBM>,
+                                       x: &Tensor<f32, [?, ?], Memory::HBM>, tokens: i32, experts: i32, cols: i32) -> void {
+  spawn on(Topology::Device) {
+    for t in 0..tokens across blocks {
+      for row in 0..experts across blocks {
+        let mut products = unsafe { Tensor<f32, [8192], Memory::SMEM>::uninit() };
+        let mut part = unsafe { Tensor<f32, [32], Memory::SMEM>::uninit() };
+        // Runs of eight columns (four words): 768 of them in a 6144-column row, one a lane.
+        for q in 0..1024 across lanes {
+          if cols % 8 == 0 && cols <= 8192 {
+            let runs: i32 = cols / 8;
+            // row * words, written with its factor 4 so that LLVM sees a 16-byte-aligned row (Vx #2362).
+            let row_words: i64 = (row as i64) * (runs as i64) * 4;
+            if q < runs {
+              let at: i64 = row_words + (q as i64) * 4;
+              let w0: i32 = gate[at] as i32;
+              let w1: i32 = gate[at + 1] as i32;
+              let w2: i32 = gate[at + 2] as i32;
+              let w3: i32 = gate[at + 3] as i32;
+              let c: i32 = 8 * q;
+              products[c] = bf16_decode!(w0) * x[t][c];
+              products[c + 1] = bf16_decode!(w0 >> 16) * x[t][c + 1];
+              products[c + 2] = bf16_decode!(w1) * x[t][c + 2];
+              products[c + 3] = bf16_decode!(w1 >> 16) * x[t][c + 3];
+              products[c + 4] = bf16_decode!(w2) * x[t][c + 4];
+              products[c + 5] = bf16_decode!(w2 >> 16) * x[t][c + 5];
+              products[c + 6] = bf16_decode!(w3) * x[t][c + 6];
+              products[c + 7] = bf16_decode!(w3 >> 16) * x[t][c + 7];
+            }
+          }
+        }
+        // The hand bf16_matvec's order, eight loads before their adds (one load, then its add, cost about
+        // 4 us a 6144-column row). A term past the row is +0.0, and sum starts at +0.0, so is never -0.0:
+        // adding it changes nothing.
+        for lane in 0..32 across lanes {
+          let mut sum: f32 = 0.0;
+          if cols % 8 == 0 && cols <= 8192 {
+            for batch in 0..(cols + 255) / 256 {
+              let d: i32 = lane + 256 * batch;
+              let p0: f32 = if d < cols { products[d] } else { 0.0 };
+              let p1: f32 = if d + 32 < cols { products[d + 32] } else { 0.0 };
+              let p2: f32 = if d + 64 < cols { products[d + 64] } else { 0.0 };
+              let p3: f32 = if d + 96 < cols { products[d + 96] } else { 0.0 };
+              let p4: f32 = if d + 128 < cols { products[d + 128] } else { 0.0 };
+              let p5: f32 = if d + 160 < cols { products[d + 160] } else { 0.0 };
+              let p6: f32 = if d + 192 < cols { products[d + 192] } else { 0.0 };
+              let p7: f32 = if d + 224 < cols { products[d + 224] } else { 0.0 };
+              sum = sum + p0;
+              sum = sum + p1;
+              sum = sum + p2;
+              sum = sum + p3;
+              sum = sum + p4;
+              sum = sum + p5;
+              sum = sum + p6;
+              sum = sum + p7;
+            }
+          }
+          part[lane] = sum;
+        }
+        let total: f32 = lanes::sum(&part, 32);
+        if cols >= 0 { logits[t][row] = total; }
+      }
+    }
+  }
+  return;
+}

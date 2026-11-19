@@ -184,6 +184,15 @@ class Scheduler:
                 req.cursor = end
             else:
                 end = min(req.cursor+prefill_limit,len(req.tokens))
+                prefill_tokens = getattr(self.model, "prefill_tokens", None)
+                bulk = min(end, len(req.tokens)-1)
+                if callable(prefill_tokens) and bulk > req.cursor:
+                    # The tokens before the last in one call (a resident's prefill_chunk, #63): the last
+                    # still takes _forward below, so its logits or greedy token come as before.
+                    start = time.perf_counter()
+                    prefill_tokens(req.tokens[req.cursor:bulk],req.cache)
+                    req.prefill_seconds += time.perf_counter()-start
+                    req.cursor = bulk
                 while req.cursor < end:
                     if self.closed or req.cancelled.is_set(): self._finish(req,"cancelled"); return False
                     start = time.perf_counter()

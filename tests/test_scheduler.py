@@ -107,3 +107,22 @@ def test_greedy_ahead_is_told_when_no_step_follows():
         assert collect(a.submit([1,2,3],4))[0]==collect(s.submit([1,2,3],4))[0]
         assert ahead.lasts==[True,True,False,False,False,True]
     finally:s.close();a.close()
+
+class ChunkModel(GreedyModel):
+    """A model with prefill_tokens (a resident's prefill_chunk, #63): the token lists it was given."""
+    def __init__(self):super().__init__();self.chunks=[]
+    def prefill_tokens(self,tokens,c):
+        self.chunks.append(list(tokens))
+        for t in tokens:Model.forward(self,t,c)
+
+def test_prefill_tokens_takes_the_prompt_before_its_last_token():
+    # Each round's tokens before the prompt's last go to prefill_tokens in one call; the last still takes
+    # forward_greedy; the same tokens as token at a time.
+    plain,chunked=Model(),ChunkModel()
+    s,c=Scheduler(plain,prefill_chunk=4),Scheduler(chunked,prefill_chunk=4)
+    try:
+        prompt=[1,2,3,4,5,6,7]
+        assert collect(c.submit(prompt,3))[0]==collect(s.submit(prompt,3))[0]
+        assert chunked.chunks==[[1,2,3,4],[5,6]]
+        assert chunked.greedy_calls==3 and chunked.forward_calls==0
+    finally:s.close();c.close()

@@ -168,6 +168,7 @@ TOPK_SORT_TOKENS = 2048  # gpu/spawn/topk_sort.vx sorts contexts up to this many
 # 16384 and mlp.down's 12288; at 6144 and below, fp8_matvec_fma_tiles).
 FMA_LONG_ROWS = 12288
 MANY_TOKENS = 4  # forward_many's limit: fp8_matvec4_rows takes up to four vectors (#16)
+PREFILL_TOKENS = 2048  # prefill_chunk's limit a call (#63, item 5b)
 TOPK_CHUNK = 2048  # past it, topk_chunks sorts chunks of this many, topk_merge merges them (#32)
 _MAX_GRID = 65535
 
@@ -203,7 +204,7 @@ class ResidentGLM:
                  topk='auto', long_topk='position', mla_kernel='decode', matvec_kernels='hand', mtp=False,
                  norm_block=256, fuse_glue=True, index_kernel='mma',
                  topk_blocks_from=65536, fold_shared=False, fuse_router=False, moe_down2=False, moe_mma=False, fuse_mla_q=False,
-                 device_decode=False,
+                 device_decode=False, prefill_rows=0, prefill_gemm='rows', prefill_sum='nccl', prefill_moe='tokens',
                  fuse_tp_norm=0, tp=None):
         if getattr(model, 'packed_weights', False):
             raise NotImplementedError('ResidentGLM supports expanded float32 weights only')
@@ -261,6 +262,27 @@ class ResidentGLM:
         # the same bits for mla_tc_at, one launch fewer (#63, item 7). Taken where mla_kernel='tc' runs fused in a
         # graph with rank 512 and rope 64.
         self.fuse_mla_q = bool(fuse_mla_q)
+        # prefill_rows (#63, item 5b): the most tokens prefill_chunk takes in one call, and with N > 0 the
+        # server's prompts go through it (ResidentSequenceModel.prefill_tokens); 0 keeps them a token at a
+        # time and prefill_chunk at PREFILL_TOKENS.
+        if type(prefill_rows) is not int or prefill_rows < 0:
+            raise ValueError('prefill_rows must be a non-negative integer')
+        self.prefill_rows = prefill_rows
+        # prefill_chunk (#63, item 5b): its Linears over the chunk's rows through cuBLASLt's block-FP8 matmul
+        # ('cublaslt': each FP8 Linear whose input width is a multiple of 128) or each row's _linear ('rows',
+        # forward()'s kernels); under tensor parallelism its sums as one NCCL all-reduce over the rows
+        # ('nccl') or each row's _tp_sum ('rows', forward()'s bits).
+        if prefill_gemm not in ('rows', 'cublaslt'):
+            raise ValueError("prefill_gemm must be 'rows' or 'cublaslt'")
+        if prefill_sum not in ('nccl', 'rows'):
+            raise ValueError("prefill_sum must be 'nccl' or 'rows'")
+        self.prefill_gemm, self.prefill_sum = prefill_gemm, prefill_sum
+        # prefill_moe: prefill_chunk's routed experts a token at a time with forward()'s kernels ('tokens'), or
+        # all the chunk's (token, expert) pairs grouped by expert through one block-FP8 GEMM each for gate, up and
+        # down ('grouped': gpu/spawn/fp8_gemm's grouped GEMM; FP8 experts whose widths are multiples of 128).
+        if prefill_moe not in ('tokens', 'grouped'):
+            raise ValueError("prefill_moe must be 'tokens' or 'grouped'")
+        self.prefill_moe = prefill_moe
         if topk not in ('auto', 'sort', 'radix'):
             raise ValueError("topk must be 'auto', 'sort' or 'radix'")
         self._topk_choice = topk
@@ -1675,6 +1697,12 @@ class ResidentGLM:
             self.sin.upload(sine)
             self._layers(position)
         self.position += 1
+        return self._head(logits)
+
+    def _head(self, logits):
+        """forward()'s output for the token whose final residual self.x holds: None with logits=False, the
+        next token with 'greedy', else the logits."""
+        m, c = self.model, self.config
         if not logits:
             return None
         self._rmsnorm(self.x, self._weight('model.norm.weight'), self.norm, m.eps)
@@ -2290,6 +2318,410 @@ class ResidentGLM:
         self._project_many(prefix + '.down_proj', act, out, count)
         return out
 
+    # ---------------------------------------------------------------- prefill (#63, item 5b)
+    def prefill_chunk(self, token_ids, *, logits=False):
+        """Append the prompt tokens token_ids (1 to PREFILL_TOKENS of them) in one pass (#63, item 5b's
+        first milestone): the caches that forward(t, logits=False) for each of them leaves, then what
+        forward() returns for the last one (logits False, True or 'greedy').
+
+        Each row-wise step runs once over the chunk's rows: the RMSNorms, the residual adds, SwiGLU, and
+        the Linears (_prefill_linear: with prefill_gemm='cublaslt' cuBLASLt's block-FP8 matmul, each row's
+        _linear otherwise). Each token's attention (its cache rows, the indexer, MLA) and routed experts
+        still run one token at a time, in order, with forward()'s kernels, so token i sees the cache rows
+        of the tokens before it. Under tensor parallelism the sums after o_proj and the FFN run over the
+        rows: one NCCL all-reduce (prefill_sum='nccl', the same bits on every rank) or each row's _tp_sum
+        ('rows', forward()'s bits).
+
+        With prefill_gemm='rows' and prefill_sum='rows', and forward() on its plain kernels (no fuse_glue,
+        fp8_kernels='hand'), the caches and logits are forward()'s bit for bit
+        (gpu/test_resident_prefill.py). cuBLASLt quantizes the Linears' inputs to e4m3 per 128 columns, as
+        SGLang's block-FP8 prefill does: close to forward(), not equal."""
+        m, c = self.model, self.config
+        if self._closed:
+            raise RuntimeError('ResidentGLM is closed')
+        tokens = [int(t) for t in token_ids]
+        if not 1 <= len(tokens) <= self._prefill_capacity() or any(not 0 <= t < int(c['vocab_size']) for t in tokens):
+            raise ValueError(f'prefill_chunk takes 1 to {self._prefill_capacity()} tokens of the vocabulary')
+        start, count = self.position, len(tokens)
+        if start + count > self.max_tokens:
+            raise ValueError(f'sequence exceeds max_tokens={self.max_tokens}')
+        if start + count > int(c.get('max_position_embeddings', 2 ** 31 - 1)):
+            raise ValueError('Request exceeds max_position_embeddings')
+        if self.mtp:
+            raise NotImplementedError('prefill_chunk does not keep the MTP layer\'s inputs yet')
+        self._device_position = None
+        hidden = self.hidden
+        x = self._prefill_rows('x', hidden)
+        embeddings = np.zeros((count, hidden), np.float32)
+        for i, token in enumerate(tokens):
+            embeddings[i] = m._embedding(token)
+        x.view((count * hidden,)).upload(embeddings.ravel())
+        self._prefill_upload_steps(start, count)
+        x_next, norm = self._prefill_rows('x_next', hidden), self._prefill_rows('norm', hidden)
+        selected, counts = self.selected, [0] * count
+        inputs = (self.cos, self.sin, getattr(self, 'step', None))
+        try:
+            for layer in range(m.n_layers):
+                prefix = f'model.layers.{layer}'
+                self._rmsnorm_rows(x, self._weight(prefix + '.input_layernorm.weight'), norm, count, m.eps)
+                attended = self._prefill_attention(layer, norm, start, count, layer > 0, counts)
+                self._prefill_sum_rows(attended, count)
+                self._launch('residual_rmsnorm', count, self.norm_block,
+                             [norm, x_next, attended, x, self._weight(prefix + '.post_attention_layernorm.weight'),
+                              I(count), I(hidden), F(_f32(m.eps, 'epsilon', True))])
+                ffn = self._prefill_feed_forward(layer, norm, count)
+                self._prefill_sum_rows(ffn, count)
+                self._add(x.view((count * hidden,)), x_next.view((count * hidden,)), ffn.view((count * hidden,)),
+                          count * hidden)
+        finally:
+            self.selected = selected
+            self.cos, self.sin = inputs[0], inputs[1]
+            if inputs[2] is not None:
+                self.step = inputs[2]
+        self.selected_count = counts[-1]
+        self.position += count
+        self._copy(self.x, self._prefill_row(x, count - 1), hidden)
+        return self._head(logits)
+
+    def _prefill_capacity(self):
+        """prefill_chunk's rows: prefill_rows (PREFILL_TOKENS if 0), or max_tokens if fewer, rounded up to
+        cuBLASLt's 4."""
+        return -(-min(self.prefill_rows or PREFILL_TOKENS, self.max_tokens) // 4) * 4
+
+    @staticmethod
+    def _prefill_bucket(count):
+        """The rows a cuBLASLt matmul of count tokens multiplies: a power of two up to 64, then a multiple of
+        64, so a server's prompt lengths need a few dozen matmul plans a Linear, not one each."""
+        padded = -(-count // 4) * 4
+        if padded <= 64:
+            return 1 << (padded - 1).bit_length()
+        return -(-padded // 64) * 64
+
+    def _prefill_rows(self, name, width, dtype='float32'):
+        """A [rows, width] scratch matrix of prefill_chunk, allocated on first use: the capacity's bucket of
+        rows, so a matmul's padding rows are in it."""
+        buffers = self.__dict__.setdefault('_prefill_buffers', {})
+        if (name, width, dtype) not in buffers:
+            buffers[name, width, dtype] = self._tensor((self._prefill_bucket(self._prefill_capacity()), width), dtype)
+        return buffers[name, width, dtype]
+
+    @staticmethod
+    def _prefill_row(matrix, i):
+        """Row i of a float32 [rows, width] matrix."""
+        width = matrix.shape[1]
+        return matrix.view((width,), offset=i * width * 4)
+
+    def _prefill_upload_steps(self, start, count):
+        """Each token's cos, sin and step buffer (forward()'s step inputs), one upload for the chunk:
+        _prefill_steps(i) are token i's views, which its attention takes as self.cos, self.sin and self.step."""
+        half = self.rot // 2
+        block = -(-(2 * half + 4) // 64) * 64
+        capacity = self._prefill_capacity()
+        if getattr(self, '_prefill_inputs', None) is None:
+            self._prefill_inputs = self._tensor((capacity * block,))
+            self._prefill_views = {}
+        steps = np.zeros((count, block), np.float32)
+        for i in range(count):
+            cosine, sine = self._rope_inputs(start + i)
+            position = start + i
+            steps[i, :2 * half + 4] = np.concatenate(
+                [cosine, sine, self._step_buffer(position, min(self.index_topk, position + 1))])
+        self._prefill_inputs.view((count * block,)).upload(steps.ravel())
+        self._prefill_block = block
+
+    def _prefill_steps(self, i):
+        views = self._prefill_views.get(i)
+        if views is None:
+            half, block, inputs = self.rot // 2, self._prefill_block, self._prefill_inputs
+            views = self._prefill_views[i] = (inputs.view((half,), offset=i * block * 4),
+                                              inputs.view((half,), offset=(i * block + half) * 4),
+                                              inputs.view((4,), 'int32', offset=(i * block + 2 * half) * 4))
+        return views
+
+    def _rmsnorm_rows(self, x, weight, out, count, eps):
+        """_rmsnorm of each of the first count rows (gpu/kernels.vx's rmsnorm_rows: the same bits a row)."""
+        self._launch('rmsnorm_rows', count, self.norm_block,
+                     [out, x, weight, I(count), I(x.shape[1]), F(_f32(eps, 'epsilon', True))])
+
+    def _prefill_sum_rows(self, partial, count):
+        """_tp_sum over the first count rows of partial: one all-reduce, or each row's _tp_sum."""
+        if self.tp is None:
+            return
+        if self.prefill_sum == 'rows':
+            for i in range(count):
+                self._tp_sum(self._prefill_row(partial, i))
+            return
+        width = partial.shape[1]
+        self.tp.collective.all_reduce_sum(partial.view((count * width,)), stream=self.stream)
+        self.launches['tp_all_reduce_rows'] = self.launches.get('tp_all_reduce_rows', 0) + 1
+
+    def _prefill_linear(self, prefix, x, out, count):
+        """out[i] = W x[i] for the first count rows (no bias): cuBLASLt with prefill_gemm='cublaslt' for an
+        FP8 Linear whose input width is a multiple of 128, else _linear a row."""
+        if bool(self.config.get('attention_bias', False)) and prefix.endswith(('q_a_proj', 'kv_a_proj_with_mqa', 'o_proj')):
+            raise NotImplementedError('prefill_chunk does not add attention biases yet')
+        rows, cols = out.shape[1], x.shape[1]
+        if self.prefill_gemm == 'cublaslt' and self._format(prefix) == 'fp8' and cols % 128 == 0:
+            codes, _, shape = self._fp8_weight(prefix)
+            if tuple(shape) != (rows, cols):
+                raise ValueError(f'{prefix}: FP8 weight is {shape[0]}x{shape[1]}, got x [{cols}] -> out [{rows}]')
+            return self._prefill_cublaslt(prefix, codes, rows, cols, x, out, count)
+        for i in range(count):
+            self._linear(prefix, self._prefill_row(x, i), self._prefill_row(out, i))
+        return out
+
+    def _prefill_cublaslt(self, prefix, codes, rows, cols, x, out, count):
+        """out[:count] = x[:count] W^T through cuBLASLt's block-FP8 matmul: the rows quantized to e4m3 with
+        per-128 scales (gpu/fp8_quant.vx), padded to _prefill_bucket(count) tokens; out's rows past count get
+        the padding's outputs (of stale codes) and are not used."""
+        from .cublaslt import pack_weight_scales
+        key = prefix + ':fp8:cublaslt-scales'
+        scales = self._weights.get(key)
+        if scales is None:  # BLK128x128_32F's layout: each row block's scales padded to a multiple of 4
+            scales = self._weights[key] = self._upload_weight(key, pack_weight_scales(self.model.weights.block_fp8(prefix)[1]))
+        padded = self._prefill_bucket(count)
+        x_codes = self._prefill_rows('lt_codes', cols, 'uint8')
+        x_scales = self._prefill_rows('lt_scales', cols // 128)  # used as [cols / 128, padded]
+        if 'fp8_quant_groups' not in self._kernels:
+            module = self._modules['fp8_quant'] = self.ctx.load_ptx(self._ptx_dir / 'fp8_quant.ptx')
+            self._kernels['fp8_quant_groups'] = module.kernel('glm_vx_gpu_fp8_quant_groups')
+        codes_view = x_codes.view((padded * cols,), 'uint8')
+        scales_view = x_scales.view((cols // 128 * padded,))
+        self._launch('fp8_quant_groups', -(-count * cols // 128 // 4), 128,
+                     [codes_view, scales_view, x.view((count * cols,)), I(count), I(cols), I(padded)])
+        matmul = self._lt_matmuls.get((padded, rows, cols))
+        if matmul is None:
+            factory = getattr(self.ctx, 'fp8_block_matmul', None)
+            if factory is not None:
+                matmul = factory(padded, rows, cols)
+            else:
+                from .cublaslt import CublasLt, Fp8BlockMatmul
+                if self._lt is None:
+                    self._lt = CublasLt(self.ctx)
+                if getattr(self, '_prefill_workspace', None) is None:  # one for every prefill matmul: one stream
+                    self._prefill_workspace = self._tensor((32 << 20,), 'uint8')
+                matmul = Fp8BlockMatmul(self._lt, padded, rows, cols, workspace=self._prefill_workspace)
+            self._lt_matmuls[(padded, rows, cols)] = matmul
+        matmul(out.view((padded * rows,)), codes_view, scales_view, codes, scales, stream=self.stream)
+        self.launches['cublaslt_fp8_rows'] = self.launches.get('cublaslt_fp8_rows', 0) + 1
+        return out
+
+    def _prefill_attention(self, layer, x, start, count, shared_ok, counts):
+        """The attention of prefill_chunk's tokens: the projections over the rows, then each token's
+        _attention_core in order; returns o_proj's outputs, one row a token (this rank's part under TP)."""
+        prefix = f'model.layers.{layer}.self_attn'
+        q_rank, qk = int(self.config['q_lora_rank']), self.nope + self.rot
+        rows = self._prefill_rows
+        q_a, q_res = rows('q_a', q_rank), rows('q_res', q_rank)
+        query, compressed = rows('query', self.heads * qk), rows('compressed', self.rank + self.rot)
+        self._prefill_linear(prefix + '.q_a_proj', x, q_a, count)
+        self._rmsnorm_rows(q_a, self._weight(prefix + '.q_a_layernorm.weight'), q_res, count, 1e-6)
+        self._prefill_linear(prefix + '.q_b_proj', q_res, query, count)
+        self._prefill_linear(prefix + '.kv_a_proj_with_mqa', x, compressed, count)
+        full = self.model.indexer_type(layer) == 'full'
+        if full:
+            iq = rows('iq', self.index_heads * self.index_dim)
+            ik, head_weights = rows('ik', self.index_dim), rows('head_weights', self.index_heads)
+            self._prefill_linear(prefix + '.indexer.wk', x, ik, count)
+            if start + count > self.index_topk:  # some token scores the keys (#43)
+                self._prefill_linear(prefix + '.indexer.wq_b', q_res, iq, count)
+                self._prefill_linear(prefix + '.indexer.weights_proj', x, head_weights, count)
+        heads_out = rows('heads_out', self.heads * self.value_dim)
+        for i in range(count):
+            self.cos, self.sin, step = self._prefill_steps(i)
+            if self.graph:
+                self.step = step
+            # Each token's own top-k: a full indexer writes it, the shared layers after it read it.
+            self.selected = self._prefill_selection(i, start + i)
+            self.selected_count = counts[i]
+            index = tuple(self._prefill_row(t, i) for t in (iq, ik, head_weights)) if full else None
+            self._attention_core(layer, start + i, shared_ok, self._prefill_row(query, i), self._prefill_row(compressed, i),
+                                 index)
+            counts[i] = self.selected_count
+            self._copy(self._prefill_row(heads_out, i), self.heads_out, self.heads * self.value_dim)
+        attended = rows('attn_out', self.hidden)
+        self._prefill_linear(prefix + '.o_proj', heads_out, attended, count)
+        return attended
+
+    def _prefill_selection(self, i, position):
+        """Token i's selection: within index_topk every token takes all the cached tokens in position
+        order (#43), so one buffer serves them all; past it, a buffer a token."""
+        if position + 1 <= self.index_topk:
+            return self._prefill_short_selection()
+        selections = self.__dict__.setdefault('_prefill_selections', {})
+        if i not in selections:
+            selections[i] = self._tensor((self.index_topk,), 'int32')
+        return selections[i]
+
+    def _prefill_short_selection(self):
+        if getattr(self, '_prefill_short', None) is None:
+            self._prefill_short = self._tensor((self.index_topk,), 'int32', np.arange(self.index_topk, dtype=np.int32))
+        return self._prefill_short
+
+    def _prefill_feed_forward(self, layer, x, count):
+        """The FFN of prefill_chunk's tokens, one row a token (this rank's part under TP): a dense MLP and
+        the shared experts over the rows; the router and the routed experts a token at a time."""
+        c = self.config
+        prefix = f'model.layers.{layer}.mlp'
+        if self.model.mlp_type(layer) == 'dense':
+            return self._prefill_mlp(prefix, x, self._prefill_rows('ffn_out', self.hidden), count)
+        k = int(c['num_experts_per_tok'])
+        if self._prefill_grouped_ok(prefix):
+            moe = self._prefill_moe_grouped(prefix, x, count)
+            if int(c.get('n_shared_experts', 1)) > 0 and not self._folds_shared(prefix):
+                shared = self._prefill_mlp(prefix + '.shared_experts', x, self._prefill_rows('mlp_out', self.hidden), count)
+                n = count * self.hidden
+                self._add(moe.view((n,)), moe.view((n,)), shared.view((n,)), n)
+            return moe
+        moe = self._prefill_rows('moe_sum', self.hidden)
+        for i in range(count):
+            row = self._prefill_row(x, i)
+            self._route(prefix, row)
+            if self.device_experts:
+                self._device_moe(prefix, row, k)
+            else:
+                self._copy(self.moe_sum, self.zeros, self.hidden)
+                self._host_experts(prefix, row, k)
+            self._copy(self._prefill_row(moe, i), self.moe_sum, self.hidden)
+        if int(c.get('n_shared_experts', 1)) > 0 and not self._folds_shared(prefix):
+            shared = self._prefill_mlp(prefix + '.shared_experts', x, self._prefill_rows('mlp_out', self.hidden), count)
+            n = count * self.hidden
+            self._add(moe.view((n,)), moe.view((n,)), shared.view((n,)), n)
+        return moe
+
+    def _prefill_grouped_ok(self, prefix):
+        """prefill_moe='grouped' applies to this MoE layer: FP8 experts as separate Linears on the device, with
+        widths the grouped GEMM takes (multiples of 128)."""
+        if self.prefill_moe != 'grouped' or not self.device_experts or self._fused_experts(f'{prefix}.experts.0'):
+            return False
+        gate = self._stacked_experts(prefix, 'gate_proj', shared=self._folds_shared(prefix))
+        return gate[0] == 'fp8' and gate[2][0] % 128 == 0 and gate[2][1] % 128 == 0
+
+    def _prefill_route(self, prefix, x, count, k):
+        """Each of the first count rows' experts and weights, [count, k] each, on the host: router_logits_rows and
+        router_topk_rows for a BF16 gate of at most 256 experts (router_bf16's bits), else _route a row."""
+        c = self.config
+        experts = int(c['n_routed_experts'])
+        ids, weights = self._prefill_rows('route_ids', k, 'int32'), self._prefill_rows('route_weights', k)
+        if self._format(prefix + '.gate') == 'bf16' and experts <= 256 and k <= 8:
+            bits, (rows, cols) = self._bf16_weight(prefix + '.gate')
+            if rows == experts and cols % 8 == 0 and cols <= 8192:
+                logits = self._prefill_rows('router_logits', experts)
+                scale = _f32(float(c.get('routed_scaling_factor', 1.0)), 'router scale')
+                self._spawn('router_logits_rows', logits=logits, gate=bits.view((rows * cols // 2,), 'uint32'), x=x,
+                            tokens=count, experts=experts, cols=cols)
+                self._spawn('router_topk_rows', indices=ids, weights=weights, logits=logits,
+                            bias=self._weight(prefix + '.gate.e_score_correction_bias'), tokens=count, experts=experts,
+                            k=k, scale=scale)
+                return (np.frombuffer(ids.view((count * k,), 'int32').download(), np.int32).reshape(count, k).copy(),
+                        np.frombuffer(weights.view((count * k,)).download(), np.float32).reshape(count, k).copy())
+        out_ids, out_weights = np.zeros((count, k), np.int32), np.zeros((count, k), np.float32)
+        for i in range(count):
+            self._route(prefix, self._prefill_row(x, i))
+            out_ids[i] = np.frombuffer(self.route_ids.download(), np.int32)[:k]
+            out_weights[i] = np.frombuffer(self.route_weights.download(), np.float32)[:k]
+        return out_ids, out_weights
+
+    def _grouped_rows(self, name, width, dtype='float32'):
+        """A [rows, width] matrix for prefill_chunk's grouped (token, expert) rows: the capacity's bucket times the
+        most slots a token (k, and the shared expert's)."""
+        buffers = self.__dict__.setdefault('_grouped_buffers', {})
+        if (name, width, dtype) not in buffers:
+            slots = int(self.config['num_experts_per_tok']) + 1
+            buffers[name, width, dtype] = self._tensor((self._prefill_bucket(self._prefill_capacity()) * slots, width), dtype)
+        return buffers[name, width, dtype]
+
+    def _prefill_moe_grouped(self, prefix, x, count):
+        """The routed experts of the first count rows of x, grouped by expert (prefill_moe='grouped'): each row's k
+        experts (and the shared expert last, with fold_shared), the (token, expert) pairs sorted by expert on the
+        host, the rows gathered and quantized to e4m3 per 128 columns (fp8_quant_rows), gate and up as grouped
+        block-FP8 GEMMs, SwiGLU, the activations quantized, down, and each token's rows weighted and added in
+        ascending expert id (moe_combine_rows: moe_down's order). Returns this rank's part, one row a token."""
+        c = self.config
+        experts, k = int(c['n_routed_experts']), int(c['num_experts_per_tok'])
+        shared = self._folds_shared(prefix)
+        kk, total = (k + 1, experts + 1) if shared else (k, experts)
+        gate, up, down = (self._stacked_experts(prefix, n, shared=shared) for n in ('gate_proj', 'up_proj', 'down_proj'))
+        inter, hidden = gate[2]
+        ids, weights = self._prefill_route(prefix, x, count, k)
+        if shared:  # the shared expert: id n_routed_experts, weight 1.0, as _device_moe's slot k
+            ids = np.concatenate([ids, np.full((count, 1), experts, np.int32)], 1)
+            weights = np.concatenate([weights, np.ones((count, 1), np.float32)], 1)
+        rows = count * kk
+        order = np.argsort(ids.ravel(), kind='stable')  # by expert, then token: the grouped rows
+        src = (order // kk).astype(np.int32)
+        slot_of = np.empty(rows, np.int32)
+        slot_of[order] = np.arange(rows, dtype=np.int32)
+        by_id = np.argsort(ids, axis=1, kind='stable')
+        tokens = np.arange(count)[:, None]
+        slots, ordered = slot_of.reshape(count, kk)[tokens, by_id], weights[tokens, by_id]
+        offsets = np.searchsorted(ids.ravel()[order], np.arange(total + 1)).astype(np.int32)
+        capacity = self._grouped_rows('y', hidden).shape[0]
+        index = self._grouped_rows('index', 1, 'int32').view((capacity,), 'int32')
+        index.view((rows,), 'int32').upload(src.tobytes())
+        table = self._prefill_rows('combine_slots', kk + 1, 'int32')  # [count, kk] slots, then the offsets
+        table.view((count * kk,), 'int32').upload(slots.astype(np.int32).tobytes())
+        offsets_dev = self._prefill_rows('group_offsets', 1, 'int32').view((total + 1,), 'int32') if total + 1 <= table.shape[0] \
+            else self._tensor((total + 1,), 'int32')
+        offsets_dev.upload(offsets.tobytes())
+        combine_weights = self._prefill_rows('combine_weights', kk)
+        combine_weights.view((count * kk,)).upload(ordered.astype(np.float32).tobytes())
+        a_codes, a_scales = self._grouped_rows('a_codes', hidden, 'uint8'), self._grouped_rows('a_scales', hidden // 128)
+        self._spawn('fp8_quant_rows', codes=a_codes, scales=a_scales, x=x, src=index, rows=rows, cols=hidden, gather=1)
+        g, u, act = (self._grouped_rows(n, inter) for n in ('gate', 'up', 'act'))
+        self._grouped_gemm(a_codes, a_scales, gate[1], g, offsets, offsets_dev, rows, inter, hidden, total)
+        self._grouped_gemm(a_codes, a_scales, up[1], u, offsets, offsets_dev, rows, inter, hidden, total)
+        n = rows * inter
+        self._swiglu(g.view((n,)), u.view((n,)), act.view((n,)), n)
+        q_codes, q_scales = self._grouped_rows('q_codes', inter, 'uint8'), self._grouped_rows('q_scales', inter // 128)
+        self._spawn('fp8_quant_rows', codes=q_codes, scales=q_scales, x=act, src=index, rows=rows, cols=inter, gather=0)
+        y = self._grouped_rows('y', hidden)
+        self._grouped_gemm(q_codes, q_scales, down[1], y, offsets, offsets_dev, rows, hidden, inter, total)
+        moe = self._prefill_rows('moe_sum', self.hidden)
+        self._spawn('moe_combine_rows', out=moe, y=y, slots=table.view((count, kk), 'int32'),
+                    weights=combine_weights.view((count, kk)), tokens=count, cols=hidden, kk=kk)
+        self.launches['grouped_moe'] = self.launches.get('grouped_moe', 0) + 1
+        return moe
+
+    def _grouped_gemm(self, a, a_scales, stack, out, offsets, offsets_dev, rows, n, k, experts):
+        """out[r] = W[e] a[r] for the grouped rows r of each expert e (offsets[e] <= r < offsets[e + 1]): a's e4m3
+        codes and row-major per-128 scales against the stacked experts' codes and 128x128 block scales. A test
+        context's fp8_grouped_gemm, else gpu/spawn/fp8_gemm's grouped GEMM (its tile table planned on the device
+        from offsets_dev; the tensor maps over the buffers' whole rows, so their few shapes are cached)."""
+        codes, scales = stack
+        factory = getattr(self.ctx, 'fp8_grouped_gemm', None)
+        if factory is not None:
+            factory()(a, a_scales, codes, scales, out, offsets, rows=rows, n=n, k=k, experts=experts, stream=self.stream)
+            return out
+        from .fp8_gemm import FP8GroupedGEMM, grouped_tiles_max
+        if getattr(self, '_grouped', None) is None:
+            self._grouped = FP8GroupedGEMM(self.ctx, self._ptx_dir / 'spawn' / 'fp8_gemm')
+        capacity = out.shape[0]
+        tiles = self.__dict__.setdefault('_grouped_tiles', {}).get(experts)
+        if tiles is None:
+            tiles = self._grouped_tiles[experts] = self._tensor((1 + 3 * grouped_tiles_max(capacity, experts),), 'int32')
+        self._grouped.plan(offsets_dev, tiles, rows=capacity, experts=experts, stream=self.stream)
+        flat = lambda tensor, dtype='float32': tensor.view((int(np.prod(tensor.shape)),), dtype)  # its parameters are 1-D
+        self._grouped.gemm(flat(a, 'uint8'), flat(a_scales), flat(codes, 'uint8'), flat(scales), flat(out), tiles,
+                           rows=capacity, n=n, k=k, experts=experts, stream=self.stream)
+        return out
+
+    def _prefill_mlp(self, prefix, x, out, count):
+        """_mlp of each of the first count rows: with prefill_gemm='cublaslt' the three projections over the
+        rows and one SwiGLU, else _mlp a row (forward()'s kernels, its fused gate_up included)."""
+        if self.prefill_gemm != 'cublaslt':
+            for i in range(count):
+                self._mlp(prefix, self._prefill_row(x, i), self._prefill_row(out, i))
+            return out
+        width = self._out_features(prefix + '.gate_proj')
+        gate, up, act = (self._prefill_rows(name, width) for name in ('gate', 'up', 'act'))
+        self._prefill_linear(prefix + '.gate_proj', x, gate, count)
+        self._prefill_linear(prefix + '.up_proj', x, up, count)
+        n = count * width
+        self._swiglu(gate.view((n,)), up.view((n,)), act.view((n,)), n)
+        self._prefill_linear(prefix + '.down_proj', act, out, count)
+        return out
+
     def prefill(self, token_ids):
         """Token-by-token prefill; returns the stacked logits of every position."""
         return np.stack([self.forward(t) for t in token_ids]) if len(token_ids) else np.empty((0, int(self.config['vocab_size'])), np.float32)
@@ -2320,6 +2752,10 @@ class ResidentSequenceModel:
         # The scheduler passes forward_greedy last= when this is set (glm_vx/scheduler.py).
         self.greedy_ahead = bool(getattr(resident, 'device_decode', False))
         self._ahead = None  # (the token it starts from, its device_step ticket)
+        # A ResidentGLM(prefill_rows=N) takes the prompt's tokens before the last in chunks of up to N
+        # (prefill_chunk, #63 item 5b): the scheduler calls prefill_tokens when the model has it.
+        if getattr(resident, 'prefill_rows', 0):
+            self.prefill_tokens = self._prefill_tokens
 
     def new_cache(self):
         self._ahead = None  # reset() drops it with every other position
@@ -2341,6 +2777,14 @@ class ResidentSequenceModel:
         self._check(cache)
         self._settle()
         self.resident.forward(token_id, logits=False)
+
+    def _prefill_tokens(self, token_ids, cache):
+        """prefill_token for each of token_ids, as prefill_chunk calls of up to prefill_rows tokens."""
+        self._check(cache)
+        self._settle()
+        tokens, rows = [int(t) for t in token_ids], self.resident.prefill_rows
+        for start in range(0, len(tokens), rows):
+            self.resident.prefill_chunk(tokens[start:start + rows])
 
     def forward(self, token_id, cache):
         self._check(cache)

@@ -1,6 +1,6 @@
 """Test-only: n ranks of a tensor-parallel job in one process, one thread a rank (#56).
 
-LocalJob(n).member(rank) has gpu/collective.Collective's all_gather: each rank's call (run on its
+LocalJob(n).member(rank) has gpu/collective.Collective's all_gather (and all_reduce_sum): each rank's call (run on its
 stream, or recorded into the graph that stream captures, as the CPU emulator's launches are) waits
 for every rank's, then copies the ranks' tensors, in rank order, into its out. run_ranks runs one
 function a rank in threads and returns their results; if one raises, the others' waits are broken
@@ -44,6 +44,26 @@ class LocalCollective:
             job.barrier.wait()  # every rank's tensor is in
             out.data.reshape(-1)[...] = np.concatenate(job.slots)
             job.barrier.wait()  # every rank has read them: the slots may be reused
+        _run(stream, work)
+        return out
+
+    def all_reduce_sum(self, tensor, *, stream, out=None):
+        """out (tensor itself by default) becomes the sum over the ranks, in rank order ((p0 + p1) + p2) ..
+        in float32: NCCL's order is its own, but its result too is the same on every rank."""
+        out = tensor if out is None else out
+        if out.data.size != tensor.data.size:
+            raise ValueError(f'out has {out.data.size} elements, in has {tensor.data.size}')
+        job = self.job
+
+        def work():
+            job.slots[self.rank] = tensor.data.reshape(-1).copy()
+            job.calls[self.rank] += 1
+            job.barrier.wait()
+            total = job.slots[0].copy()
+            for part in job.slots[1:]:
+                total = total + part
+            out.data.reshape(-1)[...] = total
+            job.barrier.wait()
         _run(stream, work)
         return out
 

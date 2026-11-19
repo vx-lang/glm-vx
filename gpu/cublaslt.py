@@ -157,7 +157,8 @@ class Fp8BlockMatmul:
     (D [mp, n], ld mp). On the H100 a matmul costs about the same at 4 tokens as at 1 would: the
     weights are the traffic. Its float32 sums differ from float64 ones by ~3e-4 of the largest
     output (Hopper's FP8 tensor-core accumulation), as SGLang's kernels do."""
-    def __init__(self, lt, m, n, k, *, out_dtype='float32', orientation='weights_a', workspace_bytes=32 << 20):
+    def __init__(self, lt, m, n, k, *, out_dtype='float32', orientation='weights_a', workspace_bytes=32 << 20,
+                 workspace=None):
         if k % 128:
             raise ValueError('k must be a multiple of 128')
         if out_dtype not in _OUT_TYPES:
@@ -187,8 +188,13 @@ class Fp8BlockMatmul:
             self.a = layout(CUDA_R_8F_E4M3, k, mp, k)
             self.b = layout(CUDA_R_8F_E4M3, k, n, k)
             self.c = layout(out_type, mp, n, mp)
-        self.workspace_bytes = workspace_bytes
-        self.workspace = lt.context.tensor((max(workspace_bytes, 1),), 'uint8')
+        # workspace: a uint8 tensor to use instead of one of workspace_bytes of its own, shared by matmuls
+        # that run one after another on one stream (ResidentGLM.prefill_chunk's many shapes).
+        if workspace is not None:
+            self.workspace, self.workspace_bytes = workspace, int(np.prod(workspace.shape))
+        else:
+            self.workspace_bytes = workspace_bytes
+            self.workspace = lt.context.tensor((max(workspace_bytes, 1),), 'uint8')
         # The heuristic refuses VEC128 / BLK128x128 modes without scale pointers ("requires a custom
         # pointer"); any device address stands in until __call__ sets the real ones.
         self._set(DESC_A_SCALE_POINTER, _P(self.workspace.pointer))

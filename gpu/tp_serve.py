@@ -112,6 +112,12 @@ class Lockstep:
         self._send(b'F %d %d\n' % (int(token_id), 2 if logits == 'greedy' else 1 if logits else 0))
         return self.resident.forward(token_id, logits=logits)
 
+    def prefill_chunk(self, token_ids, *, logits=False):
+        tokens = [int(t) for t in token_ids]
+        flag = 2 if logits == 'greedy' else 1 if logits else 0
+        self._send(b'C %d %s\n' % (flag, b' '.join(b'%d' % t for t in tokens)))
+        return self.resident.prefill_chunk(tokens, logits=logits)
+
     def device_step(self, token_id=None):
         self._send(b'S\n' if token_id is None else b'D %d\n' % int(token_id))
         return self.resident.device_step(token_id)
@@ -210,6 +216,8 @@ def follower_main(argv=None):
             op = line.split()
             if op[0] == b'F':
                 resident.forward(int(op[1]), logits={b'0': False, b'1': True, b'2': 'greedy'}[op[2]])
+            elif op[0] == b'C':
+                resident.prefill_chunk([int(t) for t in op[2:]], logits={b'0': False, b'1': True, b'2': 'greedy'}[op[1]])
             elif op[0] == b'D':
                 resident.device_step(int(op[1]), readback=False)
             elif op[0] == b'S':

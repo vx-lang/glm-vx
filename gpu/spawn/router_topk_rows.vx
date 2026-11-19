@@ -1,0 +1,92 @@
+// glm_vx_spawn_router_topk_rows (#63, item 5b): router_bf16's choice for each token from router_logits_rows' logits,
+// one block a token: k <= 8 of experts <= 256 by score = sigmoid(logit) + bias, highest first, ties to the lower
+// id, one warp in k rounds of lanes::argmax; weights the experts' sigmoids normalized over the k and scaled; the
+// same code as router_bf16's last block, so its bits. indices and weights are [tokens, stride]: slots k and up
+// are not written (fold_shared's shared-expert slot).
+// spawn-include: device.vx
+
+// 1 if expert `o` (score `other`) beats expert `e` (score `mine`): a higher score, or the same and a lower
+// id; an id at or past `experts` never does.
+macro_rules! beats {
+    ($other:expr, $o:expr, $mine:expr, $e:expr, $experts:expr) => {
+        unsafe {
+          let dv_other: f32 = $other;
+          let dv_o: i32 = $o;
+          if dv_o < $experts && (dv_other > $mine || (dv_other == $mine && dv_o < $e)) { 1 } else { 0 }
+        }
+    };
+}
+
+pub fn glm_vx_spawn_router_topk_rows(indices: &mut Tensor<i32, [?, ?], Memory::HBM>, weights: &mut Tensor<f32, [?, ?], Memory::HBM>,
+                                     logits: &Tensor<f32, [?, ?], Memory::HBM>, bias: &Tensor<f32, [?], Memory::HBM>,
+                                     tokens: i32, experts: i32, k: i32, scale: f32) -> void {
+  spawn on(Topology::Device) {
+    for t in 0..tokens across blocks {
+      let mut sg = unsafe { Tensor<f32, [256], Memory::SMEM>::uninit() };
+      let mut sc = unsafe { Tensor<f32, [256], Memory::SMEM>::uninit() };
+      for once in 0..(if experts > 0 && experts <= 256 && k > 0 && k <= 8 && k <= experts { 1 } else { 0 }) {
+        for e in 0..256 across lanes {
+          if e < experts {
+            let s: f32 = sigmoid!(logits[t][e]);
+            sg[e] = s;
+            sc[e] = s + bias[e];
+          }
+        }
+        // One warp, k rounds: each lane offers the best of its experts l, l + 32, .. still in, and lanes::argmax
+        // (the higher score, the same and the lower id) picks round r's, the expert of rank r: slot r.
+        let mut ms = unsafe { Tensor<f32, [1, 8, 32], Memory::SMEM>::uninit() };
+        let mut mi = unsafe { Tensor<i32, [1, 8, 32], Memory::SMEM>::uninit() };
+        let mut bv = unsafe { Tensor<f32, [1, 32], Memory::SMEM>::uninit() };
+        let mut bi = unsafe { Tensor<i32, [1, 32], Memory::SMEM>::uninit() };
+        let mut sel = unsafe { Tensor<i32, [1, 32], Memory::SMEM>::uninit() };
+        let mut sa = unsafe { Tensor<f32, [1, 32], Memory::SMEM>::uninit() };
+        for w in 0..1 across subgroups {
+          for l in 0..32 across lanes {
+            for j in 0..8 {
+              let e: i32 = l + 32 * j;
+              ms[w][j][l] = if e < experts { sc[e] } else { 0.0 };
+              mi[w][j][l] = if e < experts { e } else { -1 };
+            }
+            sel[w][l] = -1;
+          }
+          for r in 0..8 {
+            if r < k {
+              for l in 0..32 across lanes {
+                let mut best: f32 = 0.0;
+                let mut best_id: i32 = -1;
+                for j in 0..8 {
+                  let c: i32 = mi[w][j][l];
+                  let x: f32 = ms[w][j][l];
+                  let take: bool = c >= 0 && (best_id < 0 || x > best || (x == best && c < best_id));
+                  best = if take { x } else { best };
+                  best_id = if take { c } else { best_id };
+                }
+                bv[w][l] = best;
+                bi[w][l] = best_id;
+              }
+              let win: i32 = lanes::argmax(&bv[w], &bi[w], 32);
+              for l in 0..32 across lanes {
+                for j in 0..8 {
+                  if mi[w][j][l] == win { mi[w][j][l] = -1; }
+                }
+                if l == r { sel[w][l] = win; }
+              }
+            }
+          }
+          for l in 0..32 across lanes {
+            sa[w][l] = if l < k { sg[sel[w][l].max(0).min(255)] } else { 0.0 };
+          }
+          let total: f32 = lanes::sum(&sa[w], 32);
+          for l in 0..32 across lanes {
+            if l < k {
+              let e: i32 = sel[w][l].max(0).min(255);
+              indices[t][l] = e;
+              weights[t][l] = sg[e] / (total + 0.00000000000000000001) * scale;
+            }
+          }
+        }
+      }
+    }
+  }
+  return;
+}

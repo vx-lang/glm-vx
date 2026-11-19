@@ -1,0 +1,75 @@
+// glm_vx_spawn_fp8_quant_rows (#63, item 5b): rows of x as e4m3 codes with float32 scales, as gpu/fp8_quant.vx's
+// fp8_quant_groups does them (each 128 values of a row: scale max(|x|, 1e-10) / 448; codes of x / scale, nearest
+// even, clamped to +-448; NaN to the NaN code), the same bits, with the scales row-major, [rows, cols / 128] (the
+// per-token groups gpu/spawn/fp8_gemm's grouped GEMM reads). Row r is x's row src[r] with gather != 0 (the routed
+// experts' rows grouped by expert), else row r. One block of 32 warps a row: warp w quantizes groups w, w + 32,
+// ..; lane l of a group its values l, l + 32, l + 64, l + 96, as fp8_quant_groups. cols % 128 == 0.
+// spawn-include: device.vx
+
+// vxk_fp8_encode of gpu/fp8_quant.vx: the e4m3fn code nearest v (|v| <= 448 after the clamp), ties to even.
+macro_rules! fp8_encode {
+    ($v:expr) => {
+        unsafe {
+          let dv_v: f32 = $v;
+          let mut dv_a: f32 = dv_v;
+          if dv_a < 0.0 { dv_a = 0.0 - dv_a; }
+          if dv_a > 448.0 { dv_a = 448.0; }
+          let mut dv_e: i32 = -6;
+          let mut dv_p: f32 = 0.03125;
+          let mut dv_s: f32 = 512.0;
+          for dv_step in 0..14 {
+            if dv_a >= dv_p {
+              dv_e = dv_e + 1;
+              dv_p = dv_p * 2.0;
+              dv_s = dv_s * 0.5;
+            }
+          }
+          let dv_t: f32 = dv_a * dv_s;
+          let dv_r: f32 = (dv_t + 8388608.0) - 8388608.0;
+          let mut dv_code: i32 = (dv_e + 7) * 8 + (dv_r as i32) - 8;
+          if dv_v < 0.0 { dv_code = dv_code + 128; }
+          if dv_v != dv_v { dv_code = 127; }
+          dv_code
+        }
+    };
+}
+
+pub fn glm_vx_spawn_fp8_quant_rows(codes: &mut Tensor<u8, [?, ?], Memory::HBM>, scales: &mut Tensor<f32, [?, ?], Memory::HBM>,
+                                   x: &Tensor<f32, [?, ?], Memory::HBM>, src: &Tensor<i32, [?], Memory::HBM>,
+                                   rows: i32, cols: i32, gather: i32) -> void {
+  spawn on(Topology::Device) {
+    for row in 0..rows across blocks {
+      let mut part = unsafe { Tensor<f32, [32, 32], Memory::SMEM>::uninit() };
+      let groups: i32 = if cols % 128 == 0 { cols / 128 } else { 0 };
+      let from: i32 = if gather != 0 { src[row] } else { row };
+      for round in 0..(groups + 31) / 32 {
+        for w in 0..32 across subgroups {
+          let g: i32 = w + 32 * round;
+          for l in 0..32 across lanes {
+            let mut m: f32 = 0.0;
+            if g < groups {
+              for i in 0..4 {
+                let v: f32 = x[from][g * 128 + l + 32 * i];
+                let a: f32 = if v < 0.0 { 0.0 - v } else { v };
+                m = if a > m { a } else { m };
+              }
+            }
+            part[w][l] = m;
+          }
+          let amax: f32 = lanes::max(&part[w], 32);
+          for l in 0..32 across lanes {
+            if g < groups {
+              let scale: f32 = (if 0.0000000001 > amax { 0.0000000001 } else { amax }) / 448.0;
+              for i in 0..4 {
+                let v: f32 = x[from][g * 128 + l + 32 * i];
+                codes[row][g * 128 + l + 32 * i] = fp8_encode!(v / scale) as u8;
+              }
+              if l == 0 { scales[row][g] = scale; }
+            }
+          }
+        }
+      }
+    }
+  }
+  return;
+}

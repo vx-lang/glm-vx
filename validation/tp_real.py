@@ -11,6 +11,10 @@ the weights go to the GPU on the first step. Then:
      the whole step: layers (a replayed graph), final norm, lm_head, the logits' gather and download.
 
   python -m validation.tp_real --checkpoint ~/GLM-5.3 --ranks 8 --one-shot --output run/real.json
+
+--prefill fills the prompt (its tokens after the first and before the last) and each context through
+ResidentGLM.prefill_chunk (#63, item 5b) in chunks of its capacity (--option prefill_rows=N), and records
+the first decode step's top-5 at each context to compare with a run without it.
 """
 import argparse
 import ctypes as C
@@ -78,8 +82,16 @@ def rank_main(args, rank, job):
     context.synchronize()
     note(setup_s=round(first - started, 1), first_step_s=round(time.time() - first, 1),
          device_bytes=getattr(context, 'allocated_bytes', None))
-    for t in prompt[1:-1]:
-        r.forward(t, logits=False)
+    def fill(tokens):
+        if args.prefill:
+            rows = r._prefill_capacity()
+            for s in range(0, len(tokens), rows):
+                r.prefill_chunk(tokens[s:s + rows])
+        else:
+            for t in tokens:
+                r.forward(t, logits=False)
+
+    fill(prompt[1:-1])
     logits = r.forward(prompt[-1])
     generated, tops = [], []
     for _ in range(args.new):
@@ -96,18 +108,20 @@ def rank_main(args, rank, job):
         r.reset()
         tokens = [int(t) for t in rng.integers(0, vocab, n + args.time)]
         start = time.perf_counter()
-        for t in tokens[:n]:
-            r.forward(t, logits=False)
+        fill(tokens[:n])
         context.synchronize()
-        fill = time.perf_counter() - start
-        steps = []
+        filled = time.perf_counter() - start
+        steps, first = [], None
         for t in tokens[n:n + args.time]:
             start = time.perf_counter()
-            r.forward(t)  # returns the downloaded logits: the step is done
+            logits = r.forward(t)  # returns the downloaded logits: the step is done
             steps.append((time.perf_counter() - start) * 1e6)
+            first = top(logits) if first is None else first
         steps = np.array(steps[2:])  # the first steps past a context capture the long graphs
-        timings[str(n)] = dict(fill_tokens_per_s=round(n / fill, 1), us_per_step_median=round(float(np.median(steps)), 1),
-                               us_per_step_mean=round(float(steps.mean()), 1), us_per_step_min=round(float(steps.min()), 1))
+        timings[str(n)] = dict(fill_tokens_per_s=round(n / filled, 1), fill_s=round(filled, 3),
+                               us_per_step_median=round(float(np.median(steps)), 1),
+                               us_per_step_mean=round(float(steps.mean()), 1), us_per_step_min=round(float(steps.min()), 1),
+                               first_top=first if rank == 0 else None)
         note(**{f'context_{n}': timings[str(n)]})
     result['timings'] = timings
     result['replays'] = r.replays
@@ -128,6 +142,7 @@ def main():
     p.add_argument('--contexts', type=int, nargs='*', default=[1000, 3001])
     p.add_argument('--time', type=int, default=50, help='steps timed at each context')
     p.add_argument('--output', type=Path)
+    p.add_argument('--prefill', action='store_true', help='fill the prompt and the contexts with prefill_chunk (#63, item 5b)')
     p.add_argument('--option', action='append', help='KEY=VALUE (JSON): a ResidentGLM option over OPTIONS, e.g. fuse_tp_norm=8')
     p.add_argument('--role', help=argparse.SUPPRESS)
     p.add_argument('--job', help=argparse.SUPPRESS)
@@ -144,6 +159,7 @@ def main():
     command = [sys.executable, '-m', 'validation.tp_real', '--checkpoint', str(args.checkpoint), '--ranks', str(args.ranks),
                '--new', str(args.new), '--time', str(args.time), '--contexts', *map(str, args.contexts)]
     command += ['--one-shot'] if args.one_shot else []
+    command += ['--prefill'] if args.prefill else []
     for option in args.option or ():
         command += ['--option', option]
     command += ['--layers', str(args.layers)] if args.layers is not None else []
@@ -163,7 +179,7 @@ def main():
     if ok:  # every rank all-gathers the same logits: the same greedy tokens
         ok = all(r['generated'] == results[0]['generated'] for r in results)
     from gpu.tp_serve import parse_options
-    summary = dict(checkpoint=str(args.checkpoint), layers=args.layers, ranks=args.ranks, one_shot=args.one_shot,
+    summary = dict(checkpoint=str(args.checkpoint), layers=args.layers, ranks=args.ranks, one_shot=args.one_shot, prefill=args.prefill,
                    options={**OPTIONS, **parse_options(args.option)}, ok=ok,
                    wall_s=round(time.time() - started, 1), prompt=args.prompt, prompt_ids=prompt)
     if 'error' not in results[0]:

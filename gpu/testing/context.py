@@ -143,9 +143,28 @@ class Fp8BlockMatmul:
             out.data[...]=(x@w.T).astype(np.float32).reshape(out.data.shape)
         _run(stream,work)
     def close(self):pass
+class Fp8GroupedGemm:
+    """gpu/fp8_gemm.FP8GroupedGEMM's contract (ResidentGLM._grouped_gemm): for each expert e, the grouped rows
+    offsets[e] <= r < offsets[e + 1] of a (e4m3 codes, row-major per-128 scales) times expert e's codes with their
+    128x128 block scales, as float64 NumPy rounded to float32 once; the wgmma kernel's own order is the GPU tests'."""
+    def __call__(self,a,a_scale,b,b_scale,out,offsets,*,rows,n,k,experts,stream=None):
+        from gpu import fp8_quant
+        def work():
+            e4m3=fp8_quant.e4m3_values()
+            x=e4m3[a.data.reshape(-1)[:rows*k].reshape(rows,k)]*np.repeat(a_scale.data.reshape(-1)[:rows*(k//128)].reshape(rows,k//128),128,1)
+            codes=b.data.reshape(-1)[:experts*n*k].reshape(experts,n,k)
+            blocks=b_scale.data.reshape(-1)[:experts*(-(-n//128))*(-(-k//128))].reshape(experts,-(-n//128),-(-k//128)).astype(np.float64)
+            o=out.data.reshape(-1)
+            for e in range(experts):
+                lo,hi=int(offsets[e]),int(offsets[e+1])
+                if hi>lo:
+                    w=e4m3[codes[e]]*np.repeat(np.repeat(blocks[e],128,0),128,1)[:n,:k]
+                    o[lo*n:hi*n]=(x[lo:hi]@w.T).astype(np.float32).reshape(-1)
+        _run(stream,work)
 class Context:
     name='cpu-simt-test-only'
     def fp8_block_matmul(self,m,n,k):return Fp8BlockMatmul(self,m,n,k)
+    def fp8_grouped_gemm(self):return Fp8GroupedGemm()
     def __init__(self,*args,**kwargs):self.simt=Simt();self.tensors=[];self._host=None;self.capturing=0
     def host(self):
         if self._host is None:
