@@ -1,0 +1,94 @@
+{
+  "checkpoint": "/home/aditya/glm-h200/GLM-5.3",
+  "layers": null,
+  "ranks": 8,
+  "one_shot": true,
+  "prefill": true,
+  "options": {
+    "device_experts": true,
+    "graph": true,
+    "fused_attention": true,
+    "mla_kernel": "tc",
+    "fp8_kernels": "cvt",
+    "matvec_kernels": "x4",
+    "norm_block": 1024,
+    "long_topk": "ilp_hist",
+    "fuse_glue": true,
+    "index_kernel": "mma",
+    "fold_shared": true,
+    "moe_down2": true,
+    "fuse_router": true,
+    "prefill_rows": 2048,
+    "prefill_gemm": "cublaslt",
+    "prefill_sum": "nccl",
+    "prefill_attention": "mha_tc",
+    "prefill_moe": "grouped"
+  },
+  "ok": false,
+  "wall_s": 105.2,
+  "prompt": "The history of the transistor begins in 1947 at Bell Labs, where John Bardeen, Walter Brattain and William Shockley",
+  "prompt_ids": [
+    785,
+    3840,
+    315,
+    279,
+    97113,
+    12027,
+    304,
+    220,
+    98729,
+    19,
+    22,
+    518,
+    17857,
+    40416,
+    11,
+    1380,
+    3757,
+    4716,
+    64015,
+    11,
+    32061,
+    3240,
+    1587,
+    466,
+    323,
+    12369,
+    46693,
+    3179
+  ],
+  "ranks_results": [
+    {
+      "rank": 0,
+      "error": "exit 1"
+    },
+    {
+      "rank": 1,
+      "error": "exit 1"
+    },
+    {
+      "rank": 2,
+      "error": "exit 1"
+    },
+    {
+      "rank": 3,
+      "error": "exit 1"
+    },
+    {
+      "rank": 4,
+      "error": "exit 1"
+    },
+    {
+      "rank": 5,
+      "error": "exit 1"
+    },
+    {
+      "rank": 6,
+      "error": "exit 1"
+    },
+    {
+      "rank": 7,
+      "error": "exit 1"
+    }
+  ]
+}

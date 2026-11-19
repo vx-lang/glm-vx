@@ -1,0 +1,12 @@
+== prefill
+prompt: tokens equal False leading agree 24
+1000 fill tokens/s 117.1 -> 10.0 step us 9112.9 9110.2 first top-5 [198, 167, 27796, 168, 5691] [198, 167, 168, 27796, 5691] logit diff 0.2526
+3001 fill tokens/s 108.4 -> 9.9 step us 10054.7 10081.8 first top-5 [157, 168, 167, 2247, 5691] [157, 168, 167, 5691, 2247] logit diff 0.119
+== grouped
+prompt: tokens equal False leading agree 24
+1000 fill tokens/s 117.1 -> 15.1 step us 9112.9 9110.7 first top-5 [198, 167, 27796, 168, 5691] [198, 167, 168, 5691, 27796] logit diff 0.2925
+3001 fill tokens/s 108.4 -> 14.7 step us 10054.7 10077.1 first top-5 [157, 168, 167, 2247, 5691] [157, 168, 167, 2247, 8004] logit diff 0.1618
+== mha
+prompt: tokens equal False leading agree 24
+1000 fill tokens/s 117.1 -> 980.0 step us 9112.9 9111.5 first top-5 [198, 167, 27796, 168, 5691] [198, 167, 5691, 27796, 168] logit diff 0.1153
+3001 fill tokens/s 108.4 -> 437.6 step us 10054.7 10091.7 first top-5 [157, 168, 167, 2247, 5691] [157, 168, 167, 2247, 271] logit diff 0.1543

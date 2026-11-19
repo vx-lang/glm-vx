@@ -1,0 +1,52 @@
+{
+ "device": "NVIDIA H200",
+ "time": "2026-11-19T07:18:36Z",
+ "records": [
+  {
+   "rows": 1,
+   "start": 0,
+   "max_tokens": 64,
+   "hist": false
+  },
+  {
+   "rows": 70,
+   "start": 230,
+   "max_tokens": 320,
+   "hist": false
+  },
+  {
+   "rows": 333,
+   "start": 4000,
+   "max_tokens": 8192,
+   "hist": false
+  },
+  {
+   "rows": 2048,
+   "start": 0,
+   "max_tokens": 2048,
+   "hist": false
+  },
+  {
+   "rows": 200,
+   "start": 3000,
+   "max_tokens": 4096,
+   "hist": true
+  },
+  {
+   "rows": 2048,
+   "start": 6144,
+   "max_tokens": 8192,
+   "hist": false,
+   "us": 457.6511859893799,
+   "tflops": 262.79287933231944
+  },
+  {
+   "rows": 2048,
+   "start": 30720,
+   "max_tokens": 32768,
+   "hist": false,
+   "us": 1942.7104949951172,
+   "tflops": 274.14498180972595
+  }
+ ]
+}
