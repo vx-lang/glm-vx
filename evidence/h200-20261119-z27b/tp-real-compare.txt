@@ -1,0 +1,4 @@
+plain tokens equal True leading agree 32 max top-5 logit diff 0.0 {'1000': 9088.2, '3001': 10022.1}
+mma tokens equal True leading agree 32 max top-5 logit diff 0.15899 {'1000': 8791.6, '3001': 9712.4}
+fused tokens equal True leading agree 32 max top-5 logit diff 0.0 {'1000': 9464.6, '3001': 10409.1}
+both tokens equal True leading agree 32 max top-5 logit diff 0.15899 {'1000': 9132.0, '3001': 10055.7}

@@ -1,0 +1,74 @@
+{
+  "ranks": 8,
+  "gpus": 8,
+  "n": 6144,
+  "norm": true,
+  "norm_blocks": 8,
+  "ok": true,
+  "results": [
+    {
+      "rank": 0,
+      "kernel": "tp_sum_rmsnorm",
+      "blocks": 8,
+      "failures": [],
+      "failed": 0,
+      "us_per_call": 9.952446000170312
+    },
+    {
+      "rank": 1,
+      "kernel": "tp_sum_rmsnorm",
+      "blocks": 8,
+      "failures": [],
+      "failed": 0,
+      "us_per_call": 9.953417000133413
+    },
+    {
+      "rank": 2,
+      "kernel": "tp_sum_rmsnorm",
+      "blocks": 8,
+      "failures": [],
+      "failed": 0,
+      "us_per_call": 9.95498299994324
+    },
+    {
+      "rank": 3,
+      "kernel": "tp_sum_rmsnorm",
+      "blocks": 8,
+      "failures": [],
+      "failed": 0,
+      "us_per_call": 9.960140999965006
+    },
+    {
+      "rank": 4,
+      "kernel": "tp_sum_rmsnorm",
+      "blocks": 8,
+      "failures": [],
+      "failed": 0,
+      "us_per_call": 9.95365199992193
+    },
+    {
+      "rank": 5,
+      "kernel": "tp_sum_rmsnorm",
+      "blocks": 8,
+      "failures": [],
+      "failed": 0,
+      "us_per_call": 9.957749000022886
+    },
+    {
+      "rank": 6,
+      "kernel": "tp_sum_rmsnorm",
+      "blocks": 8,
+      "failures": [],
+      "failed": 0,
+      "us_per_call": 9.959631000128866
+    },
+    {
+      "rank": 7,
+      "kernel": "tp_sum_rmsnorm",
+      "blocks": 8,
+      "failures": [],
+      "failed": 0,
+      "us_per_call": 9.95277500010161
+    }
+  ]
+}

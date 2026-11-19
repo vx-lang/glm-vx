@@ -1,0 +1,5 @@
+allreduce-norm-16 True 10.38
+allreduce-norm-32 True 10.61
+allreduce-norm-8 True 9.96
+allreduce-tp True 5.07
+best 8
