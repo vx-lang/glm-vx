@@ -219,6 +219,15 @@ with the FP8 weights loaded straight into each lane's registers. The floor is a 
    - Then MMA for the instruction count.
    - The probe's plain prefetch used more registers and got slower, so profile first: ncu's memory-in-flight
      counters, `moe_profile --detail`.
+   - vx-94's reading (2026-11-19): `fp8_moe_cvt_gate_up` is bound by each warp's serial chain, not occupancy.
+     - At maxnreg 104 an SM holds about 19.7 warps, and 9 × 256 rows fill that in one wave, so split-K adds
+       nothing resident.
+     - Each warp walks 12 tiles of 512 columns with about one tile in flight: 12 HBM round trips in a row, which
+       fits 12.5 us at k = 7 and 8.
+     - Most of its registers hold x and the scales, not weights.
+     - The fix: a block's 48 KB of weights all in flight at once, by TMA into shared memory (4 blocks × 48 KB fit
+       in 228 KB). `lanes::copy_async` uses TMA on sm_90 but refuses 1-byte tiles (E3003). Either Vx allows them,
+       or the copy views the weights as 2-byte tiles.
 3. **tiles3 with FP8 MMA:** q_a + kv_a + the indexer's wk, the same on every rank (750 us a step, 9.6 us a
    layer). It reads about 17 MB a call, so the floor is about 5.5 us: about −0.3 ms. Same form as gate_up.
 4. **`fp8_matvec_cvt_tiles`** (752 us a step, two calls a layer of 4.7 us): already near its bytes' floor. Only
@@ -255,6 +264,44 @@ on one GPU but raises `NotImplementedError` under TP. The scheduler already has 
 - all-reduces over [chunk, hidden].
 
 This is the only route to a TTFT near SGLang's. The target is within 2x of SGLang on W1 and W3.
+
+**5a gains little (2026-11-19).** `forward_many` reads each Linear's weights once for its tokens. Those Linears are
+about 20 of a TP8 layer's ~120 us (z5), and forward_many runs them through `fp8_matvec4_rows` and the unfused
+paths. That is about 10% on TTFT, not 1.5-2x. Skipped for 5b.
+
+**5b design (2026-11-19).** `ResidentGLM.prefill_chunk(tokens)` takes M <= 2048 prompt tokens at positions
+s..s+M-1 in one call on every rank. It leaves the caches that M `forward()` calls would, though not bit for bit:
+its GEMMs quantize activations to e4m3 per 128 columns, as SGLang's block-FP8 prefill does. Decode is unchanged.
+
+| part, a layer | how | kernels |
+|---|---|---|
+| norms, residual adds | over the M rows | `rmsnorm_rows` (exists), one add over M × hidden |
+| q_a, kv_a, the indexer's wk, wq_b and weights_proj, q_b, o_proj, dense MLP, shared expert | block-FP8 GEMM, M padded to 4 | `gpu/cublaslt.py` `Fp8BlockMatmul` + `fp8_quant` |
+| cache rows: kv_a's norm, rope, bf16 store; index keys | over the M rows | rows variants of `kv_rows_bf16_at`, `index_key_at` |
+| attention (dense causal within index_topk) | M1: per token, today's kernels. M2: one launch, a count per query | `mla_tc_at` with per-query counts |
+| q and value absorbs (W_UK, W_UV) | M1: per token. M2: GEMMs | |
+| router | GEMM [M, 256] + a top-k a row | rows variant of `router_bf16` |
+| routed experts | rows grouped by expert, grouped block-FP8 GEMM, each token's k rows combined in a fixed order | M1: cuBLASLt per expert. M2: a grouped kernel (asked of vx-94) |
+| all-reduces | NCCL over [M, hidden]: the same bits on every rank | `collective.all_reduce` |
+| indexer past index_topk (W3) | scores [M, N] on tensor cores, a top-k a query | later; until then tokens past index_topk run one at a time |
+
+Estimates, not measurements, for W1's 1000-token prompt:
+
+| milestone | TTFT |
+|---|---|
+| today | 8.7 s |
+| M1 (attention per token, about 1.7 s of it) | about 2 s |
+| M2 (attention in one launch) | about 0.3 s |
+| grouped experts kernel | about 0.1 s |
+| SGLang | 0.089 s |
+
+Checks:
+- prefill_chunk's caches and last hidden against M forward() calls, within tolerance, on the CPU emulator with
+  per-row Linears;
+- the first decode token's logits on the GPU;
+- GSM8K and W1 on the 8x H200.
+
+Peers (2026-11-19): vx-94 the grouped block-FP8 GEMM; vx-7e item 6's top-k.
 
 ### 6. Long context: the indexer on every rank
 
