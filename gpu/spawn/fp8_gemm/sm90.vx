@@ -178,6 +178,18 @@ ensures writes_only()
   };
 }
 
+// st.global of two adjacent bfloat16 elements: `lo` at addr, `hi` at addr + 2, each rounded to nearest
+// even (cvt.rn.bf16x2.f32 puts its first source in the high half). addr must be 4-byte aligned.
+fn st_global_bf16x2(addr: i64, lo: f32, hi: f32) on Topology::Device -> i32
+ensures writes_only()
+{
+  return mlir!( inputs : (%a = addr : i64, %l = lo : f32, %h = hi : f32), returns : i32, dialects : ["llvm", "arith"], ensures : [writes_only()]) {
+    llvm.inline_asm has_side_effects "{ .reg .b32 w; cvt.rn.bf16x2.f32 w, $2, $1; st.global.b32 [$0], w; }", "l,f,f" %a, %l, %h : (i64, f32, f32) -> ()
+    %z = arith.constant 0 : i32
+    macro.yield %z : i32
+  };
+}
+
 fn st_global_u16(addr: i64, v: i32) on Topology::Device -> i32
 ensures writes_only()
 {

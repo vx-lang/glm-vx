@@ -402,3 +402,69 @@ def test_hardware_harness_runs_on_a_simulated_gpu(tmp_path, monkeypatch):
         assert 'tflops' in H.RECORDS[0] and 'tflops' not in H.RECORDS[1]
     finally:
         ctx.close()
+
+
+# --- the grouped GEMM's wrapper and hardware harness --------------------------------------------------------
+
+GROUPED_PARAMS = KERNEL_PARAMS + [('tiles', 'i32', False)]
+GROUPED_SCALARS = ['rows_m', 'rows_n', 'cols', 'tiles_max', 'bf16_out']
+
+
+@pytest.mark.parametrize('out_dtype', ['float32', 'uint16'])
+def test_grouped_wrapper_writes_bf16_c_to_out_bf16(fake, out_dtype):
+    ctx, library, launches, build = fake
+    for name, tensors_, scalars in (('fp8_gemm_grouped_m64', GROUPED_PARAMS, GROUPED_SCALARS),
+                                    ('fp8_gemm_grouped_plan', [('tiles', 'i32', True), ('offsets', 'i32', False)],
+                                     ['experts', 'rows'])):
+        (build / f'{name}.ptx').write_text('// fake\n')
+        (build / f'{name}.json').write_text(json.dumps(manifest(f'glm_vx_{name}', tensors_, scalars, 0)))
+    grouped = F.FP8GroupedGEMM(ctx, build)
+    rows, n, k, experts = 300, 256, 512, 8
+    a, sa = ctx.tensor((rows * k,), 'uint8'), ctx.tensor((rows * 4,), 'float32')
+    b, sb = ctx.tensor((experts * n * k,), 'uint8'), ctx.tensor((experts * 2 * 4,), 'float32')
+    out, tiles = ctx.tensor((rows * n,), out_dtype), ctx.tensor((1 + 3 * 16,), 'int32')
+    tiles_max = grouped(a, sa, b, sb, out, tiles, rows=rows, n=n, k=k, experts=experts)
+    (l,) = launches
+    bf16 = out_dtype == 'uint16'
+    assert l['kernel'] == 'glm_vx_fp8_gemm_grouped_m64' and l['block'] == 160
+    # params: 6 tensors x 5 words (out at word 15, out_bf16 at 20), then the scalars
+    assert l['pointer'](20 if bf16 else 15) == out.pointer
+    assert l['pointer'](15 if bf16 else 20) != out.pointer
+    assert [l['scalar'](30 + i) for i in range(5)] == [rows, n, k, tiles_max, int(bf16)]
+    with pytest.raises(TypeError, match='float32 or uint16'):
+        grouped(a, sa, b, sb, ctx.tensor((rows * n,), 'int32'), tiles, rows=rows, n=n, k=k, experts=experts)
+
+
+class SimulatedGroupedGEMM:
+    """FP8GroupedGEMM's calls, with grouped_tiles and grouped_reference's C (rounded to f32 or bfloat16):
+    lets the grouped hardware test's harness run without a GPU."""
+    def plan(self, offsets, tiles, *, rows, experts, stream=None):
+        off = np.frombuffer(offsets.download(), np.int32)
+        tiles.upload(F.grouped_tiles(off, F.grouped_tiles_max(rows, experts)).astype(np.int32).tobytes())
+
+    def __call__(self, a, a_scale, b, b_scale, out, tiles, *, rows, n, k, experts, stream=None):
+        get = lambda t, dt: np.frombuffer(t.download(), dt)
+        tiles_max = F.grouped_tiles_max(rows, experts)
+        table = get(tiles, np.int32)
+        offsets = np.zeros(experts + 1, np.int64)
+        for t in range(table[0]):
+            e, lo, hi = table[1 + 3 * t:4 + 3 * t]
+            offsets[e + 1:] = np.maximum(offsets[e + 1:], hi)
+        c, _ = F.grouped_reference(get(a, np.uint8).reshape(rows, k), get(a_scale, np.float32),
+                                   get(b, np.uint8).reshape(experts, n, k), get(b_scale, np.float32), offsets)
+        c = c.astype(np.float32)
+        out.upload((F.bf16_round(c) if str(out.dtype) == 'uint16' else c).tobytes())
+        return tiles_max
+
+
+def test_grouped_hardware_harness_runs_on_a_simulated_gpu(monkeypatch):
+    from gpu import test_fp8_gemm_grouped_hardware as H
+    ctx = CUDAContext(_driver=CUDADriver(_library=TensorMapLibrary(capability=(9, 0))))
+    try:
+        monkeypatch.setattr(H, 'RECORDS', [])
+        for bf16, timed in ((True, True), (False, False)):
+            record = H.run_case((ctx, SimulatedGroupedGEMM()), 300, 8, 256, 512, seed=3, timed=timed, bf16=bf16)
+            assert record['bf16'] == bf16 and record['max_err_over_bound'] <= 1
+        assert 'gemm_us' in H.RECORDS[0] and 'gemm_us' not in H.RECORDS[1]
+    finally:
+        ctx.close()

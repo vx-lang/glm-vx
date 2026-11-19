@@ -47,12 +47,12 @@ ensures reads_only(t)
 }
 
 // maps: 256 bytes, the CUtensorMap of A at byte 0 and of B at byte 128 (64-byte aligned each).
-// out: f32 [splits, M, N] (C itself when splits == 1 and bf16_out == 0); out_bf16: u16 [M, N],
-// written instead when splits == 1 and bf16_out != 0. split_blocks: 128-k blocks per split.
+// out: f32 C [M, N] when bf16_out == 0; out_bf16: C as bfloat16 bits [M, N] (round to nearest
+// even), written instead when bf16_out != 0. N is a multiple of 128.
 pub fn glm_vx_fp8_gemm_grouped_@NAME@(maps: &Tensor<u8, [?], Memory::HBM>, a_scale: &Tensor<f32, [?], Memory::HBM>,
                                  b_scale: &Tensor<f32, [?], Memory::HBM>, out: &mut Tensor<f32, [?], Memory::HBM>,
-                                 tiles: &Tensor<i32, [?], Memory::HBM>, rows_m: i32, rows_n: i32, cols: i32,
-                                 tiles_max: i32) -> void {
+                                 out_bf16: &mut Tensor<u16, [?], Memory::HBM>, tiles: &Tensor<i32, [?], Memory::HBM>,
+                                 rows_m: i32, rows_n: i32, cols: i32, tiles_max: i32, bf16_out: i32) -> void {
   // The loops give the launch shape (Vx #2097): one block for each entry and 128 columns, of @THREADS@ lanes.
   spawn on(Topology::Device) {
     for bid in 0..tiles_max * ((rows_n + 127) / 128) across blocks {
@@ -168,11 +168,25 @@ pub fn glm_vx_fp8_gemm_grouped_@NAME@(maps: &Tensor<u8, [?], Memory::HBM>, a_sca
         // The CTAs write disjoint tiles, through raw stores (sm90.vx st_global_f32).
         let n_count: i64 = rows_n as i64;
         let out_addr: i64 = address_f32(out);
+        let bf_addr: i64 = address_u16(out_bf16);
         let col0: i32 = n0 + 2 * (lane & 3);
         let lo_ok: bool = row_lo < m_end;
         let hi_ok: bool = row_hi < m_end;
         let out_lo: i64 = (row_lo as i64) * n_count + (col0 as i64);
         let out_hi: i64 = out_lo + 8 * n_count;
+        if bf16_out != 0 {
+          // Columns col0 + 8j and + 1 are next to each other and in C (N % 128 == 0, col0 even): one
+          // 4-byte store of the two bfloat16 values.
+          for j in 0..16 {
+            let off: i64 = 8 * (j as i64);
+            if lo_ok {
+              let _s: i32 = st_global_bf16x2(bf_addr + 2 * (out_lo + off), acc[4 * j], acc[4 * j + 1]);
+            }
+            if hi_ok {
+              let _s: i32 = st_global_bf16x2(bf_addr + 2 * (out_hi + off), acc[4 * j + 2], acc[4 * j + 3]);
+            }
+          }
+        } else {
         for j in 0..16 {
           let c: i32 = col0 + 8 * (j as i32);
           let off: i64 = 8 * (j as i64);
@@ -188,6 +202,7 @@ pub fn glm_vx_fp8_gemm_grouped_@NAME@(maps: &Tensor<u8, [?], Memory::HBM>, a_sca
           if hi_ok && c + 1 < rows_n {
             let _s: i32 = st_global_f32(out_addr + 4 * (out_hi + off + 1), acc[4 * j + 3]);
           }
+        }
         }
       }
     }
