@@ -3,9 +3,14 @@
 // column 8 * (i >> 2) + 2 * (lane % 4) + (i & 1)). a_desc and b_desc address the stage's tiles; step s
 // adds 2 (32 bytes) to both. Step 0 has scale-d 0, so acc = A_kb B_kb^T of this block alone. The
 // block ends with commit_group and wait_group 0, so acc is final and the stage is no longer read.
-fn wgmma_m64n128k32_k128(acc: &mut Tensor<f32, [64], Memory::REG>, a_desc: i64, b_desc: i64) on Topology::Device -> i32 {
-  return mlir!( inputs : (%acc = acc : memref<64xf32>, %ad = a_desc : i64, %bd = b_desc : i64), returns : i32,
-                dialects : ["llvm", "memref", "arith"]) {
+macro_rules! wgmma_m64n128k32_k128 {
+    ($acc:ident, $ad:expr, $bd:expr) => {
+        unsafe {
+          let dv_ad: i64 = $ad;
+          let dv_bd: i64 = $bd;
+          let dv_acc = &mut $acc;
+          let dv_wg: i32 = mlir!( inputs : (%acc = dv_acc : memref<64xf32>, %ad = dv_ad : i64, %bd = dv_bd : i64), returns : i32,
+                dialects : ["llvm", "memref", "arith"], ensures : [writes_only(dv_acc)]) {
     %i0 = arith.constant 0 : index
     %i1 = arith.constant 1 : index
     %i2 = arith.constant 2 : index
@@ -606,5 +611,8 @@ fn wgmma_m64n128k32_k128(acc: &mut Tensor<f32, [64], Memory::REG>, a_desc: i64, 
     memref.store %d63, %acc[%i63] : memref<64xf32>
     %z = arith.constant 0 : i32
     macro.yield %z : i32
-  };
+          };
+          dv_wg
+        }
+    };
 }

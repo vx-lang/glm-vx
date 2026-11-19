@@ -354,7 +354,7 @@ def test_generated_sources_are_current():
 def test_vx_constants_match_the_host(name):
     v = F.VARIANTS[name]
     text = (SOURCES / f'fp8_gemm_{name}.vx').read_text()
-    assert f'block({v.threads})' in text
+    assert f'across lanes({v.threads})' in text
     assert f'mbar_arrive_expect_tx(full, {v.a_stage + v.b_stage})' in text
     assert f'for s in 0..{v.stages}' in text
     assert f'Tensor<i32, [{v.stages * v.a_stage // 4}], Memory::SMEM, aligned(1024)>' in text

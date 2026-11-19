@@ -20,6 +20,27 @@ C[m, n] = sum_kb a_scale[m, kb] * b_scale[n / 128, kb] * sum_{k in block kb} A[m
 K must be a multiple of 16, since TMA's row stride is K bytes. Other M, N and K tails are
 handled. lm_head (154880 x 6144) is BF16 in the checkpoint and does not use this kernel.
 
+## On Vx main, and the grouped GEMM of the routed experts
+
+Vx did not merge `grid([..]) block(n)` (#2065). On main the loops give the launch shape (#2097), so
+the kernels now open with `for bid in 0..G across blocks` and `for tid in 0..THREADS across
+lanes(THREADS)`. Lane 0 sets up the mbarriers in a first lane loop, whose end is the block's barrier.
+The race check of `across` loops needs three things from the sources:
+
+- `ensures` clauses on the `sm90.vx` helpers. They write through addresses that the checker cannot
+  see, so they say `writes_only()`, as glm-vx's other inline-PTX helpers do. Every inline asm is
+  `has_side_effects`, so none is removed.
+- The wgmma step is a macro (`wgmma_m64n128k32_k128!`), so its block sits in the lane loop and
+  writes the lane's own `part`. This needs Vx PR "across: a pass may borrow its own tensor as &mut".
+- The epilogue stores through raw addresses (`st_global_f32`), because a tile's rows come from a
+  run-time table the checker cannot prove disjoint.
+
+`fp8_gemm_grouped_m64.vx` (from `fp8_gemm_grouped.vx.in`) multiplies the gathered rows of each
+expert by that expert's weights in one launch, for prefill. `fp8_gemm_grouped_plan.vx` turns the
+offsets[E + 1] into a table of 64-row tiles on the device, and `FP8GroupedGEMM` in `gpu/fp8_gemm.py`
+launches both. `grouped_tiles` and `grouped_reference` are the NumPy plan and result, and
+`gpu/test_fp8_gemm_grouped_hardware.py` is the GPU test. None of these has run on a GPU yet.
+
 ## Files
 
 | File | What it is |
