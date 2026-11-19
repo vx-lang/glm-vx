@@ -469,8 +469,9 @@ def grouped_tiles(offsets, tiles_max, block_m=GROUPED_BLOCK_M):
     return table
 
 
-def grouped_reference(a_codes, a_scale, b_codes, b_scale, offsets, *, terms=False):
-    """(C, bound) of the grouped GEMM: `reference` for each expert's rows, stacked in A's order."""
+def grouped_reference(a_codes, a_scale, b_codes, b_scale, offsets, *, bf16=False, terms=False):
+    """(C, bound) of the grouped GEMM: `reference` for each expert's rows, stacked in A's order. With
+    bf16, the bound covers C rounded to bfloat16."""
     a_codes = np.asarray(a_codes)
     rows, k = a_codes.shape
     experts, n, _ = b_codes.shape
@@ -482,7 +483,7 @@ def grouped_reference(a_codes, a_scale, b_codes, b_scale, offsets, *, terms=Fals
         lo, hi = int(offsets[e]), int(offsets[e + 1])
         if hi > lo:
             c[lo:hi], bound[lo:hi], mma[lo:hi] = reference(a_codes[lo:hi], a_scale[lo:hi], b_codes[e], b_scale[e],
-                                                           terms=True)
+                                                           bf16=bf16, terms=True)
     return (c, bound, mma) if terms else (c, bound)
 
 
@@ -516,7 +517,10 @@ class FP8GroupedGEMM:
         self.context = context
         self.plan_kernel = SpawnKernel(context, Path(build) / 'fp8_gemm_grouped_plan.ptx')
         self.kernel = SpawnKernel(context, Path(build) / 'fp8_gemm_grouped_m64.ptx')
-        self._maps = {}
+        self._maps, self._dummy = {}, {}
+
+    # The output that a launch does not write: one element, as FP8GEMM's.
+    _scratch = FP8GEMM._scratch
 
     def tensor_maps(self, a, b, rows, n, k, experts):
         from gpu.runtime import encode_tensor_map_2d
@@ -542,13 +546,19 @@ class FP8GroupedGEMM:
         return tiles_max
 
     def gemm(self, a, a_scale, b, b_scale, out, tiles, *, rows, n, k, experts, stream=None):
+        """out: float32 [rows * n] for an f32 C, or uint16 [rows * n] for C as bfloat16 bits."""
         if n % BLOCK_N or k % 16:
             raise ValueError(f'the grouped GEMM needs N % {BLOCK_N} == 0 and K % 16 == 0, got N={n}, K={k}')
+        if str(out.dtype) not in ('float32', 'uint16') or out.size < rows * n:
+            raise TypeError(f'out must be float32 or uint16 (bfloat16) with at least {rows * n} elements, '
+                            f'got {out.dtype} of {out.size}')
+        bf16 = str(out.dtype) == 'uint16'
         tiles_max = grouped_tiles_max(rows, experts)
         maps = self.tensor_maps(a, b, rows, n, k, experts)
         self.kernel.launch((tiles_max * (n // BLOCK_N),), 160, stream=stream, maps=maps, a_scale=a_scale,
-                           b_scale=b_scale, out=out, tiles=tiles, rows_m=rows, rows_n=n, cols=k,
-                           tiles_max=tiles_max)
+                           b_scale=b_scale, out=self._scratch('float32') if bf16 else out,
+                           out_bf16=out if bf16 else self._scratch('uint16'), tiles=tiles, rows_m=rows, rows_n=n,
+                           cols=k, tiles_max=tiles_max, bf16_out=int(bf16))
         return tiles_max
 
     __call__ = gemm

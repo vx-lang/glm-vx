@@ -39,7 +39,13 @@ The race check of `across` loops needs three things from the sources:
 expert by that expert's weights in one launch, for prefill. `fp8_gemm_grouped_plan.vx` turns the
 offsets[E + 1] into a table of 64-row tiles on the device, and `FP8GroupedGEMM` in `gpu/fp8_gemm.py`
 launches both. `grouped_tiles` and `grouped_reference` are the NumPy plan and result, and
-`gpu/test_fp8_gemm_grouped_hardware.py` is the GPU test. None of these has run on a GPU yet.
+`gpu/test_fp8_gemm_grouped_hardware.py` is the GPU test. They passed on an H200 in z33, after the
+fixes of b8b547b and 6c0f790.
+
+C can be f32 or bfloat16. A uint16 `out` makes `FP8GroupedGEMM` pass it as `out_bf16` with
+`bf16_out = 1`, and the epilogue stores each pair of adjacent columns as one 4-byte
+`cvt.rn.bf16x2.f32` (sm90.vx `st_global_bf16x2`). N is a multiple of 128, so a pair never runs past
+C. The down projection at 18432 rows writes 226 MB in place of 453 MB.
 
 ## Files
 
