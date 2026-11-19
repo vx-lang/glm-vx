@@ -1,0 +1,197 @@
+// Grouped block-FP8 GEMM for H100 (sm_90a): the routed experts of a MoE layer in one launch. Built
+// from fp8_gemm.vx.in (gen_fp8_gemm.py); the pipeline, the ring and the wgmma are that kernel's.
+//
+//   for each expert e and each gathered row m in offsets[e] .. offsets[e + 1]:
+//   C[m, n] = sum_kb a_scale[m, kb] * b_scale[e, n / 128, kb] * sum_{k in block kb} A[m, k] * B[e, n, k]
+//
+// A [rows, K] are the gathered e4m3 rows, grouped by expert; a_scale is f32 [rows, KB]. B is the
+// experts' e4m3 weights [E, N, K], one TMA map over [E * N, K]; b_scale is f32 [E, ceil(N / 128), KB].
+// C is f32 [rows, N], in the order of A. N % 128 == 0, so a 128-row box of B never crosses an expert.
+//
+// fp8_gemm_grouped_plan.vx writes `tiles`: tiles[0] entries of (expert, first row, end row), one for
+// each 64 rows of an expert. The grid has tiles_max x N / 128 CTAs, so the host needs no offsets: CTA
+// (n_tile, t) with t past tiles[0] runs no k block and stores nothing. Rows of the next expert in a
+// tile are multiplied with this expert's B and not stored; rows past A are zeros (TMA).
+// spawn-include: ../device.vx
+// spawn-include: sm90.vx
+// spawn-include: wgmma_m64n128k32.vx
+
+fn ring_a_address(t: &Tensor<i32, [@RING_A_WORDS@], Memory::SMEM, aligned(1024)>) on Topology::Device -> i64
+ensures reads_only(t)
+{
+  return mlir!( inputs : (%t = t : memref<@RING_A_WORDS@xi32, 3>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+    %p = memref.extract_aligned_pointer_as_index %t : memref<@RING_A_WORDS@xi32, 3> -> index
+    %r = arith.index_cast %p : index to i64
+    macro.yield %r : i64
+  };
+}
+
+fn ring_b_address(t: &Tensor<i32, [@RING_B_WORDS@], Memory::SMEM, aligned(1024)>) on Topology::Device -> i64
+ensures reads_only(t)
+{
+  return mlir!( inputs : (%t = t : memref<@RING_B_WORDS@xi32, 3>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+    %p = memref.extract_aligned_pointer_as_index %t : memref<@RING_B_WORDS@xi32, 3> -> index
+    %r = arith.index_cast %p : index to i64
+    macro.yield %r : i64
+  };
+}
+
+fn bars_address(t: &Tensor<i64, [@BARS@], Memory::SMEM>) on Topology::Device -> i64
+ensures reads_only(t)
+{
+  return mlir!( inputs : (%t = t : memref<@BARS@xi64, 3>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+    %p = memref.extract_aligned_pointer_as_index %t : memref<@BARS@xi64, 3> -> index
+    %r = arith.index_cast %p : index to i64
+    macro.yield %r : i64
+  };
+}
+
+// maps: 256 bytes, the CUtensorMap of A at byte 0 and of B at byte 128 (64-byte aligned each).
+// out: f32 [splits, M, N] (C itself when splits == 1 and bf16_out == 0); out_bf16: u16 [M, N],
+// written instead when splits == 1 and bf16_out != 0. split_blocks: 128-k blocks per split.
+pub fn glm_vx_fp8_gemm_grouped_@NAME@(maps: &Tensor<u8, [?], Memory::HBM>, a_scale: &Tensor<f32, [?], Memory::HBM>,
+                                 b_scale: &Tensor<f32, [?], Memory::HBM>, out: &mut Tensor<f32, [?], Memory::HBM>,
+                                 tiles: &Tensor<i32, [?], Memory::HBM>, rows_m: i32, rows_n: i32, cols: i32,
+                                 tiles_max: i32) -> void {
+  // The loops give the launch shape (Vx #2097): one block for each entry and 128 columns, of @THREADS@ lanes.
+  spawn on(Topology::Device) {
+    for bid in 0..tiles_max * ((rows_n + 127) / 128) across blocks {
+    // The shared tensors come before any loop: over 48 KiB of shared memory declared after a loop
+    // crashes a vxc with #1995 and #2058 but not #2064 (Vx #2061).
+    let mut ring_a = unsafe { Tensor<i32, [@RING_A_WORDS@], Memory::SMEM, aligned(1024)>::uninit() };
+    let mut ring_b = unsafe { Tensor<i32, [@RING_B_WORDS@], Memory::SMEM, aligned(1024)>::uninit() };
+    let mut bars = unsafe { Tensor<i64, [@BARS@], Memory::SMEM>::uninit() };
+    // Lane 0 sets up the barriers. The end of a lane loop is a barrier of the block, so every lane
+    // sees them after it. Each lane then works out the tile itself: code between lane loops runs on
+    // lane 0 only.
+    for tid in 0..@THREADS@ across lanes(@THREADS@) {
+      if tid == 0 {
+        let bar_base: i64 = bars_address(&bars);
+        for s in 0..@STAGES@ {
+          let _f: i32 = mbar_init(bar_base + 8 * (s as i64), 1);
+          let _e: i32 = mbar_init(bar_base + 8 * ((@STAGES@ + s) as i64), @EMPTY_ARRIVALS@);
+        }
+        let _b: i32 = fence_barrier_init();
+      } else {
+        let _idle: i32 = 0;
+      }
+    }
+    for tid in 0..@THREADS@ across lanes(@THREADS@) {
+      let a_base: i64 = ring_a_address(&ring_a);
+      let b_base: i64 = ring_b_address(&ring_b);
+      let bar_base: i64 = bars_address(&bars);
+      let blocks_k: i32 = (cols + 127) / 128;
+      let t: i32 = bid % tiles_max;
+      let n0: i32 = (bid / tiles_max) * 128;
+      let active: bool = t < tiles[0];
+      let expert: i32 = if active { tiles[1 + 3 * t] } else { 0 };
+      let m0: i32 = if active { tiles[2 + 3 * t] } else { 0 };
+      let m_end: i32 = if active { tiles[3 + 3 * t] } else { 0 };
+      let kb0: i32 = 0;
+      let nkb: i32 = if active { blocks_k } else { 0 };
+      // ::fill(0.0) of 64 elements stays a loop with a variable index, which keeps the tensor in local
+      // memory; a constant-bound loop over a REG tensor is unrolled by Vx (PR #1991).
+      let mut acc = unsafe { Tensor<f32, [@ACC@], Memory::REG>::uninit() };
+      let mut part = unsafe { Tensor<f32, [@ACC@], Memory::REG>::uninit() };
+      for r in 0..@ACC@ {
+        acc[r] = 0.0;
+        part[r] = 0.0;
+      }
+      let mut i: i32 = 0;
+      if tid == @PRODUCER@ {
+        // Only this thread reads the maps, so its fence is the block's (sm90.vx, gpu/FP8-GEMM.md).
+        let a_map: i64 = global_address(maps);
+        let b_map: i64 = a_map + 128;
+        let _fa: i32 = fence_tensormap_acquire(a_map);
+        let _fb: i32 = fence_tensormap_acquire(b_map);
+        let _pa: i32 = prefetch_tensormap(a_map);
+        let _pb: i32 = prefetch_tensormap(b_map);
+        while i < nkb {
+          let s: i32 = i % @STAGES@;
+          let parity: i32 = (i / @STAGES@) & 1;
+          let _m: i32 = mbar_wait(bar_base + 8 * ((@STAGES@ + s) as i64), parity ^ 1);
+          let full: i64 = bar_base + 8 * (s as i64);
+          let _x: i32 = mbar_arrive_expect_tx(full, @TX_BYTES@);
+          let k: i32 = (kb0 + i) * 128;
+          let _ta: i32 = tma_load_2d(a_base + @A_STAGE@ * (s as i64), a_map, k, m0, full);
+          let _tb: i32 = tma_load_2d(b_base + @B_STAGE@ * (s as i64), b_map, k, expert * rows_n + n0, full);
+          i = i + 1;
+        }
+      } else {
+        // Vx: without this `else`, E3048 says the `if` above has no value (gpu/FP8-GEMM.md).
+        let _idle: i32 = 0;
+      }
+      if tid < @PRODUCER@ {
+        let group: i32 = tid >> 7;
+        let warp: i32 = (tid >> 5) & 3;
+        let lane: i32 = tid & 31;
+        let row_lo: i32 = m0 + 64 * group + 16 * warp + (lane >> 2);
+        let row_hi: i32 = row_lo + 8;
+        // Rows past M read row M - 1's scale: their A rows are zeros (TMA), so their part is 0 and
+        // the scale only has to be finite. They are not stored.
+        let mut srow_lo: i32 = row_lo;
+        if srow_lo > rows_m - 1 {
+          srow_lo = rows_m - 1;
+        }
+        let mut srow_hi: i32 = row_hi;
+        if srow_hi > rows_m - 1 {
+          srow_hi = rows_m - 1;
+        }
+        let kbs: i64 = blocks_k as i64;
+        let a_lo: i64 = (srow_lo as i64) * kbs;
+        let a_hi: i64 = (srow_hi as i64) * kbs;
+        let b_row: i64 = ((expert * ((rows_n + 127) / 128) + n0 / 128) as i64) * kbs;
+        let a_desc: i64 = sw128_desc(a_base + 8192 * (group as i64));
+        let b_desc: i64 = sw128_desc(b_base);
+        while i < nkb {
+          let s: i32 = i % @STAGES@;
+          let parity: i32 = (i / @STAGES@) & 1;
+          let kb: i64 = (kb0 + i) as i64;
+          // The scales are loaded before the wait, so their latency hides behind it.
+          let sb: f32 = b_scale[b_row + kb];
+          let s_lo: f32 = a_scale[a_lo + kb] * sb;
+          let s_hi: f32 = a_scale[a_hi + kb] * sb;
+          let _m: i32 = mbar_wait(bar_base + 8 * (s as i64), parity);
+          let _w: i32 = wgmma_m64n128k32_k128!(part, a_desc + @A_STAGE_DESC@ * (s as i64), b_desc + @B_STAGE_DESC@ * (s as i64));
+          if lane == 0 {
+            let _a: i32 = mbar_arrive(bar_base + 8 * ((@STAGES@ + s) as i64));
+          }
+          for j in 0..16 {
+            acc[4 * j] = acc[4 * j] + part[4 * j] * s_lo;
+            acc[4 * j + 1] = acc[4 * j + 1] + part[4 * j + 1] * s_lo;
+            acc[4 * j + 2] = acc[4 * j + 2] + part[4 * j + 2] * s_hi;
+            acc[4 * j + 3] = acc[4 * j + 3] + part[4 * j + 3] * s_hi;
+          }
+          i = i + 1;
+        }
+        // Epilogue: register 4j + q is row row_lo + 8 (q >> 1), column n0 + 8j + 2 (lane % 4) + (q & 1).
+        // The CTAs write disjoint tiles, through raw stores (sm90.vx st_global_f32).
+        let n_count: i64 = rows_n as i64;
+        let out_addr: i64 = address_f32(out);
+        let col0: i32 = n0 + 2 * (lane & 3);
+        let lo_ok: bool = row_lo < m_end;
+        let hi_ok: bool = row_hi < m_end;
+        let out_lo: i64 = (row_lo as i64) * n_count + (col0 as i64);
+        let out_hi: i64 = out_lo + 8 * n_count;
+        for j in 0..16 {
+          let c: i32 = col0 + 8 * (j as i32);
+          let off: i64 = 8 * (j as i64);
+          if lo_ok && c < rows_n {
+            let _s: i32 = st_global_f32(out_addr + 4 * (out_lo + off), acc[4 * j]);
+          }
+          if lo_ok && c + 1 < rows_n {
+            let _s: i32 = st_global_f32(out_addr + 4 * (out_lo + off + 1), acc[4 * j + 1]);
+          }
+          if hi_ok && c < rows_n {
+            let _s: i32 = st_global_f32(out_addr + 4 * (out_hi + off), acc[4 * j + 2]);
+          }
+          if hi_ok && c + 1 < rows_n {
+            let _s: i32 = st_global_f32(out_addr + 4 * (out_hi + off + 1), acc[4 * j + 3]);
+          }
+        }
+      }
+    }
+  }
+  }
+  return;
+}

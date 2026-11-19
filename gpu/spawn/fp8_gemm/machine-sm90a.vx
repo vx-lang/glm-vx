@@ -7,6 +7,7 @@ Memory SMEM { within: Memory::HBM, capacity: 228 KiB, bandwidth: 128 B/cyc, gran
 Memory REG { within: Memory::SMEM, capacity: 1020 B, managed: explicit, scope: thread }
 Topology Device {
   arch: nvptx64,
+  levels: [blocks(max_lanes: 1024, memory: cta), subgroups(lanes: 32), lanes(memory: thread)],
   chip: sm_90a,
   memory: Memory::HBM,
   visible: [Memory::CPU_DRAM, Memory::HBM, Memory::SMEM, Memory::REG],

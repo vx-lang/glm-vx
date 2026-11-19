@@ -1,0 +1,37 @@
+// The tile table of the grouped block-FP8 GEMM (fp8_gemm_grouped_m64.vx): for each expert e, the
+// rows offsets[e] .. offsets[e + 1] of the gathered rows, in tiles of 64 rows. Entry t is
+// tiles[1 + 3 t .. 4 + 3 t] = (expert, first row, the expert's end row), and tiles[0] is the number
+// of entries. An expert with no rows has no entry. The table only depends on the offsets, so one
+// plan serves the gate_up and the down GEMM of a layer. At most `tiles_max` entries are written;
+// ceil(rows / 64) + experts is always enough. experts <= 1024.
+pub fn glm_vx_fp8_gemm_grouped_plan(tiles: &mut Tensor<i32, [?], Memory::HBM>, offsets: &Tensor<i32, [?], Memory::HBM>,
+                                    experts: i32, tiles_max: i32) -> void {
+  spawn on(Topology::Device) {
+    for b in 0..1 across blocks {
+      let mut counts = unsafe { Tensor<i32, [1024], Memory::SMEM>::uninit() };
+      for e in 0..1024 across lanes(1024) {
+        if e < experts {
+          counts[e] = (offsets[e + 1] - offsets[e] + 63) / 64;
+        } else {
+          counts[e] = 0;
+        }
+      }
+      // Lane 0 writes the table: the entries of one expert follow those of the expert before it.
+      let mut t: i32 = 0;
+      for e in 0..experts {
+        let start: i32 = offsets[e];
+        let end: i32 = offsets[e + 1];
+        for j in 0..counts[e] {
+          if t < tiles_max {
+            tiles[1 + 3 * t] = e;
+            tiles[2 + 3 * t] = start + 64 * j;
+            tiles[3 + 3 * t] = end;
+            t = t + 1;
+          }
+        }
+      }
+      tiles[0] = t;
+    }
+  }
+  return;
+}

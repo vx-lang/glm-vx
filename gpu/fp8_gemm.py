@@ -7,7 +7,7 @@ groups of 128 along K, as DeepGEMM and SGLang's W8A8 block FP8 make them) and b_
 [ceil(N / 128), ceil(K / 128)], the checkpoint's `weight_scale_inv` (dequant = code * scale;
 glm_vx/checkpoint.py dequantize_block_fp8). C is f32 or bfloat16 (uint16 bits).
 
-- `plan` picks the kernel variant (m64: one consumer warpgroup, M <= 64; m128: two) and the split-K.
+- `plan` picks the kernel variant (m64: one consumer warpgroup of 64 rows) and the split-K.
 - `FP8GEMM` encodes the two TMA tensor maps (gpu/runtime.py encode_tensor_map_2d), uploads them,
   and launches the kernel, then the split-K reduction when splits > 1.
 - `reference` and `error_bound` are the numerical contract: the f64 value and how far the
@@ -57,13 +57,22 @@ class Variant:
     @property
     def ctas_per_sm(self):
         """Resident CTAs per SM by shared memory (228 KiB an SM, 1 KiB reserved a CTA) and
-        registers (65536 an SM, at most ~160 a thread here: gpu/FP8-GEMM.md)."""
+        registers. An SM's 65536 registers are four sub-partitions of 16384, and a CTA's warps are
+        dealt to them in turn, so the limit is warps a sub-partition: REGISTERS a thread (ptxas,
+        gpu/FP8-GEMM.md) rounded up to 8, times 32 lanes."""
         shared = self.stages * (self.a_stage + self.b_stage) + 1024 + 16 * self.stages
-        return max(1, min((228 * 1024) // (shared + 1024), 65536 // (160 * self.threads)))
+        warps_per_partition = 16384 // (-(-REGISTERS // 8) * 8 * 32)
+        warps = -(-self.threads // 32)
+        return max(1, min((228 * 1024) // (shared + 1024), 4 * warps_per_partition // warps))
 
 
-# Must match gpu/spawn/fp8_gemm/gen_fp8_gemm.py VARIANTS (gpu/test_fp8_gemm.py checks).
-VARIANTS = {'m64': Variant('m64', 1, 4), 'm128': Variant('m128', 2, 4)}
+# Registers a thread of fp8_gemm_m64 (ptxas 13.1, sm_90a).
+REGISTERS = 227
+# Must match gpu/spawn/fp8_gemm/gen_fp8_gemm.py VARIANTS (gpu/test_fp8_gemm.py checks). m128 (two
+# consumer warpgroups, 288 threads) is not built: its 9 warps put 3 on one register sub-partition,
+# which leaves 170 registers a thread, and the kernel needs about 220 (it spills at 168). The H200
+# refused to launch it (z33). A 384-thread m128 with setmaxnreg, as DeepGEMM's, would fit.
+VARIANTS = {'m64': Variant('m64', 1, 4)}
 
 
 @dataclass(frozen=True)
@@ -99,7 +108,7 @@ class Plan:
 def plan(m, n, k, *, sms=SM90_SMS, variant=None, splits=None):
     """Variant and split-K for C[m, n] = A[m, k] B[n, k]^T.
 
-    m64 for m <= 64, else m128 (B is read once for both 64-row halves). Splits: decode tiles are
+    m64, a tile of 64 rows (the only variant, see VARIANTS). Splits: decode tiles are
     few (m = 1, n = 2048 is 16 CTAs), so K is split until the CTAs fill the GPU's CTA slots
     (sms * ctas_per_sm), with at least 2 k blocks a split, choosing the split with the fewest
     waves' idle slots and then the fewest splits. Tuning (stream-K, a persistent grid) is later.
@@ -109,7 +118,7 @@ def plan(m, n, k, *, sms=SM90_SMS, variant=None, splits=None):
             raise ValueError(f'{name} must be a positive integer, got {value!r}')
     if k % 16:
         raise ValueError(f'k must be a multiple of 16 (the TMA row stride of A and B is k bytes), got {k}')
-    v = VARIANTS[variant] if variant else VARIANTS['m64' if m <= 64 else 'm128']
+    v = VARIANTS[variant] if variant else VARIANTS['m64']
     blocks_k = -(-k // BLOCK_K)
     tiles = -(-m // v.block_m) * -(-n // BLOCK_N)
     if splits is None:
@@ -179,8 +188,10 @@ class FP8GEMM:
         maps = self._maps.get(key)
         if maps is None:
             driver = self.context.driver
-            raw = (encode_tensor_map_2d(driver, a.pointer, p.m, p.k, p.k, p.variant.block_m, BLOCK_K)
-                   + encode_tensor_map_2d(driver, b.pointer, p.n, p.k, p.k, BLOCK_N, BLOCK_K))
+            # cuTensorMapEncodeTiled needs a current context (CUDA_ERROR_INVALID_CONTEXT without one).
+            with self.context._activate():
+                raw = (encode_tensor_map_2d(driver, a.pointer, p.m, p.k, p.k, p.variant.block_m, BLOCK_K)
+                       + encode_tensor_map_2d(driver, b.pointer, p.n, p.k, p.k, BLOCK_N, BLOCK_K))
             maps = self.context.tensor((256,), 'uint8', raw)
             if len(self._maps) >= 64:
                 self._maps.pop(next(iter(self._maps))).close()
@@ -226,10 +237,12 @@ class FP8GEMM:
 # Hopper's FP8 wgmma does not accumulate in full f32: DeepSeek-V3 (arXiv 2412.19437, section 3.3.2)
 # measured that it keeps "around 14 bits", which is why the scales are applied, and the sum
 # promoted to f32 on the CUDA cores, every 128 k (DeepGEMM does the same; so does this kernel).
-# Model: a 128-k block is 4 wgmma k32 steps; each step sums 32 products and adds them to the
-# running block sum, so at most 8 roundings, each at most 2^-13 of a partial sum whose magnitude
-# is at most S_kb = sum_k |a_k b_k|. Hence |part - P_kb| <= 8 * 2^-13 * S_kb = 2^-10 * S_kb.
-EPS_MMA = 2.0 ** -10
+# A 128-k block is 4 wgmma k32 steps. With 8 roundings of at most 2^-13 each, |part - P_kb| would be
+# at most 2^-10 * S_kb, S_kb = sum_k |a_k b_k|. The H200 measured more (z33): the grouped GEMM's
+# down projection (K = 256, 18432 rows, 113M elements) had 24 elements up to 1.31 times that, and
+# the 2304-row case reached 1.0. The tensor core may also cut the 32 products of a step when it
+# aligns them, so the hardware sets EPS_MMA, not the model: 2^-9, 1.5 times the largest measured.
+EPS_MMA = 2.0 ** -9
 U32 = 2.0 ** -24         # f32 unit roundoff: s = a_s * b_s, part * s, acc + ..., split-K sums
 U_BF16 = 2.0 ** -8       # bfloat16 unit roundoff (8 significant bits), round to nearest even
 
@@ -424,3 +437,118 @@ def bytes_moved(m, n, k, *, out_bytes=4):
     """Bytes a GEMM must move at least: A, B, both scales, C."""
     blocks = -(-k // BLOCK_K)
     return m * k + n * k + 4 * (m * blocks + -(-n // BLOCK_N) * blocks) + out_bytes * m * n
+
+
+# --- grouped GEMM of the routed experts (prefill) ----------------------------------------------------
+#
+# fp8_gemm_grouped_m64.vx multiplies the gathered rows of each expert by that expert's weights in one
+# launch: A [rows, K] grouped by expert (offsets[E + 1]), B [E, N, K], b_scale [E, ceil(N / 128), KB],
+# C [rows, N] in the order of A. fp8_gemm_grouped_plan.vx turns the offsets into a table of 64-row
+# tiles on the device, so the host never reads the offsets. One table serves gate_up and down.
+
+GROUPED_BLOCK_M = 64
+
+
+def grouped_tiles_max(rows, experts, block_m=GROUPED_BLOCK_M):
+    """Entries enough for any offsets: each expert adds at most one partial tile."""
+    return -(-rows // block_m) + experts
+
+
+def grouped_tiles(offsets, tiles_max, block_m=GROUPED_BLOCK_M):
+    """fp8_gemm_grouped_plan.vx in NumPy: int32 [1 + 3 * tiles_max], tiles[0] the entry count and
+    entry t at 1 + 3 t: (expert, first row, the expert's end row). Unused entries are -1 here."""
+    offsets = np.asarray(offsets, np.int64)
+    table = np.full(1 + 3 * tiles_max, -1, np.int32)
+    t = 0
+    for e in range(len(offsets) - 1):
+        for start in range(int(offsets[e]), int(offsets[e + 1]), block_m):
+            if t < tiles_max:
+                table[1 + 3 * t: 4 + 3 * t] = (e, start, offsets[e + 1])
+                t += 1
+    table[0] = t
+    return table
+
+
+def grouped_reference(a_codes, a_scale, b_codes, b_scale, offsets, *, terms=False):
+    """(C, bound) of the grouped GEMM: `reference` for each expert's rows, stacked in A's order."""
+    a_codes = np.asarray(a_codes)
+    rows, k = a_codes.shape
+    experts, n, _ = b_codes.shape
+    blocks = -(-k // BLOCK_K)
+    a_scale = np.asarray(a_scale, np.float32).reshape(rows, blocks)
+    b_scale = np.asarray(b_scale, np.float32).reshape(experts, -(-n // BLOCK_N), blocks)
+    c, bound, mma = np.zeros((rows, n)), np.zeros((rows, n)), np.zeros((rows, n))
+    for e in range(experts):
+        lo, hi = int(offsets[e]), int(offsets[e + 1])
+        if hi > lo:
+            c[lo:hi], bound[lo:hi], mma[lo:hi] = reference(a_codes[lo:hi], a_scale[lo:hi], b_codes[e], b_scale[e],
+                                                           terms=True)
+    return (c, bound, mma) if terms else (c, bound)
+
+
+def random_grouped_case(rows, experts, n, k, seed=0, *, empty=0.3):
+    """A grouped case: random e4m3 codes and scales, and offsets in which about `empty` of the
+    experts have no rows and the rest share `rows` unevenly (as a prefill chunk's routing does)."""
+    rng = np.random.default_rng(seed)
+    a, a_scale, _, _ = random_case(rows, BLOCK_N, k, seed)
+    b = np.stack([random_case(1, n, k, seed + 1 + e)[2] for e in range(experts)])
+    b_scale = np.stack([random_case(1, n, k, seed + 1 + e)[3] for e in range(experts)])
+    weight = rng.random(experts) ** 3 * (rng.random(experts) > empty)
+    if weight.sum() == 0:
+        weight[0] = 1.0
+    counts = np.floor(weight / weight.sum() * rows).astype(np.int64)
+    counts[np.argmax(weight)] += rows - counts.sum()
+    offsets = np.concatenate([[0], np.cumsum(counts)]).astype(np.int32)
+    return a, a_scale, b, b_scale, offsets
+
+
+class FP8GroupedGEMM:
+    """fp8_gemm_grouped_plan.ptx and fp8_gemm_grouped_m64.ptx on one context.
+
+    `plan(offsets, tiles, rows=, experts=)` writes the tile table; `gemm(a, a_scale, b, b_scale, out,
+    tiles, rows=, n=, k=, experts=)` runs the GEMM with it. Both launch on `stream`, so the table
+    comes from offsets that an earlier kernel wrote, with no copy to the host. Tensor maps are cached
+    as FP8GEMM's are (same rules for CUDA graphs).
+    """
+
+    def __init__(self, context, build=BUILD):
+        from gpu.spawn.launch import SpawnKernel
+        self.context = context
+        self.plan_kernel = SpawnKernel(context, Path(build) / 'fp8_gemm_grouped_plan.ptx')
+        self.kernel = SpawnKernel(context, Path(build) / 'fp8_gemm_grouped_m64.ptx')
+        self._maps = {}
+
+    def tensor_maps(self, a, b, rows, n, k, experts):
+        from gpu.runtime import encode_tensor_map_2d
+        key = (a.pointer, b.pointer, rows, n, k, experts)
+        maps = self._maps.get(key)
+        if maps is None:
+            driver = self.context.driver
+            with self.context._activate():
+                raw = (encode_tensor_map_2d(driver, a.pointer, rows, k, k, GROUPED_BLOCK_M, BLOCK_K)
+                       + encode_tensor_map_2d(driver, b.pointer, experts * n, k, k, BLOCK_N, BLOCK_K))
+            maps = self.context.tensor((256,), 'uint8', raw)
+            if len(self._maps) >= 64:
+                self._maps.pop(next(iter(self._maps))).close()
+            self._maps[key] = maps
+        return maps
+
+    def plan(self, offsets, tiles, *, rows, experts, stream=None):
+        if experts > 1024:
+            raise ValueError('fp8_gemm_grouped_plan.vx counts at most 1024 experts')
+        tiles_max = grouped_tiles_max(rows, experts)
+        self.plan_kernel.launch((1,), 1024, stream=stream, tiles=tiles, offsets=offsets, experts=experts,
+                                tiles_max=tiles_max)
+        return tiles_max
+
+    def gemm(self, a, a_scale, b, b_scale, out, tiles, *, rows, n, k, experts, stream=None):
+        if n % BLOCK_N or k % 16:
+            raise ValueError(f'the grouped GEMM needs N % {BLOCK_N} == 0 and K % 16 == 0, got N={n}, K={k}')
+        tiles_max = grouped_tiles_max(rows, experts)
+        maps = self.tensor_maps(a, b, rows, n, k, experts)
+        self.kernel.launch((tiles_max * (n // BLOCK_N),), 160, stream=stream, maps=maps, a_scale=a_scale,
+                           b_scale=b_scale, out=out, tiles=tiles, rows_m=rows, rows_n=n, cols=k,
+                           tiles_max=tiles_max)
+        return tiles_max
+
+    __call__ = gemm
