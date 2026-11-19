@@ -281,6 +281,30 @@ For comparison, SGLang's kernel sums at 32768 are in `evidence/h200-20261118-z5/
   the top-k does today.
 - Also check whether SGLang's index keys are FP8. If they are, ours may be too.
 
+### 7. The attention block's small kernels (found on one H200 and in z5's TP8 trace)
+
+One TP8 MoE layer in z5, in order, in us:
+
+| part | kernels |
+|---|---|
+| attention in | all-reduce 5.3, `residual_rmsnorm8` 3.1, `tiles3` 9.6, `rmsnorm_pair` 2.7, `tiles` (q_b) 3.9, `kv_rows_bf16_at` 1.9 (+ `index_key_at` 2.5 and `copy` 1.4 on full-indexer layers) |
+| attention | `cols_cvt` 4.3, `rope_strided` 1.3, `mla_q_bf16_at` 2.2, `mla_tc_at` 8.2, `mla_flash_merge_at` 4.0, `heads_cvt` 4.0, `tiles` (o_proj) 6.1 |
+| MoE | all-reduce 6.1, norm 2.8, router 9.5 + 5.9, gate_up 12.6, down 21.8 |
+
+The small kernels (the norm pair, the cache rows, rope, `mla_q`, the merge, index key + copy) add up to about
+12 us a layer, about 0.9 ms a step. Each is bound by its own latency, not its bytes. Fusions that keep the bits:
+- the merge with `heads_cvt`: blocks per (head, rows of W_UV), each merging its head's 512 latents again;
+- rope and `mla_q_bf16` into `cols_cvt`'s output;
+- `rmsnorm_pair` in `tiles3`'s last block;
+- the cache-row writes with the norms.
+
+Each saves perhaps 1.5-4 us a layer. They can be developed and bit-checked on one GPU, but their times need TP8's
+per-rank shapes.
+
+Measured on one H200 since:
+- `router_bf16`'s top-k in one warp: 12.2 to 10.5 us, the same bits (af6d4d2).
+- `moe_mma` down: 10.3 us against `down2`'s 18.5 (item 4).
+
 ## Expected totals (estimates)
 
 | after | W1 served TPOT | vs SGLang 9.18 |
