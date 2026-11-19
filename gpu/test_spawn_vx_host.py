@@ -1297,6 +1297,125 @@ def test_topk_select_at_reads_tokens_from_the_step(run, tokens):
         np.testing.assert_array_equal(got, stable_set(scores[:tokens], k))
 
 
+# topk_select_bitmap_at (#63): topk_select_at's set and order, from the bins of the keys' top 12 bits that
+# the scores kernel counted. It reads the scores once and leaves the bins zero.
+def score_bins(scores):
+    """index_scores_*_hist_at's bins: each key's top 12 bits (topk_key32: NaN is 0, -0.0 is +0.0's key)."""
+    b = scores.view(np.uint32).astype(np.uint64)
+    key = np.where(b >= 0x80000000, 0xFFFFFFFF - b, b ^ 0x80000000)
+    key = np.where(b == 0x80000000, 0x80000000, key)
+    key = np.where((b & 0x7FFFFFFF) > 0x7F800000, 0, key)
+    return np.bincount((key >> 20).astype(np.int64), minlength=4096).astype(np.uint32)
+
+
+def bitmap_scores(tokens, kind, rng):
+    if kind == 'equal':
+        s = np.zeros(tokens, F)  # one key: the lowest positions are taken
+    elif kind == 'few':
+        s = rng.integers(0, 2, size=tokens).astype(F)  # the threshold bin is most of the context
+    elif kind == 'narrow':
+        s = (5 + 0.01 * rng.normal(size=tokens)).astype(F)  # one bin holds more than 2048 keys
+    elif kind == 'ints':
+        s = rng.integers(-50, 50, size=tokens).astype(F)
+    elif kind == 'recent':
+        s = rng.normal(size=tokens).astype(F)
+        s[-3000:] += 3  # the last positions score higher, as recent tokens often do
+    elif kind == 'negative':
+        s = -np.abs(rng.normal(size=tokens)).astype(F)
+    elif kind == 'nan':
+        s = rng.normal(size=tokens).astype(F)
+        s[rng.random(tokens) < 0.8] = np.nan  # the threshold is NaN's key: NaN ties, the lowest positions first
+    elif kind == 'tail':
+        # 2101 keys of one bin (read again, past 2048) in 1 + m * 2^-23 with m < 1024, so with the same top 22
+        # bits. The last position holds the bin's one largest key, which k takes: a lane that counted the
+        # position past it (lane 904 of step 4 at 5000 tokens) would take a copy of it too.
+        s = np.full(tokens, -1, F)
+        at = 10 + rng.permutation(tokens - 11)
+        s[at[:500]] = 100
+        s[at[500:2600]] = (1 + rng.integers(0, 1023, size=2100) * 2.0 ** -23).astype(F)
+        s[-1] = F(1 + 1023 * 2.0 ** -23)
+    elif kind in ('bin2048', 'bin2049'):  # 1001 keys above a bin of exactly 2048 (listed) or 2049 equal keys
+        s = np.full(tokens, -1, F)
+        at = 10 + rng.permutation(tokens - 10)
+        s[at[:1000]] = 100
+        s[at[1000:1000 + int(kind[3:])]] = 1
+    else:
+        s = rng.normal(size=tokens).astype(F)
+    s[[3, 5, 7, 9]] = np.nan, -np.inf, -0.0, np.inf
+    return s
+
+
+@pytest.mark.parametrize('tokens,k,kind', [(2049, 2048, 'ints'), (3001, 2048, 'normal'), (32768, 2048, 'normal'),
+                                           (32768, 2048, 'ints'), (32768, 2048, 'recent'), (32768, 2048, 'narrow'),
+                                           (32768, 2048, 'negative'), (65536, 2048, 'normal'), (65536, 2048, 'equal'),
+                                           (5000, 2048, 'few'), (4096, 2048, 'nan'), (6000, 1, 'normal'),
+                                           (6000, 4000, 'ints'), (65536, 65535, 'ints'), (6000, 3049, 'bin2048'),
+                                           (6000, 3050, 'bin2049'), (5000, 2048, 'tail')])
+def test_topk_select_bitmap_at_is_the_stable_set_in_position_order(run, tokens, k, kind):
+    scores = bitmap_scores(tokens, kind, np.random.default_rng(tokens * 7 + k))
+    step = np.array([tokens - 1, tokens, k, 1], np.int32)
+    got = run('topk_select_bitmap_at', out_ids=np.full(k + 3, -7, np.int32), scores=scores.view(np.int32),
+              hist=score_bins(scores), step=step, k=k)
+    np.testing.assert_array_equal(got['out_ids'][:k], stable_set(scores, k))
+    np.testing.assert_array_equal(got['out_ids'][k:], -7)
+    np.testing.assert_array_equal(got['hist'], 0)
+
+
+def test_topk_select_bitmap_at_cases_reach_both_of_its_paths():
+    """The threshold bin of 'bin2048' holds 2048 keys, which the kernel lists; 'bin2049''s holds one more,
+    so the kernel reads the scores again. k takes the whole bin, so a key the list lost would show."""
+    listed = set()
+    for tokens, k, kind in [(6000, 3049, 'bin2048'), (6000, 3050, 'bin2049')]:
+        bins = score_bins(bitmap_scores(tokens, kind, np.random.default_rng(tokens * 7 + k)))
+        listed.add(threshold_bin_keys(bins, k) <= 2048)
+    assert listed == {True, False}
+
+
+def threshold_bin_keys(bins, k):
+    """The keys of the threshold bin: the highest bin whose count and the counts above it reach k."""
+    above = np.cumsum(bins[::-1])[::-1]
+    return int(bins[np.flatnonzero(above >= k).max()])
+
+
+# topk_select_bitmap_stats_at (#63, ResidentGLM(topk_bitmap='stats')): topk_select_bitmap_at's output, and
+# stats adds up its launches with tokens > k, those whose threshold bin held more than 2048 keys, the most
+# keys the bin held, and the launches whose bin held more than 1024.
+def test_topk_select_bitmap_stats_at_counts_how_often_the_list_overflows(run):
+    stats, held = np.zeros(4, np.uint32), []
+    for tokens, k, kind in [(32768, 2048, 'normal'), (32768, 2048, 'narrow'), (6000, 3050, 'bin2049'),
+                            (6000, 3049, 'bin2048'), (32768, 2048, 'ints'), (100, 2048, 'normal')]:
+        scores = bitmap_scores(tokens, kind, np.random.default_rng(tokens * 7 + k))
+        bins = score_bins(scores)
+        step = np.array([tokens - 1, tokens, min(k, tokens), 1], np.int32)
+        got = run('topk_select_bitmap_stats_at', out_ids=np.full(k, -7, np.int32), scores=scores.view(np.int32),
+                  hist=bins, stats=stats, step=step, k=k)
+        stats = got['stats']
+        if tokens > k:
+            held.append(threshold_bin_keys(bins, k))
+            np.testing.assert_array_equal(got['out_ids'], stable_set(scores, k))
+        else:
+            np.testing.assert_array_equal(got['out_ids'], -7)  # and stats unchanged
+    np.testing.assert_array_equal(stats, [5, sum(n > 2048 for n in held), max(held), sum(n > 1024 for n in held)])
+
+
+# Under graph replay: tokens from the step buffer, the scores past it ignored; up to k it writes nothing
+# and still zeroes the bins.
+@pytest.mark.parametrize('tokens', [100, 2048, 2049, 6000, 20000])
+def test_topk_select_bitmap_at_reads_tokens_from_the_step(run, tokens):
+    max_tokens, k = 20000, 2048
+    scores = np.random.default_rng(tokens).integers(-50, 50, size=max_tokens).astype(F)
+    scores[tokens:] = np.inf  # never selected: past tokens
+    step = np.array([tokens - 1, tokens, min(k, tokens), 1], np.int32)
+    bins = score_bins(scores[:tokens]) if tokens > k else np.arange(4096, dtype=np.uint32)
+    got = run('topk_select_bitmap_at', out_ids=np.full(k, -7, np.int32), scores=scores.view(np.int32), hist=bins,
+              step=step, k=k)
+    if tokens <= k:
+        np.testing.assert_array_equal(got['out_ids'], -7)
+    else:
+        np.testing.assert_array_equal(got['out_ids'], stable_set(scores[:tokens], k))
+    np.testing.assert_array_equal(got['hist'], 0)
+
+
 # kv_rows_bf16_at (#39, ResidentGLM(fuse_glue=True)): store_row_bf16_at of the latent row, and of
 # rope_strided's packed [rotated even, rotated odd] (one rounding an operation), in one launch.
 @pytest.mark.parametrize('rank,rot', [(512, 64), (333, 10), (16, 0)])

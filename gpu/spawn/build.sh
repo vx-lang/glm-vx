@@ -9,6 +9,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 : "${PYTHON:=python3}"
 : "${OUT:=gpu/build/spawn}"
+"$PYTHON" gpu/spawn/gen_topk_bitmap_stats.py --check
 extra=()
 if [[ -n "${MACHINE:-}" ]]; then extra+=(--machine "$MACHINE"); fi
 if [[ -n "${PTXAS:-}" ]]; then extra+=(--ptxas "$PTXAS" ${PTXAS_ARCH:+--ptxas-arch "$PTXAS_ARCH"}); fi

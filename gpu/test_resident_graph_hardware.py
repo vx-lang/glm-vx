@@ -214,12 +214,14 @@ def test_long_topk_warp_gives_the_bits_of_position(ctx):
 
 @pytest.mark.skipif(not (SPAWN / 'index_mma/topk_mb_write_at.ptx').exists(), reason='gpu/spawn index_mma not built')
 @pytest.mark.parametrize('index_kernel', ['mma', 'fp8', 'mma16'])
-@pytest.mark.parametrize('option', ['ilp', 'ilp_hist', 'blocks'])
+@pytest.mark.parametrize('option', ['ilp', 'ilp_hist', 'blocks', 'bitmap', 'stats'])
 def test_long_topk_ilp_gives_the_bits_of_position(ctx, option, index_kernel):
     """long_topk='ilp' and 'ilp_hist' (#32): topk_select_ilp_at, or the scores kernel's bins and
     topk_select_ilp_hist_at, select topk_select_at's set in the same order, so under replay the logits are
     'position''s bit for bit. 'blocks' is 'ilp_hist' with topk_blocks_from=256: from step 257 on, the
-    multi-block pair topk_mb_list_at + topk_mb_write_at, in a third step graph. 32 heads of 128, so the
+    multi-block pair topk_mb_list_at + topk_mb_write_at, in a third step graph. 'bitmap' is 'ilp_hist' with
+    topk_bitmap=True: topk_select_bitmap_at (#63) in place of topk_select_ilp_hist_at, and 'stats' its twin
+    topk_select_bitmap_stats_at, which also counts its launches. 32 heads of 128, so the
     scores are index_scores_mma_at's or _fp8_at's (or their _hist_at twins, whose scores are the same);
     600 steps, index_topk 128."""
     if index_kernel == 'fp8' and tuple(ctx.compute_capability) < (9, 0):
@@ -227,8 +229,9 @@ def test_long_topk_ilp_gives_the_bits_of_position(ctx, option, index_kernel):
     steps = 600
     model = build(seed=113, index_n_heads=32, index_head_dim=128, index_topk=128, max_position_embeddings=1024)
     tokens = np.random.default_rng(113).integers(0, model.config['vocab_size'], size=steps).tolist()
-    long_topk = 'ilp_hist' if option == 'blocks' else option
-    extra = dict(topk_blocks_from=256) if option == 'blocks' else {}
+    long_topk = 'ilp_hist' if option in ('blocks', 'bitmap', 'stats') else option
+    extra = {'blocks': dict(topk_blocks_from=256), 'bitmap': dict(topk_bitmap=True),
+             'stats': dict(topk_bitmap='stats')}.get(option, {})
     out = {}
     for name, kwargs in ((option, dict(long_topk=long_topk, **extra)), ('position', dict(long_topk='position'))):
         resident = ResidentGLM(model, ctx=ctx, max_tokens=steps + 8, device_experts=True, graph=True,
@@ -239,9 +242,14 @@ def test_long_topk_ilp_gives_the_bits_of_position(ctx, option, index_kernel):
             assert launched('topk_select_ilp_at') == (name == 'ilp')
             assert launched('topk_select_ilp_hist_at') == (name in ('ilp_hist', 'blocks'))
             assert launched('topk_mb_list_at') == launched('topk_mb_write_at') == (name == 'blocks')
+            assert (resident.launches.get('topk_select_bitmap_at', 0) > 0) == (name == 'bitmap')
+            assert (resident.launches.get('topk_select_bitmap_stats_at', 0) > 0) == (name == 'stats')
+            if name == 'stats':  # launches, of them over 2048 keys, the most keys, of them over 1024 keys
+                launches, over, most, half = np.frombuffer(resident.topk_stats.download(), np.uint32)
+                assert launches > 0 and over <= half <= launches and 1 <= most <= steps + 8
             if name != 'position':
                 assert resident.replays == steps - (3 if name == 'blocks' else 2)
-            if name in ('ilp_hist', 'blocks'):  # every step past index_topk counted and zeroed its bins
+            if name in ('ilp_hist', 'blocks', 'bitmap', 'stats'):  # every step past index_topk counted and zeroed its bins
                 assert not np.frombuffer(resident.score_bins.download(), np.uint32).any()
                 if name == 'blocks':
                     assert not np.frombuffer(resident._mb['count'].download(), np.uint32).any()

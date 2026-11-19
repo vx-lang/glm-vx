@@ -104,13 +104,26 @@ def rank_main(args, rank, job):
     rng = np.random.default_rng(0)
     vocab = int(config['vocab_size'])
     timings = {}
+    # With --option 'topk_bitmap="stats"': topk_select_bitmap_stats_at's counts (#63) over each context's fill
+    # and over its timed steps: launches, launches whose threshold bin held more than 2048 keys (the rounds
+    # read the scores again), the most keys it held, launches whose bin held more than 1024.
+    stats = getattr(r, 'topk_stats', None)
+
+    def topk_stats():
+        counts = np.frombuffer(stats.download(), np.uint32).tolist()
+        stats.upload(np.zeros(4, np.uint32).tobytes())
+        return counts
+
     for n in args.contexts:
         r.reset()
+        if stats is not None:
+            topk_stats()
         tokens = [int(t) for t in rng.integers(0, vocab, n + args.time)]
         start = time.perf_counter()
         fill(tokens[:n])
         context.synchronize()
         filled = time.perf_counter() - start
+        fill_stats = topk_stats() if stats is not None else None
         steps, first = [], None
         for t in tokens[n:n + args.time]:
             start = time.perf_counter()
@@ -122,6 +135,8 @@ def rank_main(args, rank, job):
                                us_per_step_median=round(float(np.median(steps)), 1),
                                us_per_step_mean=round(float(steps.mean()), 1), us_per_step_min=round(float(steps.min()), 1),
                                first_top=first if rank == 0 else None)
+        if stats is not None:
+            timings[str(n)]['topk_stats'] = dict(fill=fill_stats, steps=topk_stats())
         note(**{f'context_{n}': timings[str(n)]})
     result['timings'] = timings
     result['replays'] = r.replays

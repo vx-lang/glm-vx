@@ -8,10 +8,13 @@ flush (moe_profile.event_us), the median of --repeats, k = 2048, 32 heads of 128
                           bins, so it is timed after a copy of them, less the copy alone
   topk_mb                 topk_mb_list_at + topk_mb_write_at, the same over blocks of 8192 positions
                           (past topk_blocks_from), timed the same way
+  bitmap                  topk_select_bitmap_at (#63, topk_bitmap=True): ilp_hist's set from the same bins with
+                          one pass over the scores; up to 65536 tokens (a dash past them), timed the same way
 
 Every output is checked: the twins' scores are equal bit for bit, the bins are numpy's, and each top-k
 gives np.sort(np.argsort(-scores, kind='stable')[:k]). The last columns are a step's indexer before
-(scores + topk_select_at) and after (scores_hist + topk_select_ilp_hist_at).
+(scores + topk_select_at) and after (scores_hist + topk_select_ilp_hist_at, the multi-block pair, or
+topk_select_bitmap_at).
 
   python -m validation.topk_hist_ab --output run/topk-hist.md [--kernel mma|fp8|mma16] [--spawn DIR]
 
@@ -57,7 +60,8 @@ def main():
     topk = {name: SpawnKernel(ctx, path) for name, path in
             [('topk_select_at', spawn / 'topk_select_at.ptx'), ('topk_select_ilp_at', mma / 'topk_select_ilp_at.ptx'),
              ('topk_select_ilp_hist_at', mma / 'topk_select_ilp_hist_at.ptx'),
-             ('topk_mb_list_at', mma / 'topk_mb_list_at.ptx'), ('topk_mb_write_at', mma / 'topk_mb_write_at.ptx')]}
+             ('topk_mb_list_at', mma / 'topk_mb_list_at.ptx'), ('topk_mb_write_at', mma / 'topk_mb_write_at.ptx'),
+             ('topk_select_bitmap_at', spawn / 'topk_select_bitmap_at.ptx')]}
     z = lambda n, dtype: ctx.tensor((n,), np.dtype(dtype).name, np.zeros(n, dtype).tobytes())
     mb = dict(wcnt=z(4096, np.int32), ckey=z(16384, np.uint32), cpos=z(16384, np.int32), count=z(1, np.uint32),
               offs=z(8192, np.int32), sel=z(4, np.uint32))
@@ -65,8 +69,8 @@ def main():
     copy = SpawnKernel(ctx, spawn / 'copy.ptx')
     time = lambda launch: event_us(ctx, stream, spawn, launch, repeats=args.repeats)
     rng = np.random.default_rng(1)
-    rows = ['| tokens | scores | scores_hist | topk_select_at | ilp | ilp_hist | topk_mb | before | after (one block) |'
-            ' after (blocks) |', '|---|---|---|---|---|---|---|---|---|---|']
+    rows = ['| tokens | scores | scores_hist | topk_select_at | ilp | ilp_hist | topk_mb | bitmap | before |'
+            ' after (one block) | after (blocks) | after (bitmap) |', '|---|---|---|---|---|---|---|---|---|---|---|---|']
     for tokens in args.tokens:
         q = rng.normal(size=(HEADS, DIM)).astype('f4')
         keys = (rng.normal(size=(tokens, DIM)) * rng.uniform(0.1, 10, size=(tokens, 1))).astype('f4')
@@ -113,6 +117,9 @@ def main():
                     topk['topk_mb_write_at'].launch(stream=stream, out_ids=ids, scores=as_int, hist=hist, offs=mb['offs'],
                                                     sel=mb['sel'], step=step, max_tokens=tokens, k=K,
                                                     arrivals=arrivals[1]))}
+        if tokens <= 65536:
+            runs['topk_select_bitmap_at'] = lambda: (restore(), topk['topk_select_bitmap_at'].launch(
+                stream=stream, out_ids=ids, scores=as_int, hist=hist, step=step, k=K))
         for name, run in runs.items():
             run()
             stream.synchronize()
@@ -122,8 +129,9 @@ def main():
              time(lambda: (restore(), hist_k.launch(stream=stream, out=out, hist=hist, **common))) - time(restore)]
         t += [time(runs['topk_select_at']), time(runs['topk_select_ilp_at']),
               time(runs['topk_select_ilp_hist_at']) - time(restore), time(runs['topk_mb']) - time(restore)]
-        t += [t[0] + t[2], t[1] + t[4], t[1] + t[5]]
-        rows.append(f'| {tokens} | ' + ' | '.join(f'{x:.1f}' for x in t) + ' |')
+        bitmap = time(runs['topk_select_bitmap_at']) - time(restore) if 'topk_select_bitmap_at' in runs else None
+        t += [bitmap, t[0] + t[2], t[1] + t[4], t[1] + t[5], None if bitmap is None else t[1] + bitmap]
+        rows.append(f'| {tokens} | ' + ' | '.join('-' if x is None else f'{x:.1f}' for x in t) + ' |')
         print(rows[-1], flush=True)
     rows += ['', f'index_scores_{args.kernel}; scores_hist and ilp_hist less a 4096-word copy timed alone; every '
              f'output checked; median of {args.repeats}; PTX from {spawn}.']
