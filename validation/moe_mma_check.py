@@ -89,6 +89,7 @@ def run_gate_up(ctx, stream, spawn, rng, inter, cols, experts, k, repeats):
                 gate_scales=t(gate_scales, 'float32'), up_scales=t(up_scales, 'float32'), x=t(x, 'float32'),
                 ids=t(ids, 'int32'), k=k, experts=experts, inter=inter, up_row=0, stride=inter, cols=cols)
     kernels = {'gu16': SpawnKernel(ctx, spawn / 'moe_mma' / 'fp8_moe_mma16_gate_up_at.ptx'),
+               'gu16p': SpawnKernel(ctx, spawn / 'moe_mma' / 'fp8_moe_mma16p_gate_up_at.ptx'),
                'cvt': SpawnKernel(ctx, spawn / 'fp8_moe_cvt_gate_up.ptx')}
     outs, times = {}, {}
     for name, kernel in kernels.items():
@@ -101,7 +102,8 @@ def run_gate_up(ctx, stream, spawn, rng, inter, cols, experts, k, repeats):
     peak = float(np.abs(ref).max())
     rel = lambda a, b: float(np.abs(a - b).max() / peak)
     return dict(kernel='gate_up', inter=inter, cols=cols, experts=experts, k=k, max_abs_out=peak,
-                finite=bool(np.isfinite(outs['gu16']).all()), gu16_vs_model=rel(outs['gu16'], ref),
+                finite=bool(np.isfinite(outs['gu16']).all() and np.isfinite(outs['gu16p']).all()),
+                gu16_vs_model=rel(outs['gu16'], ref), gu16p_vs_model=rel(outs['gu16p'], ref),
                 cvt_vs_model=rel(outs['cvt'], ref), gu16_vs_cvt=rel(outs['gu16'], outs['cvt']),
                 weight_mb=2 * k * inter * cols / 1e6, us=times,
                 tb_per_s={n: 2 * k * inter * cols / us / 1e6 for n, us in times.items()})
@@ -167,7 +169,8 @@ def main(argv=None):
     gate_ups = [run_gate_up(ctx, stream, spawn, rng, c, args.rows, args.experts, args.k, args.repeats) for c in args.cols]
     ctx.close()
     ok = all(r['finite'] and r['mma_vs_model'] <= args.tolerance and r['mma16_vs_model'] <= args.tolerance for r in results)
-    ok = ok and all(r['finite'] and r['gu16_vs_model'] <= args.tolerance for r in gate_ups)
+    ok = ok and all(r['finite'] and r['gu16_vs_model'] <= args.tolerance and r['gu16p_vs_model'] <= args.tolerance
+                    for r in gate_ups)
     results += gate_ups
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(dict(ok=ok, tolerance=args.tolerance, kernel=str(args.kernel or 'moe_mma/fp8_moe_mma_down_at.ptx'),

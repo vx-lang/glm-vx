@@ -49,10 +49,11 @@ KERNELS = {'f32': ('moe_gate_up', 'moe_down'), 'bf16': ('bf16_moe_gate_up', 'bf1
            'fp8mma': ('fp8_moe_cvt_gate_up', 'moe_mma/fp8_moe_mma_down_at'),  # moe_mma: down on the FP8 tensor cores
            'fp8mma16': ('fp8_moe_cvt_gate_up', 'moe_mma/fp8_moe_mma16_down_at'),  # moe_mma='f16': act in f16
            'fp8mma16gu': ('moe_mma/fp8_moe_mma16_gate_up_at', 'moe_mma/fp8_moe_mma16_down_at'),  # both on the tensor cores
+           'fp8mma16pgu': ('moe_mma/fp8_moe_mma16p_gate_up_at', 'moe_mma/fp8_moe_mma16_down_at'),  # gate_up pipelined
            'int4': ('int4_moe_gate_up', 'int4_moe_down')}
-ELEMENT = {'f32': 4.0, 'bf16': 2.0, 'fp8': 1.0, 'fp8x4': 1.0, 'fp8fma': 1.0, 'fp8cvt': 1.0, 'fp8cvt2': 1.0, 'fp8mma': 1.0, 'fp8mma16': 1.0, 'fp8mma16gu': 1.0,
+ELEMENT = {'f32': 4.0, 'bf16': 2.0, 'fp8': 1.0, 'fp8x4': 1.0, 'fp8fma': 1.0, 'fp8cvt': 1.0, 'fp8cvt2': 1.0, 'fp8mma': 1.0, 'fp8mma16': 1.0, 'fp8mma16gu': 1.0, 'fp8mma16pgu': 1.0,
            'int4': 0.5}
-FP8 = ('fp8', 'fp8x4', 'fp8fma', 'fp8cvt', 'fp8cvt2', 'fp8mma', 'fp8mma16', 'fp8mma16gu')  # one copy of the FP8 weights; the others view the codes as u32
+FP8 = ('fp8', 'fp8x4', 'fp8fma', 'fp8cvt', 'fp8cvt2', 'fp8mma', 'fp8mma16', 'fp8mma16gu', 'fp8mma16pgu')  # one copy of the FP8 weights; the others view the codes as u32
 DETAIL = ['sm__inst_executed.sum', 'smsp__issue_active.avg.pct_of_peak_sustained_active',
           'sm__warps_active.avg.pct_of_peak_sustained_active',
           'smsp__average_warp_latency_issue_stalled_long_scoreboard.ratio',
@@ -149,7 +150,7 @@ def child(args):
     out = ctx.tensor((HIDDEN,), 'float32')
     fp8 = None  # the FP8 formats share one copy of the FP8 weights (fp8x4, fp8fma: a u32 view): all six
     for fmt in args.formats:  # formats at once would not fit in 80 GB
-        if fmt in ('fp8cvt', 'fp8cvt2', 'fp8mma', 'fp8mma16', 'fp8mma16gu') and tuple(ctx.compute_capability) < (8, 9):
+        if fmt in ('fp8cvt', 'fp8cvt2', 'fp8mma', 'fp8mma16', 'fp8mma16gu', 'fp8mma16pgu') and tuple(ctx.compute_capability) < (8, 9):
             continue  # sm_90 PTX (Hopper's e4m3x2 -> f16x2 conversion)
         if fmt in FP8 and fp8 is not None:
             codes = EXPERTS * INTER * HIDDEN  # each projection's code bytes

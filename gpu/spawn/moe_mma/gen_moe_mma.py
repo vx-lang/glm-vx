@@ -312,6 +312,77 @@ def gate_up16_ptx():
     return ' '.join(p)
 
 
+GU_GROUPS = 6  # 128-column groups a warp in fp8_moe_mma16p_gate_up_at: cols = GU_WARPS * 128 * GU_GROUPS = 6144
+
+
+def gate_up16p_ptx():
+    """gate_up16_ptx's work over a warp's whole range (GU_GROUPS groups of 128 columns), pipelined: the weights of
+    group j + 1 are in flight while group j computes. x goes once to shared memory in f16: lane l loads columns
+    128 i + 4 l .. + 3 of each group i (one round trip for all), each group's max over the warp gives its power-of-two
+    scale, and the f16 pairs go to the warp's region; the B fragments are read from there. $0 as gate_up16_ptx's;
+    $1, $2 gate rows g, g + 8 at the warp's first column + 16 c; $3, $4 up's; $5 x at the warp's first column (f32
+    bytes); $6, $7 the gate and up scales of the warp's first group (GU_GROUPS in a row); $8 the warp's region of
+    shared memory (GU_GROUPS x 256 bytes, a shared-window address)."""
+    G = GU_GROUPS
+    p = ['{', '.reg .b32 a<32>, d<32>, u<4>, b<8>, l, src, eb, ib, sm, sl, sr, h<2>;', '.reg .b64 xa;',
+         '.reg .f32 y<24>, sx<6>, gs<6>, us<6>, cg<4>, cu<4>, t, m, inv, f, ag0, ag2, au0, au2, v0, v2, v4, v6;',
+         '.reg .b16 lo, hi;', '.reg .pred p8, p16, p24;']
+
+    def loads(grp, buf):  # gate (a..) and up (d..) rows g, g + 8, chunks 0, 1 of group grp into buffer buf (16 + 16)
+        out = []
+        for name, regs in (('a', (1, 2)), ('d', (3, 4))):
+            for c in range(2):
+                for r in range(2):
+                    base = 16 * buf + 8 * c + 4 * r
+                    out.append(f'ld.global.nc.L1::no_allocate.v4.u32 {{{name}{base}, {name}{base + 1}, {name}{base + 2}, '
+                               f'{name}{base + 3}}}, [${regs[r]}+{128 * grp + 64 * c}];')
+        return out
+
+    p += loads(0, 0) + loads(1, 1)
+    p += [f'ld.global.nc.f32 gs{i}, [$6+{4 * i}];' for i in range(G)] + [f'ld.global.nc.f32 us{i}, [$7+{4 * i}];' for i in range(G)]
+    # x: lane l takes columns 128 i + 4 l .. + 3 of group i
+    p += ['mov.u32 l, %laneid;', 'mul.wide.u32 xa, l, 16;', 'add.s64 xa, xa, $5;', 'cvt.u32.u64 sm, $8;', 'shl.b32 sl, l, 3;',
+          'add.u32 sl, sl, sm;']
+    for i in range(G):
+        p.append(f'ld.global.nc.v4.f32 {{y{4 * i}, y{4 * i + 1}, y{4 * i + 2}, y{4 * i + 3}}}, [xa+{512 * i}];')
+    for i in range(G):
+        ys = [f'y{4 * i + e}' for e in range(4)]
+        p += [f'abs.f32 m, {ys[0]};'] + [f'abs.f32 t, {y}; max.f32 m, m, t;' for y in ys[1:]]
+        p += [f'shfl.sync.bfly.b32 t, m, {k}, 31, -1; max.f32 m, m, t;' for k in (1, 2, 4, 8, 16)]
+        p += ['max.f32 m, m, 0f0D800000;', 'mov.b32 eb, m;', 'and.b32 eb, eb, 2139095040;', 'sub.u32 eb, eb, 117440512;',
+              f'mov.b32 sx{i}, eb;', 'sub.u32 ib, 2130706432, eb;', 'mov.b32 inv, ib;']
+        p += [f'mul.f32 {y}, {y}, inv;' for y in ys]
+        p += [f'cvt.rn.f16x2.f32 h0, {ys[1]}, {ys[0]};', f'cvt.rn.f16x2.f32 h1, {ys[3]}, {ys[2]};',
+              f'st.shared.v2.b32 [sl+{256 * i}], {{h0, h1}};']
+    p += ['bar.warp.sync -1;']
+    # lane column c's B fragment of chunk c2 of group i: f16 columns 64 c2 + 16 c .. + 15 = bytes 128 c2 + 32 c
+    p += ['and.b32 sr, l, 3;', 'shl.b32 sr, sr, 5;', 'add.u32 sr, sr, sm;']
+    p += [f'mov.f32 {r}, 0f00000000;' for r in ('ag0', 'ag2', 'au0', 'au2')]
+    for i in range(G):
+        buf = i % 2
+        p += [f'mov.f32 cg{j}, 0f00000000;' for j in range(4)] + [f'mov.f32 cu{j}, 0f00000000;' for j in range(4)]
+        for c in range(2):
+            p += [f'ld.shared.v4.b32 {{b0, b1, b2, b3}}, [sr+{256 * i + 128 * c}];',
+                  f'ld.shared.v4.b32 {{b4, b5, b6, b7}}, [sr+{256 * i + 128 * c + 16}];']
+            for mstep in range(4):
+                for name, cc in (('a', 'cg'), ('d', 'cu')):
+                    w0, w8 = 16 * buf + 8 * c + mstep, 16 * buf + 8 * c + 4 + mstep
+                    p += [f'mov.b32 {{lo, hi}}, {name}{w0};', 'cvt.rn.f16x2.e4m3x2 u0, lo;', 'cvt.rn.f16x2.e4m3x2 u1, hi;',
+                          f'mov.b32 {{lo, hi}}, {name}{w8};', 'cvt.rn.f16x2.e4m3x2 u2, lo;', 'cvt.rn.f16x2.e4m3x2 u3, hi;',
+                          f'mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {{{cc}0, {cc}1, {cc}2, {cc}3}}, {{u0, u2, u1, u3}}, '
+                          f'{{b{2 * mstep}, b{2 * mstep + 1}}}, {{{cc}0, {cc}1, {cc}2, {cc}3}};']
+        if i + 2 < G:
+            p += loads(i + 2, buf)  # this buffer is free now: group i + 2's weights
+        p += [f'mul.f32 f, sx{i}, gs{i};', 'fma.rn.f32 ag0, f, cg0, ag0;', 'fma.rn.f32 ag2, f, cg2, ag2;',
+              f'mul.f32 f, sx{i}, us{i};', 'fma.rn.f32 au0, f, cu0, au0;', 'fma.rn.f32 au2, f, cu2, au2;']
+    p += ['and.b32 src, l, 7;', 'shl.b32 src, src, 2;',
+          'shfl.sync.idx.b32 v0, ag0, src, 31, -1;', 'shfl.sync.idx.b32 v2, ag2, src, 31, -1;',
+          'shfl.sync.idx.b32 v4, au0, src, 31, -1;', 'shfl.sync.idx.b32 v6, au2, src, 31, -1;',
+          'setp.lt.u32 p8, l, 8;', 'setp.lt.u32 p16, l, 16;', 'setp.lt.u32 p24, l, 24;',
+          'mov.f32 $0, v6;', '@p24 mov.f32 $0, v4;', '@p16 mov.f32 $0, v2;', '@p8 mov.f32 $0, v0;', '}']
+    return ' '.join(p)
+
+
 def gate_up_source():
     return f'''// Generated by gen_moe_mma.py: the routed experts' gate and up projections and SwiGLU on the tensor cores (#63,
 // docs/TP-SERVING-PLAN.md item 4): act[s * inter + i] = silu(gate . x) * (up . x) for expert s (ascending id order)
@@ -404,10 +475,50 @@ pub fn glm_vx_spawn_fp8_moe_mma16_gate_up_at(act: &mut Tensor<f32, [?], Memory::
 '''
 
 
+def gate_up_p_source():
+    """fp8_moe_mma16_gate_up_at's source, pipelined: one call of gate_up16p_ptx a warp over its whole range, x in
+    shared memory."""
+    text = gate_up_source()
+    region = 64 * GU_GROUPS  # u32 a warp
+    swaps = [
+        ("// Generated by gen_moe_mma.py: the routed experts' gate and up projections and SwiGLU on the tensor cores (#63,",
+         "// Generated by gen_moe_mma.py: fp8_moe_mma16_gate_up_at pipelined: each warp's whole range in one call, the next\n"
+         "// group's weights in flight while one computes, x in f16 in the warp's region of shared memory. As before:\n"
+         "// the routed experts' gate and up projections and SwiGLU on the tensor cores (#63,"),
+        (f"cols % {GU_WARPS * SEGMENT} == 0; otherwise act is zeros", f"cols == {GU_WARPS * 128 * GU_GROUPS}; otherwise act is zeros"),
+        ('fn gate_up_mma_warp(g0: i64, g8: i64, u0: i64, u8: i64, x: i64, gs: i64, us: i64) on Topology::Device -> f32',
+         'fn gate_up_mma_warp(g0: i64, g8: i64, u0: i64, u8: i64, x: i64, gs: i64, us: i64, sm: i64) on Topology::Device -> f32'),
+        ('%us = us : i64), returns : f32,', '%us = us : i64, %sm = sm : i64), returns : f32,'),
+        (f'"{gate_up16_ptx()}", "=f,l,l,l,l,l,l,l" %g0, %g8, %u0, %u8, %x, %gs, %us : (i64, i64, i64, i64, i64, i64, i64) -> f32',
+         f'"{gate_up16p_ptx()}", "=f,l,l,l,l,l,l,l,l" %g0, %g8, %u0, %u8, %x, %gs, %us, %sm : '
+         '(i64, i64, i64, i64, i64, i64, i64, i64) -> f32'),
+        ('pub fn glm_vx_spawn_fp8_moe_mma16_gate_up_at(', 'pub fn glm_vx_spawn_fp8_moe_mma16p_gate_up_at('),
+        (f'      let mut part = unsafe {{ Tensor<f32, [{GU_WARPS}, 32], Memory::SMEM>::uninit() }};\n',
+         f'      let mut part = unsafe {{ Tensor<f32, [{GU_WARPS}, 32], Memory::SMEM>::uninit() }};\n'
+         f'      let xs = unsafe {{ Tensor<u32, [{GU_WARPS}, {region}], Memory::SMEM>::uninit() }};\n'),
+        (f'cols % {GU_WARPS * SEGMENT} == 0 && cols > 0 {{', f'cols == {GU_WARPS * 128 * GU_GROUPS} {{'),
+        ('              let xb: i64 = address1(x) + (first + c16) * 4;', '              let xb: i64 = address1(x) + first * 4;'),
+    ]
+    for old, new in swaps:
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    a = text.index('              let mut seg: i64 = 0;')
+    b = text.index('            }\n          }\n          part[w][lane] = v;')
+    call = ("              // the warp's region of xs, a shared-window address (memref address space 3)\n"
+            f"              let sm: i64 = mlir!( inputs : (%t = &xs : memref<{GU_WARPS}x{region}xi32, 3>), returns : i64,\n"
+            "                                   dialects : [\"memref\", \"arith\"], ensures : [reads_only(xs)]) {\n"
+            f"                %p = memref.extract_aligned_pointer_as_index %t : memref<{GU_WARPS}x{region}xi32, 3> -> index\n"
+            "                %r = arith.index_cast %p : index to i64\n"
+            "                macro.yield %r : i64\n"
+            "              };\n"
+            f"              v = gate_up_mma_warp(gr, gr + 8 * n, ur, ur + 8 * n, xb, gsb, usb, sm + (w as i64) * {4 * region});\n")
+    return text[:a] + call + text[b:]
+
+
 def main():
     outputs = {'fp8_moe_mma_down_at.vx': down_source(),
                'fp8_moe_mma16_down_at.vx': down_source('fp8_moe_mma16_down_at', F16_HEAD, down16_ptx),
-               'fp8_moe_mma16_gate_up_at.vx': gate_up_source()}
+               'fp8_moe_mma16_gate_up_at.vx': gate_up_source(), 'fp8_moe_mma16p_gate_up_at.vx': gate_up_p_source()}
     stale = [name for name, text in outputs.items()
              if not (HERE / name).exists() or (HERE / name).read_text() != text]
     if '--check' in sys.argv:

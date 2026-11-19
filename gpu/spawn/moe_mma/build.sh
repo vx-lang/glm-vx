@@ -11,7 +11,7 @@ mkdir -p "$OUT"
 "$PYTHON" gpu/spawn/moe_mma/gen_moe_mma.py --check
 ptxas=()
 if [[ -n "${PTXAS:-}" ]]; then ptxas=(--ptxas "$PTXAS"); fi
-for name in fp8_moe_mma_down_at fp8_moe_mma16_down_at fp8_moe_mma16_gate_up_at; do
+for name in fp8_moe_mma_down_at fp8_moe_mma16_down_at fp8_moe_mma16_gate_up_at fp8_moe_mma16p_gate_up_at; do
   "$PYTHON" gpu/spawn/build.py --source "gpu/spawn/moe_mma/$name.vx" --output "$OUT/$name.ptx" \
     --machine gpu/spawn/index_mma/machine-sm90a.vx --ptx-version 8.4 "${ptxas[@]}" ${PTXAS:+--ptxas-arch sm_90a}
 done
