@@ -1,0 +1,2 @@
+4d15 vs 8146: 111 identical, 0 differ: 
+3609 vs 8146: 110 identical, 1 differ: ./mla_tc_at.ptx

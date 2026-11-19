@@ -1,0 +1,13 @@
+vx 8146 cargo rc=0:     Finished `release` profile [optimized] target(s) in 2m 58s
+vxc 0.0.4
+vx 4d15 cargo rc=0:     Finished `release` profile [optimized] target(s) in 3m 00s
+vxc 0.0.4
+kernels 3609 rc=0: 111 ptx; errors: 0
+kernels 4d15 rc=0: 111 ptx; errors: 0
+kernels 8146 rc=0: 111 ptx; errors: 0
+4d15 vs 8146: 100 identical, 11 differ ./index_mma/index_scores_fp8_hist_at.ptx ./index_mma/index_scores_mma16_hist_at.ptx ./index_mma/index_scores_mma_hist_at.ptx ./index_mma/topk_mb_list_at.ptx ./index_mma/topk_mb_write_at.ptx ./index_mma/topk_select_ilp_at.ptx ./index_mma/topk_select_ilp_hist_at.ptx ./topk_radix.ptx ./topk_radix_at.ptx ./tp_all_reduce.ptx ./tp_sum_rmsnorm.ptx
+3609 vs 8146: 99 identical, 12 differ ./index_mma/index_scores_fp8_hist_at.ptx ./index_mma/index_scores_mma16_hist_at.ptx ./index_mma/index_scores_mma_hist_at.ptx ./index_mma/topk_mb_list_at.ptx ./index_mma/topk_mb_write_at.ptx ./index_mma/topk_select_ilp_at.ptx ./index_mma/topk_select_ilp_hist_at.ptx ./mla_tc_at.ptx ./topk_radix.ptx ./topk_radix_at.ptx ./tp_all_reduce.ptx ./tp_sum_rmsnorm.ptx
+3609 vs 4d15: 99 identical, 12 differ ./index_mma/index_scores_fp8_hist_at.ptx ./index_mma/index_scores_mma16_hist_at.ptx ./index_mma/index_scores_mma_hist_at.ptx ./index_mma/topk_mb_list_at.ptx ./index_mma/topk_mb_write_at.ptx ./index_mma/topk_select_ilp_at.ptx ./index_mma/topk_select_ilp_hist_at.ptx ./mla_tc_at.ptx ./topk_radix.ptx ./topk_radix_at.ptx ./tp_all_reduce.ptx ./tp_sum_rmsnorm.ptx
+vxmain-done
+
+[exited with code 0]

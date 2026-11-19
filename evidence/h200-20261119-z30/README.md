@@ -18,7 +18,8 @@ line, "no CUDA device".
 
 **glm-vx's kernels:** all 113 spawn kernels were rebuilt with this vxc.
 - No glm-vx kernel uses Vx's fp8 types: ours decode FP8 with integers, an LLVM intrinsic, or inline PTX.
-- 100 PTX are identical to the Vx 3609 build. The 13 that differ (`spawn-ptx-diff-b.txt`) are the top-k and
+- 100 PTX are identical to the Vx 3609 build (byte for byte; with the build path in the assert strings
+  normalized only `mla_tc_at` differs, `../vx-main-8146e0d05`). The 13 that differ (`spawn-ptx-diff-b.txt`) are the top-k and
   indexer kernels, `mla_tc_at`, `router_bf16`, `tp_sum_rmsnorm` and `tp_all_reduce`; none of them is an FP8
   conversion kernel.
 - GLM-5.3's first 4 layers on the rebuilt kernels (`tp-real-4d15.json`) give the same 32 tokens and the same
