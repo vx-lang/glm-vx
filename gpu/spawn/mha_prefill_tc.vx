@@ -1,0 +1,167 @@
+// glm_vx_spawn_mha_prefill_tc (#63, item 5b): mha_prefill's causal attention on the tensor cores, in the form of
+// FlashAttention-2. Query i at position start + i sees keys 0..start + i. Key j of head h is kv[j][h][0..192]
+// (k_nope) then k_rope[j], and its value is kv[j][h][192..448]. score = (q . k) * scale, and
+// o[i][h * 256 + e] = sum_j p_j v_j[e] / sum_j p_j with p_j = exp(score_j - max). o is mha_prefill's o as a 2-D
+// tensor [rows, heads * 256]: lanes::copy writes the sums from registers only to a tensor with the tile's 2 dimensions.
+//
+// Block b takes the 64 queries of tile b / heads (the last tile first, it has the most keys) and head b % heads. It
+// rounds its queries to bf16 once, and then for each tile of 64 keys:
+//   1. rounds the keys to bf16 into kvs;
+//   2. scores them, s = K Q^T, with mma.sync (bf16 products, f32 sums);
+//   3. takes each query's new max in f32, P = exp(score * scale - max), and the factor its old sums shrink by;
+//   4. rounds the values to bf16 into kvs, in the same lane loop as 3;
+//   5. scales the output sums by that factor and adds P V with mma.sync (P in bf16). The sums stay in registers.
+// At the end it divides each row by its sum of P and writes it. The products are of bf16 values with f32 sums, as in
+// FlashAttention-3 and SGLang's prefill, so o agrees with float64 attention to bf16 rounding.
+//
+// In steps 3 and 4, lane t of subgroup w takes query x = 32 * (w % 2) + t over part a = w / 2 of the key tile
+// (keys 16 * a .. + 15). Its running max and its sum of P over its part stay in its registers.
+//
+// Needs nope == 192, rot == 64 and value == 256; otherwise it writes nothing. It writes all 64 rows of a query tile
+// that are rows of o, so when o has more rows than queries, it also writes up to 63 rows past queries.
+// spawn-maxnreg: 128 (build.py: two blocks of 256 lanes an SM, 91 KB of shared memory each)
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_mha_prefill_tc(o: &mut Tensor<f32, [?, ?], Memory::HBM>, q: &Tensor<f32, [?, ?, ?], Memory::HBM>,
+                                   kv: &Tensor<f32, [?, ?, ?], Memory::HBM>, k_rope: &Tensor<f32, [?, ?], Memory::HBM>,
+                                   start: i32, queries: i32, heads: i32, nope: i32, rot: i32, value: i32, scale: f32) -> void {
+  spawn on(Topology::Device) {
+    for b in 0..((queries + 63) / 64) * heads across blocks {
+      let tiles: i32 = (queries + 63) / 64;
+      let i0: i32 = (tiles - 1 - b / heads) * 64;
+      let h: i32 = b % heads;
+      let keys: i32 = start + queries;
+      let last: i32 = if i0 + 64 < queries { i0 + 63 } else { queries - 1 };
+      let key_tiles: i32 = (start + last) / 64 + 1;
+      let ok: bool = nope == 192 && rot == 64 && value == 256 && start >= 0;
+      // qs[c][g][e][x]: element 128 * c + e of query i0 + 32 * g + x (the queries, transposed).
+      let mut qs = unsafe { Tensor<bf16, [2, 2, 128, 32], Memory::SMEM>::uninit() };
+      // kvs[c][r][k][e]: column 128 * c + e of key j0 + 16 * r + k, of K (k_nope then k_rope) and then of V.
+      let mut kvs = unsafe { Tensor<bf16, [2, 4, 16, 128], Memory::SMEM>::uninit() };
+      // s[w]: the scores of keys j0 + 16 * (w % 4) .. + 15 (rows) and queries i0 + 32 * (w / 4) .. + 31.
+      let mut s = unsafe { Tensor<f32, [8, 16, 32], Memory::SMEM>::uninit() };
+      // p[a][r][x][k]: P of query i0 + 16 * a + x and key j0 + 16 * r + k.
+      let mut p = unsafe { Tensor<bf16, [4, 4, 16, 16], Memory::SMEM>::uninit() };
+      // acc[w]: the output sums of queries i0 + 16 * (w % 4) .. + 15, values 128 * (w / 4) .. + 127 (in registers).
+      let mut acc = unsafe { Tensor<f32, [8, 16, 128], Memory::SMEM>::uninit() };
+      // Of lane t of subgroup w (in registers): its query's max so far, and its sum of P over its part so far.
+      let mut row_max = unsafe { Tensor<f32, [8, 32], Memory::SMEM>::uninit() };
+      let mut row_sum = unsafe { Tensor<f32, [8, 32], Memory::SMEM>::uninit() };
+      // part_max[w][t]: the max of lane t of subgroup w over its part of the tile; sums[w][t]: its sum at the end.
+      let mut part_max = unsafe { Tensor<f32, [8, 32], Memory::SMEM>::uninit() };
+      let mut sums = unsafe { Tensor<f32, [8, 32], Memory::SMEM>::uninit() };
+      // factor[a][g][x]: the factor of the row of query i0 + 16 * g + x, from the lanes of part a (all equal).
+      let mut factor = unsafe { Tensor<f32, [4, 4, 16], Memory::SMEM>::uninit() };
+      if ok {
+        // Lane t of subgroup w: element 32 * w + t of each query.
+        for w in 0..8 across subgroups {
+          for t in 0..32 across lanes {
+            for x in 0..64 {
+              let i: i32 = i0 + x;
+              let mut v: f32 = 0.0;
+              if i < queries { v = q[i][h][32 * w + t]; }
+              qs[w / 4][x / 32][32 * (w % 4) + t][x % 32] = v as bf16;
+            }
+            row_max[w][t] = -3.0e38;
+            row_sum[w][t] = 0.0;
+          }
+          lanes::fill(&mut acc[w], 0.0);
+        }
+        for kt in 0..key_tiles {
+          let j0: i32 = kt * 64;
+          // Lane t of subgroup w: columns 128 * c + 4 * t .. + 3 of keys 16 * (k / 2) + 8 * (k % 2) + w.
+          for w in 0..8 across subgroups {
+            for t in 0..32 across lanes {
+              for c in 0..2 {
+                for k in 0..8 {
+                  let j: i32 = j0 + 16 * (k / 2) + 8 * (k % 2) + w;
+                  for u in 0..4 {
+                    let d: i32 = 128 * c + 4 * t + u;
+                    let mut v: f32 = 0.0;
+                    if j < keys {
+                      if d < 192 { v = kv[j][h][d]; } else { v = k_rope[j][d - 192]; }
+                    }
+                    kvs[c][k / 2][8 * (k % 2) + w][4 * t + u] = v as bf16;
+                  }
+                }
+              }
+            }
+          }
+          for w in 0..8 across subgroups {
+            s[w] = (kvs[0][w % 4] as f32) @ (qs[0][w / 4] as f32);
+            s[w] = s[w] + (kvs[1][w % 4] as f32) @ (qs[1][w / 4] as f32);
+          }
+          // Key 16 * a + r of the tile is past query x when j0 + 16 * a + r > start + i0 + x.
+          for w in 0..8 across subgroups {
+            for t in 0..32 across lanes {
+              let seen: i32 = start + i0 + 32 * (w % 2) + t - j0;
+              let mut m: f32 = -3.0e38;
+              for r in 0..16 {
+                let v: f32 = s[w / 2 + 4 * (w % 2)][r][t] * scale;
+                if 16 * (w / 2) + r <= seen && v > m { m = v; }
+              }
+              part_max[w][t] = m;
+            }
+          }
+          for w in 0..8 across subgroups {
+            for t in 0..32 across lanes {
+              let seen: i32 = start + i0 + 32 * (w % 2) + t - j0;
+              let old: f32 = row_max[w][t];
+              let mut m: f32 = old;
+              for a in 0..4 {
+                let v: f32 = part_max[2 * a + w % 2][t];
+                if v > m { m = v; }
+              }
+              let shrink: f32 = (old - m).fast_exp();
+              let mut z: f32 = 0.0;
+              for r in 0..16 {
+                let v: f32 = s[w / 2 + 4 * (w % 2)][r][t] * scale;
+                let mut e: f32 = 0.0;
+                if 16 * (w / 2) + r <= seen { e = (v - m).fast_exp(); }
+                p[2 * (w % 2) + t / 16][w / 2][t % 16][r] = e as bf16;
+                z = z + e;
+              }
+              row_max[w][t] = m;
+              row_sum[w][t] = row_sum[w][t] * shrink + z;
+              factor[w / 2][2 * (w % 2) + t / 16][t % 16] = shrink;
+              // The values, as the keys above: columns 128 * c + 4 * t .. + 3 of keys 16 * (k / 2) + 8 * (k % 2) + w.
+              for c in 0..2 {
+                for k in 0..8 {
+                  let j: i32 = j0 + 16 * (k / 2) + 8 * (k % 2) + w;
+                  for u in 0..4 {
+                    let mut v: f32 = 0.0;
+                    if j < keys { v = kv[j][h][192 + 128 * c + 4 * t + u]; }
+                    kvs[c][k / 2][8 * (k % 2) + w][4 * t + u] = v as bf16;
+                  }
+                }
+              }
+            }
+          }
+          for w in 0..8 across subgroups {
+            lanes::scale_rows(&mut acc[w], &factor[0][w % 4]);
+            acc[w] = acc[w] + (p[w % 4][0] as f32) @ (kvs[w / 4][0] as f32);
+            acc[w] = acc[w] + (p[w % 4][1] as f32) @ (kvs[w / 4][1] as f32);
+            acc[w] = acc[w] + (p[w % 4][2] as f32) @ (kvs[w / 4][2] as f32);
+            acc[w] = acc[w] + (p[w % 4][3] as f32) @ (kvs[w / 4][3] as f32);
+          }
+        }
+        for w in 0..8 across subgroups {
+          for t in 0..32 across lanes {
+            sums[w][t] = row_sum[w][t];
+          }
+        }
+        for w in 0..8 across subgroups {
+          for t in 0..32 across lanes {
+            let total: f32 = sums[w % 2][t] + sums[2 + w % 2][t] + sums[4 + w % 2][t] + sums[6 + w % 2][t];
+            factor[w / 2][2 * (w % 2) + t / 16][t % 16] = 1.0 / total;
+          }
+        }
+        for w in 0..8 across subgroups {
+          lanes::scale_rows(&mut acc[w], &factor[0][w % 4]);
+          lanes::copy(o, &acc[w], [i0 + 16 * (w % 4), h * 256 + 128 * (w / 4)]);
+        }
+      }
+    }
+  }
+  return;
+}

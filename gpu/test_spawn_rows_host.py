@@ -177,3 +177,70 @@ def test_mha_prefill_sparse_attends_to_each_querys_selection(run):
             score = (kv[pick, h, :nope].astype(np.float64) @ q[i, h, :nope] + k_rope[pick] @ q[i, h, nope:]) * scale
             p = np.exp(score - score.max())
             np.testing.assert_allclose(o[i, h], p @ kv[pick, h, nope:] / p.sum(), rtol=2e-5, atol=2e-6)
+
+
+def mha_float64(q, kv, k_rope, start, queries, nope=192):
+    """Causal attention in float64 over bf16-rounded q, keys and values: query i at start + i sees keys
+    0..start + i. o [queries, heads, value]."""
+    rounded = lambda x: (bf16_bits(x).astype(np.uint32) << 16).view(F).astype(np.float64)
+    q, kv, k_rope = rounded(q), rounded(kv), rounded(k_rope)
+    heads, keys, scale = q.shape[1], start + queries, q.shape[2] ** -0.5
+    seen = np.arange(keys)[None, :] <= start + np.arange(queries)[:, None]
+    o = np.zeros((queries, heads, kv.shape[2] - nope))
+    for h in range(heads):
+        score = (q[:, h, :nope] @ kv[:keys, h, :nope].T + q[:, h, nope:] @ k_rope[:keys].T) * scale
+        p = np.exp(np.where(seen, score, -np.inf) - np.where(seen, score, -np.inf).max(1, keepdims=True))
+        o[:, h] = p @ kv[:keys, h, nope:] / p.sum(1, keepdims=True)
+    return o
+
+
+def mha_tc_inputs(heads, start, queries, seed, rising=False):
+    """q [queries, heads, 256], kv [keys, heads, 448] and k_rope [keys, 64] of normal values. With rising, every
+    query's rope part is one vector r and key j's is 3 r j / keys, so later keys score higher and a query's max
+    rises with each tile of keys."""
+    rng = np.random.default_rng(seed)
+    keys = start + queries
+    q = rng.normal(size=(queries, heads, 256)).astype(F)
+    kv = rng.normal(size=(keys, heads, 448)).astype(F)
+    k_rope = rng.normal(size=(keys, 64)).astype(F)
+    if rising:
+        r = rng.normal(size=64).astype(F)
+        q[:, :, 192:] = r
+        k_rope = (3 * r[None, :] * (np.arange(keys, dtype=F) / keys)[:, None]).astype(F)
+    return q, kv, k_rope
+
+
+def run_mha_tc(run, q, kv, k_rope, start, queries, rows=None, nope=192, fill=0.0):
+    heads = q.shape[1]
+    o = np.full((rows or queries, heads * 256), fill, F)
+    return run('mha_prefill_tc', o=o, q=q, kv=kv, k_rope=k_rope, start=start, queries=queries, heads=heads, nope=nope,
+               rot=64, value=256, scale=F(256 ** -0.5))['o']
+
+
+# mha_prefill_tc: mha_prefill's attention for GLM-5.3's shapes (nope 192, rope 64, value 256) on the tensor cores,
+# 64 queries and 64 keys a tile. Its products are of bf16 values with f32 sums, and P is rounded to bf16 for P V, so
+# it agrees with float64 attention over bf16-rounded inputs to bf16 rounding, not bit for bit.
+@pytest.mark.parametrize('heads,start,queries,rising', [
+    (2, 0, 70, False),  # query 0 sees one key; two query tiles, the second partly past queries
+    (1, 100, 5, False),  # one query tile over two key tiles, the second partly past the queries
+    (3, 37, 130, False),  # three query tiles over three key tiles, none of them on a multiple of 64
+    (1, 0, 1, False),
+    (2, 200, 40, True),  # the max of each query rises with each of its four key tiles
+])
+def test_mha_prefill_tc_is_causal_attention_to_bf16_rounding(run, heads, start, queries, rising):
+    q, kv, k_rope = mha_tc_inputs(heads, start, queries, seed=heads * 1000 + start + queries, rising=rising)
+    got = run_mha_tc(run, q, kv, k_rope, start, queries).reshape(queries, heads, 256)
+    want = mha_float64(q, kv, k_rope, start, queries)
+    np.testing.assert_allclose(got, want, rtol=0, atol=5e-3 * max(1.0, float(np.abs(want).max())))
+
+
+def test_mha_prefill_tc_writes_its_tiles_rows_only_and_nothing_off_its_shape(run):
+    # o with more rows than queries: the last tile (rows 64..127) writes all its rows, the rows after it keep their
+    # values. With nope 128 the kernel writes nothing.
+    heads, start, queries = 1, 5, 70
+    q, kv, k_rope = mha_tc_inputs(heads, start, queries, seed=23)
+    got = run_mha_tc(run, q, kv, k_rope, start, queries, rows=140, fill=7.0)
+    want = mha_float64(q, kv, k_rope, start, queries).reshape(queries, 256)
+    np.testing.assert_allclose(got[:queries], want, rtol=0, atol=5e-3 * max(1.0, float(np.abs(want).max())))
+    assert np.isfinite(got[queries:128]).all() and (got[128:] == 7.0).all()
+    assert (run_mha_tc(run, q, kv, k_rope, start, queries, nope=128, fill=7.0) == 7.0).all()

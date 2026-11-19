@@ -286,9 +286,10 @@ class ResidentGLM:
         # prefill_attention: prefill_chunk's attention a token at a time with forward()'s kernels ('tokens'), or in the
         # MHA form DeepSeek's and SGLang's prefill use ('mha': kv_b_proj expands every cached key's latent to its keys
         # and values, then one causal mha_prefill launch for the chunk; past index_topk, the indexer's scores and a
-        # top-k a query over the chunk, then mha_prefill_sparse over each query's selection).
-        if prefill_attention not in ('tokens', 'mha'):
-            raise ValueError("prefill_attention must be 'tokens' or 'mha'")
+        # top-k a query over the chunk, then mha_prefill_sparse over each query's selection). 'mha_tc' is 'mha' with
+        # the dense launch on the tensor cores (mha_prefill_tc: bf16 products, f32 sums; nope 192, rope 64, value 256).
+        if prefill_attention not in ('tokens', 'mha', 'mha_tc'):
+            raise ValueError("prefill_attention must be 'tokens', 'mha' or 'mha_tc'")
         self.prefill_attention = prefill_attention
         if topk not in ('auto', 'sort', 'radix'):
             raise ValueError("topk must be 'auto', 'sort' or 'radix'")
@@ -639,6 +640,9 @@ class ResidentGLM:
         if self.mla_kernel == 'tc' and m.index_topk > 2048:
             raise ValueError(f"mla_kernel='tc' needs index_topk <= 2048 (64 splits of 32), the model has {m.index_topk}")
         self.rank, self.nope, self.rot, self.value_dim = m.rank, m.nope, m.rot, m.value_dim
+        if self.prefill_attention == 'mha_tc' and (m.nope, m.rot, m.value_dim) != (192, 64, 256):
+            raise ValueError(f"prefill_attention='mha_tc' needs nope 192, rope 64 and value 256 (GLM-5.3's); the model has "
+                             f"nope {m.nope}, rope {m.rot}, value {m.value_dim}")
         self.index_heads, self.index_dim, self.index_topk = m.index_heads, m.index_dim, m.index_topk
         qk = self.nope + self.rot
         q_rank = int(c['q_lora_rank'])
@@ -2416,7 +2420,7 @@ class ResidentGLM:
         """prefill_chunk's scratch rows: its tokens, or with prefill_attention='mha' every key of a dense prefill (up to
         index_topk), in cuBLASLt's bucket so a matmul's padding rows are in it."""
         rows = self._prefill_capacity()
-        if self.prefill_attention == 'mha':
+        if self.prefill_attention in ('mha', 'mha_tc'):
             rows = max(rows, min(self.index_topk, self.max_tokens))
         return self._prefill_bucket(rows)
 
@@ -2541,7 +2545,7 @@ class ResidentGLM:
         """The attention of prefill_chunk's tokens: the projections over the rows, then each token's
         _attention_core in order (or _prefill_mha); returns o_proj's outputs, one row a token (this rank's part
         under TP)."""
-        if self.prefill_attention == 'mha':
+        if self.prefill_attention in ('mha', 'mha_tc'):
             return self._prefill_mha(layer, x, start, count)
         prefix = f'model.layers.{layer}.self_attn'
         q_rank, qk = int(self.config['q_lora_rank']), self.nope + self.rot
@@ -2647,6 +2651,8 @@ class ResidentGLM:
         if long:  # each query past index_topk attends to its DSA selection
             self._spawn('mha_prefill_sparse', selected=self._prefill_rows('selected_rows', self.index_topk, 'int32'),
                         topk=self.index_topk, **common)
+        elif self.prefill_attention == 'mha_tc':  # o as [rows, heads * value]; it may write rows count .. count + 63
+            self._spawn('mha_prefill_tc', **dict(common, o=out))
         else:
             self._spawn('mha_prefill', **common)
         attended = rows('attn_out', self.hidden)
