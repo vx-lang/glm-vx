@@ -289,10 +289,15 @@ class ResidentGLM:
         self.topk_blocks_from = int(topk_blocks_from)
         # topk_bitmap (#63): with 'ilp_hist', the one-block top-k is topk_select_bitmap_at, not
         # topk_select_ilp_hist_at: the same set and order from the same bins, with one pass over the scores
-        # (bitmaps of the taken positions) instead of two. Its bitmaps hold 65536 positions.
+        # (bitmaps of the taken positions) instead of two. Its bitmaps hold 65536 positions. 'stats' launches
+        # its twin topk_select_bitmap_stats_at, which also adds to topk_stats (gen_topk_bitmap_stats.py):
+        # launches, those whose threshold bin held more than 2048 keys, the most keys it held, and those whose
+        # bin held more than 1024.
+        if topk_bitmap not in (False, True, 'stats'):
+            raise ValueError("topk_bitmap must be False, True or 'stats'")
         if topk_bitmap and long_topk != 'ilp_hist':
             raise ValueError("topk_bitmap needs long_topk='ilp_hist'")
-        self.topk_bitmap = bool(topk_bitmap)
+        self.topk_bitmap = topk_bitmap
         # fold_shared: a MoE layer's shared expert runs inside the routed experts' two launches as one more
         # expert, stacked last (id n_routed_experts, weight 1.0 in a ninth route slot the router never
         # writes), so its gate_up, down and the add after them are not launches of their own. Ascending
@@ -691,6 +696,7 @@ class ResidentGLM:
         # long_topk='ilp_hist': the scores' bins of 4096, zero between layers (the top-k zeroes it).
         self.score_bins = t((4096,), 'uint32', np.zeros(4096, np.uint32)) if self.long_topk == 'ilp_hist' else None
         self._hist_counted = False
+        self.topk_stats = t((4,), 'uint32', np.zeros(4, np.uint32)) if self.topk_bitmap == 'stats' else None
         if self.topk_bitmap and min(cap, self.topk_blocks_from) > 65536:
             raise ValueError(f'topk_bitmap selects up to 65536 tokens in one block, not {min(cap, self.topk_blocks_from)}: '
                              'set topk_blocks_from <= 65536')
@@ -1351,10 +1357,11 @@ class ResidentGLM:
                             scores=self.scores.view(self.scores.shape, 'int32'), hist=self.score_bins, offs=mb['offs'],
                             sel=mb['sel'], step=self.step, arrivals=mb['write_arrivals'], **size)
             elif self.graph and self.long_topk == 'ilp_hist' and self._hist_counted:
-                self._spawn('topk_select_bitmap_at' if self.topk_bitmap else 'index_mma/topk_select_ilp_hist_at',
-                            out_ids=self.selected,
-                            scores=self.scores.view(self.scores.shape, 'int32'), hist=self.score_bins, step=self.step,
-                            k=self.index_topk)
+                name = {False: 'index_mma/topk_select_ilp_hist_at', True: 'topk_select_bitmap_at',
+                        'stats': 'topk_select_bitmap_stats_at'}[self.topk_bitmap]
+                extra = dict(stats=self.topk_stats) if self.topk_bitmap == 'stats' else {}
+                self._spawn(name, out_ids=self.selected, scores=self.scores.view(self.scores.shape, 'int32'),
+                            hist=self.score_bins, step=self.step, k=self.index_topk, **extra)
             elif self.graph and self.long_topk in ('ilp', 'ilp_hist'):
                 self._spawn('index_mma/topk_select_ilp_at', out_ids=self.selected,
                             scores=self.scores.view(self.scores.shape, 'int32'), step=self.step, k=self.index_topk)

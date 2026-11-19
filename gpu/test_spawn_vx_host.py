@@ -1367,9 +1367,35 @@ def test_topk_select_bitmap_at_cases_reach_both_of_its_paths():
     listed = set()
     for tokens, k, kind in [(6000, 3049, 'bin2048'), (6000, 3050, 'bin2049')]:
         bins = score_bins(bitmap_scores(tokens, kind, np.random.default_rng(tokens * 7 + k)))
-        above = np.cumsum(bins[::-1])[::-1]
-        listed.add(bool(bins[np.flatnonzero(above >= k).max()] <= 2048))
+        listed.add(threshold_bin_keys(bins, k) <= 2048)
     assert listed == {True, False}
+
+
+def threshold_bin_keys(bins, k):
+    """The keys of the threshold bin: the highest bin whose count and the counts above it reach k."""
+    above = np.cumsum(bins[::-1])[::-1]
+    return int(bins[np.flatnonzero(above >= k).max()])
+
+
+# topk_select_bitmap_stats_at (#63, ResidentGLM(topk_bitmap='stats')): topk_select_bitmap_at's output, and
+# stats adds up its launches with tokens > k, those whose threshold bin held more than 2048 keys, the most
+# keys the bin held, and the launches whose bin held more than 1024.
+def test_topk_select_bitmap_stats_at_counts_how_often_the_list_overflows(run):
+    stats, held = np.zeros(4, np.uint32), []
+    for tokens, k, kind in [(32768, 2048, 'normal'), (32768, 2048, 'narrow'), (6000, 3050, 'bin2049'),
+                            (6000, 3049, 'bin2048'), (32768, 2048, 'ints'), (100, 2048, 'normal')]:
+        scores = bitmap_scores(tokens, kind, np.random.default_rng(tokens * 7 + k))
+        bins = score_bins(scores)
+        step = np.array([tokens - 1, tokens, min(k, tokens), 1], np.int32)
+        got = run('topk_select_bitmap_stats_at', out_ids=np.full(k, -7, np.int32), scores=scores.view(np.int32),
+                  hist=bins, stats=stats, step=step, k=k)
+        stats = got['stats']
+        if tokens > k:
+            held.append(threshold_bin_keys(bins, k))
+            np.testing.assert_array_equal(got['out_ids'], stable_set(scores, k))
+        else:
+            np.testing.assert_array_equal(got['out_ids'], -7)  # and stats unchanged
+    np.testing.assert_array_equal(stats, [5, sum(n > 2048 for n in held), max(held), sum(n > 1024 for n in held)])
 
 
 # Under graph replay: tokens from the step buffer, the scores past it ignored; up to k it writes nothing

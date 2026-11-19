@@ -261,7 +261,7 @@ def test_long_topk_takes_ilp_and_ilp_hist():
 
 def test_topk_bitmap_needs_ilp_hist_and_at_most_65536_tokens_a_block():
     # topk_bitmap (#63): 'ilp_hist' with topk_select_bitmap_at as its one-block top-k, whose bitmaps hold
-    # 65536 positions. The kernel's tests are test_spawn_vx_host.py's (CPU) and test_spawn_hardware.py's.
+    # 65536 positions; 'stats' its twin that counts how often the list overflows. The kernel's tests are test_spawn_vx_host.py's (CPU) and test_spawn_hardware.py's.
     model = build(seed=61)
     with pytest.raises(ValueError, match="topk_bitmap needs long_topk='ilp_hist'"):
         ResidentGLM(model, ctx=Context(), long_topk='ilp', topk_bitmap=True)
@@ -271,5 +271,12 @@ def test_topk_bitmap_needs_ilp_hist_and_at_most_65536_tokens_a_block():
     resident = ResidentGLM(model, ctx=Context(), long_topk='ilp_hist', topk_bitmap=True, max_tokens=65537)
     try:
         assert resident.topk_bitmap and resident._mb is not None  # past 65536 tokens, the multi-block pair
+    finally:
+        resident.close()
+    with pytest.raises(ValueError, match="topk_bitmap must be False, True or 'stats'"):
+        ResidentGLM(model, ctx=Context(), long_topk='ilp_hist', topk_bitmap='count')
+    resident = ResidentGLM(model, ctx=Context(), long_topk='ilp_hist', topk_bitmap='stats')
+    try:  # topk_select_bitmap_stats_at's counts, zero until it runs
+        assert resident.topk_stats.shape == (4,) and not np.frombuffer(resident.topk_stats.download(), np.uint32).any()
     finally:
         resident.close()
