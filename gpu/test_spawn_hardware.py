@@ -1243,6 +1243,38 @@ def test_spawn_topk_select_ilp_hist_at_is_the_stable_set_and_zeroes_hist(context
         assert not download(hist).any()
 
 
+# topk_select_bitmap_at (#63, ResidentGLM(topk_bitmap=True)): the same set, order and zeroed hist, up to
+# 65536 tokens; 'narrow', 'equal' and 'few' put more than 2048 keys in the threshold bin (the path that
+# reads the scores again). gpu/test_spawn_vx_host.py runs the same kernel on the CPU.
+@pytest.mark.parametrize('tokens,k,ties', [(2049, 2048, True), (3001, 2048, False), (32768, 2048, False),
+                                           (32768, 2048, True), (32768, 2048, 'narrow'), (65536, 2048, False),
+                                           (65536, 2048, 'equal'), (5000, 2048, 'few'), (40000, 1000, 'near'),
+                                           (9000, 16, True), (2048, 2048, False)])
+def test_spawn_topk_select_bitmap_at_is_the_stable_set_and_zeroes_hist(context, tokens, k, ties):
+    rng = np.random.default_rng(tokens * 13 + k)
+    if ties == 'equal':
+        scores = np.zeros(tokens, 'f4')
+    elif ties == 'few':
+        scores = rng.integers(0, 2, size=tokens).astype('f4')
+    elif ties == 'narrow':
+        scores = (5 + 0.01 * rng.normal(size=tokens)).astype('f4')
+    elif ties == 'near':
+        scores = np.where(rng.random(tokens) < 0.05, 4 + 0.5 * rng.random(tokens), rng.random(tokens)).astype('f4')
+    else:
+        scores = rng.integers(-50, 50, size=tokens).astype('f4') if ties else rng.normal(size=tokens).astype('f4')
+    scores[[3, 5, 7, 9]] = np.nan, -np.inf, -0.0, np.inf
+    kernel = SpawnKernel(context, BUILD / 'spawn/topk_select_bitmap_at.ptx')
+    out, d_scores = upload(context, np.full(k, -7, 'i4')), upload(context, scores.view(np.int32))
+    step = upload(context, np.array([tokens - 1, tokens, min(k, tokens), 1], np.int32))
+    want = np.sort(np.argsort(-scores, kind='stable')[:k]) if tokens > k else np.full(k, -7, 'i4')
+    for _ in range(2):  # the second run's hist counted again, as the next layer's scores kernel would
+        hist = upload(context, topk_bins(scores))
+        kernel.launch(out_ids=out, scores=d_scores, hist=hist, step=step, k=k)
+        context.synchronize()
+        np.testing.assert_array_equal(download(out), want)
+        assert not download(hist).any()
+
+
 # topk_mb_list_at + topk_mb_write_at (#32, ResidentGLM(long_topk='ilp_hist') past topk_blocks_from): the
 # same set and order over blocks of 8192 positions, from the bins; the list of 16384 overflows for
 # 'equal' and 'narrow'. After: hist and count zero, also when tokens <= k writes nothing.

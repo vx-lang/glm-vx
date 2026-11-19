@@ -257,3 +257,19 @@ def test_long_topk_takes_ilp_and_ilp_hist():
         assert resident.score_bins is None
     finally:
         resident.close()
+
+
+def test_topk_bitmap_needs_ilp_hist_and_at_most_65536_tokens_a_block():
+    # topk_bitmap (#63): 'ilp_hist' with topk_select_bitmap_at as its one-block top-k, whose bitmaps hold
+    # 65536 positions. The kernel's tests are test_spawn_vx_host.py's (CPU) and test_spawn_hardware.py's.
+    model = build(seed=61)
+    with pytest.raises(ValueError, match="topk_bitmap needs long_topk='ilp_hist'"):
+        ResidentGLM(model, ctx=Context(), long_topk='ilp', topk_bitmap=True)
+    with pytest.raises(ValueError, match='topk_blocks_from <= 65536'):
+        ResidentGLM(model, ctx=Context(), long_topk='ilp_hist', topk_bitmap=True, max_tokens=65537,
+                    topk_blocks_from=65537)
+    resident = ResidentGLM(model, ctx=Context(), long_topk='ilp_hist', topk_bitmap=True, max_tokens=65537)
+    try:
+        assert resident.topk_bitmap and resident._mb is not None  # past 65536 tokens, the multi-block pair
+    finally:
+        resident.close()

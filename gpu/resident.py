@@ -202,7 +202,7 @@ class ResidentGLM:
                  device_topk=True, device_experts=False, fused_attention=False, graph=False, fp8_kernels='hand',
                  topk='auto', long_topk='position', mla_kernel='decode', matvec_kernels='hand', mtp=False,
                  norm_block=256, fuse_glue=True, index_kernel='mma',
-                 topk_blocks_from=65536, fold_shared=False, fuse_router=False, moe_down2=False, moe_mma=False, fuse_mla_q=False,
+                 topk_blocks_from=65536, topk_bitmap=False, fold_shared=False, fuse_router=False, moe_down2=False, moe_mma=False, fuse_mla_q=False,
                  device_decode=False,
                  fuse_tp_norm=0, tp=None):
         if getattr(model, 'packed_weights', False):
@@ -287,6 +287,12 @@ class ResidentGLM:
         # are kept by that range too, so a request crossing it captures once more. Either kernel gives
         # the same set and order, so the choice is speed only.
         self.topk_blocks_from = int(topk_blocks_from)
+        # topk_bitmap (#63): with 'ilp_hist', the one-block top-k is topk_select_bitmap_at, not
+        # topk_select_ilp_hist_at: the same set and order from the same bins, with one pass over the scores
+        # (bitmaps of the taken positions) instead of two. Its bitmaps hold 65536 positions.
+        if topk_bitmap and long_topk != 'ilp_hist':
+            raise ValueError("topk_bitmap needs long_topk='ilp_hist'")
+        self.topk_bitmap = bool(topk_bitmap)
         # fold_shared: a MoE layer's shared expert runs inside the routed experts' two launches as one more
         # expert, stacked last (id n_routed_experts, weight 1.0 in a ninth route slot the router never
         # writes), so its gate_up, down and the add after them are not launches of their own. Ascending
@@ -685,6 +691,9 @@ class ResidentGLM:
         # long_topk='ilp_hist': the scores' bins of 4096, zero between layers (the top-k zeroes it).
         self.score_bins = t((4096,), 'uint32', np.zeros(4096, np.uint32)) if self.long_topk == 'ilp_hist' else None
         self._hist_counted = False
+        if self.topk_bitmap and min(cap, self.topk_blocks_from) > 65536:
+            raise ValueError(f'topk_bitmap selects up to 65536 tokens in one block, not {min(cap, self.topk_blocks_from)}: '
+                             'set topk_blocks_from <= 65536')
         # The multi-block top-k's scratch (topk_mb_list_at): each warp's keys above the threshold bin, the
         # bin's keys and positions, their count (zero between layers), each warp's first slots, K and left,
         # and the two launches' arrival counts. Its offsets hold 4096 warps of 256 positions.
@@ -1342,7 +1351,8 @@ class ResidentGLM:
                             scores=self.scores.view(self.scores.shape, 'int32'), hist=self.score_bins, offs=mb['offs'],
                             sel=mb['sel'], step=self.step, arrivals=mb['write_arrivals'], **size)
             elif self.graph and self.long_topk == 'ilp_hist' and self._hist_counted:
-                self._spawn('index_mma/topk_select_ilp_hist_at', out_ids=self.selected,
+                self._spawn('topk_select_bitmap_at' if self.topk_bitmap else 'index_mma/topk_select_ilp_hist_at',
+                            out_ids=self.selected,
                             scores=self.scores.view(self.scores.shape, 'int32'), hist=self.score_bins, step=self.step,
                             k=self.index_topk)
             elif self.graph and self.long_topk in ('ilp', 'ilp_hist'):
