@@ -1,0 +1,6 @@
+f8e8m0 0 wrong
+true true true true
+NaN NaN true
+64 1073741800 128 2
+2 0.5 1
+

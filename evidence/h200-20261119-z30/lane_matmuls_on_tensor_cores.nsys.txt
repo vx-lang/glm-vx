@@ -1,0 +1,97 @@
+[JIT] Translating to LLVM IR...
+[JIT] Optimizing LLVM IR (-O0)...
+[JIT] Compiling to native object (-O0)...
+[JIT] Linking native executable...
+[JIT] Executing native binary...
+bf16: -3 -2 7 sum of all 2041
+f16: -3 3 -2 sum of all -6
+
+Collecting data...
+Generating '/tmp/nsys-report-5976.qdstrm'
+[1/8] [0%                          ] lane_matmuls_on_tensor_cores.nsys-rep[1/8] [0%                          ] lane_matmuls_on_tensor_cores.nsys-rep[1/8] [======33%                   ] lane_matmuls_on_tensor_cores.nsys-rep[1/8] [======35%                   ] lane_matmuls_on_tensor_cores.nsys-rep[1/8] [=======37%                  ] lane_matmuls_on_tensor_cores.nsys-rep[1/8] [=======38%                  ] lane_matmuls_on_tensor_cores.nsys-rep[1/8] [========40%                 ] lane_matmuls_on_tensor_cores.nsys-rep[1/8] [=============59%            ] lane_matmuls_on_tensor_cores.nsys-rep[1/8] [==============61%           ] lane_matmuls_on_tensor_cores.nsys-rep[1/8] [==============63%           ] lane_matmuls_on_tensor_cores.nsys-rep[1/8] [==============64%           ] lane_matmuls_on_tensor_cores.nsys-rep[1/8] [===============65%          ] lane_matmuls_on_tensor_cores.nsys-rep[1/8] [===============66%          ] lane_matmuls_on_tensor_cores.nsys-rep[1/8] [===============67%          ] lane_matmuls_on_tensor_cores.nsys-rep[1/8] [================68%         ] lane_matmuls_on_tensor_cores.nsys-rep[1/8] [================69%         ] lane_matmuls_on_tensor_cores.nsys-rep[1/8] [================70%         ] lane_matmuls_on_tensor_cores.nsys-rep[1/8] [=================74%        ] lane_matmuls_on_tensor_cores.nsys-rep[1/8] [=====================86%    ] lane_matmuls_on_tensor_cores.nsys-rep[1/8] [========================100%] lane_matmuls_on_tensor_cores.nsys-rep[1/8] [========================100%] lane_matmuls_on_tensor_cores.nsys-rep
+[2/8] [0%                          ] lane_matmuls_on_tensor_cores.sqlite[2/8] [1%                          ] lane_matmuls_on_tensor_cores.sqlite[2/8] [2%                          ] lane_matmuls_on_tensor_cores.sqlite[2/8] [3%                          ] lane_matmuls_on_tensor_cores.sqlite[2/8] [4%                          ] lane_matmuls_on_tensor_cores.sqlite[2/8] [5%                          ] lane_matmuls_on_tensor_cores.sqlite[2/8] [6%                          ] lane_matmuls_on_tensor_cores.sqlite[2/8] [7%                          ] lane_matmuls_on_tensor_cores.sqlite[2/8] [8%                          ] lane_matmuls_on_tensor_cores.sqlite[2/8] [9%                          ] lane_matmuls_on_tensor_cores.sqlite[2/8] [10%                         ] lane_matmuls_on_tensor_cores.sqlite[2/8] [11%                         ] lane_matmuls_on_tensor_cores.sqlite[2/8] [12%                         ] lane_matmuls_on_tensor_cores.sqlite[2/8] [13%                         ] lane_matmuls_on_tensor_cores.sqlite[2/8] [14%                         ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=15%                        ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=16%                        ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=17%                        ] lane_matmuls_on_tensor_cores.sqlite[2/8] [==18%                       ] lane_matmuls_on_tensor_cores.sqlite[2/8] [==19%                       ] lane_matmuls_on_tensor_cores.sqlite[2/8] [==20%                       ] lane_matmuls_on_tensor_cores.sqlite[2/8] [==21%                       ] lane_matmuls_on_tensor_cores.sqlite[2/8] [===22%                      ] lane_matmuls_on_tensor_cores.sqlite[2/8] [===23%                      ] lane_matmuls_on_tensor_cores.sqlite[2/8] [===24%                      ] lane_matmuls_on_tensor_cores.sqlite[2/8] [====25%                     ] lane_matmuls_on_tensor_cores.sqlite[2/8] [====26%                     ] lane_matmuls_on_tensor_cores.sqlite[2/8] [====27%                     ] lane_matmuls_on_tensor_cores.sqlite[2/8] [====28%                     ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=====29%                    ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=====30%                    ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=====31%                    ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=====32%                    ] lane_matmuls_on_tensor_cores.sqlite[2/8] [======33%                   ] lane_matmuls_on_tensor_cores.sqlite[2/8] [======34%                   ] lane_matmuls_on_tensor_cores.sqlite[2/8] [======35%                   ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=======36%                  ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=======37%                  ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=======38%                  ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=======39%                  ] lane_matmuls_on_tensor_cores.sqlite[2/8] [========40%                 ] lane_matmuls_on_tensor_cores.sqlite[2/8] [========41%                 ] lane_matmuls_on_tensor_cores.sqlite[2/8] [========42%                 ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=========43%                ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=========44%                ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=========45%                ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=========46%                ] lane_matmuls_on_tensor_cores.sqlite[2/8] [==========47%               ] lane_matmuls_on_tensor_cores.sqlite[2/8] [==========48%               ] lane_matmuls_on_tensor_cores.sqlite[2/8] [==========49%               ] lane_matmuls_on_tensor_cores.sqlite[2/8] [===========50%              ] lane_matmuls_on_tensor_cores.sqlite[2/8] [===========51%              ] lane_matmuls_on_tensor_cores.sqlite[2/8] [===========52%              ] lane_matmuls_on_tensor_cores.sqlite[2/8] [===========53%              ] lane_matmuls_on_tensor_cores.sqlite[2/8] [============54%             ] lane_matmuls_on_tensor_cores.sqlite[2/8] [============55%             ] lane_matmuls_on_tensor_cores.sqlite[2/8] [============56%             ] lane_matmuls_on_tensor_cores.sqlite[2/8] [============57%             ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=============58%            ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=============59%            ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=============60%            ] lane_matmuls_on_tensor_cores.sqlite[2/8] [==============61%           ] lane_matmuls_on_tensor_cores.sqlite[2/8] [==============62%           ] lane_matmuls_on_tensor_cores.sqlite[2/8] [==============63%           ] lane_matmuls_on_tensor_cores.sqlite[2/8] [==============64%           ] lane_matmuls_on_tensor_cores.sqlite[2/8] [===============65%          ] lane_matmuls_on_tensor_cores.sqlite[2/8] [===============66%          ] lane_matmuls_on_tensor_cores.sqlite[2/8] [===============67%          ] lane_matmuls_on_tensor_cores.sqlite[2/8] [================68%         ] lane_matmuls_on_tensor_cores.sqlite[2/8] [================69%         ] lane_matmuls_on_tensor_cores.sqlite[2/8] [================70%         ] lane_matmuls_on_tensor_cores.sqlite[2/8] [================71%         ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=================72%        ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=================73%        ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=================74%        ] lane_matmuls_on_tensor_cores.sqlite[2/8] [==================75%       ] lane_matmuls_on_tensor_cores.sqlite[2/8] [==================76%       ] lane_matmuls_on_tensor_cores.sqlite[2/8] [==================77%       ] lane_matmuls_on_tensor_cores.sqlite[2/8] [==================78%       ] lane_matmuls_on_tensor_cores.sqlite[2/8] [===================79%      ] lane_matmuls_on_tensor_cores.sqlite[2/8] [===================80%      ] lane_matmuls_on_tensor_cores.sqlite[2/8] [===================81%      ] lane_matmuls_on_tensor_cores.sqlite[2/8] [===================82%      ] lane_matmuls_on_tensor_cores.sqlite[2/8] [====================83%     ] lane_matmuls_on_tensor_cores.sqlite[2/8] [====================84%     ] lane_matmuls_on_tensor_cores.sqlite[2/8] [====================85%     ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=====================86%    ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=====================87%    ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=====================88%    ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=====================89%    ] lane_matmuls_on_tensor_cores.sqlite[2/8] [======================90%   ] lane_matmuls_on_tensor_cores.sqlite[2/8] [======================91%   ] lane_matmuls_on_tensor_cores.sqlite[2/8] [======================92%   ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=======================93%  ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=======================94%  ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=======================95%  ] lane_matmuls_on_tensor_cores.sqlite[2/8] [=======================96%  ] lane_matmuls_on_tensor_cores.sqlite[2/8] [========================97% ] lane_matmuls_on_tensor_cores.sqlite[2/8] [========================98% ] lane_matmuls_on_tensor_cores.sqlite[2/8] [========================99% ] lane_matmuls_on_tensor_cores.sqlite[2/8] [========================100%] lane_matmuls_on_tensor_cores.sqlite[2/8] [========================100%] lane_matmuls_on_tensor_cores.sqlite
+SKIPPED: /home/aditya/glm-h200/repo/evidence/h200-20261119-z30/lane_matmuls_on_tensor_cores.sqlite does not contain NV Tools Extension (NVTX) data.
+[3/8] Executing 'nvtx_sum' stats report
+[4/8] Executing 'osrt_sum' stats report
+
+ Time (%)  Total Time (ns)  Num Calls   Avg (ns)    Med (ns)   Min (ns)   Max (ns)   StdDev (ns)           Name         
+ --------  ---------------  ---------  ----------  ----------  --------  ----------  -----------  ----------------------
+     92.2      21285039946       1220  17446754.1    544910.5      1571  1200383912  136549646.3  pthread_cond_wait     
+      6.6       1532947421         34  45086688.9   1328026.5      2632   614896196  115512975.4  poll                  
+      0.5        115179411        520    221498.9      8772.0      1008    16819074     917094.5  ioctl                 
+      0.2         54075834          1  54075834.0  54075834.0  54075834    54075834          0.0  wait4                 
+      0.2         39719730        248    160160.2     95155.5      1033     1537684     221457.3  pthread_mutex_lock    
+      0.1         33487872          7   4783981.7     27783.0     14149    33337388   12590874.1  waitpid               
+      0.0          3887182         20    194359.1     18287.0      5044     1295406     396808.7  pthread_join          
+      0.0          3667781         42     87328.1     69243.0     32318      386642      66012.4  pthread_create        
+      0.0          2166924         47     46104.8      7222.0      2006      847279     134405.5  mmap64                
+      0.0          1942405         87     22326.5      7420.0      1094      189752      31958.8  pthread_cond_broadcast
+      0.0          1614141          7    230591.6    214836.0    184286      280649      34825.3  posix_spawnp          
+      0.0          1056155        486      2173.2      1359.0      1000       87657       5626.2  pthread_cond_signal   
+      0.0           919095         12     76591.3     15782.0      1016      555299     157862.0  futex                 
+      0.0           852641         10     85264.1     54024.5     33564      376337     103426.0  sem_timedwait         
+      0.0           347256         65      5342.4      3955.0      1233       38839       5490.5  open64                
+      0.0           304278         76      4003.7      2824.0      1032       28600       4452.9  fread                 
+      0.0           303024          1    303024.0    303024.0    303024      303024          0.0  posix_spawn           
+      0.0           279338         57      4900.7      2438.0      1184       47398       8213.9  write                 
+      0.0           195405         17     11494.4     10622.0      2330       51446      11815.8  mmap                  
+      0.0           174992         36      4860.9      2419.5      1092       36634       6794.0  fopen                 
+      0.0           172857         90      1920.6      1405.5      1005       12394       1554.1  stat                  
+      0.0           133771         31      4315.2      2341.0      1033       35130       6398.4  close                 
+      0.0           128822         14      9201.6      5616.0      1052       33339      10556.3  open                  
+      0.0           126021         64      1969.1      1423.5      1005       20670       2471.3  fopen64               
+      0.0           109064          7     15580.6     15388.0      3558       44731      13951.9  munmap                
+      0.0            89585         17      5269.7      4390.0      2277       15006       3019.6  mprotect              
+      0.0            62467         29      2154.0      2160.0      1001        7575       1302.6  read                  
+      0.0            61303         35      1751.5      1279.0      1001        5730       1193.1  fclose                
+      0.0            56803         17      3341.4      2211.0      1272        7274       2163.1  pipe2                 
+      0.0            46988          1     46988.0     46988.0     46988       46988          0.0  backtrace             
+      0.0            35981          9      3997.9      3548.0      1165        9310       3019.0  statx                 
+      0.0            32926          1     32926.0     32926.0     32926       32926          0.0  fgets                 
+      0.0            19101          2      9550.5      9550.5      7392       11709       3052.6  socket                
+      0.0            18750         10      1875.0      1715.0      1009        2784        722.1  fstat                 
+      0.0            12021          1     12021.0     12021.0     12021       12021          0.0  connect               
+      0.0            10252          4      2563.0      2227.0      1004        4794       1718.2  fwrite                
+      0.0             9873          1      9873.0      9873.0      9873        9873          0.0  openat64              
+      0.0             5740          3      1913.3      1322.0      1267        3151       1072.2  fcntl                 
+      0.0             5159          4      1289.8      1236.0      1128        1559        191.0  sigaction             
+      0.0             3079          1      3079.0      3079.0      3079        3079          0.0  bind                  
+      0.0             2296          1      2296.0      2296.0      2296        2296          0.0  signal                
+      0.0             2034          1      2034.0      2034.0      2034        2034          0.0  pread                 
+      0.0             1200          1      1200.0      1200.0      1200        1200          0.0  listen                
+
+[5/8] Executing 'cuda_api_sum' stats report
+
+ Time (%)  Total Time (ns)  Num Calls  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)           Name         
+ --------  ---------------  ---------  --------  --------  --------  --------  -----------  ----------------------
+     49.1           304709          1  304709.0  304709.0    304709    304709          0.0  cuModuleLoadData      
+     18.7           116028          2   58014.0   58014.0      2966    113062      77849.6  cudaMalloc            
+     16.6           103036          3   34345.3    5578.0       992     96466      53846.9  cudaFree              
+      9.8            61145          4   15286.3   16051.5      5991     23051       7324.1  cudaMemcpy            
+      4.6            28664          1   28664.0   28664.0     28664     28664          0.0  cuLaunchKernel        
+      0.9             5853          1    5853.0    5853.0      5853      5853          0.0  cudaDeviceSynchronize 
+      0.2             1361          1    1361.0    1361.0      1361      1361          0.0  cuModuleGetLoadingMode
+
+[6/8] Executing 'cuda_gpu_kern_sum' stats report
+
+ Time (%)  Total Time (ns)  Instances  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)       Name      
+ --------  ---------------  ---------  --------  --------  --------  --------  -----------  ---------------
+    100.0             4576          1    4576.0    4576.0      4576      4576          0.0  vx_npu_kernel_0
+
+[7/8] Executing 'cuda_gpu_mem_time_sum' stats report
+
+ Time (%)  Total Time (ns)  Count  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)           Operation          
+ --------  ---------------  -----  --------  --------  --------  --------  -----------  ----------------------------
+     59.6             3584      2    1792.0    1792.0      1696      1888        135.8  [CUDA memcpy Device-to-Host]
+     40.4             2432      2    1216.0    1216.0      1088      1344        181.0  [CUDA memcpy Host-to-Device]
+
+[8/8] Executing 'cuda_gpu_mem_size_sum' stats report
+
+ Total (MB)  Count  Avg (MB)  Med (MB)  Min (MB)  Max (MB)  StdDev (MB)           Operation          
+ ----------  -----  --------  --------  --------  --------  -----------  ----------------------------
+      0.016      2     0.008     0.008     0.008     0.008        0.000  [CUDA memcpy Device-to-Host]
+      0.016      2     0.008     0.008     0.008     0.008        0.000  [CUDA memcpy Host-to-Device]
+
+Generated:
+	/home/aditya/glm-h200/repo/evidence/h200-20261119-z30/lane_matmuls_on_tensor_cores.nsys-rep
+	/home/aditya/glm-h200/repo/evidence/h200-20261119-z30/lane_matmuls_on_tensor_cores.sqlite

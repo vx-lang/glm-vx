@@ -1,0 +1,12 @@
+// (if c { x } else { 0.0 }) as bf16, x an f32: Vx 3609 takes it; 4d15f5315 (PR #3649's branch) says
+// E3007 "If expression branches have incompatible types: f32 and bf16".
+fn pick(c: bool, x: f32) -> f32 {
+  let y: bf16 = (if c { x } else { 0.0 }) as bf16;
+  return y as f32;
+}
+
+fn main() -> i32 {
+  print(pick(true, 1.5));
+  print(pick(false, 1.5));
+  return 0;
+}

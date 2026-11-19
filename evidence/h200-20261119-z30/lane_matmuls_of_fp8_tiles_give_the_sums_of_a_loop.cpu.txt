@@ -1,0 +1,4 @@
+e4m3: -3 -3 7 sum of all 1020
+e5m2: -5 2 5 sum of all -3
+
+[Vx CUDA] no CUDA device (no CUDA-capable device is detected); kernels will run on the host

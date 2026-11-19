@@ -1,0 +1,8 @@
+f8e4m3 0 wrong
+f8e5m2 0 wrong
+f4e2m1 0 wrong
+448 57344 6 -448 -6
+NaN NaN 6
+3 4 288 -6 2
+0.3125 2.75 6
+
