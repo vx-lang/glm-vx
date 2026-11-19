@@ -1,16 +1,16 @@
-# z27 (#63) on the 8x H200: what one H200 could not show, with deploy14 (branch tp at af6d4d2 + every spawn kernel).
+# z27 (#63) on the 8x H200: what one H200 could not show, with deploy15 (branch tp at 0b6b4c3 + every spawn kernel).
 #   a. validation/tp_all_reduce_check on 8 GPUs: tp_all_reduce, then gpu/spawn/tp_sum_rmsnorm at 8, 16, 32 blocks (bits
 #      on every rank and us a call); B = the fastest that passes. While the page cache fills.
-#   b. validation/tp_real on all of GLM-5.3, z10's options (moe_down2, fuse_router) and then + moe_mma, + fuse_tp_norm=B,
-#      + both: tokens, top-5 and the step at 1000 / 3001 tokens. moe_mma changes bits (within 2e-4 a layer on one GPU);
-#      fuse_tp_norm must not.
+#   b. validation/tp_real on all of GLM-5.3, z10's options (moe_down2, fuse_router) and then + moe_mma, + fuse_tp_norm=B
+#      and fuse_mla_q, + all three: tokens, top-5 and the step at 1000 / 3001 tokens. moe_mma changes bits (within 2e-4
+#      a layer on one GPU); fuse_tp_norm and fuse_mla_q must not (fused: the same tokens and top-5 as plain).
 #   c. glm_vx.server --tp 8 + device_decode (item 2): z5's prompt against z11's tokens (no bits change), W1.
-#   d. the server with device_decode + moe_mma + fuse_tp_norm=B: z5's prompt, W1, GSM8K 5-shot 200 (moe_mma changes
+#   d. the server with device_decode + moe_mma + fuse_tp_norm=B + fuse_mla_q: z5's prompt, W1, GSM8K 5-shot 200 (moe_mma changes
 #      bits: it must stay in SGLang's 0.915-0.935), ShareGPT 50, W3 (2 prompts).
 set -u
 cd ~/glm-h200
 . ./env.sh
-tar xzf deploy14.tar.gz -C repo
+tar xzf deploy15.tar.gz -C repo
 export PYTHONPATH=$HOME/glm-h200/repo NCCL_NVLS_ENABLE=0 SGLANG_CACHE_DIR=$HOME/glm-h200/sglang-cache GLM_VX_TP_SPIN=0.05
 export VX_NCCL_LIB=$(find $HOME/glm-h200/repo/.venv -name libnccl.so.2 | head -1)
 M=$HOME/glm-h200/GLM-5.3 SGV=$HOME/glm-h200/sglang-venv
@@ -60,7 +60,8 @@ idle
 out=evidence/h200-20261119-z27b; mkdir -p $out; cp ../z27.sh $out/
 for mode in plain mma fused both; do
   opts="--option moe_down2=true --option fuse_router=true"
-  case $mode in mma) opts="$opts --option moe_mma=true";; fused) opts="$opts --option fuse_tp_norm=$B";; both) opts="$opts --option moe_mma=true --option fuse_tp_norm=$B";; esac
+  case $mode in mma) opts="$opts --option moe_mma=true";; fused) opts="$opts --option fuse_tp_norm=$B --option fuse_mla_q=true";;
+    both) opts="$opts --option moe_mma=true --option fuse_tp_norm=$B --option fuse_mla_q=true";; esac
   [ "$B" = none ] && [ $mode != plain ] && [ $mode != mma ] && continue
   run tp-real-$mode timeout 3600 $PYTHON -m validation.tp_real --checkpoint $M --ranks 8 --one-shot --contexts 1000 3001 $opts --output $out/tp-real-$mode.json
   idle
@@ -85,7 +86,7 @@ stop
 echo z27c-done
 out=evidence/h200-20261119-z27d; mkdir -p $out; cp ../z27.sh ../greedy_check.py $out/
 fused=""; [ "$B" != none ] && fused="--tp-option fuse_tp_norm=$B"
-if serve --tp-option device_decode=true --tp-option moe_mma=true $fused; then
+if serve --tp-option device_decode=true --tp-option moe_mma=true --tp-option fuse_mla_q=true $fused; then
   run greedy $PYTHON ../greedy_check.py $out/../h200-20261118-z5/real-8-oneshot.json $URL
   w W1 device-decode-mma-fused
   run gsm8k-glmvx timeout 7200 $SG benchmarks/gsm8k.py --base-url $URL --output $out/gsm8k-glmvx.json
