@@ -1,0 +1,27 @@
+{
+  "ok": true,
+  "tolerance": 2e-05,
+  "kernel": "../moe_mma_nreg/n72/fp8_moe_mma_down_at.ptx",
+  "results": [
+    {
+      "rows": 6144,
+      "cols": 256,
+      "experts": 257,
+      "k": 9,
+      "max_abs_out": 0.6495172106428534,
+      "finite": true,
+      "mma_vs_model": 9.81443177858141e-08,
+      "down2_vs_model": 0.020558133097902276,
+      "mma_vs_down2": 0.02055812505227545,
+      "weight_mb": 14.155776,
+      "us": {
+        "mma": 13.69599997997284,
+        "down2": 21.808000281453133
+      },
+      "tb_per_s": {
+        "mma": 1.0335700949692959,
+        "down2": 0.6491093093042072
+      }
+    }
+  ]
+}

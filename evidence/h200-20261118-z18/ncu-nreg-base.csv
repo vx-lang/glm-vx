@@ -1,0 +1,10 @@
+==WARNING== Note: Running with unmodified GPU clocks. If not controlled otherwise, profiling results may be inconsistent.
+==PROF== Connected to process 9267 (/usr/bin/python3.12)
+{"rows": 6144, "cols": 256, "experts": 257, "k": 9, "max_abs_out": 0.6495172106428534, "finite": true, "mma_vs_model": 9.81443177858141e-08, "down2_vs_model": 0.020558133097902276, "mma_vs_down2": 0.02055812505227545, "weight_mb": 14.155776, "us": {"mma": 16.16000011563301, "down2": 21.407999098300934}, "tb_per_s": {"mma": 0.8759762313557073, "down2": 0.6612376960125848}}
+moe_mma_check: PASS
+==PROF== Disconnected from process 9267
+"ID","Process ID","Process Name","Host Name","Kernel Name","Context","Stream","Block Size","Grid Size","Device","CC","Section Name","Metric Name","Metric Unit","Metric Value"
+"0","9267","python3.12","127.0.0.1","glm_vx_spawn_fp8_moe_mma_down_at","1","13","(288, 1, 1)","(384, 1, 1)","0","9.0","Command line profiler metrics","gpu__time_duration.sum","ns","13600"
+"0","9267","python3.12","127.0.0.1","glm_vx_spawn_fp8_moe_mma_down_at","1","13","(288, 1, 1)","(384, 1, 1)","0","9.0","Command line profiler metrics","launch__occupancy_limit_registers","block","1"
+"0","9267","python3.12","127.0.0.1","glm_vx_spawn_fp8_moe_mma_down_at","1","13","(288, 1, 1)","(384, 1, 1)","0","9.0","Command line profiler metrics","launch__registers_per_thread","register/thread","127"
+"0","9267","python3.12","127.0.0.1","glm_vx_spawn_fp8_moe_mma_down_at","1","13","(288, 1, 1)","(384, 1, 1)","0","9.0","Command line profiler metrics","sm__warps_active.avg.pct_of_peak_sustained_active","%","14.04"

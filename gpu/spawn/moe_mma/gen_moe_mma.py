@@ -29,19 +29,24 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROWS_PER_BLOCK, WARPS = 16, 9
 SEGMENT = 256  # columns a call of the warp's PTX takes: two 128-column scale groups
+# ptxas's budget (build.py: .maxnreg). Unbudgeted it takes 127 registers, one block of 9 warps an SM; at 72 (172 bytes
+# spilled) three fit: 12.7 against 14.0 us at TP8's shapes on the H200 (ncu, evidence/h200-20261118-z18).
+MAXNREG = 72
 
 
 def down_ptx():
     """One warp's 16 rows x 256 columns of one expert. $0: lane j < 16 gets row j's sum (scaled), lanes 16.. 0.
     $1, $2: rows g and g + 8 of the segment at byte 16 c; $3: act of the segment at column 16 c (bytes, f32);
-    $4, $5: the two groups' weight scales."""
-    p = ['{', '.reg .b32 a<32>, b<8>, l, src;', '.reg .f32 x<32>, c<4>, t, m, s, inv, f, acc0, acc2, v0, v2;',
+    $4: the address of the segment's two weight scales, loaded after the weights (an address the weights do not
+    wait for: passed as values, the scales' load came first and the weights' waited a round trip for it)."""
+    p = ['{', '.reg .b32 a<32>, b<8>, l, src;', '.reg .f32 x<32>, c<4>, t, m, s, inv, f, ws<2>, acc0, acc2, v0, v2;',
          '.reg .b16 h<2>;', '.reg .pred p8, p16;']
     # a[8 q + 4 r + i]: word i of row r (0: g, 1: g + 8) in chunk q (0..3), 64 q + 16 c.
     for q in range(4):
         for r in range(2):
             base = 8 * q + 4 * r
             p.append(f'ld.global.nc.L1::no_allocate.v4.u32 {{a{base}, a{base + 1}, a{base + 2}, a{base + 3}}}, [${r + 1}+{64 * q}];')
+    p += ['ld.global.nc.f32 ws0, [$4+0];', 'ld.global.nc.f32 ws1, [$4+4];']
     p += ['mov.f32 acc0, 0f00000000;', 'mov.f32 acc2, 0f00000000;']
     for grp in range(2):
         # act columns 128 grp + 64 h + 16 c + {0..15} (h = 0, 1): x[16 h + ..], bytes 512 grp + 256 h + 16 i.
@@ -64,7 +69,7 @@ def down_ptx():
                 bj = 4 * h + 2 * step
                 p.append(f'mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 {{c0, c1, c2, c3}}, '
                          f'{{a{a0}, a{a8}, a{a0 + 1}, a{a8 + 1}}}, {{b{bj}, b{bj + 1}}}, {{c0, c1, c2, c3}};')
-        p += [f'mul.f32 f, s, ${4 + grp};', 'fma.rn.f32 acc0, f, c0, acc0;', 'fma.rn.f32 acc2, f, c2, acc2;']
+        p += [f'mul.f32 f, s, ws{grp};', 'fma.rn.f32 acc0, f, c0, acc0;', 'fma.rn.f32 acc2, f, c2, acc2;']
     p += ['mov.u32 l, %laneid;', 'and.b32 src, l, 7;', 'shl.b32 src, src, 2;',
           'shfl.sync.idx.b32 v0, acc0, src, 31, -1;', 'shfl.sync.idx.b32 v2, acc2, src, 31, -1;',
           'setp.lt.u32 p8, l, 8;', 'setp.lt.u32 p16, l, 16;',
@@ -102,14 +107,15 @@ def down_source():
 // k <= {WARPS}, rows % {ROWS_PER_BLOCK} == 0 and cols % {SEGMENT} == 0; otherwise out is zeros (ResidentGLM(moe_mma=True)
 // keeps down2 there).
 // spawn-include: ../device.vx
+// spawn-maxnreg: {MAXNREG}
 
 {HELPERS}
-fn down_mma_warp(r0: i64, r8: i64, x: i64, s0: f32, s1: f32) on Topology::Device -> f32
+fn down_mma_warp(r0: i64, r8: i64, x: i64, ws: i64) on Topology::Device -> f32
 ensures writes_only()
 {{
-  return mlir!( inputs : (%r0 = r0 : i64, %r8 = r8 : i64, %x = x : i64, %s0 = s0 : f32, %s1 = s1 : f32), returns : f32,
+  return mlir!( inputs : (%r0 = r0 : i64, %r8 = r8 : i64, %x = x : i64, %ws = ws : i64), returns : f32,
                 dialects : ["llvm"], ensures : [writes_only()]) {{
-    %r = llvm.inline_asm has_side_effects "{down_ptx()}", "=f,l,l,l,f,f" %r0, %r8, %x, %s0, %s1 : (i64, i64, i64, f32, f32) -> f32
+    %r = llvm.inline_asm has_side_effects "{down_ptx()}", "=f,l,l,l,l" %r0, %r8, %x, %ws : (i64, i64, i64, i64) -> f32
     macro.yield %r : f32
   }};
 }}
@@ -140,11 +146,10 @@ pub fn glm_vx_spawn_fp8_moe_mma_down_at(out: &mut Tensor<f32, [?], Memory::HBM>,
               let rg: i64 = address1u(down) + (e * (rows as i64) + row0 + ((lane / 4) as i64)) * n + c16;
               let xb: i64 = address1(act) + ((w as i64) * n + c16) * 4;
               let tiles: i64 = n / 128;
-              let sb: i64 = (e * (((rows as i64) + 127) / 128) + row0 / 128) * tiles;
+              let sb: i64 = address1(scales) + (e * (((rows as i64) + 127) / 128) + row0 / 128) * tiles * 4;
               let mut seg: i64 = 0;
               while seg < n / {SEGMENT} {{
-                v = v + down_mma_warp(rg + seg * {SEGMENT}, rg + 8 * n + seg * {SEGMENT}, xb + seg * {SEGMENT * 4},
-                                      scales[sb + 2 * seg], scales[sb + 2 * seg + 1]);
+                v = v + down_mma_warp(rg + seg * {SEGMENT}, rg + 8 * n + seg * {SEGMENT}, xb + seg * {SEGMENT * 4}, sb + seg * 8);
                 seg = seg + 1;
               }}
               v = v * weights[slot];

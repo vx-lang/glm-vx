@@ -1,0 +1,4 @@
+ptxas Build cuda_13.3.r13.3/compiler.38244171_0: one mma.sync.m16n8k32.row.col.f32.e4m3.e4m3.f32 (one-mma-e4m3.ptx), the SASS's MMA and F2FP instructions
+sm_89:  1 QMMA.16832.F32.E4M3.E4M3;
+sm_90a:  12 F2FP.F16.E4M3.UNPACK_B; 2 HMMA.16816.F32; 1 MMA_MASK;
+gpu/spawn/moe_mma/fp8_moe_mma_down_at as committed (sm_90a, 72 registers):  96 F2FP.F16.E4M3.UNPACK_B; 32 F2FP.SATFINITE.E4M3.F32.PACK_AB_MERGE_C; 16 HMMA.16816.F32; 1 MMA_MASK;
