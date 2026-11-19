@@ -204,7 +204,7 @@ class ResidentGLM:
                  topk='auto', long_topk='position', mla_kernel='decode', matvec_kernels='hand', mtp=False,
                  norm_block=256, fuse_glue=True, index_kernel='mma',
                  topk_blocks_from=65536, fold_shared=False, fuse_router=False, moe_down2=False, moe_mma=False, fuse_mla_q=False,
-                 device_decode=False, prefill_rows=0, prefill_gemm='rows', prefill_sum='nccl', prefill_moe='tokens',
+                 device_decode=False, prefill_rows=0, prefill_gemm='rows', prefill_sum='nccl', prefill_moe='tokens', prefill_attention='tokens',
                  fuse_tp_norm=0, tp=None):
         if getattr(model, 'packed_weights', False):
             raise NotImplementedError('ResidentGLM supports expanded float32 weights only')
@@ -283,6 +283,13 @@ class ResidentGLM:
         if prefill_moe not in ('tokens', 'grouped'):
             raise ValueError("prefill_moe must be 'tokens' or 'grouped'")
         self.prefill_moe = prefill_moe
+        # prefill_attention: prefill_chunk's attention a token at a time with forward()'s kernels ('tokens'), or in the
+        # MHA form DeepSeek's and SGLang's prefill use ('mha': kv_b_proj expands every cached key's latent to its keys
+        # and values, then one causal mha_prefill launch for the chunk) while the context fits in index_topk, where
+        # every token attends to every earlier one (#43).
+        if prefill_attention not in ('tokens', 'mha'):
+            raise ValueError("prefill_attention must be 'tokens' or 'mha'")
+        self.prefill_attention = prefill_attention
         if topk not in ('auto', 'sort', 'radix'):
             raise ValueError("topk must be 'auto', 'sort' or 'radix'")
         self._topk_choice = topk
@@ -1272,9 +1279,9 @@ class ResidentGLM:
                     weight_c=words(third[0]), scales_c=flat(third[1]), rows_c=rows[2] if full else 0)
         return True
 
-    def _index_core(self, layer, prefix, position, iq, ik, head_weights_raw):
-        """The indexer after its projections: the key row, the rotated queries, scores, top-k."""
-        tokens = position + 1
+    def _index_key(self, layer, prefix, position, ik):
+        """The indexer's key row at `position` from its projection ik: LayerNorm, RoPE and the cache row (and the
+        FP8 or bf16 copies its scores kernel reads)."""
         if self.fuse_glue and self.graph and self.rot // 2 <= 256:
             # LayerNorm, RoPE and the cache row at the step's position in one launch (#39).
             self._launch('index_key_at', 1, 256, [self.index_keys[layer], ik, self._weight(prefix + '.k_norm.weight'),
@@ -1294,6 +1301,11 @@ class ResidentGLM:
         if self.index_bf16:
             self._spawn('index_mma/index_key_bf16_at', words=self.index_words[layer], keys=self.index_keys[layer],
                         step=self.step, max_tokens=self.index_keys[layer].shape[0], dim=self.index_dim)
+
+    def _index_core(self, layer, prefix, position, iq, ik, head_weights_raw):
+        """The indexer after its projections: the key row, the rotated queries, scores, top-k."""
+        tokens = position + 1
+        self._index_key(layer, prefix, position, ik)
         if tokens <= self.index_topk:
             # Every cached token is selected, in position order, as SGLang's DSA top-k does (topk_v2.cuh,
             # trivial_transform when seq_len <= topk) and GlmMoeDsaModel._index too (#43): the key row is
@@ -2378,7 +2390,8 @@ class ResidentGLM:
             self.cos, self.sin = inputs[0], inputs[1]
             if inputs[2] is not None:
                 self.step = inputs[2]
-        self.selected_count = counts[-1]
+        # prefill_attention='mha' (a dense context) sets no counts: every token is selected
+        self.selected_count = counts[-1] or min(self.index_topk, start + count)
         self.position += count
         self._copy(self.x, self._prefill_row(x, count - 1), hidden)
         return self._head(logits)
@@ -2397,12 +2410,19 @@ class ResidentGLM:
             return 1 << (padded - 1).bit_length()
         return -(-padded // 64) * 64
 
+    def _prefill_buffer_rows(self):
+        """prefill_chunk's scratch rows: its tokens, or with prefill_attention='mha' every key of a dense prefill (up to
+        index_topk), in cuBLASLt's bucket so a matmul's padding rows are in it."""
+        rows = self._prefill_capacity()
+        if self.prefill_attention == 'mha':
+            rows = max(rows, min(self.index_topk, self.max_tokens))
+        return self._prefill_bucket(rows)
+
     def _prefill_rows(self, name, width, dtype='float32'):
-        """A [rows, width] scratch matrix of prefill_chunk, allocated on first use: the capacity's bucket of
-        rows, so a matmul's padding rows are in it."""
+        """A [_prefill_buffer_rows(), width] scratch matrix of prefill_chunk, allocated on first use."""
         buffers = self.__dict__.setdefault('_prefill_buffers', {})
         if (name, width, dtype) not in buffers:
-            buffers[name, width, dtype] = self._tensor((self._prefill_bucket(self._prefill_capacity()), width), dtype)
+            buffers[name, width, dtype] = self._tensor((self._prefill_buffer_rows(), width), dtype)
         return buffers[name, width, dtype]
 
     @staticmethod
@@ -2508,7 +2528,10 @@ class ResidentGLM:
 
     def _prefill_attention(self, layer, x, start, count, shared_ok, counts):
         """The attention of prefill_chunk's tokens: the projections over the rows, then each token's
-        _attention_core in order; returns o_proj's outputs, one row a token (this rank's part under TP)."""
+        _attention_core in order (or _prefill_mha); returns o_proj's outputs, one row a token (this rank's part
+        under TP)."""
+        if self.prefill_attention == 'mha' and start + count <= self.index_topk:
+            return self._prefill_mha(layer, x, start, count)
         prefix = f'model.layers.{layer}.self_attn'
         q_rank, qk = int(self.config['q_lora_rank']), self.nope + self.rot
         rows = self._prefill_rows
@@ -2541,6 +2564,64 @@ class ResidentGLM:
             self._copy(self._prefill_row(heads_out, i), self.heads_out, self.heads * self.value_dim)
         attended = rows('attn_out', self.hidden)
         self._prefill_linear(prefix + '.o_proj', heads_out, attended, count)
+        return attended
+
+    def _prefill_mha(self, layer, x, start, count):
+        """prefill_attention='mha' while every token attends to every earlier one (start + count <= index_topk): the
+        projections over the rows; the chunk's cache rows in one launch (kv_rows_prefill: forward()'s latent and
+        rope rows); the indexer's key rows a token at a time; the queries with RoPE (q_rows_prefill); kv_b_proj over
+        every cached latent row, 0 to start + count, for the keys' k_nope and values; one causal mha_prefill launch;
+        o_proj. The same attention as the absorbed form forward() runs, in float32 here, summed in another order."""
+        prefix = f'model.layers.{layer}.self_attn'
+        c = self.config
+        q_rank, qk = int(c['q_lora_rank']), self.nope + self.rot
+        rows = self._prefill_rows
+        q_a, q_res = rows('q_a', q_rank), rows('q_res', q_rank)
+        query, compressed = rows('query', self.heads * qk), rows('compressed', self.rank + self.rot)
+        self._prefill_linear(prefix + '.q_a_proj', x, q_a, count)
+        self._rmsnorm_rows(q_a, self._weight(prefix + '.q_a_layernorm.weight'), q_res, count, 1e-6)
+        self._prefill_linear(prefix + '.q_b_proj', q_res, query, count)
+        self._prefill_linear(prefix + '.kv_a_proj_with_mqa', x, compressed, count)
+        steps = self._prefill_inputs.view((self._prefill_capacity(), self._prefill_block))
+        bf16 = self.latents[layer].dtype == 'uint16'
+        self._spawn('kv_rows_prefill_bf16' if bf16 else 'kv_rows_prefill', latents=self.latents[layer],
+                    rope_keys=self.rope_keys[layer], compressed=compressed, weight=self._weight(prefix + '.kv_a_layernorm.weight'),
+                    steps=steps, start=start, rows=count, rank=self.rank, rot=self.rot, eps=_f32(1e-6, 'epsilon', True),
+                    threads=self.norm_block)
+        if self.model.indexer_type(layer) == 'full':  # the key rows later steps score
+            ik = rows('ik', self.index_dim)
+            self._prefill_linear(prefix + '.indexer.wk', x, ik, count)
+            inputs = (self.cos, self.sin, getattr(self, 'step', None))
+            try:
+                for i in range(count):
+                    self.cos, self.sin, step = self._prefill_steps(i)
+                    if self.graph:
+                        self.step = step
+                    self._index_key(layer, prefix + '.indexer', start + i, self._prefill_row(ik, i))
+            finally:
+                self.cos, self.sin = inputs[0], inputs[1]
+                if inputs[2] is not None:
+                    self.step = inputs[2]
+        q = rows('q_heads', self.heads * qk)
+        self._spawn('q_rows_prefill', q_out=q.view((q.shape[0], self.heads, qk)), query=query, steps=steps, rows=count,
+                    heads=self.heads, nope=self.nope, rot=self.rot)
+        keys = start + count
+        if bf16:
+            latent, rope = rows('latent_f32', self.rank), rows('rope_f32', self.rot)
+            self._spawn('rows_bf16_f32', out=latent, x=self.latents[layer], rows=keys, cols=self.rank)
+            self._spawn('rows_bf16_f32', out=rope, x=self.rope_keys[layer], rows=keys, cols=self.rot)
+        else:
+            latent, rope = self.latents[layer], self.rope_keys[layer]
+        width = self.nope + self.value_dim
+        kv = rows('kv_heads', self.heads * width)
+        self._prefill_linear(prefix + '.kv_b_proj', latent, kv, keys)
+        out = rows('heads_out', self.heads * self.value_dim)
+        self._spawn('mha_prefill', o=out.view((out.shape[0], self.heads, self.value_dim)),
+                    q=q.view((q.shape[0], self.heads, qk)), kv=kv.view((kv.shape[0], self.heads, width)), k_rope=rope,
+                    start=start, queries=count, heads=self.heads, nope=self.nope, rot=self.rot, value=self.value_dim,
+                    scale=_f32(qk ** -0.5, 'MLA scale', True))
+        attended = rows('attn_out', self.hidden)
+        self._prefill_linear(prefix + '.o_proj', out, attended, count)
         return attended
 
     def _prefill_selection(self, i, position):

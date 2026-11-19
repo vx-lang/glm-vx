@@ -65,3 +65,67 @@ def test_router_rows_are_router_bf16_a_token(run, experts, cols, k, tokens):
         np.testing.assert_array_equal(got['indices'][t], one['indices'])
         bits_equal(got['weights'][t], one['weights'])
     assert (got['indices'][:, k] == -7).all() and (got['weights'][:, k] == 3.0).all()
+
+
+def bf16_bits(x):
+    """float32 to bfloat16 bits, nearest even (Vx's `as bf16`)."""
+    b = np.asarray(x, F).view(np.uint32).astype(np.uint64)
+    return ((b + 0x7FFF + ((b >> 16) & 1)) >> 16).astype(np.uint16)
+
+
+def test_kv_rows_prefill_bf16_is_kv_rows_bf16_at_a_row(run):
+    # The chunk's cache rows: each row's RMSNorm (rmsnorm_rows' sums with `threads` lanes) and rope, as bf16, at
+    # start + t; against decode's kv_rows_bf16_at on the same row (its latent normalized by rmsnorm_rows), bit for bit.
+    rng = np.random.default_rng(11)
+    rows, rank, rot, start, cap, threads = 5, 512, 64, 3, 12, 256
+    compressed = rng.normal(size=(rows, rank + rot)).astype(F)
+    weight = rng.normal(size=rank).astype(F)
+    angles = rng.normal(size=(rows, rot // 2)).astype(F)
+    steps = np.zeros((rows, 128), F)
+    steps[:, :rot // 2], steps[:, rot // 2:rot] = np.cos(angles), np.sin(angles)
+    got = run('kv_rows_prefill_bf16', latents=np.zeros((cap, rank), np.uint16), rope_keys=np.zeros((cap, rot), np.uint16),
+              compressed=compressed, weight=weight, steps=steps, start=start, rows=rows, rank=rank, rot=rot, eps=1e-6,
+              threads=threads)
+    for t in range(rows):
+        normed = run('rmsnorm_rows', out=np.zeros((1, rank), F), x=compressed[t, :rank].copy(), weight=weight, rows=1,
+                     dim=rank, eps=1e-6, threads=threads)['out'][0]
+        one = run('kv_rows_bf16_at', latents=np.zeros((cap, rank), np.uint16), rope_keys=np.zeros((cap, rot), np.uint16),
+                  latent_row=normed, rope_x=compressed[t, rank:].copy(), cosine=steps[t, :rot // 2].copy(),
+                  sine=steps[t, rot // 2:rot].copy(), step=np.array([start + t, 0, 0, 0], np.int32), rank=rank, rot=rot)
+        np.testing.assert_array_equal(got['latents'][start + t], one['latents'][start + t])
+        np.testing.assert_array_equal(got['rope_keys'][start + t], one['rope_keys'][start + t])
+    assert not got['latents'][:start].any() and not got['latents'][start + rows:].any()
+    out = run('rows_bf16_f32', out=np.zeros((cap, rank), F), x=got['latents'], rows=cap, cols=rank)['out']
+    np.testing.assert_array_equal(bf16_bits(out), got['latents'])
+
+
+def test_q_rows_and_mha_prefill_are_causal_attention(run):
+    # q_rows_prefill: each (token, head)'s nope values, then its rope values rotated as the rope cache's (packed
+    # [even, odd]); mha_prefill: query i at start + i over keys 0..start + i, against float64 NumPy.
+    rng = np.random.default_rng(13)
+    heads, nope, rot, value, start, queries = 3, 24, 8, 16, 5, 4
+    keys = start + queries
+    query = rng.normal(size=(queries, heads * (nope + rot))).astype(F)
+    angles = rng.normal(size=(queries, rot // 2)).astype(F)
+    steps = np.zeros((queries, 64), F)
+    steps[:, :rot // 2], steps[:, rot // 2:rot] = np.cos(angles), np.sin(angles)
+    q = run('q_rows_prefill', q_out=np.zeros((queries, heads, nope + rot), F), query=query, steps=steps, rows=queries,
+            heads=heads, nope=nope, rot=rot)['q_out']
+    raw = query.reshape(queries, heads, nope + rot)
+    even, odd = raw[:, :, nope::2], raw[:, :, nope + 1::2]
+    c, s = steps[:, None, :rot // 2], steps[:, None, rot // 2:rot]
+    want_q = np.concatenate([raw[:, :, :nope], even * c - odd * s, odd * c + even * s], -1)
+    np.testing.assert_allclose(q, want_q, rtol=1e-6, atol=1e-6)
+    kv = rng.normal(size=(keys, heads, nope + value)).astype(F)
+    k_rope = rng.normal(size=(keys, rot)).astype(F)
+    scale = F((nope + rot) ** -0.5)
+    o = run('mha_prefill', o=np.zeros((queries, heads, value), F), q=q, kv=kv, k_rope=k_rope, start=start, queries=queries,
+            heads=heads, nope=nope, rot=rot, value=value, scale=scale)['o']
+    want = np.zeros((queries, heads, value))
+    for i in range(queries):
+        n = start + i + 1
+        for h in range(heads):
+            score = (kv[:n, h, :nope].astype(np.float64) @ q[i, h, :nope] + k_rope[:n] @ q[i, h, nope:]) * scale
+            p = np.exp(score - score.max())
+            want[i, h] = p @ kv[:n, h, nope:] / p.sum()
+    np.testing.assert_allclose(o, want, rtol=2e-5, atol=2e-6)

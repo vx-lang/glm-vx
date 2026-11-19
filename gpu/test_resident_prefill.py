@@ -224,3 +224,22 @@ def test_grouped_experts_in_the_chunk_stay_near_the_token_at_a_time_logits():
     np.testing.assert_allclose(chunk_last, last, atol=0.15 * scale)
     np.testing.assert_allclose(chunk_after, after, atol=0.15 * scale)
     assert launches['grouped_moe'] > 0 and launches.get('router_logits_rows', 0) == launches['grouped_moe']
+
+
+@pytest.mark.parametrize('graph', [False, True])
+def test_mha_attention_is_the_absorbed_attention(graph):
+    # prefill_attention='mha' (index_topk 16: the prompt is dense): kv_b_proj expands each cached latent row, one
+    # causal mha_prefill launch; the same attention as forward()'s absorbed MLA in float32, summed in another order.
+    # Layer 0's cache rows are forward()'s bits (kv_rows_prefill: its norm and rope).
+    model = build(seed=3, index_topk=16)
+    options = dict(graph=True, fused_attention=True, device_experts=True) if graph else {}
+    (last, after, caches, _), (chunk_last, chunk_after, chunk_caches, launches) = run(
+        model, [PROMPT[:4], PROMPT[4:]], prefill_attention='mha', **options)
+    np.testing.assert_allclose(chunk_last, last, rtol=1e-4, atol=1e-4 * float(np.abs(last).max()))
+    np.testing.assert_allclose(chunk_after, after, rtol=1e-4, atol=1e-4 * float(np.abs(after).max()))
+    for key in caches:  # layer 0's rows are forward()'s bits (its inputs are the same); later layers' inputs differ
+        if key[1] == 0 and not graph:
+            np.testing.assert_array_equal(chunk_caches[key].view(np.uint32), caches[key].view(np.uint32), err_msg=str(key))
+        else:
+            np.testing.assert_allclose(chunk_caches[key], caches[key], rtol=1e-4, atol=1e-5, err_msg=str(key))
+    assert launches.get('mha_prefill', 0) == 2 * model.n_layers

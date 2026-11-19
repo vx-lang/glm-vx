@@ -1,0 +1,58 @@
+// glm_vx_spawn_mha_prefill (#63, item 5b): causal attention of prefill_chunk's queries in the MHA form DeepSeek's and
+// SGLang's prefill use, a plain float32 version on the CUDA cores (vx-7e's tensor-core kernel replaces it): query
+// q[i][h] (nope then RoPE'd rope values) at position start + i sees keys 0..start + i; key j of head h is
+// kv[j][h][0..nope] (kv_b_proj's k_nope) and the shared k_rope[j], its value kv[j][h][nope..nope + value].
+// score = (q . k) * scale, softmax in float32, o[i][h] = sum_j p_j v_j / sum_j p_j. One block a (query, head): lane l
+// scores keys l, l + 256, ..; keys <= 4096.
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_mha_prefill(o: &mut Tensor<f32, [?, ?, ?], Memory::HBM>, q: &Tensor<f32, [?, ?, ?], Memory::HBM>,
+                                kv: &Tensor<f32, [?, ?, ?], Memory::HBM>, k_rope: &Tensor<f32, [?, ?], Memory::HBM>,
+                                start: i32, queries: i32, heads: i32, nope: i32, rot: i32, value: i32, scale: f32) -> void {
+  spawn on(Topology::Device) {
+    for i in 0..queries across blocks {
+      for h in 0..heads across blocks {
+        let mut sc = unsafe { Tensor<f32, [4096], Memory::SMEM>::uninit() };
+        let mut part = unsafe { Tensor<f32, [256], Memory::SMEM>::uninit() };
+        let keys: i32 = start + i + 1;
+        for l in 0..256 across lanes {
+          let mut m: f32 = -3.0e38;
+          for k in 0..16 {
+            let j: i32 = l + 256 * k;
+            if j < keys && keys <= 4096 {
+              let mut s: f32 = 0.0;
+              for d in 0..nope { s = s + q[i][h][d] * kv[j][h][d]; }
+              for d in 0..rot { s = s + q[i][h][nope + d] * k_rope[j][d]; }
+              s = s * scale;
+              sc[j] = s;
+              m = if s > m { s } else { m };
+            }
+          }
+          part[l] = m;
+        }
+        let peak: f32 = lanes::max(&part, 256);
+        for l in 0..256 across lanes {
+          let mut z: f32 = 0.0;
+          for k in 0..16 {
+            let j: i32 = l + 256 * k;
+            if j < keys && keys <= 4096 {
+              let e: f32 = (sc[j] - peak).fast_exp();
+              sc[j] = e;
+              z = z + e;
+            }
+          }
+          part[l] = z;
+        }
+        let total: f32 = lanes::sum(&part, 256);
+        for d in 0..value across lanes(256) {
+          let mut acc: f32 = 0.0;
+          if keys <= 4096 {
+            for j in 0..keys { acc = acc + sc[j] * kv[j][h][nope + d]; }
+          }
+          o[i][h][d] = acc / total;
+        }
+      }
+    }
+  }
+  return;
+}

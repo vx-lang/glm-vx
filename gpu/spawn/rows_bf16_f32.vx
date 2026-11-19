@@ -1,0 +1,16 @@
+// glm_vx_spawn_rows_bf16_f32 (#63, item 5b): out[r][c] = x[r][c] as f32 for the first rows rows and cols columns of
+// a bf16 matrix (exact): prefill_chunk reads the bf16 MLA caches (mla_kernel='tc') as float32 rows for kv_b_proj's
+// GEMM and mha_prefill.
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_rows_bf16_f32(out: &mut Tensor<f32, [?, ?], Memory::HBM>, x: &Tensor<bf16, [?, ?], Memory::HBM>,
+                                  rows: i32, cols: i32) -> void {
+  spawn on(Topology::Device) {
+    for r in 0..rows across blocks {
+      for c in 0..cols across lanes(256) {
+        out[r][c] = x[r][c] as f32;
+      }
+    }
+  }
+  return;
+}
