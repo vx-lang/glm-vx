@@ -138,6 +138,30 @@ def test_fused_glue_gives_the_same_bits_on_the_gpu(ctx, kind):
     assert launches[True]['rmsnorm_pair'] > 0 and 'residual_rmsnorm' not in launches[True]
 
 
+@pytest.mark.skipif(not (SPAWN / 'mla_q_rope_bf16_at.ptx').exists(), reason='gpu/spawn mla_q_rope_bf16_at not built')
+@pytest.mark.parametrize('heads', [16, 32])
+def test_fuse_mla_q_gives_the_same_bits_on_the_gpu(ctx, heads):
+    """fuse_mla_q (#63, item 7) under replay with mla_kernel='tc' and the FP8 absorb: mla_q_rope_bf16_at's bf16
+    queries are the bits rope_strided and mla_q_bf16_at gave, so the logits are too, past index_topk. (A rank of 8 has 8 heads, padded to 16 for mla_tc_at: tensor parallelism only.)"""
+    from gpu.test_resident import fp8_model
+    steps = 40
+    model = fp8_model(109, num_attention_heads=heads, num_key_value_heads=heads, kv_lora_rank=512, qk_rope_head_dim=64,
+                      qk_head_dim=72, index_head_dim=64, index_topk=16, hidden_size=144)[0]
+    tokens = np.random.default_rng(109).integers(0, model.config['vocab_size'], size=steps).tolist()
+    out, launches = {}, {}
+    for fuse in (False, True):
+        resident = ResidentGLM(model, ctx=ctx, max_tokens=steps + 8, device_experts=True, graph=True, fused_attention=True,
+                               mla_kernel='tc', norm_block=1024, fp8_kernels='cvt', fuse_mla_q=fuse)
+        try:
+            out[fuse], launches[fuse] = resident.prefill(tokens), dict(resident.launches)
+        finally:
+            resident.close()
+    np.testing.assert_array_equal(out[True], out[False])
+    assert launches[True].get('mla_q_rope_bf16_at') and 'mla_q_bf16_at' not in launches[True]
+    assert launches[True].get('rope_strided', 0) < launches[False]['rope_strided']
+    assert launches[False].get('mla_q_bf16_at')
+
+
 @pytest.mark.skipif(not (SPAWN / 'index_scores_tc_at.ptx').exists(), reason='gpu/spawn index_scores_tc_at not built')
 @pytest.mark.parametrize('kernel,name', [('tc', 'index_scores_tc_at'), ('mma', 'index_mma/index_scores_mma_at'),
                                          ('fp8', 'index_mma/index_scores_fp8_at')])

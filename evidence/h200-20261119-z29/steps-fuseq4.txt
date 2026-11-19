@@ -1,0 +1,37 @@
+64906 kernels on GPU (0) ; 53 steps with a head
+step -3: 62 kernels, span 1228 us, busy 1223 us, host gap before it 465 us
+      424.9 us    1x  424.9  glm_vx_spawn_bf16_matvec4
+      251.2 us   11x   22.8  glm_vx_spawn_fp8_matvec_cvt_tiles
+      224.2 us    4x   56.0  glm_vx_spawn_fp8_moe_cvt_gate_up
+       73.5 us    1x   73.5  glm_vx_spawn_fp8_moe_cvt_down2
+       49.8 us    4x   12.5  glm_vx_spawn_mla_tc_at
+       46.4 us    4x   11.6  glm_vx_spawn_mla_q_absorb_at
+       38.6 us    4x    9.7  glm_vx_spawn_fp8_matvec_cvt_tiles3
+       25.5 us    4x    6.4  glm_vx_spawn_fp8_matvec_heads_cvt
+       22.5 us    7x    3.2  glm_vx_gpu_residual_rmsnorm8
+       17.9 us    4x    4.5  glm_vx_spawn_mla_flash_merge_at
+       10.5 us    4x    2.6  glm_vx_gpu_rmsnorm_pair
+        8.8 us    4x    2.2  glm_vx_spawn_kv_rows_bf16_at
+        8.7 us    1x    8.7  glm_vx_spawn_router_bf16
+        7.3 us    3x    2.4  glm_vx_gpu_index_key_at
+        6.3 us    2x    3.2  glm_vx_gpu_rmsnorm
+        4.6 us    3x    1.5  glm_vx_gpu_copy
+        1.9 us    1x    1.9  glm_vx_gpu_add
+step -2: 62 kernels, span 1228 us, busy 1223 us, host gap before it 457 us
+      424.0 us    1x  424.0  glm_vx_spawn_bf16_matvec4
+      254.3 us   11x   23.1  glm_vx_spawn_fp8_matvec_cvt_tiles
+      221.8 us    4x   55.5  glm_vx_spawn_fp8_moe_cvt_gate_up
+       74.1 us    1x   74.1  glm_vx_spawn_fp8_moe_cvt_down2
+       50.3 us    4x   12.6  glm_vx_spawn_mla_tc_at
+       47.2 us    4x   11.8  glm_vx_spawn_mla_q_absorb_at
+       37.8 us    4x    9.4  glm_vx_spawn_fp8_matvec_cvt_tiles3
+       25.3 us    4x    6.3  glm_vx_spawn_fp8_matvec_heads_cvt
+       22.4 us    7x    3.2  glm_vx_gpu_residual_rmsnorm8
+       17.8 us    4x    4.5  glm_vx_spawn_mla_flash_merge_at
+       10.7 us    4x    2.7  glm_vx_gpu_rmsnorm_pair
+        8.6 us    1x    8.6  glm_vx_spawn_router_bf16
+        8.4 us    4x    2.1  glm_vx_spawn_kv_rows_bf16_at
+        7.5 us    3x    2.5  glm_vx_gpu_index_key_at
+        6.3 us    2x    3.1  glm_vx_gpu_rmsnorm
+        4.2 us    3x    1.4  glm_vx_gpu_copy
+        2.1 us    1x    2.1  glm_vx_gpu_add

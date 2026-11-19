@@ -1,0 +1,50 @@
+// mla_q_bf16_at with the queries' rope in it (#63, docs/TP-SERVING-PLAN.md item 7): the decode step's MLA queries in
+// bf16, in mla_tc_at's tile layout, and no rope_strided launch before it. q_t[g][(c * 2 + hh) * 128 + k][h] is head
+// 16 g + 8 hh + h's latent query at 128 c + k, as mla_q_bf16_at writes it from q_latent. qr_t[g][hh * 64 + k][h] is
+// its rope query rotated here as glm_vx_gpu_rope_strided does: x at head * x_stride + rope_at (the query's rope
+// part), pairs (2p, 2p + 1), a * cos[p] - b * sin[p] at k = p and b * cos[p] + a * sin[p] at k = 32 + p; so the bits
+// of rope_strided then mla_q_bf16_at. A head at or past `real` (mla_tc_at's heads padded to 16 under tensor
+// parallelism) gets zeros, as its zero rows of q_latent and q_rope gave. Needs heads % 16 == 0, rank == 512 and
+// rope_dim == 64; otherwise it writes nothing.
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_mla_q_rope_bf16_at(q_t: &mut Tensor<bf16, [?, ?, ?], Memory::HBM>, qr_t: &mut Tensor<bf16, [?, ?, ?], Memory::HBM>,
+                                       q_latent: &Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                                       cosine: &Tensor<f32, [?], Memory::HBM>, sine: &Tensor<f32, [?], Memory::HBM>,
+                                       heads: i32, real: i32, rank: i32, rope_dim: i32, x_stride: i32, rope_at: i32) -> void {
+  spawn on(Topology::Device) {
+    for g in 0..heads / 16 across blocks {
+      for hh in 0..2 across blocks {
+        for h in 0..8 across blocks {
+          for k in 0..128 across lanes(128) {
+            if heads % 16 == 0 && rank == 512 && rope_dim == 64 {
+              let head: i32 = g * 16 + hh * 8 + h;
+              let v0: f32 = q_latent[head * 512 + k];
+              let v1: f32 = q_latent[head * 512 + 128 + k];
+              let v2: f32 = q_latent[head * 512 + 256 + k];
+              let v3: f32 = q_latent[head * 512 + 384 + k];
+              q_t[g][hh * 128 + k][h] = v0 as bf16;
+              q_t[g][(2 + hh) * 128 + k][h] = v1 as bf16;
+              q_t[g][(4 + hh) * 128 + k][h] = v2 as bf16;
+              q_t[g][(6 + hh) * 128 + k][h] = v3 as bf16;
+            }
+          }
+          for p in 0..32 across lanes(128) {
+            if heads % 16 == 0 && rank == 512 && rope_dim == 64 && rope_at >= 0 && rope_at + 64 <= x_stride {
+              let head: i32 = g * 16 + hh * 8 + h;
+              let live: bool = head < real;
+              let xb: i64 = ((if live { head } else { 0 }) as i64) * (x_stride as i64) + (rope_at as i64);
+              let a: f32 = if live { x[xb + (2 * p) as i64] } else { 0.0 };
+              let b: f32 = if live { x[xb + (2 * p + 1) as i64] } else { 0.0 };
+              let c: f32 = cosine[p];
+              let s: f32 = sine[p];
+              qr_t[g][hh * 64 + p][h] = (if live { a * c - b * s } else { 0.0 }) as bf16;
+              qr_t[g][hh * 64 + 32 + p][h] = (if live { b * c + a * s } else { 0.0 }) as bf16;
+            }
+          }
+        }
+      }
+    }
+  }
+  return;
+}

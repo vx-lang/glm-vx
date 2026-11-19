@@ -202,7 +202,8 @@ class ResidentGLM:
                  device_topk=True, device_experts=False, fused_attention=False, graph=False, fp8_kernels='hand',
                  topk='auto', long_topk='position', mla_kernel='decode', matvec_kernels='hand', mtp=False,
                  norm_block=256, fuse_glue=True, index_kernel='mma',
-                 topk_blocks_from=65536, fold_shared=False, fuse_router=False, moe_down2=False, moe_mma=False, device_decode=False,
+                 topk_blocks_from=65536, fold_shared=False, fuse_router=False, moe_down2=False, moe_mma=False, fuse_mla_q=False,
+                 device_decode=False,
                  fuse_tp_norm=0, tp=None):
         if getattr(model, 'packed_weights', False):
             raise NotImplementedError('ResidentGLM supports expanded float32 weights only')
@@ -256,6 +257,10 @@ class ResidentGLM:
         # On by default since the H200 A/B (evidence/h200-20261116-r: about 13 us a layer); False keeps
         # the separate launches, for an A/B or to check a fusion against them.
         self.fuse_glue = bool(fuse_glue)
+        # fuse_mla_q: the query's rope (rope_strided) inside the bf16 query kernel, gpu/spawn/mla_q_rope_bf16_at:
+        # the same bits for mla_tc_at, one launch fewer (#63, item 7). Taken where mla_kernel='tc' runs fused in a
+        # graph with rank 512 and rope 64.
+        self.fuse_mla_q = bool(fuse_mla_q)
         if topk not in ('auto', 'sort', 'radix'):
             raise ValueError("topk must be 'auto', 'sort' or 'radix'")
         self._topk_choice = topk
@@ -1474,6 +1479,8 @@ class ResidentGLM:
         # Absorbed MLA. q_latent[h] = W_k[h]^T q_nope[h]; the transposed nope blocks are built once.
         warps = 4
         absorb = self._fp8_absorb(prefix)
+        fuse_q = (self.fuse_mla_q and self.fused_attention and self.graph and self.mla_kernel == 'tc'
+                  and self.rank == 512 and self.rot == 64)
         if absorb is not None:
             # kv_b_proj's FP8 codes, laid out once per head (#42): a quarter of the float32 copy's bytes.
             codes, scales = absorb
@@ -1485,8 +1492,9 @@ class ResidentGLM:
             self._launch('matvec_heads', (self.heads * self.rank + warps - 1) // warps, 128,
                          [self.latent_q, kv_t, query, I(self.heads), I(self.rank), I(self.nope),
                           I(self.rank * self.nope), I(qk), I(self.rank)])
-        self._rope(self.rot_q, query.view((self.heads * qk - self.nope,), offset=self.nope * 4),
-                   self.heads, self.rot, qk, self.rot)
+        if not fuse_q:
+            self._rope(self.rot_q, query.view((self.heads * qk - self.nope,), offset=self.nope * 4),
+                       self.heads, self.rot, qk, self.rot)
         count = self.selected_count
         splits = self._splits(count)
         block = ((self.rank + 31) // 32) * 32
@@ -1496,8 +1504,13 @@ class ResidentGLM:
             groups = self.mla_heads // 16
             numerator = self.numerator.view((groups, self.splits_max, 16 * self.rank))
             stats = self.stats.view((groups, self.splits_max, 32))
-            self._spawn('mla_q_bf16_at', q_t=self.q_t, qr_t=self.qr_t, q_latent=self.latent_q, q_rope=self.rot_q,
-                        heads=self.mla_heads, rank=self.rank, rope_dim=self.rot)
+            if fuse_q:
+                self._spawn('mla_q_rope_bf16_at', q_t=self.q_t, qr_t=self.qr_t, q_latent=self.latent_q,
+                            x=query.view((self.heads * qk,)), cosine=self.cos, sine=self.sin, heads=self.mla_heads,
+                            real=self.heads, rank=self.rank, rope_dim=self.rot, x_stride=qk, rope_at=self.nope)
+            else:
+                self._spawn('mla_q_bf16_at', q_t=self.q_t, qr_t=self.qr_t, q_latent=self.latent_q, q_rope=self.rot_q,
+                            heads=self.mla_heads, rank=self.rank, rope_dim=self.rot)
             self._spawn('mla_tc_at', numerator=numerator.view((groups * self.splits_max * 16, self.rank)),
                         stats=stats.view((groups * self.splits_max, 32)), q_t=self.q_t.view((groups * 1024, 8)),
                         qr_t=self.qr_t.view((groups * 128, 8)), cache_latent=self.latents[layer],
