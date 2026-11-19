@@ -469,6 +469,17 @@ def grouped_tiles(offsets, tiles_max, block_m=GROUPED_BLOCK_M):
     return table
 
 
+def grouped_ranges(offsets, tiles_max, block_m=GROUPED_BLOCK_M):
+    """The ranges that fp8_gemm_grouped_plan.vx writes beside the tile table, in NumPy: int32 [tiles_max, 2],
+    entry t the rows [first row, min(first row + block_m, end row)) that it stores, and [0, 0) past the last."""
+    table = grouped_tiles(offsets, tiles_max, block_m)
+    ranges = np.zeros((tiles_max, 2), np.int32)
+    for t in range(table[0]):
+        _, start, end = table[1 + 3 * t:4 + 3 * t]
+        ranges[t] = (start, min(start + block_m, end))
+    return ranges
+
+
 def grouped_reference(a_codes, a_scale, b_codes, b_scale, offsets, *, bf16=False, terms=False):
     """(C, bound) of the grouped GEMM: `reference` for each expert's rows, stacked in A's order. With
     bf16, the bound covers C rounded to bfloat16."""
@@ -510,6 +521,10 @@ class FP8GroupedGEMM:
     tiles, rows=, n=, k=, experts=)` runs the GEMM with it. Both launch on `stream`, so the table
     comes from offsets that an earlier kernel wrote, with no copy to the host. Tensor maps are cached
     as FP8GEMM's are (same rules for CUDA graphs).
+
+    The plan also writes the rows that each entry stores (grouped_ranges), which the GEMM takes as a
+    Vx DisjointRanges table. This object keeps that table, one for each tiles buffer, so gemm() needs
+    a plan() with the same tiles first.
     """
 
     def __init__(self, context, build=BUILD):
@@ -517,10 +532,21 @@ class FP8GroupedGEMM:
         self.context = context
         self.plan_kernel = SpawnKernel(context, Path(build) / 'fp8_gemm_grouped_plan.ptx')
         self.kernel = SpawnKernel(context, Path(build) / 'fp8_gemm_grouped_m64.ptx')
-        self._maps, self._dummy = {}, {}
+        self._maps, self._dummy, self._ranges = {}, {}, {}
 
-    # The output that a launch does not write: one element, as FP8GEMM's.
-    _scratch = FP8GEMM._scratch
+    def _scratch(self, dtype):
+        """The output that a launch does not write: [1, 2], since the kernel's C is 2-D with an even
+        second dimension."""
+        if dtype not in self._dummy:
+            self._dummy[dtype] = self.context.tensor((1, 2), dtype, bytes(8 if dtype == 'float32' else 4))
+        return self._dummy[dtype]
+
+    def ranges(self, tiles, tiles_max):
+        """The [tiles_max, 2] int32 table of row ranges that plan() writes beside `tiles`."""
+        key = (tiles.pointer, tiles_max)
+        if key not in self._ranges:
+            self._ranges[key] = self.context.tensor((tiles_max, 2), 'int32', bytes(8 * tiles_max))
+        return self._ranges[key]
 
     def tensor_maps(self, a, b, rows, n, k, experts):
         from gpu.runtime import encode_tensor_map_2d
@@ -541,8 +567,8 @@ class FP8GroupedGEMM:
         if experts > 1024:
             raise ValueError('fp8_gemm_grouped_plan.vx counts at most 1024 experts')
         tiles_max = grouped_tiles_max(rows, experts)
-        self.plan_kernel.launch((1,), 1024, stream=stream, tiles=tiles, offsets=offsets, experts=experts,
-                                tiles_max=tiles_max)
+        self.plan_kernel.launch((1,), 1024, stream=stream, tiles=tiles, ranges=self.ranges(tiles, tiles_max),
+                                offsets=offsets, experts=experts, tiles_max=tiles_max)
         return tiles_max
 
     def gemm(self, a, a_scale, b, b_scale, out, tiles, *, rows, n, k, experts, stream=None):
@@ -554,11 +580,15 @@ class FP8GroupedGEMM:
                             f'got {out.dtype} of {out.size}')
         bf16 = str(out.dtype) == 'uint16'
         tiles_max = grouped_tiles_max(rows, experts)
+        ranges = self._ranges.get((tiles.pointer, tiles_max))
+        if ranges is None:
+            raise ValueError('run plan() with these tiles first: the GEMM reads the row ranges that it writes')
         maps = self.tensor_maps(a, b, rows, n, k, experts)
+        c = out.view((rows, n))
         self.kernel.launch((tiles_max * (n // BLOCK_N),), 160, stream=stream, maps=maps, a_scale=a_scale,
-                           b_scale=b_scale, out=self._scratch('float32') if bf16 else out,
-                           out_bf16=out if bf16 else self._scratch('uint16'), tiles=tiles, rows_m=rows, rows_n=n,
-                           cols=k, tiles_max=tiles_max, bf16_out=int(bf16))
+                           b_scale=b_scale, out=self._scratch('float32') if bf16 else c,
+                           out_bf16=c if bf16 else self._scratch('uint16'), tiles=tiles, ranges=ranges, rows_m=rows,
+                           rows_n=n, cols=k, tiles_max=tiles_max, bf16_out=int(bf16))
         return tiles_max
 
     __call__ = gemm

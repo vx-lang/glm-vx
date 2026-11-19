@@ -4,8 +4,12 @@
 // of entries. An expert with no rows has no entry. The table only depends on the offsets, so one
 // plan serves the gate_up and the down GEMM of a layer. At most `tiles_max` entries are written;
 // ceil(rows / 64) + experts is always enough. experts <= 1024.
-pub fn glm_vx_fp8_gemm_grouped_plan(tiles: &mut Tensor<i32, [?], Memory::HBM>, offsets: &Tensor<i32, [?], Memory::HBM>,
-                                    experts: i32, tiles_max: i32) -> void {
+//
+// `ranges` [tiles_max, 2] gets the rows that entry t stores: [first row, min(first row + 64, end
+// row)), and the empty range [0, 0) for each t past the last entry. No two of them overlap, so the
+// GEMM takes `ranges` as a DisjointRanges table.
+pub fn glm_vx_fp8_gemm_grouped_plan(tiles: &mut Tensor<i32, [?], Memory::HBM>, ranges: &mut Tensor<i32, [?, ?], Memory::HBM>,
+                                    offsets: &Tensor<i32, [?], Memory::HBM>, experts: i32, tiles_max: i32) -> void {
   spawn on(Topology::Device) {
     for b in 0..1 across blocks {
       let mut counts = unsafe { Tensor<i32, [1024], Memory::SMEM>::uninit() };
@@ -14,6 +18,15 @@ pub fn glm_vx_fp8_gemm_grouped_plan(tiles: &mut Tensor<i32, [?], Memory::HBM>, o
           counts[e] = (offsets[e + 1] - offsets[e] + 63) / 64;
         } else {
           counts[e] = 0;
+        }
+      }
+      for e in 0..1024 across lanes(1024) {
+        for q in 0..(tiles_max + 1023) / 1024 {
+          let t: i32 = 1024 * q + e;
+          if t < tiles_max {
+            ranges[t][0] = 0;
+            ranges[t][1] = 0;
+          }
         }
       }
       // Lane 0 writes the table: the entries of one expert follow those of the expert before it.
@@ -26,6 +39,8 @@ pub fn glm_vx_fp8_gemm_grouped_plan(tiles: &mut Tensor<i32, [?], Memory::HBM>, o
             tiles[1 + 3 * t] = e;
             tiles[2 + 3 * t] = start + 64 * j;
             tiles[3 + 3 * t] = end;
+            ranges[t][0] = start + 64 * j;
+            ranges[t][1] = if start + 64 * (j + 1) < end { start + 64 * (j + 1) } else { end };
             t = t + 1;
           }
         }

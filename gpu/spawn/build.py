@@ -190,7 +190,8 @@ def kernel_params(manifest_params):
                 raise ValueError(f'unsupported scalar parameter {p}')
             params.append({'name': p['name'], 'kind': 'scalar', 'type': p['type']})
         elif p['kind'] == 'tensor':
-            element = re.match(r'&(?:mut )?Tensor<(\w+),', p['type'])
+            # A `Distinct` or `DisjointRanges` tensor is its tensor at run time.
+            element = re.match(r'&(?:mut )?(?:(?:Distinct|DisjointRanges)<)?Tensor<(\w+),', p['type'])
             if not element or element[1] not in ELEMENT_BITS or p['rank'] not in (1, 2, 3) or p['words'] != 3 + 2 * p['rank']:
                 raise ValueError(f'unsupported tensor parameter {p}')
             if p['mutable'] != p['type'].startswith('&mut '):

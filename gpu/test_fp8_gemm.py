@@ -232,7 +232,9 @@ SCALARS = ['rows_m', 'rows_n', 'cols', 'splits', 'split_blocks', 'bf16_out']
 
 
 def manifest(entry, tensors, scalars, shared):
-    params = [{'name': n, 'kind': 'memref', 'element': e, 'rank': 1, 'mut': mut} for n, e, mut in tensors]
+    """tensors: (name, element, mutable) of rank 1, or (name, element, mutable, rank)."""
+    params = [{'name': t[0], 'kind': 'memref', 'element': t[1], 'rank': t[3] if len(t) > 3 else 1, 'mut': t[2]}
+              for t in tensors]
     params += [{'name': n, 'kind': 'scalar', 'type': 'i32'} for n in scalars]
     return {'schema': 'glm-vx-spawn-v2', 'entry': entry, 'params': params, 'dynamic_shared_bytes': shared}
 
@@ -406,41 +408,85 @@ def test_hardware_harness_runs_on_a_simulated_gpu(tmp_path, monkeypatch):
 
 # --- the grouped GEMM's wrapper and hardware harness --------------------------------------------------------
 
-GROUPED_PARAMS = KERNEL_PARAMS + [('tiles', 'i32', False)]
+GROUPED_PARAMS = KERNEL_PARAMS[:3] + [('out', 'f32', True, 2), ('out_bf16', 'bf16', True, 2), ('tiles', 'i32', False),
+                                     ('ranges', 'i32', False, 2)]
 GROUPED_SCALARS = ['rows_m', 'rows_n', 'cols', 'tiles_max', 'bf16_out']
+PLAN_PARAMS = [('tiles', 'i32', True), ('ranges', 'i32', True, 2), ('offsets', 'i32', False)]
+
+
+def grouped_fake(fake):
+    ctx, library, launches, build = fake
+    for name, tensors_, scalars in (('fp8_gemm_grouped_m64', GROUPED_PARAMS, GROUPED_SCALARS),
+                                    ('fp8_gemm_grouped_plan', PLAN_PARAMS, ['experts', 'tiles_max'])):
+        (build / f'{name}.ptx').write_text('// fake\n')
+        (build / f'{name}.json').write_text(json.dumps(manifest(f'glm_vx_{name}', tensors_, scalars, 0)))
+    return F.FP8GroupedGEMM(ctx, build)
 
 
 @pytest.mark.parametrize('out_dtype', ['float32', 'uint16'])
 def test_grouped_wrapper_writes_bf16_c_to_out_bf16(fake, out_dtype):
     ctx, library, launches, build = fake
-    for name, tensors_, scalars in (('fp8_gemm_grouped_m64', GROUPED_PARAMS, GROUPED_SCALARS),
-                                    ('fp8_gemm_grouped_plan', [('tiles', 'i32', True), ('offsets', 'i32', False)],
-                                     ['experts', 'rows'])):
-        (build / f'{name}.ptx').write_text('// fake\n')
-        (build / f'{name}.json').write_text(json.dumps(manifest(f'glm_vx_{name}', tensors_, scalars, 0)))
-    grouped = F.FP8GroupedGEMM(ctx, build)
+    grouped = grouped_fake(fake)
     rows, n, k, experts = 300, 256, 512, 8
     a, sa = ctx.tensor((rows * k,), 'uint8'), ctx.tensor((rows * 4,), 'float32')
     b, sb = ctx.tensor((experts * n * k,), 'uint8'), ctx.tensor((experts * 2 * 4,), 'float32')
     out, tiles = ctx.tensor((rows * n,), out_dtype), ctx.tensor((1 + 3 * 16,), 'int32')
+    offsets = ctx.tensor((experts + 1,), 'int32')
+    grouped.plan(offsets, tiles, rows=rows, experts=experts)
     tiles_max = grouped(a, sa, b, sb, out, tiles, rows=rows, n=n, k=k, experts=experts)
-    (l,) = launches
+    plan, l = launches
     bf16 = out_dtype == 'uint16'
+    assert plan['kernel'] == 'glm_vx_fp8_gemm_grouped_plan'
     assert l['kernel'] == 'glm_vx_fp8_gemm_grouped_m64' and l['block'] == 160
-    # params: 6 tensors x 5 words (out at word 15, out_bf16 at 20), then the scalars
-    assert l['pointer'](20 if bf16 else 15) == out.pointer
-    assert l['pointer'](15 if bf16 else 20) != out.pointer
-    assert [l['scalar'](30 + i) for i in range(5)] == [rows, n, k, tiles_max, int(bf16)]
+    # params: maps, a_scale, b_scale (5 words each), out (7: 2-D), out_bf16 (7), tiles (5), ranges (7), scalars
+    c, scratch = (22, 15) if bf16 else (15, 22)
+    assert l['pointer'](c) == out.pointer and l['pointer'](scratch) != out.pointer
+    # C is [rows, n], and the tensor that the launch does not write is [1, 2]: both second dimensions are even.
+    assert [l['pointer'](c + 3 + i) for i in range(4)] == [rows, n, n, 1]
+    assert [l['pointer'](scratch + 3 + i) for i in range(4)] == [1, 2, 2, 1]
+    # The plan writes the ranges that the GEMM reads: [tiles_max, 2].
+    assert plan['pointer'](5) == l['pointer'](34)
+    assert [l['pointer'](34 + 3 + i) for i in range(2)] == [tiles_max, 2]
+    assert [l['scalar'](41 + i) for i in range(5)] == [rows, n, k, tiles_max, int(bf16)]
     with pytest.raises(TypeError, match='float32 or uint16'):
         grouped(a, sa, b, sb, ctx.tensor((rows * n,), 'int32'), tiles, rows=rows, n=n, k=k, experts=experts)
+
+
+def test_grouped_wrapper_needs_a_plan_of_the_same_tiles(fake):
+    ctx, library, launches, build = fake
+    grouped = grouped_fake(fake)
+    rows, n, k, experts = 300, 256, 512, 8
+    a, sa = ctx.tensor((rows * k,), 'uint8'), ctx.tensor((rows * 4,), 'float32')
+    b, sb = ctx.tensor((experts * n * k,), 'uint8'), ctx.tensor((experts * 2 * 4,), 'float32')
+    out, tiles = ctx.tensor((rows * n,), 'float32'), ctx.tensor((1 + 3 * 16,), 'int32')
+    with pytest.raises(ValueError, match='run plan'):
+        grouped(a, sa, b, sb, out, tiles, rows=rows, n=n, k=k, experts=experts)
+    assert launches == []
+
+
+def test_grouped_ranges_are_the_rows_that_each_tile_stores():
+    # Expert 0 has 70 rows (a full tile and 6 rows), expert 1 none, expert 2 has 3 rows.
+    ranges = F.grouped_ranges([0, 70, 70, 73], 6)
+    np.testing.assert_array_equal(ranges, [[0, 64], [64, 70], [70, 73], [0, 0], [0, 0], [0, 0]])
 
 
 class SimulatedGroupedGEMM:
     """FP8GroupedGEMM's calls, with grouped_tiles and grouped_reference's C (rounded to f32 or bfloat16):
     lets the grouped hardware test's harness run without a GPU."""
+    def __init__(self, ctx):
+        self.context, self._ranges = ctx, {}
+
+    def ranges(self, tiles, tiles_max):
+        key = (tiles.pointer, tiles_max)
+        if key not in self._ranges:
+            self._ranges[key] = self.context.tensor((tiles_max, 2), 'int32', bytes(8 * tiles_max))
+        return self._ranges[key]
+
     def plan(self, offsets, tiles, *, rows, experts, stream=None):
         off = np.frombuffer(offsets.download(), np.int32)
-        tiles.upload(F.grouped_tiles(off, F.grouped_tiles_max(rows, experts)).astype(np.int32).tobytes())
+        tiles_max = F.grouped_tiles_max(rows, experts)
+        tiles.upload(F.grouped_tiles(off, tiles_max).astype(np.int32).tobytes())
+        self.ranges(tiles, tiles_max).upload(F.grouped_ranges(off, tiles_max).tobytes())
 
     def __call__(self, a, a_scale, b, b_scale, out, tiles, *, rows, n, k, experts, stream=None):
         get = lambda t, dt: np.frombuffer(t.download(), dt)
@@ -463,7 +509,7 @@ def test_grouped_hardware_harness_runs_on_a_simulated_gpu(monkeypatch):
     try:
         monkeypatch.setattr(H, 'RECORDS', [])
         for bf16, timed in ((True, True), (False, False)):
-            record = H.run_case((ctx, SimulatedGroupedGEMM()), 300, 8, 256, 512, seed=3, timed=timed, bf16=bf16)
+            record = H.run_case((ctx, SimulatedGroupedGEMM(ctx)), 300, 8, 256, 512, seed=3, timed=timed, bf16=bf16)
             assert record['bf16'] == bf16 and record['max_err_over_bound'] <= 1
         assert 'gemm_us' in H.RECORDS[0] and 'gemm_us' not in H.RECORDS[1]
     finally:

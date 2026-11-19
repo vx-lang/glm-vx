@@ -70,6 +70,8 @@ def run_case(grouped, rows, experts, n, k, *, seed, timed, bf16=False):
     backing = upload(ctx, sentinel)
     out = backing.view((rows * n,), offset=GUARD * sentinel.itemsize)
     tiles = upload(ctx, np.full(1 + 3 * tiles_max, -1, np.int32))
+    # -1 in every range too, so a range that the plan does not write shows.
+    kernels.ranges(tiles, tiles_max).upload(np.full((tiles_max, 2), -1, np.int32).tobytes())
     da, dsa, db, dsb, doff = (upload(ctx, x) for x in (a, a_scale, b, b_scale, offsets))
     record = {'rows': rows, 'experts': experts, 'n': n, 'k': k, 'bf16': bf16, 'tiles_max': tiles_max,
               'experts_with_rows': int((np.diff(offsets) > 0).sum())}
@@ -78,6 +80,7 @@ def run_case(grouped, rows, experts, n, k, *, seed, timed, bf16=False):
         kernels(da, dsa, db, dsb, out, tiles, rows=rows, n=n, k=k, experts=experts, stream=stream)
         stream.synchronize()
         table = np.frombuffer(tiles.download(), np.int32)
+        ranges = np.frombuffer(kernels.ranges(tiles, tiles_max).download(), np.int32).reshape(tiles_max, 2)
         raw = np.frombuffer(backing.download(), sentinel.dtype)
         if timed:
             for _ in range(3):
@@ -103,6 +106,7 @@ def run_case(grouped, rows, experts, n, k, *, seed, timed, bf16=False):
     count = int(want[0])
     assert table[0] == count, f'plan has {table[0]} entries, want {count}'
     assert (table[1:1 + 3 * count] == want[1:1 + 3 * count]).all(), 'plan entries differ from grouped_tiles'
+    assert (ranges == F.grouped_ranges(offsets, tiles_max)).all(), 'plan ranges differ from grouped_ranges'
     assert raw[:GUARD].tobytes() == sentinel[:GUARD].tobytes(), 'wrote before C'
     assert raw[-GUARD:].tobytes() == sentinel[-GUARD:].tobytes(), 'wrote after C'
     got = raw[GUARD:-GUARD].reshape(rows, n)

@@ -9,9 +9,12 @@
 // C is f32 [rows, N], in the order of A. N % 128 == 0, so a 128-row box of B never crosses an expert.
 //
 // fp8_gemm_grouped_plan.vx writes `tiles`: tiles[0] entries of (expert, first row, end row), one for
-// each 64 rows of an expert. The grid has tiles_max x N / 128 CTAs, so the host needs no offsets: CTA
-// (n_tile, t) with t past tiles[0] runs no k block and stores nothing. Rows of the next expert in a
-// tile are multiplied with this expert's B and not stored; rows past A are zeros (TMA).
+// each 64 rows of an expert. It also writes `ranges`: range t is the rows [first row, min(first row
+// + 64, end row)) of entry t, and the empty range [0, 0) past tiles[0]. No two ranges overlap, so the
+// race check of Vx proves that no two CTAs store the same element of C. The grid has tiles_max x
+// N / 128 CTAs, so the host needs no offsets: CTA (n_tile, t) with t past tiles[0] runs no k block
+// and stores nothing. Rows of the next expert in a tile are multiplied with this expert's B and not
+// stored; rows past A are zeros (TMA).
 // spawn-include: ../device.vx
 // spawn-include: sm90.vx
 // spawn-include: wgmma_m64n128k32.vx
@@ -46,12 +49,34 @@ ensures reads_only(t)
   };
 }
 
+// Tells LLVM that the second dimension of `$t` is even, so that it can merge the stores of columns
+// c and c + 1 (c even) into one store: bf16x2 in 4 bytes, f32 pairs in 8. Nothing checks it, and the
+// kernel's caller makes it true. The clause names an element that the lane writes anyway: the race
+// check of Vx refuses a block that names all of `$t`.
+macro_rules! even_pitch {
+    ($t:ident, $el:ident, $row:ident, $col:ident) => {
+        mlir!( inputs : (%o = $t : memref<?x?x$el>), returns : i32, dialects : ["arith", "memref", "llvm"],
+               ensures : [writes_only($t[$row][$col])]) {
+          %c1 = arith.constant 1 : index
+          %n = memref.dim %o, %c1 : memref<?x?x$el>
+          %m = arith.andi %n, %c1 : index
+          %c0 = arith.constant 0 : index
+          %e = arith.cmpi eq, %m, %c0 : index
+          llvm.intr.assume %e : i1
+          %z = arith.constant 0 : i32
+          macro.yield %z : i32
+        }
+    };
+}
+
 // maps: 256 bytes, the CUtensorMap of A at byte 0 and of B at byte 128 (64-byte aligned each).
-// out: f32 C [M, N] when bf16_out == 0; out_bf16: C as bfloat16 bits [M, N] (round to nearest
-// even), written instead when bf16_out != 0. N is a multiple of 128.
+// out: f32 C [M, N] when bf16_out == 0; out_bf16: C in bfloat16 [M, N] (round to nearest even),
+// written instead when bf16_out != 0. N is a multiple of 128, and the second dimension of the
+// tensor that the kernel writes is even.
 pub fn glm_vx_fp8_gemm_grouped_@NAME@(maps: &Tensor<u8, [?], Memory::HBM>, a_scale: &Tensor<f32, [?], Memory::HBM>,
-                                 b_scale: &Tensor<f32, [?], Memory::HBM>, out: &mut Tensor<f32, [?], Memory::HBM>,
-                                 out_bf16: &mut Tensor<u16, [?], Memory::HBM>, tiles: &Tensor<i32, [?], Memory::HBM>,
+                                 b_scale: &Tensor<f32, [?], Memory::HBM>, out: &mut Tensor<f32, [?, ?], Memory::HBM>,
+                                 out_bf16: &mut Tensor<bf16, [?, ?], Memory::HBM>, tiles: &Tensor<i32, [?], Memory::HBM>,
+                                 ranges: &DisjointRanges<Tensor<i32, [?, 2], Memory::HBM>>,
                                  rows_m: i32, rows_n: i32, cols: i32, tiles_max: i32, bf16_out: i32) -> void {
   // The loops give the launch shape (Vx #2097): one block for each entry and 128 columns, of @THREADS@ lanes.
   spawn on(Topology::Device) {
@@ -165,44 +190,42 @@ pub fn glm_vx_fp8_gemm_grouped_@NAME@(maps: &Tensor<u8, [?], Memory::HBM>, a_sca
           i = i + 1;
         }
         // Epilogue: register 4j + q is row row_lo + 8 (q >> 1), column n0 + 8j + 2 (lane % 4) + (q & 1).
-        // The CTAs write disjoint tiles, through raw stores (sm90.vx st_global_f32).
-        let n_count: i64 = rows_n as i64;
-        let out_addr: i64 = address_f32(out);
-        let bf_addr: i64 = address_u16(out_bf16);
-        let col0: i32 = n0 + 2 * (lane & 3);
-        let lo_ok: bool = row_lo < m_end;
-        let hi_ok: bool = row_hi < m_end;
-        let out_lo: i64 = (row_lo as i64) * n_count + (col0 as i64);
-        let out_hi: i64 = out_lo + 8 * n_count;
+        // The rows are those of range t, written as parts of tid that the race check of Vx follows.
+        let start: i64 = ranges[t][0] as i64;
+        let end: i64 = ranges[t][1] as i64;
+        let row_lo: i64 = start + ((64 * (tid / 128) + 16 * ((tid % 128) / 32) + (tid % 32) / 4) as i64);
+        let row_hi: i64 = row_lo + 8;
+        let col0: i32 = n0 + 2 * (tid % 4);
+        // One loop over j for both rows: the race check compares the columns of the two rows by
+        // the same j.
         if bf16_out != 0 {
-          // Columns col0 + 8j and + 1 are next to each other and in C (N % 128 == 0, col0 even): one
-          // 4-byte store of the two bfloat16 values.
           for j in 0..16 {
-            let off: i64 = 8 * (j as i64);
-            if lo_ok {
-              let _s: i32 = st_global_bf16x2(bf_addr + 2 * (out_lo + off), acc[4 * j], acc[4 * j + 1]);
+            let c: i32 = col0 + 8 * j;
+            if row_lo < end {
+              let _e: i32 = even_pitch!(out_bf16, bf16, row_lo, c);
+              out_bf16[row_lo][c] = acc[4 * j] as bf16;
+              out_bf16[row_lo][c + 1] = acc[4 * j + 1] as bf16;
             }
-            if hi_ok {
-              let _s: i32 = st_global_bf16x2(bf_addr + 2 * (out_hi + off), acc[4 * j + 2], acc[4 * j + 3]);
+            if row_hi < end {
+              let _e: i32 = even_pitch!(out_bf16, bf16, row_hi, c);
+              out_bf16[row_hi][c] = acc[4 * j + 2] as bf16;
+              out_bf16[row_hi][c + 1] = acc[4 * j + 3] as bf16;
             }
           }
         } else {
-        for j in 0..16 {
-          let c: i32 = col0 + 8 * (j as i32);
-          let off: i64 = 8 * (j as i64);
-          if lo_ok && c < rows_n {
-            let _s: i32 = st_global_f32(out_addr + 4 * (out_lo + off), acc[4 * j]);
+          for j in 0..16 {
+            let c: i32 = col0 + 8 * j;
+            if row_lo < end {
+              let _e: i32 = even_pitch!(out, f32, row_lo, c);
+              out[row_lo][c] = acc[4 * j];
+              out[row_lo][c + 1] = acc[4 * j + 1];
+            }
+            if row_hi < end {
+              let _e: i32 = even_pitch!(out, f32, row_hi, c);
+              out[row_hi][c] = acc[4 * j + 2];
+              out[row_hi][c + 1] = acc[4 * j + 3];
+            }
           }
-          if lo_ok && c + 1 < rows_n {
-            let _s: i32 = st_global_f32(out_addr + 4 * (out_lo + off + 1), acc[4 * j + 1]);
-          }
-          if hi_ok && c < rows_n {
-            let _s: i32 = st_global_f32(out_addr + 4 * (out_hi + off), acc[4 * j + 2]);
-          }
-          if hi_ok && c + 1 < rows_n {
-            let _s: i32 = st_global_f32(out_addr + 4 * (out_hi + off + 1), acc[4 * j + 3]);
-          }
-        }
         }
       }
     }

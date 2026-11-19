@@ -32,8 +32,8 @@ The race check of `across` loops needs three things from the sources:
   `has_side_effects`, so none is removed.
 - The wgmma step is a macro (`wgmma_m64n128k32_k128!`), so its block sits in the lane loop and
   writes the lane's own `part`. This needs Vx PR "across: a pass may borrow its own tensor as &mut".
-- The epilogue stores through raw addresses (`st_global_f32`), because a tile's rows come from a
-  run-time table the checker cannot prove disjoint.
+- The epilogue of `fp8_gemm.vx.in` stores through raw addresses (`st_global_f32`). The grouped
+  kernel stores with plain writes `out[row][col] = ..`, and the race check proves them (see below).
 
 `fp8_gemm_grouped_m64.vx` (from `fp8_gemm_grouped.vx.in`) multiplies the gathered rows of each
 expert by that expert's weights in one launch, for prefill. `fp8_gemm_grouped_plan.vx` turns the
@@ -43,9 +43,22 @@ launches both. `grouped_tiles` and `grouped_reference` are the NumPy plan and re
 fixes of b8b547b and 6c0f790.
 
 C can be f32 or bfloat16. A uint16 `out` makes `FP8GroupedGEMM` pass it as `out_bf16` with
-`bf16_out = 1`, and the epilogue stores each pair of adjacent columns as one 4-byte
-`cvt.rn.bf16x2.f32` (sm90.vx `st_global_bf16x2`). N is a multiple of 128, so a pair never runs past
-C. The down projection at 18432 rows writes 226 MB in place of 453 MB.
+`bf16_out = 1`. N is a multiple of 128, so a pair of adjacent columns never runs past C. The down
+projection at 18432 rows writes 226 MB in place of 453 MB.
+
+The grouped epilogue writes C as a 2-D tensor with plain writes, which the Vx race check proves
+apart:
+
+- The plan also writes `ranges` [tiles_max, 2]: entry t stores the rows [first row, min(first row +
+  64, end row)), and [0, 0) past the last entry (`grouped_ranges` in NumPy). The GEMM takes it as a
+  `DisjointRanges` table (Vx #3664), so a row `ranges[t][0] + r` inside `if row < ranges[t][1]`
+  fixes t. `FP8GroupedGEMM` keeps one ranges table for each tiles buffer, so `gemm()` needs a
+  `plan()` with the same tiles first.
+- A lane's rows are `16 * ((tid % 128) / 32) + (tid % 32) / 4` and 8 more, written as parts of tid
+  that the race check follows (Vx #3670). One loop over j holds the stores of both rows.
+- The `even_pitch!` macro tells LLVM that the second dimension of C is even (Vx #3668), so each
+  pair of columns is one store: `cvt.rn.bf16x2.f32` and `st.global.b32` for bfloat16, and
+  `st.global.v2.b32` for f32. The caller makes it true. The unused output is a [1, 2] tensor.
 
 ## Files
 
