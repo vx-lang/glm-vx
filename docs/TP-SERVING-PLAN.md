@@ -411,6 +411,43 @@ TP.
 Peers could take a multi-row MoE kernel (2-4 tokens' experts in one launch, a shared expert read once) and
 multi-query mla_tc_at (k + 1 queries a launch).
 
+### 9. Decode ideas from Xingyu Dang's megakernel post (vx-7e's summary, 2026-11-19; not filed as issues yet)
+
+Source: https://dangxingyu.github.io/megakernel/ (repo github.com/dangxingyu/megakernel-zoo). Per vx-7e's summary:
+one decode megakernel per model, batch-1 decode 1.13-1.77x the best of SGLang/vLLM. Prefill is their weak side, so
+nothing here changes item 5b. All estimates below are unmeasured.
+
+1. **Overlap kernel boundaries (Hopper's programmatic dependent launch, PDL).**
+   - The next kernel starts early and loads its weights, which do not depend on the previous kernel; it waits
+     (griddepcontrol.wait) only before reading activations. PDL works inside CUDA graphs.
+   - z5's step had 1521 kernels: a 9.83 ms span, 9.14 ms busy, plus each kernel's ramp-up and drain.
+   - Their grid barriers in place of 181 boundaries took Qwen3-8B from 7.37 to 6.46 ms.
+   - Guess: 0.5-1.5 ms a step.
+   - Needs Vx (emit griddepcontrol; hoist weight loads above the wait, an MLIR pass) and a launch attribute in
+     gpu/spawn/launch.py. vx-7e offers the Vx side. Later, Vx grid barriers between `across blocks` loops would
+     allow a megakernel a layer.
+2. **Prefetch the next weights into L2 during the all-reduces.**
+   - HBM is mostly idle during the 156 all-reduces a step (5.07 us each, z27a).
+   - Idle blocks could pull the next projection's weights (tiles3: ~17 MB a rank; the 50 MB L2 holds it) into L2.
+   - Needs an L2 prefetch lane routine in Vx. Guess: ~0.2 ms a step.
+3. **Independent kernels at the same time.**
+   - Graph branches during capture: the indexer path beside q_b/kv, and the one-block norms and small glue beside
+     the GEMVs.
+   - No Vx change, the same bits. Guess: 0.2-0.5 ms a step.
+4. **Timing method.** Both engines in one job on one VM: alternate which goes first, restart the servers each
+   round, three rounds. This replaces glm-vx z35 against SGLang z6 on another VM before any claim is published.
+5. **An audit before a number counts.** Check glm-vx for the classes their audits caught:
+   - KV writes past max_tokens;
+   - claims of bit identity that do not hold;
+   - double rounding (e.g. scores rounded to bf16 twice);
+   - different tokens under load than alone, once batching exists;
+   - prefix-cache matches by hash only.
+
+Not taken for GLM-5.3:
+- lossless 12-bit weights: ours are FP8 already;
+- a bf16 all-reduce: our 24 KB messages are latency-bound, and it changes bits;
+- a low-precision lm_head shortlist, layer-0 lookup tables: each under 0.5% of a step.
+
 ## Expected totals (estimates)
 
 | after | W1 served TPOT | vs SGLang 9.18 |
