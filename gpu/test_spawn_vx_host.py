@@ -1325,6 +1325,15 @@ def bitmap_scores(tokens, kind, rng):
     elif kind == 'nan':
         s = rng.normal(size=tokens).astype(F)
         s[rng.random(tokens) < 0.8] = np.nan  # the threshold is NaN's key: NaN ties, the lowest positions first
+    elif kind == 'tail':
+        # 2101 keys of one bin (read again, past 2048) in 1 + m * 2^-23 with m < 1024, so with the same top 22
+        # bits. The last position holds the bin's one largest key, which k takes: a lane that counted the
+        # position past it (lane 904 of step 4 at 5000 tokens) would take a copy of it too.
+        s = np.full(tokens, -1, F)
+        at = 10 + rng.permutation(tokens - 11)
+        s[at[:500]] = 100
+        s[at[500:2600]] = (1 + rng.integers(0, 1023, size=2100) * 2.0 ** -23).astype(F)
+        s[-1] = F(1 + 1023 * 2.0 ** -23)
     elif kind in ('bin2048', 'bin2049'):  # 1001 keys above a bin of exactly 2048 (listed) or 2049 equal keys
         s = np.full(tokens, -1, F)
         at = 10 + rng.permutation(tokens - 10)
@@ -1341,7 +1350,7 @@ def bitmap_scores(tokens, kind, rng):
                                            (32768, 2048, 'negative'), (65536, 2048, 'normal'), (65536, 2048, 'equal'),
                                            (5000, 2048, 'few'), (4096, 2048, 'nan'), (6000, 1, 'normal'),
                                            (6000, 4000, 'ints'), (65536, 65535, 'ints'), (6000, 3049, 'bin2048'),
-                                           (6000, 3050, 'bin2049')])
+                                           (6000, 3050, 'bin2049'), (5000, 2048, 'tail')])
 def test_topk_select_bitmap_at_is_the_stable_set_in_position_order(run, tokens, k, kind):
     scores = bitmap_scores(tokens, kind, np.random.default_rng(tokens * 7 + k))
     step = np.array([tokens - 1, tokens, k, 1], np.int32)
