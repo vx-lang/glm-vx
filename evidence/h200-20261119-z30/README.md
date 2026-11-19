@@ -33,3 +33,7 @@ line, "no CUDA device".
 - A `let y: bf16 = (if c { x } else { 0.0 }) as bf16;` form (`if_literal_as_bf16.vx`) is refused by both, so the
   quirk was already there; what changed between 3609 and 4d15f5315 is that it now reaches this form too.
 - glm-vx now uses typed f32 lets (4d1abf7), which give the same values.
+- vx-7e checked: it is not #3649. Main at 5f71deb4d, before #3649, refuses the kernel the same way. "Vx 3609"
+  here is glm-vx's local build of PR #3609's branch, an older base. `(if c { a } else { 0.0 }) as T` fails for any
+  float T other than f32, f64 included, because the cast's target type reaches the literal. Filed as Vx #3653.
+  The H200 results are posted on #3649 (vx-lang/Vx#3649, comment 6997878245).
