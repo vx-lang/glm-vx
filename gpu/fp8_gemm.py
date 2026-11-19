@@ -179,8 +179,10 @@ class FP8GEMM:
         maps = self._maps.get(key)
         if maps is None:
             driver = self.context.driver
-            raw = (encode_tensor_map_2d(driver, a.pointer, p.m, p.k, p.k, p.variant.block_m, BLOCK_K)
-                   + encode_tensor_map_2d(driver, b.pointer, p.n, p.k, p.k, BLOCK_N, BLOCK_K))
+            # cuTensorMapEncodeTiled needs a current context (CUDA_ERROR_INVALID_CONTEXT without one).
+            with self.context._activate():
+                raw = (encode_tensor_map_2d(driver, a.pointer, p.m, p.k, p.k, p.variant.block_m, BLOCK_K)
+                       + encode_tensor_map_2d(driver, b.pointer, p.n, p.k, p.k, BLOCK_N, BLOCK_K))
             maps = self.context.tensor((256,), 'uint8', raw)
             if len(self._maps) >= 64:
                 self._maps.pop(next(iter(self._maps))).close()
@@ -511,8 +513,9 @@ class FP8GroupedGEMM:
         maps = self._maps.get(key)
         if maps is None:
             driver = self.context.driver
-            raw = (encode_tensor_map_2d(driver, a.pointer, rows, k, k, GROUPED_BLOCK_M, BLOCK_K)
-                   + encode_tensor_map_2d(driver, b.pointer, experts * n, k, k, BLOCK_N, BLOCK_K))
+            with self.context._activate():
+                raw = (encode_tensor_map_2d(driver, a.pointer, rows, k, k, GROUPED_BLOCK_M, BLOCK_K)
+                       + encode_tensor_map_2d(driver, b.pointer, experts * n, k, k, BLOCK_N, BLOCK_K))
             maps = self.context.tensor((256,), 'uint8', raw)
             if len(self._maps) >= 64:
                 self._maps.pop(next(iter(self._maps))).close()
