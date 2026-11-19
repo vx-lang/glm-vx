@@ -143,7 +143,7 @@ def test_split_k_agrees(gemm, splits):
     assert np.all(np.abs(runs[0] - ref) <= bound)
 
 
-@pytest.mark.parametrize('variant', ['m64', 'm128'])
+@pytest.mark.parametrize('variant', list(F.VARIANTS))
 def test_variants_agree_on_small_m(gemm, variant):
     ctx, kernels = gemm
     m, n, k = 33, 384, 1024

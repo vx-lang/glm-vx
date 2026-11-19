@@ -46,7 +46,7 @@ launches both. `grouped_tiles` and `grouped_reference` are the NumPy plan and re
 | File | What it is |
 | --- | --- |
 | `gpu/spawn/fp8_gemm/fp8_gemm.vx.in` | The kernel template, with the design notes in its header |
-| `gpu/spawn/fp8_gemm/gen_fp8_gemm.py` | Writes `fp8_gemm_m64.vx`, `fp8_gemm_m128.vx` and `wgmma_m64n128k32.vx` (`--check` verifies them) |
+| `gpu/spawn/fp8_gemm/gen_fp8_gemm.py` | Writes `fp8_gemm_m64.vx`, `fp8_gemm_grouped_m64.vx` and `wgmma_m64n128k32.vx` (`--check` verifies them) |
 | `gpu/spawn/fp8_gemm/sm90.vx` | mbarrier, TMA, tensormap fence, wgmma descriptor and bf16 helpers (inline PTX in `mlir!`) |
 | `gpu/spawn/fp8_gemm/fp8_gemm_reduce.vx` | The split-K reduction |
 | `gpu/spawn/fp8_gemm/build.sh`, `machine-sm90a.vx` | The build, into `gpu/build/spawn/fp8_gemm/`. Not part of `gpu/spawn/build.sh` |
@@ -58,10 +58,16 @@ launches both. `grouped_tiles` and `grouped_reference` are the NumPy plan and re
 ## Design
 
 **CTA and threads.** One CTA computes a `BLOCK_M x 128` tile of C over one range of 128-k blocks.
-There are two variants:
+There is one variant:
 
-- **m64**: one consumer warpgroup, 160 threads. Used when M <= 64.
-- **m128**: two consumer warpgroups that share each B tile, 288 threads.
+- **m64**: one consumer warpgroup, 160 threads, a tile of 64 rows.
+
+An m128 variant (two consumer warpgroups that share each B tile, 288 threads) was dropped after
+the H200 refused to launch it (z33). An SM's registers are four sub-partitions of 16384, and a
+CTA's 9 warps put 3 on one of them, which leaves 170 registers a thread. Since the port to
+`across` loops the kernel needs about 220 (ptxas spills at 168). A `.maxnreg 224` made it compile
+but not launch. A 384-thread m128 that gives the producer warpgroup fewer registers with
+`setmaxnreg`, as DeepGEMM does, would fit.
 
 Threads `0 .. 128*c - 1` are the consumer warpgroups. A warpgroup must start at a warp index that
 is a multiple of 4 (PTX ISA 9.7.15.1). One producer warp follows them, and one thread of it issues
@@ -80,8 +86,10 @@ the B ring after it (both 1024-aligned) and the barriers last.
 
 | Variant | Dynamic shared | CTAs per SM |
 | --- | --- | --- |
-| m64 | 98,368 B | 2 |
-| m128 | 131,136 B | 1 |
+| m64 | 98,368 B | 1 |
+
+Shared memory allows 2, but registers allow 1: at 227 a thread (232 allocated), a sub-partition
+holds 2 warps, so an SM holds 8, and a second CTA of 5 warps does not fit.
 
 **Producer loop.** For each k block:
 
@@ -123,14 +131,14 @@ and writes f32 or bf16. The plans at the model's shapes:
 
 | M, N, K | Variant | Splits | Grid |
 | --- | --- | --- | --- |
-| 1, 2048, 6144 | m64 | 16 | 256 |
+| 1, 2048, 6144 | m64 | 8 | 128 |
 | 1, 576, 6144 | m64 | 24 | 120 |
-| 1, 6144, 2048 | m64 | 4 | 192 |
-| 1, 12288, 6144 | m64 | 5 | 480 |
-| 1, 6144, 12288 | m64 | 11 | 528 |
-| 128, 2048, 6144 | m128 | 8 | 128 |
-| 256, 2048, 6144 | m128 | 4 | 128 |
-| 256, 12288, 6144 | m128 | 1 | 192 |
+| 1, 6144, 2048 | m64 | 2 | 96 |
+| 1, 12288, 6144 | m64 | 1 | 96 |
+| 1, 6144, 12288 | m64 | 5 | 240 |
+| 128, 2048, 6144 | m64 | 4 | 128 |
+| 256, 2048, 6144 | m64 | 2 | 128 |
+| 256, 12288, 6144 | m64 | 1 | 384 |
 
 **Tensor maps in global memory.** Vx has no `CUtensorMap` kernel parameter (`.param .align 64`),
 so the host passes the two maps in device memory instead. `FP8GEMM.tensor_maps` encodes them with
@@ -184,15 +192,19 @@ The bound used for every element is:
                 [+ 2^-8 * (|C| + bound) for bf16 output]
 
 where
-  EPS_MMA = 2^-10
+  EPS_MMA = 2^-9
   s_kb    = a_scale * b_scale
   P_kb    = the block's exact sum
   S_kb    = sum_k |a_k b_k|
 ```
 
 Where EPS_MMA comes from: each 128-k block is 4 k32 steps, and each step sums 32 products and adds
-them to the running block sum. That is at most 8 roundings, each at most 2^-13 of a partial sum
-bounded by S_kb, so 8 x 2^-13 = 2^-10.
+them to the running block sum. With at most 8 roundings, each at most 2^-13 of a partial sum
+bounded by S_kb, it would be 8 x 2^-13 = 2^-10. The H200 measured more (z33): in the grouped
+GEMM's down projection (K = 256, 18432 rows), 24 of 113M elements were up to 1.31 times that
+bound, and the 2304-row case reached 1.0. With K = 256 there are only two blocks, so the f32 term
+adds almost no slack. The tensor core may also cut a step's products when it aligns them. So
+EPS_MMA is set from the hardware: 2^-9, 1.5 times the largest measured.
 
 The second term covers the f32 rounding of `s`, of `part * s`, of the accumulation and of the
 split-K sums. The bf16 term is round-to-nearest-even with 8 significant bits.
@@ -259,10 +271,11 @@ the same registers, stack and shared memory for this source.
 | Kernel | Registers | Stack | Spills | Dynamic shared | Block | SASS |
 | --- | --- | --- | --- | --- | --- | --- |
 | `fp8_gemm_m64` | 158 | 0 | 0 | 98,368 B | 160 | 19,840 B (1,240 instructions) |
-| `fp8_gemm_m128` | 158 | 0 | 0 | 131,136 B | 288 | 19,840 B (1,240 instructions) |
 | `fp8_gemm_reduce` | 32 | 0 | 0 | 0 | 256 | 3,712 B (232 instructions) |
 
-Neither variant has a `__local_depot`. Register use fits both block sizes: 158 x 288 = 45.5k of 64k.
+The kernel has no `__local_depot`. These numbers are from before the port to `across` loops:
+with Vx main and the grouped GEMM's changes, ptxas gives `fp8_gemm_m64` 227 registers and
+`fp8_gemm_grouped_m64` 230, with no spills (see the grouped GEMM section).
 
 GPU numbers have not been measured: there was no H100 here. `scripts/pod_validate.sh` on an
 H100 writes `fp8_gemm_hardware.json` with time, TFLOP/s and GB/s per shape.

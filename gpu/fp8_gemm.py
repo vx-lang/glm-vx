@@ -7,7 +7,7 @@ groups of 128 along K, as DeepGEMM and SGLang's W8A8 block FP8 make them) and b_
 [ceil(N / 128), ceil(K / 128)], the checkpoint's `weight_scale_inv` (dequant = code * scale;
 glm_vx/checkpoint.py dequantize_block_fp8). C is f32 or bfloat16 (uint16 bits).
 
-- `plan` picks the kernel variant (m64: one consumer warpgroup, M <= 64; m128: two) and the split-K.
+- `plan` picks the kernel variant (m64: one consumer warpgroup of 64 rows) and the split-K.
 - `FP8GEMM` encodes the two TMA tensor maps (gpu/runtime.py encode_tensor_map_2d), uploads them,
   and launches the kernel, then the split-K reduction when splits > 1.
 - `reference` and `error_bound` are the numerical contract: the f64 value and how far the
@@ -57,13 +57,22 @@ class Variant:
     @property
     def ctas_per_sm(self):
         """Resident CTAs per SM by shared memory (228 KiB an SM, 1 KiB reserved a CTA) and
-        registers (65536 an SM, at most ~160 a thread here: gpu/FP8-GEMM.md)."""
+        registers. An SM's 65536 registers are four sub-partitions of 16384, and a CTA's warps are
+        dealt to them in turn, so the limit is warps a sub-partition: REGISTERS a thread (ptxas,
+        gpu/FP8-GEMM.md) rounded up to 8, times 32 lanes."""
         shared = self.stages * (self.a_stage + self.b_stage) + 1024 + 16 * self.stages
-        return max(1, min((228 * 1024) // (shared + 1024), 65536 // (160 * self.threads)))
+        warps_per_partition = 16384 // (-(-REGISTERS // 8) * 8 * 32)
+        warps = -(-self.threads // 32)
+        return max(1, min((228 * 1024) // (shared + 1024), 4 * warps_per_partition // warps))
 
 
-# Must match gpu/spawn/fp8_gemm/gen_fp8_gemm.py VARIANTS (gpu/test_fp8_gemm.py checks).
-VARIANTS = {'m64': Variant('m64', 1, 4), 'm128': Variant('m128', 2, 4)}
+# Registers a thread of fp8_gemm_m64 (ptxas 13.1, sm_90a).
+REGISTERS = 227
+# Must match gpu/spawn/fp8_gemm/gen_fp8_gemm.py VARIANTS (gpu/test_fp8_gemm.py checks). m128 (two
+# consumer warpgroups, 288 threads) is not built: its 9 warps put 3 on one register sub-partition,
+# which leaves 170 registers a thread, and the kernel needs about 220 (it spills at 168). The H200
+# refused to launch it (z33). A 384-thread m128 with setmaxnreg, as DeepGEMM's, would fit.
+VARIANTS = {'m64': Variant('m64', 1, 4)}
 
 
 @dataclass(frozen=True)
@@ -99,7 +108,7 @@ class Plan:
 def plan(m, n, k, *, sms=SM90_SMS, variant=None, splits=None):
     """Variant and split-K for C[m, n] = A[m, k] B[n, k]^T.
 
-    m64 for m <= 64, else m128 (B is read once for both 64-row halves). Splits: decode tiles are
+    m64, a tile of 64 rows (the only variant, see VARIANTS). Splits: decode tiles are
     few (m = 1, n = 2048 is 16 CTAs), so K is split until the CTAs fill the GPU's CTA slots
     (sms * ctas_per_sm), with at least 2 k blocks a split, choosing the split with the fewest
     waves' idle slots and then the fewest splits. Tuning (stream-K, a persistent grid) is later.
@@ -109,7 +118,7 @@ def plan(m, n, k, *, sms=SM90_SMS, variant=None, splits=None):
             raise ValueError(f'{name} must be a positive integer, got {value!r}')
     if k % 16:
         raise ValueError(f'k must be a multiple of 16 (the TMA row stride of A and B is k bytes), got {k}')
-    v = VARIANTS[variant] if variant else VARIANTS['m64' if m <= 64 else 'm128']
+    v = VARIANTS[variant] if variant else VARIANTS['m64']
     blocks_k = -(-k // BLOCK_K)
     tiles = -(-m // v.block_m) * -(-n // BLOCK_N)
     if splits is None:
@@ -228,10 +237,12 @@ class FP8GEMM:
 # Hopper's FP8 wgmma does not accumulate in full f32: DeepSeek-V3 (arXiv 2412.19437, section 3.3.2)
 # measured that it keeps "around 14 bits", which is why the scales are applied, and the sum
 # promoted to f32 on the CUDA cores, every 128 k (DeepGEMM does the same; so does this kernel).
-# Model: a 128-k block is 4 wgmma k32 steps; each step sums 32 products and adds them to the
-# running block sum, so at most 8 roundings, each at most 2^-13 of a partial sum whose magnitude
-# is at most S_kb = sum_k |a_k b_k|. Hence |part - P_kb| <= 8 * 2^-13 * S_kb = 2^-10 * S_kb.
-EPS_MMA = 2.0 ** -10
+# A 128-k block is 4 wgmma k32 steps. With 8 roundings of at most 2^-13 each, |part - P_kb| would be
+# at most 2^-10 * S_kb, S_kb = sum_k |a_k b_k|. The H200 measured more (z33): the grouped GEMM's
+# down projection (K = 256, 18432 rows, 113M elements) had 24 elements up to 1.31 times that, and
+# the 2304-row case reached 1.0. The tensor core may also cut the 32 products of a step when it
+# aligns them, so the hardware sets EPS_MMA, not the model: 2^-9, 1.5 times the largest measured.
+EPS_MMA = 2.0 ** -9
 U32 = 2.0 ** -24         # f32 unit roundoff: s = a_s * b_s, part * s, acc + ..., split-K sums
 U_BF16 = 2.0 ** -8       # bfloat16 unit roundoff (8 significant bits), round to nearest even
 

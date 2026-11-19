@@ -109,8 +109,8 @@ CASES = [  # m, n, k, variant, splits, bf16: tails in every dimension, both vari
     (1, 128, 128, 'm64', 1, False),
     (7, 200, 272, 'm64', 1, True),          # N tail 72, K tail 16
     (64, 256, 512, 'm64', 2, False),
-    (65, 130, 400, 'm128', 1, False),       # M tail: second warpgroup holds 1 row
-    (130, 300, 1040, 'm128', 3, True),      # M tile 2 (2 rows), N tail 44, K tail 16, 3 splits
+    (65, 130, 400, 'm64', 1, False),        # M tail: the second M tile holds 1 row
+    (130, 300, 1040, 'm64', 3, True),       # M tile 3 (2 rows), N tail 44, K tail 16, 3 splits
     (3, 576, 384, None, None, False),       # kv_a's N = 4.5 x 128; the planned split
 ]
 
@@ -211,7 +211,7 @@ def test_bf16_rounding_is_nearest_even():
                                    (128, 6144, 12288), (256, 2048, 6144), (65, 130, 1040)])
 def test_plan_covers_k_once_and_fills_the_gpu(m, n, k):
     p = F.plan(m, n, k)
-    assert p.variant.name == ('m64' if m <= 64 else 'm128')
+    assert p.variant.name == 'm64'
     assert (p.splits - 1) * p.split_blocks < p.blocks_k <= p.splits * p.split_blocks   # no empty split
     slots = F.SM90_SMS * p.variant.ctas_per_sm
     assert p.grid >= min(slots, p.tiles_m * p.tiles_n * max(1, p.blocks_k // 2)) * 0.4
@@ -239,7 +239,7 @@ def manifest(entry, tensors, scalars, shared):
 
 @pytest.fixture
 def fake(tmp_path):
-    shared = {'m64': 98368, 'm128': 131136}
+    shared = {'m64': 98368}
     for name in F.VARIANTS:
         (tmp_path / f'fp8_gemm_{name}.ptx').write_text('// fake\n')
         (tmp_path / f'fp8_gemm_{name}.json').write_text(json.dumps(
@@ -274,9 +274,9 @@ def test_wrapper_launches_one_kernel_and_uploads_both_maps(fake):
     gemm = F.FP8GEMM(ctx, build)
     a, sa, b, sb, out = tensors(ctx, 128, 6144, 12288, 'uint16')
     p = gemm(a, sa, b, sb, out, m=128, n=6144, k=12288, splits=1)
-    assert [l['kernel'] for l in launches] == ['glm_vx_fp8_gemm_m128']
+    assert [l['kernel'] for l in launches] == ['glm_vx_fp8_gemm_m64']
     l = launches[0]
-    assert (l['grid'], l['block'], l['shared']) == (p.grid, 288, 131136) == (48, 288, 131136)
+    assert (l['grid'], l['block'], l['shared']) == (p.grid, 160, 98368) == (96, 160, 98368)
     # params: 5 tensors x 5 words, then rows_m, rows_n, cols, splits, split_blocks, bf16_out
     assert [l['scalar'](25 + i) for i in range(6)] == [128, 6144, 12288, 1, 96, 1]
     assert l['pointer'](20) == out.pointer                      # out_bf16's aligned pointer
@@ -284,7 +284,7 @@ def test_wrapper_launches_one_kernel_and_uploads_both_maps(fake):
     allocation, offset = library.storage(maps_ptr, 256)
     raw = bytes(allocation[offset:offset + 256])
     assert maps_ptr % 256 == 0
-    assert decode_map(raw[:128]) == {'address': a.pointer, 'dims': [12288, 128], 'stride': 12288, 'box': [128, 128],
+    assert decode_map(raw[:128]) == {'address': a.pointer, 'dims': [12288, 128], 'stride': 12288, 'box': [128, 64],
                                      'swizzle': 3, 'l2': 3}
     assert decode_map(raw[128:]) == {'address': b.pointer, 'dims': [12288, 6144], 'stride': 12288,
                                      'box': [128, 128], 'swizzle': 3, 'l2': 3}
@@ -398,7 +398,7 @@ def test_hardware_harness_runs_on_a_simulated_gpu(tmp_path, monkeypatch):
         monkeypatch.setattr(H, 'RECORDS', [])
         for bf16, timed in ((True, True), (False, False)):
             record = H.run_case((ctx, SimulatedGEMM()), 65, 200, 272, bf16=bf16, timed=timed, seed=1)
-            assert record['max_err_over_bound'] <= 1 and record['variant'] == 'm128'
+            assert record['max_err_over_bound'] <= 1 and record['variant'] == 'm64'
         assert 'tflops' in H.RECORDS[0] and 'tflops' not in H.RECORDS[1]
     finally:
         ctx.close()
