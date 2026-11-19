@@ -262,3 +262,37 @@ def test_mha_attention_past_index_topk_selects_per_query(graph):
     full = sum(model.indexer_type(i) == 'full' for i in range(model.n_layers))
     assert launches.get('mha_prefill', 0) == model.n_layers and launches.get('mha_prefill_sparse', 0) == model.n_layers
     assert launches.get('topk_select_rows', 0) == full and launches.get('index_scores_rows', 0) == full
+
+
+def test_two_ranks_mha_prompt_past_index_topk():
+    # prefill_attention='mha' under tensor parallelism: each rank's heads (q_b, kv_b_proj and o_proj split), the
+    # indexer the same on every rank, the sums over the rows; both ranks agree, near two-rank forward().
+    from gpu.testing.collective import LocalJob, run_ranks
+    from gpu.tp import TensorParallel
+    model = build(seed=3)
+    results = {}
+    for chunked in (False, True):
+        job = LocalJob(2)
+
+        def rank_main(rank):
+            resident = ResidentGLM(model, ctx=Context(), max_tokens=32, prefill_attention='mha',
+                                   tp=TensorParallel(rank, 2, job.member(rank)))
+            try:
+                if chunked:
+                    resident.prefill_chunk(PROMPT[:3])
+                    last = resident.prefill_chunk(PROMPT[3:], logits=True)
+                else:
+                    for t in PROMPT[:-1]:
+                        resident.forward(t, logits=False)
+                    last = resident.forward(PROMPT[-1])
+                return last, resident.forward(NEXT), dict(resident.launches)
+            finally:
+                resident.close()
+        results[chunked] = run_ranks(job, rank_main)
+    for ranks in results.values():
+        for r in (0, 1):
+            np.testing.assert_array_equal(ranks[1][r].view(np.uint32), ranks[0][r].view(np.uint32))
+    (last, after, _), (chunk_last, chunk_after, launches) = results[False][0], results[True][0]
+    np.testing.assert_allclose(chunk_last, last, rtol=1e-4, atol=1e-4 * float(np.abs(last).max()))
+    np.testing.assert_allclose(chunk_after, after, rtol=1e-4, atol=1e-4 * float(np.abs(after).max()))
+    assert launches.get('mha_prefill_sparse', 0) == model.n_layers
