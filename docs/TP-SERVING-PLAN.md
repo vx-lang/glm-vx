@@ -303,6 +303,20 @@ Checks:
 
 Peers (2026-11-19): vx-94 the grouped block-FP8 GEMM; vx-7e item 6's top-k.
 
+**Status (2026-11-19, CPU emulator only; z32 is the first GPU run):**
+
+| piece | option | commit | checked |
+|---|---|---|---|
+| norms, adds, SwiGLU over the rows; Linears over the rows (cuBLASLt rows or per row) | `prefill_rows`, `prefill_gemm` | e7fd339 | `forward()`'s bits with per-row Linears |
+| sums over the rows under TP | `prefill_sum` | e7fd339 | `forward()`'s bits with 'rows', two emulated ranks |
+| routed experts grouped by expert | `prefill_moe='grouped'` | e7fd339 | a NumPy model of the quantized experts, per layer |
+| dense attention in one launch (kv_b expansion + causal `mha_prefill`) | `prefill_attention='mha'` | fd855f1 | logits within 1e-4; layer 0's caches bit for bit |
+| scheduler and TP lockstep | `prefill_tokens`, Lockstep `C` | e7fd339 | scheduler test; emulated ranks |
+
+Still a token at a time: the indexer's key rows (a launch or two each), and every token past index_topk (attention,
+indexer scores and top-k): W3's 32K prompt gains little until the indexer and sparse attention run over the chunk.
+`mha_prefill` is float32 on the CUDA cores until vx-7e's tensor-core version lands.
+
 ### 6. Long context: the indexer on every rank
 
 **Why.** Our step grows 1.35 ms from 1000 to 32768 tokens of context; SGLang's served TPOT grows 0.25 ms.
