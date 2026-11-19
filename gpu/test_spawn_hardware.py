@@ -1329,3 +1329,23 @@ def test_spawn_index_scores_mma16_at_is_mma_at_bit_for_bit(context, tokens, max_
     np.testing.assert_array_equal(download(got).view(np.uint32), download(want).view(np.uint32))
     np.testing.assert_array_equal(download(again).view(np.uint32), download(want).view(np.uint32))
     np.testing.assert_array_equal(download(hist), topk_bins(download(want)[:tokens]))
+
+
+# mha_prefill_tc (#63, item 5b): mha_prefill's causal attention on the tensor cores for GLM-5.3 at TP8 (8 heads,
+# nope 192, rope 64, value 256). Against float64 over bf16-rounded inputs to bf16 rounding, and against mha_prefill
+# (float32 on the CUDA cores) to that rounding plus the bf16 rounding of the inputs.
+@pytest.mark.parametrize('start,queries', [(0, 2048), (100, 5), (37, 130), (1000, 1048)])
+def test_spawn_mha_prefill_tc_is_mha_prefill_to_bf16_rounding(context, start, queries):
+    from gpu.test_spawn_rows_host import mha_float64, mha_tc_inputs
+    heads, scale = 8, np.float32(256 ** -0.5)
+    q, kv, k_rope = mha_tc_inputs(heads, start, queries, seed=start + queries)
+    inputs = dict(q=upload(context, q), kv=upload(context, kv), k_rope=upload(context, k_rope), start=start,
+                  queries=queries, heads=heads, nope=192, rot=64, value=256, scale=scale)
+    tc, cores = upload(context, np.zeros((queries, heads * 256), 'f4')), upload(context, np.zeros((queries, heads, 256), 'f4'))
+    SpawnKernel(context, BUILD / 'spawn/mha_prefill_tc.ptx').launch(o=tc, **inputs)
+    SpawnKernel(context, BUILD / 'spawn/mha_prefill.ptx').launch(o=cores, **inputs)
+    context.synchronize()
+    want = mha_float64(q, kv, k_rope, start, queries)
+    tol = 5e-3 * max(1.0, float(np.abs(want).max()))
+    np.testing.assert_allclose(download(tc).reshape(queries, heads, 256), want, rtol=0, atol=tol)
+    np.testing.assert_allclose(download(tc).reshape(queries, heads, 256), download(cores), rtol=0, atol=3 * tol)

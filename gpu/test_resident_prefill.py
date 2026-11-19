@@ -251,6 +251,32 @@ def test_mha_attention_is_the_absorbed_attention(graph):
     assert launches.get('mha_prefill', 0) == 2 * model.n_layers
 
 
+
+# GLM-5.3's head sizes on the tiny model: mha_prefill_tc takes nope 192, rope 64 and value 256 only.
+TC_HEADS = dict(qk_nope_head_dim=192, qk_rope_head_dim=64, qk_head_dim=256, v_head_dim=256, index_head_dim=128)
+
+
+def test_mha_tc_attention_is_the_mha_attention_to_bf16_rounding():
+    # prefill_attention='mha_tc': each dense mha_prefill launch becomes one of mha_prefill_tc (the tensor cores: bf16
+    # products, f32 sums). The prompt's last logits and the next token's agree with 'mha' (float32) to that rounding.
+    model = build(seed=3, index_topk=16, **TC_HEADS)
+    got = {}
+    for attention in ('mha', 'mha_tc'):
+        resident = ResidentGLM(model, ctx=Context(), max_tokens=32, prefill_attention=attention)
+        try:
+            assert resident.prefill_chunk(PROMPT[:4]) is None
+            last = resident.prefill_chunk(PROMPT[4:], logits=True)
+            got[attention] = last, resident.forward(NEXT), dict(resident.launches)
+        finally:
+            resident.close()
+    (last, after, launches), (tc_last, tc_after, tc_launches) = got['mha'], got['mha_tc']
+    np.testing.assert_allclose(tc_last, last, rtol=0, atol=5e-3 * float(np.abs(last).max()))
+    np.testing.assert_allclose(tc_after, after, rtol=0, atol=5e-3 * float(np.abs(after).max()))
+    assert launches.get('mha_prefill', 0) == 2 * model.n_layers and 'mha_prefill_tc' not in launches
+    assert tc_launches.get('mha_prefill_tc', 0) == 2 * model.n_layers and 'mha_prefill' not in tc_launches
+    with pytest.raises(ValueError, match="prefill_attention='mha_tc' needs nope 192"):
+        ResidentGLM(build(seed=3), ctx=Context(), max_tokens=32, prefill_attention='mha_tc')
+
 @pytest.mark.parametrize('graph', [False, True])
 def test_mha_attention_past_index_topk_selects_per_query(graph):
     # index_topk 4, a 10-token prompt in chunks of 3 and 7: the second chunk's queries at positions 3.. score the keys
