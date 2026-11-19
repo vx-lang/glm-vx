@@ -1,0 +1,131 @@
+{
+ "device": "NVIDIA H200",
+ "time": "2026-11-19T07:20:50Z",
+ "kernels": {
+  "fp8_gemm_grouped_m64": {
+   "ptx_sha256": "814851affe20b1a8f8191291181c88e2192cf064d97ebd8e4448b18fc27a981c",
+   "vxc": "vxc 0.0.4",
+   "ptxas_log": [
+    "ptxas info    : 0 bytes gmem",
+    "ptxas info    : Compiling entry function 'glm_vx_fp8_gemm_grouped_m64' for 'sm_90a'",
+    "ptxas info    : Function properties for glm_vx_fp8_gemm_grouped_m64",
+    "    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+    "ptxas info    : Used 230 registers, used 1 barriers",
+    "ptxas info    : Compile time = 49.888 ms"
+   ],
+   "dynamic_shared_bytes": 98368
+  },
+  "fp8_gemm_grouped_plan": {
+   "ptx_sha256": "f3f867e90867d3dca2c2e31b8e340c989b149a8d8fbb3d39989ec93153f0ae43",
+   "vxc": "vxc 0.0.4",
+   "ptxas_log": [
+    "ptxas info    : 0 bytes gmem",
+    "ptxas info    : Compiling entry function 'glm_vx_fp8_gemm_grouped_plan' for 'sm_90a'",
+    "ptxas info    : Function properties for glm_vx_fp8_gemm_grouped_plan",
+    "    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+    "ptxas info    : Used 14 registers, used 1 barriers, 4096 bytes smem",
+    "ptxas info    : Compile time = 7.390 ms"
+   ],
+   "dynamic_shared_bytes": 0
+  },
+  "fp8_gemm_m128": {
+   "ptx_sha256": "bd770c0fd31affbb519e0a98ec2286c967331f171b6fe18be2358adf8df2dbab",
+   "vxc": "vxc 0.0.4",
+   "ptxas_log": [
+    "ptxas info    : 0 bytes gmem",
+    "ptxas info    : Compiling entry function 'glm_vx_fp8_gemm_m128' for 'sm_90a'",
+    "ptxas info    : Function properties for glm_vx_fp8_gemm_m128",
+    "    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+    "ptxas info    : Used 218 registers, used 1 barriers",
+    "ptxas info    : Compile time = 75.702 ms"
+   ],
+   "dynamic_shared_bytes": 131136
+  },
+  "fp8_gemm_m64": {
+   "ptx_sha256": "3d59e086b4ec83b7254d34655d0ffaaabd11141f821a00c13d287766c8932067",
+   "vxc": "vxc 0.0.4",
+   "ptxas_log": [
+    "ptxas info    : 0 bytes gmem",
+    "ptxas info    : Compiling entry function 'glm_vx_fp8_gemm_m64' for 'sm_90a'",
+    "ptxas info    : Function properties for glm_vx_fp8_gemm_m64",
+    "    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+    "ptxas info    : Used 227 registers, used 1 barriers",
+    "ptxas info    : Compile time = 77.321 ms"
+   ],
+   "dynamic_shared_bytes": 98368
+  },
+  "fp8_gemm_reduce": {
+   "ptx_sha256": "2af541d5043ed64191723908da68ca35526414f66e7bf85c653d5b11f78698b5",
+   "vxc": "vxc 0.0.4",
+   "ptxas_log": [
+    "ptxas info    : 0 bytes gmem",
+    "ptxas info    : Compiling entry function 'glm_vx_fp8_gemm_reduce' for 'sm_90a'",
+    "ptxas info    : Function properties for glm_vx_fp8_gemm_reduce",
+    "    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads",
+    "ptxas info    : Used 32 registers, used 1 barriers",
+    "ptxas info    : Compile time = 9.037 ms"
+   ],
+   "dynamic_shared_bytes": 0
+  }
+ },
+ "eps_mma_bound": 0.0009765625,
+ "records": [
+  {
+   "m": 1,
+   "n": 2048,
+   "k": 6144,
+   "out": "uint16",
+   "variant": "m64",
+   "splits": 16,
+   "split_blocks": 3,
+   "grid": 256,
+   "block": 160,
+   "time_us": 157.9408049583435,
+   "tflops": 0.15933706306383222,
+   "gbps": 79.75403191925147,
+   "max_err_over_bound": 0.5282982647133365,
+   "median_err_over_bound": 0.07858023843578561,
+   "effective_eps_mma": 0.001282783159257359,
+   "max_rel_err": 0.0025241979578137304,
+   "c_sha256": "0eb1d0a9cf7a71e0"
+  },
+  {
+   "m": 7,
+   "n": 2048,
+   "k": 6144,
+   "out": "uint16",
+   "variant": "m64",
+   "splits": 16,
+   "split_blocks": 3,
+   "grid": 256,
+   "block": 160,
+   "time_us": 155.88480234146118,
+   "tflops": 1.1300701887161833,
+   "gbps": 81.20745454243068,
+   "max_err_over_bound": 0.579230244721163,
+   "median_err_over_bound": 0.07779526225890085,
+   "effective_eps_mma": 0.0017517767665014416,
+   "max_rel_err": 0.0033519155687907003,
+   "c_sha256": "efd7f5f450b5ff04"
+  },
+  {
+   "m": 64,
+   "n": 2048,
+   "k": 6144,
+   "out": "uint16",
+   "variant": "m64",
+   "splits": 16,
+   "split_blocks": 3,
+   "grid": 256,
+   "block": 160,
+   "time_us": 160.62560081481936,
+   "tflops": 10.027123496066043,
+   "gbps": 82.51257540994186,
+   "max_err_over_bound": 0.6149302697374343,
+   "median_err_over_bound": 0.07701671139177681,
+   "effective_eps_mma": 0.0017421169597627538,
+   "max_rel_err": 0.002441412726084462,
+   "c_sha256": "1d230b44210cf6af"
+  }
+ ]
+}

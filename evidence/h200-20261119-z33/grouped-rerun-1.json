@@ -1,0 +1,34 @@
+{
+ "device": "NVIDIA H200",
+ "time": "2026-11-19T07:41:37Z",
+ "records": [
+  {
+   "rows": 18432,
+   "experts": 256,
+   "n": 512,
+   "k": 6144,
+   "bf16": false,
+   "tiles_max": 544,
+   "experts_with_rows": 149,
+   "plan_us": 35.734400153160095,
+   "gemm_us": 312.49120235443115,
+   "gbps": 1994.81389332995,
+   "max_err_over_bound": 0.23995116412859926,
+   "max_rel_err": 0.00033473757451151203
+  },
+  {
+   "rows": 18432,
+   "experts": 256,
+   "n": 512,
+   "k": 6144,
+   "bf16": true,
+   "tiles_max": 544,
+   "experts_with_rows": 149,
+   "plan_us": 35.708799958229065,
+   "gemm_us": 300.7312059402466,
+   "gbps": 2010.0588567456746,
+   "max_err_over_bound": 0.5369110942494705,
+   "max_rel_err": 0.0031742005098055427
+  }
+ ]
+}

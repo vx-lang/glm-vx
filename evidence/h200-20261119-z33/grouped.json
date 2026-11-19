@@ -1,0 +1,98 @@
+{
+ "device": "NVIDIA H200",
+ "time": "2026-11-19T07:21:38Z",
+ "records": [
+  {
+   "rows": 300,
+   "experts": 8,
+   "n": 256,
+   "k": 512,
+   "tiles_max": 13,
+   "experts_with_rows": 6,
+   "max_err_over_bound": 0.5772334940454367,
+   "max_rel_err": 0.00048352562199052067
+  },
+  {
+   "rows": 1,
+   "experts": 4,
+   "n": 128,
+   "k": 128,
+   "tiles_max": 5,
+   "experts_with_rows": 1,
+   "max_err_over_bound": 0.4246815819735067,
+   "max_rel_err": 0.00036598112608934245
+  },
+  {
+   "rows": 65,
+   "experts": 2,
+   "n": 128,
+   "k": 256,
+   "tiles_max": 4,
+   "experts_with_rows": 2,
+   "max_err_over_bound": 0.5287878728106651,
+   "max_rel_err": 0.00024361214259061714
+  },
+  {
+   "rows": 200,
+   "experts": 16,
+   "n": 384,
+   "k": 1024,
+   "tiles_max": 20,
+   "experts_with_rows": 6,
+   "max_err_over_bound": 0.5776499592596768,
+   "max_rel_err": 0.00037814297539676904
+  },
+  {
+   "rows": 2304,
+   "experts": 256,
+   "n": 512,
+   "k": 6144,
+   "tiles_max": 292,
+   "experts_with_rows": 114,
+   "plan_us": 37.81760036945343,
+   "gemm_us": 121.62879705429077,
+   "gbps": 3107.9587166455863,
+   "max_err_over_bound": 0.3168557821494372,
+   "max_rel_err": 0.0003018400345878262
+  },
+  {
+   "rows": 18432,
+   "experts": 256,
+   "n": 512,
+   "k": 6144,
+   "tiles_max": 544,
+   "experts_with_rows": 149,
+   "plan_us": 35.760000348091125,
+   "gemm_us": 313.41919898986816,
+   "gbps": 1988.9074887851757,
+   "max_err_over_bound": 0.4794763421314455,
+   "max_rel_err": 0.00033473757451151203
+  },
+  {
+   "rows": 2304,
+   "experts": 256,
+   "n": 6144,
+   "k": 256,
+   "tiles_max": 292,
+   "experts_with_rows": 121,
+   "plan_us": 26.556798815727234,
+   "gemm_us": 262.58718967437744,
+   "gbps": 942.903453542538,
+   "max_err_over_bound": 0.9996250230838192,
+   "max_rel_err": 0.00040462473675436907
+  },
+  {
+   "rows": 18432,
+   "experts": 256,
+   "n": 6144,
+   "k": 256,
+   "tiles_max": 544,
+   "experts_with_rows": 163,
+   "plan_us": 36.73120141029358,
+   "gemm_us": 660.1647853851318,
+   "gbps": 1081.9878912252068,
+   "max_err_over_bound": 1.3079003212558789,
+   "max_rel_err": 0.00040971418550703225
+  }
+ ]
+}
