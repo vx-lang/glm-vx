@@ -156,8 +156,9 @@ class Fp8GroupedGemm:
             codes=b.data.reshape(-1)[:experts*n*k].reshape(experts,n,k)
             blocks=b_scale.data.reshape(-1)[:experts*(-(-n//128))*(-(-k//128))].reshape(experts,-(-n//128),-(-k//128)).astype(np.float64)
             o=out.data.reshape(-1)
+            starts=offsets.data.reshape(-1) if hasattr(offsets,'data') else np.asarray(offsets)  # device offsets (moe_group_offsets)
             for e in range(experts):
-                lo,hi=int(offsets[e]),int(offsets[e+1])
+                lo,hi=int(starts[e]),int(starts[e+1])
                 if hi>lo:
                     w=e4m3[codes[e]]*np.repeat(np.repeat(blocks[e],128,0),128,1)[:n,:k]
                     v=(x[lo:hi]@w.T).astype(np.float32).reshape(-1)

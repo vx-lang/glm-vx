@@ -1,8 +1,8 @@
 // glm_vx_spawn_fp8_quant_rows (#63, item 5b): rows of x as e4m3 codes with float32 scales, as gpu/fp8_quant.vx's
 // fp8_quant_groups does them (each 128 values of a row: scale max(|x|, 1e-10) / 448; codes of x / scale, nearest
 // even, clamped to +-448; NaN to the NaN code), the same bits, with the scales row-major, [rows, cols / 128] (the
-// per-token groups gpu/spawn/fp8_gemm's grouped GEMM reads). Row r is x's row src[r] with gather != 0 (the routed
-// experts' rows grouped by expert), else row r. One block of 32 warps a row: warp w quantizes groups w, w + 32,
+// per-token groups gpu/spawn/fp8_gemm's grouped GEMM reads). Row r is x's row src[r] / gather with gather > 0 (the
+// routed experts' rows grouped by expert: src is moe_group_place's order of pairs, gather their kk), else row r. One block of 32 warps a row: warp w quantizes groups w, w + 32,
 // ..; lane l of a group its values l, l + 32, l + 64, l + 96, as fp8_quant_groups. cols % 128 == 0.
 // spawn-include: device.vx
 
@@ -41,7 +41,7 @@ pub fn glm_vx_spawn_fp8_quant_rows(codes: &mut Tensor<u8, [?, ?], Memory::HBM>, 
     for row in 0..rows across blocks {
       let mut part = unsafe { Tensor<f32, [32, 32], Memory::SMEM>::uninit() };
       let groups: i32 = if cols % 128 == 0 { cols / 128 } else { 0 };
-      let from: i32 = if gather != 0 { src[row] } else { row };
+      let from: i32 = if gather > 0 { src[row] / gather } else { row };
       for round in 0..(groups + 31) / 32 {
         for w in 0..32 across subgroups {
           let g: i32 = w + 32 * round;

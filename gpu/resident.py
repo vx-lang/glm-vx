@@ -219,8 +219,6 @@ class ResidentGLM:
         # for bit; the logits are gathered from the ranks' vocabulary rows. A size of 1 is no split.
         self.tp = tp if tp is not None and tp.size > 1 else None
         if self.tp is not None:
-            if mtp:
-                raise NotImplementedError('tensor parallelism does not run the MTP layer yet')
             from .tp import ShardedModel
             model = ShardedModel(model, self.tp.rank, self.tp.size)
         self.model, self.config = model, model.config
@@ -1719,10 +1717,16 @@ class ResidentGLM:
     def _head(self, logits):
         """forward()'s output for the token whose final residual self.x holds: None with logits=False, the
         next token with 'greedy', else the logits."""
-        m, c = self.model, self.config
+        m = self.model
         if not logits:
             return None
         self._rmsnorm(self.x, self._weight('model.norm.weight'), self.norm, m.eps)
+        return self._head_of_norm(logits)
+
+    def _head_of_norm(self, logits):
+        """_head after its norm: lm_head on self.norm (under tensor parallelism each rank's vocabulary rows), then
+        the next token (logits='greedy') or the logits, gathered from the ranks."""
+        c = self.config
         head = 'model.embed_tokens' if c.get('tie_word_embeddings', False) else 'lm_head'
         greedy = logits == 'greedy'
         if self.tp is None:
@@ -2103,6 +2107,9 @@ class ResidentGLM:
             self._mtp_layer(position, reuse_selection)
         prefix = f'model.layers.{m.n_layers}'
         self._rmsnorm(self.x, self._weight(prefix + '.shared_head.norm.weight'), self.norm, m.eps)
+        if self.tp is not None:  # each rank's vocabulary rows, gathered (the token: the ranks' argmax pairs)
+            out = self._head_of_norm('greedy' if greedy else True)
+            return (out, self.norm) if greedy else (out, np.frombuffer(self.norm.download(), dtype=np.float32).copy())
         head = 'model.embed_tokens' if c.get('tie_word_embeddings', False) else 'lm_head'
         self._project(head, self.norm, self.logits)
         if greedy:
@@ -2757,12 +2764,20 @@ class ResidentGLM:
         gate = self._stacked_experts(prefix, 'gate_proj', shared=self._folds_shared(prefix))
         return gate[0] == 'fp8' and gate[2][0] % 128 == 0 and gate[2][1] % 128 == 0
 
-    def _prefill_route(self, prefix, x, count, k):
-        """Each of the first count rows' experts and weights, [count, k] each, on the host: router_logits_rows and
-        router_topk_rows for a BF16 gate of at most 256 experts (router_bf16's bits), else _route a row."""
+    def _prefill_route(self, prefix, x, count, k, kk):
+        """Each of the first count rows' experts and weights on the device, [rows, kk] int32 and f32 (columns k and up,
+        fold_shared's shared expert, hold n_routed_experts and 1.0 from their allocation): router_logits_rows and
+        router_topk_rows for a BF16 gate of at most 256 experts (router_bf16's bits); otherwise _route a row and an
+        upload (a host round trip a token: tests' float32 routers only)."""
         c = self.config
         experts = int(c['n_routed_experts'])
-        ids, weights = self._prefill_rows('route_ids', k, 'int32'), self._prefill_rows('route_weights', k)
+        key = ('route', kk)
+        buffers = self.__dict__.setdefault('_route_rows', {})
+        if key not in buffers:
+            rows = self._prefill_buffer_rows()
+            ids0, w0 = np.full((rows, kk), experts, np.int32), np.ones((rows, kk), np.float32)
+            buffers[key] = (self._tensor((rows, kk), 'int32', ids0), self._tensor((rows, kk), 'float32', w0))
+        ids, weights = buffers[key]
         if self._format(prefix + '.gate') == 'bf16' and experts <= 256 and k <= 8:
             bits, (rows, cols) = self._bf16_weight(prefix + '.gate')
             if rows == experts and cols % 8 == 0 and cols <= 8192:
@@ -2773,14 +2788,15 @@ class ResidentGLM:
                 self._spawn('router_topk_rows', indices=ids, weights=weights, logits=logits,
                             bias=self._weight(prefix + '.gate.e_score_correction_bias'), tokens=count, experts=experts,
                             k=k, scale=scale)
-                return (np.frombuffer(ids.view((count * k,), 'int32').download(), np.int32).reshape(count, k).copy(),
-                        np.frombuffer(weights.view((count * k,)).download(), np.float32).reshape(count, k).copy())
-        out_ids, out_weights = np.zeros((count, k), np.int32), np.zeros((count, k), np.float32)
+                return ids, weights
+        host_ids, host_weights = np.full((count, kk), experts, np.int32), np.ones((count, kk), np.float32)
         for i in range(count):
             self._route(prefix, self._prefill_row(x, i))
-            out_ids[i] = np.frombuffer(self.route_ids.download(), np.int32)[:k]
-            out_weights[i] = np.frombuffer(self.route_weights.download(), np.float32)[:k]
-        return out_ids, out_weights
+            host_ids[i, :k] = np.frombuffer(self.route_ids.download(), np.int32)[:k]
+            host_weights[i, :k] = np.frombuffer(self.route_weights.download(), np.float32)[:k]
+        ids.view((count * kk,), 'int32').upload(host_ids.tobytes())
+        weights.view((count * kk,)).upload(host_weights.tobytes())
+        return ids, weights
 
     def _grouped_rows(self, name, width, dtype='float32'):
         """A [rows, width] matrix for prefill_chunk's grouped (token, expert) rows: the capacity's bucket times the
@@ -2792,63 +2808,60 @@ class ResidentGLM:
         return buffers[name, width, dtype]
 
     def _prefill_moe_grouped(self, prefix, x, count):
-        """The routed experts of the first count rows of x, grouped by expert (prefill_moe='grouped'): each row's k
-        experts (and the shared expert last, with fold_shared), the (token, expert) pairs sorted by expert on the
-        host, the rows gathered and quantized to e4m3 per 128 columns (fp8_quant_rows), gate and up as grouped
-        block-FP8 GEMMs, SwiGLU, the activations quantized, down, and each token's rows weighted and added in
-        ascending expert id (moe_combine_rows: moe_down's order). Returns this rank's part, one row a token."""
+        """The routed experts of the first count rows of x, grouped by expert (prefill_moe='grouped'), all on the device:
+        each row's k experts (and the shared expert last, with fold_shared; _prefill_route); the (token, expert) pairs
+        grouped by expert in pair order (moe_group_count / _offsets / _place: Vx's std::nn counting sort) and each
+        token's grouped rows ranked by expert id (moe_group_finish); the rows gathered and quantized to e4m3 per 128
+        columns (fp8_quant_rows); gate and up as grouped block-FP8 GEMMs, SwiGLU, the activations quantized, down (bf16
+        C); each token's rows weighted and added in ascending expert id (moe_combine_rows_bf16: moe_down's order).
+        Returns this rank's part, one row a token."""
         c = self.config
         experts, k = int(c['n_routed_experts']), int(c['num_experts_per_tok'])
         shared = self._folds_shared(prefix)
         kk, total = (k + 1, experts + 1) if shared else (k, experts)
         gate, up, down = (self._stacked_experts(prefix, n, shared=shared) for n in ('gate_proj', 'up_proj', 'down_proj'))
         inter, hidden = gate[2]
-        ids, weights = self._prefill_route(prefix, x, count, k)
-        if shared:  # the shared expert: id n_routed_experts, weight 1.0, as _device_moe's slot k
-            ids = np.concatenate([ids, np.full((count, 1), experts, np.int32)], 1)
-            weights = np.concatenate([weights, np.ones((count, 1), np.float32)], 1)
+        ids, weights = self._prefill_route(prefix, x, count, k, kk)
         rows = count * kk
-        order = np.argsort(ids.ravel(), kind='stable')  # by expert, then token: the grouped rows
-        src = (order // kk).astype(np.int32)
-        slot_of = np.empty(rows, np.int32)
-        slot_of[order] = np.arange(rows, dtype=np.int32)
-        by_id = np.argsort(ids, axis=1, kind='stable')
-        tokens = np.arange(count)[:, None]
-        slots, ordered = slot_of.reshape(count, kk)[tokens, by_id], weights[tokens, by_id]
-        offsets = np.searchsorted(ids.ravel()[order], np.arange(total + 1)).astype(np.int32)
         capacity = self._grouped_rows('y', hidden, 'uint16').shape[0]
-        index = self._grouped_rows('index', 1, 'int32').view((capacity,), 'int32')
-        index.view((rows,), 'int32').upload(src.tobytes())
-        table = self._prefill_rows('combine_slots', kk + 1, 'int32')  # [count, kk] slots, then the offsets
-        table.view((count * kk,), 'int32').upload(slots.astype(np.int32).tobytes())
-        offsets_dev = self._prefill_rows('group_offsets', 1, 'int32').view((total + 1,), 'int32') if total + 1 <= table.shape[0] \
-            else self._tensor((total + 1,), 'int32')
-        offsets_dev.upload(offsets.tobytes())
-        combine_weights = self._prefill_rows('combine_weights', kk)
-        combine_weights.view((count * kk,)).upload(ordered.astype(np.float32).tobytes())
+        blocks = -(-capacity // 256)
+        meta = self.__dict__.setdefault('_group_meta', {})
+        if total not in meta:
+            meta[total] = (self._tensor((blocks, total), 'int32'), self._tensor((blocks, total), 'int32'),
+                           self._tensor((total + 1,), 'int32'), self._tensor((capacity,), 'int32'),
+                           self._tensor((capacity,), 'int32'), self._tensor((capacity,), 'int32'),
+                           self._tensor((capacity,), 'int32'))
+        counts, base, starts, order_all, tiles_all, slots_all, picks_all = meta[total]
+        flat_ids = ids.view((ids.shape[0] * kk,), 'int32').view((rows,), 'int32')
+        order, tile_expert = order_all.view((rows,), 'int32'), tiles_all.view((rows,), 'int32')
+        self._spawn('moe_group_count', counts=counts, ids=flat_ids, n=rows, experts=total)
+        self._spawn('moe_group_offsets', base=base, starts=starts, tile_expert=tile_expert, order=order, counts=counts,
+                    n=rows, experts=total, align=1)
+        self._spawn('moe_group_place', order=order, ids=flat_ids, base=base, n=rows)
+        self._spawn('moe_group_finish', slots=slots_all, picks=picks_all, order=order, ids=flat_ids, rows=rows, kk=kk)
         a_codes, a_scales = self._grouped_rows('a_codes', hidden, 'uint8'), self._grouped_rows('a_scales', hidden // 128)
-        self._spawn('fp8_quant_rows', codes=a_codes, scales=a_scales, x=x, src=index, rows=rows, cols=hidden, gather=1)
+        self._spawn('fp8_quant_rows', codes=a_codes, scales=a_scales, x=x, src=order_all, rows=rows, cols=hidden, gather=kk)
         g, u, act = (self._grouped_rows(n, inter) for n in ('gate', 'up', 'act'))
-        self._grouped_gemm(a_codes, a_scales, gate[1], g, offsets, offsets_dev, rows, inter, hidden, total)
-        self._grouped_gemm(a_codes, a_scales, up[1], u, offsets, offsets_dev, rows, inter, hidden, total)
+        self._grouped_gemm(a_codes, a_scales, gate[1], g, starts, rows, inter, hidden, total)
+        self._grouped_gemm(a_codes, a_scales, up[1], u, starts, rows, inter, hidden, total)
         n = rows * inter
         self._swiglu(g.view((n,)), u.view((n,)), act.view((n,)), n)
         q_codes, q_scales = self._grouped_rows('q_codes', inter, 'uint8'), self._grouped_rows('q_scales', inter // 128)
-        self._spawn('fp8_quant_rows', codes=q_codes, scales=q_scales, x=act, src=index, rows=rows, cols=inter, gather=0)
+        self._spawn('fp8_quant_rows', codes=q_codes, scales=q_scales, x=act, src=order_all, rows=rows, cols=inter, gather=0)
         y = self._grouped_rows('y', hidden, 'uint16')  # down's C in bf16: half the bytes of its largest write
-        self._grouped_gemm(q_codes, q_scales, down[1], y, offsets, offsets_dev, rows, hidden, inter, total)
+        self._grouped_gemm(q_codes, q_scales, down[1], y, starts, rows, hidden, inter, total)
         moe = self._prefill_rows('moe_sum', self.hidden)
-        self._spawn('moe_combine_rows_bf16', out=moe, y=y, slots=table.view((count, kk), 'int32'),
-                    weights=combine_weights.view((count, kk)), tokens=count, cols=hidden, kk=kk)
+        self._spawn('moe_combine_rows_bf16', out=moe, y=y, slots=slots_all.view((capacity // kk, kk), 'int32'),
+                    picks=picks_all.view((capacity // kk, kk), 'int32'), weights=weights, tokens=count, cols=hidden, kk=kk)
         self.launches['grouped_moe'] = self.launches.get('grouped_moe', 0) + 1
         return moe
 
-    def _grouped_gemm(self, a, a_scales, stack, out, offsets, offsets_dev, rows, n, k, experts):
+    def _grouped_gemm(self, a, a_scales, stack, out, offsets, rows, n, k, experts):
         """out[r] = W[e] a[r] for the grouped rows r of each expert e (offsets[e] <= r < offsets[e + 1]), float32 or (out
         uint16) bf16 bits rounded to nearest even: a's e4m3
         codes and row-major per-128 scales against the stacked experts' codes and 128x128 block scales. A test
         context's fp8_grouped_gemm, else gpu/spawn/fp8_gemm's grouped GEMM (its tile table planned on the device
-        from offsets_dev; the tensor maps over the buffers' whole rows, so their few shapes are cached)."""
+        from the device offsets; the tensor maps over the buffers' whole rows, so their few shapes are cached)."""
         codes, scales = stack
         factory = getattr(self.ctx, 'fp8_grouped_gemm', None)
         if factory is not None:
@@ -2861,7 +2874,7 @@ class ResidentGLM:
         tiles = self.__dict__.setdefault('_grouped_tiles', {}).get(experts)
         if tiles is None:
             tiles = self._grouped_tiles[experts] = self._tensor((1 + 3 * grouped_tiles_max(capacity, experts),), 'int32')
-        self._grouped.plan(offsets_dev, tiles, rows=capacity, experts=experts, stream=self.stream)
+        self._grouped.plan(offsets, tiles, rows=capacity, experts=experts, stream=self.stream)
         flat = lambda tensor, dtype='float32': tensor.view((int(np.prod(tensor.shape)),), dtype)  # its parameters are 1-D
         self._grouped.gemm(flat(a, 'uint8'), flat(a_scales), flat(codes, 'uint8'), flat(scales), flat(out, str(out.dtype)), tiles,
                            rows=capacity, n=n, k=k, experts=experts, stream=self.stream)

@@ -1,0 +1,34 @@
+// glm_vx_spawn_moe_group_count (#63, item 5b): Vx's std::nn nn_moe_group_count (a counting sort's first kernel): counts[b][e]
+// = the pairs of expert e among pairs 256 b .. 256 b + 255 of ids. prefill_chunk's grouped experts, on the device.
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_moe_group_count(counts : &mut Tensor<i32, [?, ?], Memory::HBM>, ids : &Tensor<i32, [?], Memory::HBM>, n : i32, experts : i32) -> void {
+  spawn on(Topology::Device) {
+    for b in 0..(n + 255) / 256 across blocks {
+      let mut keys = unsafe { Tensor<i32, [256], Memory::SMEM>::uninit() };
+      for l in 0..1024 across lanes {
+        if l < 256 {
+          let p = b * 256 + l;
+          let mut id = -1;
+          if p < n {
+            id = ids[p];
+            assert(id >= 0 && id < experts, "nn_moe_group_count: an id is not the number of an expert");
+          }
+          keys[l] = id;
+        }
+      }
+      for e in 0..1024 across lanes {
+        if e < experts {
+          let mut count = 0;
+          for j in 0..256 {
+            if keys[j] == e {
+              count = count + 1;
+            }
+          }
+          counts[b][e] = count;
+        }
+      }
+    }
+  }
+  return;
+}
