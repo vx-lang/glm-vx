@@ -790,7 +790,8 @@ class ResidentGLM:
         cache = 'uint16' if self.mla_kernel == 'tc' else 'float32'  # mla_kernel='tc': bf16 bits
         self.latents = [t((cap, self.rank), cache) for _ in range(layers)]
         self.rope_keys = [t((cap, self.rot), cache) for _ in range(layers)]
-        self.index_keys = [t((cap, self.index_dim)) if m.indexer_type(i) == 'full' else None
+        # rows a multiple of 32: prefill_chunk converts 32 key rows at a time to bf16 words (index_q_bf16_at)
+        self.index_keys = [t((-(-cap // 32) * 32, self.index_dim)) if m.indexer_type(i) == 'full' else None
                            for i in range(layers)]
         # index_kernel='fp8': each full indexer's key rows also as E4M3 codes (128 bytes, 32 words a row)
         # and a scale a row, written by index_key_fp8_at as the rows are cached.
@@ -2671,9 +2672,27 @@ class ResidentGLM:
         scores = self._prefill_rows('index_scores_rows', self._prefill_bucket(self.max_tokens))  # [queries, keys]
         layer = int(prefix.split('.')[2])
         keys = self.index_keys[layer]
-        self._spawn('index_scores_rows', scores=scores.view((scores.shape[0], scores.shape[1])), q=q3,
-                    keys=keys.view((keys.shape[0], dim)), weights=weights, start=start, queries=count, heads=heads,
-                    dim=dim, scale=_f32(dim ** -0.5, 'scale'))
+        scale = _f32(dim ** -0.5, 'scale')
+        if heads == 32 and dim == 128 and getattr(self.ctx, 'spawn_kernel', None) is None:
+            # On a GPU: vx-94's index_scores_chunk_at on the tensor cores (gpu/index_chunk.py): q and the keys in bf16
+            # words, as index_kernel 'mma' rounds them; the key rows 32 to a 4096-wide row for index_q_bf16_at.
+            from .index_chunk import IndexChunkScores
+            if getattr(self, '_index_chunk', None) is None:
+                self._index_chunk = IndexChunkScores(self.ctx, self._ptx_dir / 'spawn' / 'index_mma')
+            cap = keys.shape[0]
+            words = self._prefill_key_rows('index_key_words', 64, 'int32')  # [>= cap, 64]
+            blocks = -(-(start + count) // 32)
+            self._index_chunk.q_bf16.launch(words=words.view((words.shape[0] // 32, 2048), 'int32'),
+                                            q=keys.view((cap // 32, 4096)), rows=blocks, stream=self.stream)
+            q_words = rows('iq_words', 2048, 'int32')
+            self._index_chunk(scores.view((scores.shape[0], scores.shape[1])), q_words, words, weights, rows=count,
+                              start=start, max_tokens=cap, scale=scale, q=q.view((q.shape[0], heads * dim)),
+                              stream=self.stream)
+            self.launches['index_scores_chunk'] = self.launches.get('index_scores_chunk', 0) + 1
+        else:
+            self._spawn('index_scores_rows', scores=scores.view((scores.shape[0], scores.shape[1])), q=q3,
+                        keys=keys.view((keys.shape[0], dim)), weights=weights, start=start, queries=count, heads=heads,
+                        dim=dim, scale=scale)
         self._spawn('topk_select_rows', out_ids=rows('selected_rows', self.index_topk, 'int32'),
                     scores=scores.view(scores.shape, 'int32'), start=start, rows=count, k=self.index_topk)
         self._prefill_selected_layer = layer
