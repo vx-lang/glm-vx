@@ -261,7 +261,17 @@ This is the only route to a TTFT near SGLang's. The target is within 2x of SGLan
 **Why.** Our step grows 1.35 ms from 1000 to 32768 tokens of context; SGLang's served TPOT grows 0.25 ms.
 gpu/tp.py keeps the DSA indexer the same on every rank, so all 8 score every key on its 21 layers.
 
-**First, profile.** nsys a 32K step and split it into indexer scores, top-k (`ilp_hist`) and sparse attention.
+**Profiled on one H200** (`evidence/h200-20261119-z23`, per rank, since every TP8 rank runs the full indexer).
+A full-indexer layer at 32768 tokens:
+- `topk_select_ilp_hist_at` 38.7 us;
+- `index_scores_mma_hist_at` 7.5 us;
+- MLA +1.8 us and the merge +2.1 us over 1000 tokens.
+
+Over TP8's 21 full-indexer layers that is about 0.97 ms of the 1.35 ms growth, 0.81 ms of it top-k. SGLang's
+`fast_topk_v2` does the same k = 2048 at 32768 in 21.4 us. So the first lever is our single-GPU top-k, about
+−0.36 ms at SGLang's speed; splitting the indexer across ranks comes after.
+
+**First, profile** (done above). nsys a 32K step and split it into indexer scores, top-k (`ilp_hist`) and sparse attention.
 For comparison, SGLang's kernel sums at 32768 are in `evidence/h200-20261118-z5/nsys-sglang-32768_cuda_gpu_kern_sum.csv`.
 
 **Then, likely:**

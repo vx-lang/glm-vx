@@ -1,0 +1,1 @@
+{'indexer_types': ['full', 'full', 'full', 'shared'], 'index_topk_freq': 4, 'index_skip_topk_offset': 3, 'index_topk_pattern': None, 'mlp_layer_types': ['dense', 'dense', 'dense', 'sparse']}

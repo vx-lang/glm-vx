@@ -1,0 +1,41 @@
+71586 kernels on GPU (0) ; 25 steps with a head
+step -3: 70 kernels, span 1185 us, busy 1180 us, host gap before it 430 us
+      428.6 us    1x  428.6  glm_vx_spawn_bf16_matvec4
+      233.8 us   11x   21.3  glm_vx_spawn_fp8_matvec_cvt_tiles
+      222.7 us    4x   55.7  glm_vx_spawn_fp8_moe_cvt_gate_up
+       56.7 us    1x   56.7  glm_vx_spawn_fp8_moe_mma16_down_at
+       49.8 us    4x   12.4  glm_vx_spawn_mla_tc_at
+       38.3 us    4x    9.6  glm_vx_spawn_fp8_matvec_cvt_tiles3
+       25.0 us    4x    6.2  glm_vx_spawn_fp8_matvec_heads_cvt
+       23.1 us    7x    3.3  glm_vx_gpu_residual_rmsnorm8
+       21.5 us    4x    5.4  glm_vx_spawn_fp8_matvec_cols_cvt
+       18.1 us    4x    4.5  glm_vx_spawn_mla_flash_merge_at
+       10.8 us    4x    2.7  glm_vx_gpu_rmsnorm_pair
+       10.8 us    1x   10.8  glm_vx_spawn_router_bf16
+        8.9 us    4x    2.2  glm_vx_spawn_kv_rows_bf16_at
+        7.3 us    3x    2.4  glm_vx_gpu_index_key_at
+        7.3 us    4x    1.8  glm_vx_spawn_mla_q_bf16_at
+        6.2 us    2x    3.1  glm_vx_gpu_rmsnorm
+        5.4 us    4x    1.4  glm_vx_gpu_rope_strided
+        4.3 us    3x    1.4  glm_vx_gpu_copy
+        2.0 us    1x    2.0  glm_vx_gpu_add
+step -2: 70 kernels, span 1180 us, busy 1174 us, host gap before it 458 us
+      428.9 us    1x  428.9  glm_vx_spawn_bf16_matvec4
+      231.8 us   11x   21.1  glm_vx_spawn_fp8_matvec_cvt_tiles
+      222.7 us    4x   55.7  glm_vx_spawn_fp8_moe_cvt_gate_up
+       53.6 us    1x   53.6  glm_vx_spawn_fp8_moe_mma16_down_at
+       49.9 us    4x   12.5  glm_vx_spawn_mla_tc_at
+       37.8 us    4x    9.4  glm_vx_spawn_fp8_matvec_cvt_tiles3
+       24.7 us    4x    6.2  glm_vx_spawn_fp8_matvec_heads_cvt
+       23.4 us    7x    3.3  glm_vx_gpu_residual_rmsnorm8
+       21.1 us    4x    5.3  glm_vx_spawn_fp8_matvec_cols_cvt
+       17.9 us    4x    4.5  glm_vx_spawn_mla_flash_merge_at
+       10.7 us    4x    2.7  glm_vx_gpu_rmsnorm_pair
+       10.6 us    1x   10.6  glm_vx_spawn_router_bf16
+        9.1 us    4x    2.3  glm_vx_spawn_kv_rows_bf16_at
+        7.6 us    3x    2.5  glm_vx_gpu_index_key_at
+        7.2 us    4x    1.8  glm_vx_spawn_mla_q_bf16_at
+        6.2 us    2x    3.1  glm_vx_gpu_rmsnorm
+        5.3 us    4x    1.3  glm_vx_gpu_rope_strided
+        4.1 us    3x    1.4  glm_vx_gpu_copy
+        2.0 us    1x    2.0  glm_vx_gpu_add
