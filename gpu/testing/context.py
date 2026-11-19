@@ -146,7 +146,8 @@ class Fp8BlockMatmul:
 class Fp8GroupedGemm:
     """gpu/fp8_gemm.FP8GroupedGEMM's contract (ResidentGLM._grouped_gemm): for each expert e, the grouped rows
     offsets[e] <= r < offsets[e + 1] of a (e4m3 codes, row-major per-128 scales) times expert e's codes with their
-    128x128 block scales, as float64 NumPy rounded to float32 once; the wgmma kernel's own order is the GPU tests'."""
+    128x128 block scales, as float64 NumPy rounded to float32 once (then to bf16 for a uint16 out); the wgmma kernel's
+    own order is the GPU tests'."""
     def __call__(self,a,a_scale,b,b_scale,out,offsets,*,rows,n,k,experts,stream=None):
         from gpu import fp8_quant
         def work():
@@ -159,7 +160,10 @@ class Fp8GroupedGemm:
                 lo,hi=int(offsets[e]),int(offsets[e+1])
                 if hi>lo:
                     w=e4m3[codes[e]]*np.repeat(np.repeat(blocks[e],128,0),128,1)[:n,:k]
-                    o[lo*n:hi*n]=(x[lo:hi]@w.T).astype(np.float32).reshape(-1)
+                    v=(x[lo:hi]@w.T).astype(np.float32).reshape(-1)
+                    if o.dtype==np.uint16:  # bf16 C: nearest even
+                        bits=v.view(np.uint32).astype(np.uint64); v=((bits+0x7FFF+((bits>>16)&1))>>16).astype(np.uint16)
+                    o[lo*n:hi*n]=v
         _run(stream,work)
 class Context:
     name='cpu-simt-test-only'

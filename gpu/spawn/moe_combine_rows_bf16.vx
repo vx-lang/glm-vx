@@ -1,0 +1,22 @@
+// glm_vx_spawn_moe_combine_rows_bf16 (#63, item 5b): moe_combine_rows over the grouped GEMM's bf16 output (down's C as
+// bf16 halves its write), each term widened to f32 exactly: out[t] = sum over j < kk of weights[t][j] * y[slots[t][j]], the
+// terms in j's order from +0.0: each token's routed experts' rows of the grouped GEMM's output y, weighted, in the
+// order the caller gives (ascending expert id, the shared expert last: moe_down's order). One block a token.
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_moe_combine_rows_bf16(out: &mut Tensor<f32, [?, ?], Memory::HBM>, y: &Tensor<bf16, [?, ?], Memory::HBM>,
+                                     slots: &Tensor<i32, [?, ?], Memory::HBM>, weights: &Tensor<f32, [?, ?], Memory::HBM>,
+                                     tokens: i32, cols: i32, kk: i32) -> void {
+  spawn on(Topology::Device) {
+    for t in 0..tokens across blocks {
+      for d in 0..cols across lanes(256) {
+        let mut acc: f32 = 0.0;
+        for j in 0..kk {
+          acc = acc + weights[t][j] * (y[slots[t][j]][d] as f32);
+        }
+        out[t][d] = acc;
+      }
+    }
+  }
+  return;
+}

@@ -2810,7 +2810,7 @@ class ResidentGLM:
         tokens = np.arange(count)[:, None]
         slots, ordered = slot_of.reshape(count, kk)[tokens, by_id], weights[tokens, by_id]
         offsets = np.searchsorted(ids.ravel()[order], np.arange(total + 1)).astype(np.int32)
-        capacity = self._grouped_rows('y', hidden).shape[0]
+        capacity = self._grouped_rows('y', hidden, 'uint16').shape[0]
         index = self._grouped_rows('index', 1, 'int32').view((capacity,), 'int32')
         index.view((rows,), 'int32').upload(src.tobytes())
         table = self._prefill_rows('combine_slots', kk + 1, 'int32')  # [count, kk] slots, then the offsets
@@ -2829,16 +2829,17 @@ class ResidentGLM:
         self._swiglu(g.view((n,)), u.view((n,)), act.view((n,)), n)
         q_codes, q_scales = self._grouped_rows('q_codes', inter, 'uint8'), self._grouped_rows('q_scales', inter // 128)
         self._spawn('fp8_quant_rows', codes=q_codes, scales=q_scales, x=act, src=index, rows=rows, cols=inter, gather=0)
-        y = self._grouped_rows('y', hidden)
+        y = self._grouped_rows('y', hidden, 'uint16')  # down's C in bf16: half the bytes of its largest write
         self._grouped_gemm(q_codes, q_scales, down[1], y, offsets, offsets_dev, rows, hidden, inter, total)
         moe = self._prefill_rows('moe_sum', self.hidden)
-        self._spawn('moe_combine_rows', out=moe, y=y, slots=table.view((count, kk), 'int32'),
+        self._spawn('moe_combine_rows_bf16', out=moe, y=y, slots=table.view((count, kk), 'int32'),
                     weights=combine_weights.view((count, kk)), tokens=count, cols=hidden, kk=kk)
         self.launches['grouped_moe'] = self.launches.get('grouped_moe', 0) + 1
         return moe
 
     def _grouped_gemm(self, a, a_scales, stack, out, offsets, offsets_dev, rows, n, k, experts):
-        """out[r] = W[e] a[r] for the grouped rows r of each expert e (offsets[e] <= r < offsets[e + 1]): a's e4m3
+        """out[r] = W[e] a[r] for the grouped rows r of each expert e (offsets[e] <= r < offsets[e + 1]), float32 or (out
+        uint16) bf16 bits rounded to nearest even: a's e4m3
         codes and row-major per-128 scales against the stacked experts' codes and 128x128 block scales. A test
         context's fp8_grouped_gemm, else gpu/spawn/fp8_gemm's grouped GEMM (its tile table planned on the device
         from offsets_dev; the tensor maps over the buffers' whole rows, so their few shapes are cached)."""
@@ -2856,7 +2857,7 @@ class ResidentGLM:
             tiles = self._grouped_tiles[experts] = self._tensor((1 + 3 * grouped_tiles_max(capacity, experts),), 'int32')
         self._grouped.plan(offsets_dev, tiles, rows=capacity, experts=experts, stream=self.stream)
         flat = lambda tensor, dtype='float32': tensor.view((int(np.prod(tensor.shape)),), dtype)  # its parameters are 1-D
-        self._grouped.gemm(flat(a, 'uint8'), flat(a_scales), flat(codes, 'uint8'), flat(scales), flat(out), tiles,
+        self._grouped.gemm(flat(a, 'uint8'), flat(a_scales), flat(codes, 'uint8'), flat(scales), flat(out, str(out.dtype)), tiles,
                            rows=capacity, n=n, k=k, experts=experts, stream=self.stream)
         return out
 

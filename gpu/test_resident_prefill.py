@@ -159,6 +159,11 @@ def silu(x):
     return x / (1.0 + np.exp(-x))
 
 
+def bf16_values(x):
+    b = np.asarray(x, np.float32).view(np.uint32).astype(np.uint64)
+    return (((b + 0x7FFF + ((b >> 16) & 1)) >> 16) << 16).astype(np.uint32).view(np.float32)
+
+
 @pytest.mark.parametrize('fold', [False, True])
 def test_grouped_experts_are_the_quantized_experts_of_each_token(fold):
     # prefill_moe='grouped' on one MoE layer against NumPy: each token's experts and weights from forward()'s
@@ -208,7 +213,8 @@ def test_grouped_experts_are_the_quantized_experts_of_each_token(fold):
         for name, w in names:
             g, u = dense(name + '.gate_proj') @ xq, dense(name + '.up_proj') @ xq
             act = (silu(g.astype(np.float32)) * u.astype(np.float32)).astype(np.float32)
-            want[t] += w * (dense(name + '.down_proj') @ quantized(act))
+            y = (dense(name + '.down_proj') @ quantized(act)).astype(np.float32)  # down's C in bf16
+            want[t] += w * bf16_values(y)
     np.testing.assert_allclose(got, want, rtol=2e-4, atol=2e-4 * np.abs(want).max())
 
 
