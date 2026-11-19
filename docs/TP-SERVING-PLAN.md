@@ -366,6 +366,51 @@ Measured on one H200 since:
 - `router_bf16`'s top-k in one warp: 12.2 to 10.5 us, the same bits (af6d4d2).
 - `moe_mma` down: 10.3 us against `down2`'s 18.5 (item 4).
 
+### 8. MTP speculative decoding under tensor parallelism (planned 2026-11-19)
+
+**Why.** Our SGLang baseline (z6) runs without speculation, as benchmarks/SGLANG-SETUP.md requires. But SGLang can
+serve GLM-5.3 with its MTP layer (`num_nextn_predict_layers: 1`, model.layers.78) as a drafter
+(`--speculative-algorithm` NEXTN/EAGLE). At batch 1 that typically cuts TPOT 1.5-2x, which is far more than our
+current ~7% lead (W1 8.55 vs 9.18 ms, z27d). To stay ahead of SGLang in its fastest configuration, we need MTP under
+TP.
+
+**What exists (one GPU, #16).**
+- `ResidentGLM(mtp=True)`: `mtp_step` drafts with the MTP layer (its own MLA cache, indexer and MoE).
+- `forward_many`: verifies 1-4 tokens in one step, with forward()'s bits.
+- `rewind`, and `glm_vx/speculative.py`'s greedy accept loop.
+- GPU-checked on the H100 (`test-speculative-resident`).
+- Under TP, ResidentGLM refuses `mtp=True` and forward_many raises.
+
+**Plan, in order:**
+1. **Shard the MTP layer** as gpu/tp.ShardedModel shards a MoE layer: its heads, its experts' intermediate columns,
+   the sums after o_proj and the FFN. eh_proj [hidden, 2 hidden] is replicated (75 MB FP8 a rank), or split by
+   columns with one more all-reduce. enorm, hnorm and the shared head's norm are replicated; lm_head is the
+   model's, vocabulary-split.
+2. **Verify under TP with prefill_chunk.** It now runs any number of tokens under TP.
+   - It needs a per-row greedy output: argmax_pair over each rank's vocabulary rows for every row, and one
+     all-gather of [rows, 2] pairs.
+   - It also needs the rows' final hidden states, for the next draft.
+3. **Make a 2-4 row step cheap.** cuBLASLt rows and the grouped MoE are tuned for big chunks. For k + 1 <= 4 rows,
+   the step graph should run the decode kernels:
+   - Linears reading each weight once for up to 4 rows (cvt, as fp8_matvec4_rows does for x4);
+   - attention a row at a time with mla_tc_at;
+   - the routed experts a row at a time.
+   - The experts are the cost: k = 1 roughly doubles the MoE bytes. Expected cost of a 2-row verify step is about
+     1.35x a decode step. With ~1.8 tokens accepted a step, that is ~1.3x TPOT. k = 2-3 gains more if acceptance
+     holds (estimates, to measure).
+4. **Accept on the device** (as device_decode): compare drafts with the verify step's argmax on the GPU, write the
+   accepted count and the next token to the step buffer, and launch the next draft before the host reads anything.
+5. **Lockstep and scheduler.** New follower commands for the draft and verify steps; glm_vx/speculative.py over
+   Lockstep.
+6. **Checks.**
+   - Greedy output equal to non-speculative greedy, up to the verify path's rounding.
+   - GSM8K.
+   - The acceptance rate on W1 and ShareGPT.
+   - TPOT against SGLang with `--speculative-algorithm NEXTN` on the same VM, both engines in one session.
+
+Peers could take a multi-row MoE kernel (2-4 tokens' experts in one launch, a shared expert read once) and
+multi-query mla_tc_at (k + 1 queries a launch).
+
 ## Expected totals (estimates)
 
 | after | W1 served TPOT | vs SGLang 9.18 |
