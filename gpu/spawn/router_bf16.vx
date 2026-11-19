@@ -6,21 +6,18 @@
 //     are glm_vx_gpu_bf16_matvec's bit for bit, which are the float32 matvec's on the same values. (One
 //     warp a row, as bf16_matvec4, walks a 6144-column row in 24 steps: 9 us for 16 rows on the H200.)
 //   - The last block to finish picks k <= 8 of experts <= 256 by score = sigmoid(logit) + bias, highest
-//     first, ties to the lower id: router.vx's choice and order, in two passes of ranks instead of k
-//     rounds. An expert's rank is the number of experts that beat it (a higher score, or the same and a
-//     lower id); slot s is the expert of rank s. First each expert's rank among its 32 (e / 32), whose k
-//     best are the candidates; then each candidate's rank among the at most 8k candidates, which is its
-//     rank among all (whatever beats one of the k best is among the k best of its own 32, so a
-//     candidate). The candidates and slots are written with relaxed atomic stores: their indices (a rank)
-//     are distinct, which the race proof cannot see. (One pass over all 256 cost 7.7 us on the H200.) Its weight is the expert's sigmoid, normalized over the k and scaled
-//     as router.vx does. A NaN score is where the two may differ (it beats nothing and nothing beats it
-//     here). sigmoid! is libdevice's expf (device.vx), the hand router's ex2.approx: on the GPU the weights
+//     first, ties to the lower id: router.vx's choice and order. One warp runs k rounds: lane l holds
+//     experts l, l + 32, .. in registers, offers the best still in, and lanes::argmax (the higher score,
+//     or the same and the lower id: the router's order) picks round r's, the expert of rank r, for slot r.
+//     (Two passes of ranks with shared-memory atomics in the block took 5.5 us of the launch's 12.2 on the
+//     H200, ncu, evidence/h200-20261119-z26; one pass over all 256, 7.7 us.) Its weight is the expert's
+//     sigmoid, normalized over the k (lanes::sum, the same order in a subgroup as in a block) and scaled
+//     as router.vx does. A NaN score is where the two may differ (it never wins a round here). sigmoid! is libdevice's expf (device.vx), the hand router's ex2.approx: on the GPU the weights
 //     are gpu/spawn router's, not the hand router's, to the last bits.
 // Slots k and above of indices and weights are not written (fold_shared's shared-expert slot). arrivals:
 // one u32, zero before the first launch; the last block puts it back to zero.
 // spawn-include: device.vx
-// spawn-vxc: -fweak-relaxed-atomics
-import core::sync::atomic;
+// spawn-maxnreg: 32 (1024-lane blocks: two an SM, the 256 rows in one wave; the tail's registers would raise it to 61)
 
 // 1 if expert `o` (score `other`) beats expert `e` (score `mine`): a higher score, or the same and a lower
 // id; an id at or past `experts` never does.
@@ -100,11 +97,6 @@ pub fn glm_vx_spawn_router_bf16(indices: &mut Tensor<i32, [?], Memory::HBM>, wei
     // The last block to finish. Each part is a loop of one trip or none, not an `if` around lane loops.
     let mut sg = unsafe { Tensor<f32, [256], Memory::SMEM>::uninit() };
     let mut sc = unsafe { Tensor<f32, [256], Memory::SMEM>::uninit() };
-    let cand = Tensor<i32, [64], Memory::SMEM>::fill(-1);
-    let mut cl = unsafe { Tensor<i32, [64], Memory::SMEM>::uninit() };
-    let mut cs = unsafe { Tensor<f32, [64], Memory::SMEM>::uninit() };
-    let ch = Tensor<i32, [32], Memory::SMEM>::fill(0);
-    let mut sa = unsafe { Tensor<f32, [32], Memory::SMEM>::uninit() };
     for once in 0..(if experts > 0 && experts <= 256 && k > 0 && k <= 8 && k <= experts && cols % 8 == 0 { 1 } else { 0 }) {
       for e in 0..256 across lanes {
         if e < experts {
@@ -113,65 +105,57 @@ pub fn glm_vx_spawn_router_bf16(indices: &mut Tensor<i32, [?], Memory::HBM>, wei
           sc[e] = s + bias[e];
         }
       }
-      // Each expert's rank among its 32; the k best of each 32 are candidates, at 8 * (e / 32) + rank.
-      for e in 0..256 across lanes {
-        if e < experts {
-          let mine: f32 = sc[e];
-          let base: i32 = e - e % 32;
-          // Eight loads before their compares (no lane past `experts` counts: its score is not read).
-          let mut beaten: i32 = 0;
-          for jb in 0..4 {
-            let o: i32 = base + 8 * jb;
-            let s0: f32 = sc[(o).min(255)];
-            let s1: f32 = sc[(o + 1).min(255)];
-            let s2: f32 = sc[(o + 2).min(255)];
-            let s3: f32 = sc[(o + 3).min(255)];
-            let s4: f32 = sc[(o + 4).min(255)];
-            let s5: f32 = sc[(o + 5).min(255)];
-            let s6: f32 = sc[(o + 6).min(255)];
-            let s7: f32 = sc[(o + 7).min(255)];
-            beaten = beaten + beats!(s0, o, mine, e, experts) + beats!(s1, o + 1, mine, e, experts)
-                     + beats!(s2, o + 2, mine, e, experts) + beats!(s3, o + 3, mine, e, experts)
-                     + beats!(s4, o + 4, mine, e, experts) + beats!(s5, o + 5, mine, e, experts)
-                     + beats!(s6, o + 6, mine, e, experts) + beats!(s7, o + 7, mine, e, experts);
+      // One warp, k rounds: each lane offers the best of its experts l, l + 32, .. still in, and lanes::argmax
+      // (the higher score, the same and the lower id) picks round r's, the expert of rank r: slot r.
+      let mut ms = unsafe { Tensor<f32, [1, 8, 32], Memory::SMEM>::uninit() };
+      let mut mi = unsafe { Tensor<i32, [1, 8, 32], Memory::SMEM>::uninit() };
+      let mut bv = unsafe { Tensor<f32, [1, 32], Memory::SMEM>::uninit() };
+      let mut bi = unsafe { Tensor<i32, [1, 32], Memory::SMEM>::uninit() };
+      let mut sel = unsafe { Tensor<i32, [1, 32], Memory::SMEM>::uninit() };
+      let mut sa = unsafe { Tensor<f32, [1, 32], Memory::SMEM>::uninit() };
+      for w in 0..1 across subgroups {
+        for l in 0..32 across lanes {
+          for j in 0..8 {
+            let e: i32 = l + 32 * j;
+            ms[w][j][l] = if e < experts { sc[e] } else { 0.0 };
+            mi[w][j][l] = if e < experts { e } else { -1 };
           }
-          if beaten < k { atomic_store_i32(&cand, 8 * (e / 32) + beaten, e, AtomicOrdering::Relaxed); }
+          sel[w][l] = -1;
         }
-      }
-      // The candidates and their scores into plain shared memory (an empty one is id 256, never counted).
-      for c in 0..64 across lanes {
-        let e: i32 = atomic_load_i32(&cand, c, AtomicOrdering::Relaxed);
-        let ok: bool = e >= 0 && e < experts;
-        cl[c] = if ok { e } else { 256 };
-        cs[c] = if ok { sc[e] } else { 0.0 };
-      }
-      // Each candidate's rank among the candidates, its rank among all: slot `rank` is it.
-      for c in 0..64 across lanes {
-        let e: i32 = cl[c];
-        if e < experts {
-          let mine: f32 = cs[c];
-          let mut beaten: i32 = 0;
-          for jb in 0..8 {
-            let j: i32 = 8 * jb;
-            beaten = beaten + beats!(cs[j], cl[j], mine, e, experts) + beats!(cs[j + 1], cl[j + 1], mine, e, experts)
-                     + beats!(cs[j + 2], cl[j + 2], mine, e, experts) + beats!(cs[j + 3], cl[j + 3], mine, e, experts)
-                     + beats!(cs[j + 4], cl[j + 4], mine, e, experts) + beats!(cs[j + 5], cl[j + 5], mine, e, experts)
-                     + beats!(cs[j + 6], cl[j + 6], mine, e, experts) + beats!(cs[j + 7], cl[j + 7], mine, e, experts);
+        for r in 0..8 {
+          if r < k {
+            for l in 0..32 across lanes {
+              let mut best: f32 = 0.0;
+              let mut best_id: i32 = -1;
+              for j in 0..8 {
+                let c: i32 = mi[w][j][l];
+                let x: f32 = ms[w][j][l];
+                let take: bool = c >= 0 && (best_id < 0 || x > best || (x == best && c < best_id));
+                best = if take { x } else { best };
+                best_id = if take { c } else { best_id };
+              }
+              bv[w][l] = best;
+              bi[w][l] = best_id;
+            }
+            let win: i32 = lanes::argmax(&bv[w], &bi[w], 32);
+            for l in 0..32 across lanes {
+              for j in 0..8 {
+                if mi[w][j][l] == win { mi[w][j][l] = -1; }
+              }
+              if l == r { sel[w][l] = win; }
+            }
           }
-          if beaten < k { atomic_store_i32(&ch, beaten, e, AtomicOrdering::Relaxed); }
         }
-      }
-      for slot in 0..32 across lanes {
-        let mut value: f32 = 0.0;
-        if slot < k { value = sg[atomic_load_i32(&ch, slot, AtomicOrdering::Relaxed).max(0).min(255)]; }
-        sa[slot] = value;
-      }
-      let total: f32 = lanes::sum(&sa, 32);
-      for slot in 0..32 across lanes {
-        if slot < k {
-          let e: i32 = atomic_load_i32(&ch, slot, AtomicOrdering::Relaxed).max(0).min(255);
-          indices[slot] = e;
-          weights[slot] = sg[e] / (total + 0.00000000000000000001) * scale;
+        for l in 0..32 across lanes {
+          sa[w][l] = if l < k { sg[sel[w][l].max(0).min(255)] } else { 0.0 };
+        }
+        let total: f32 = lanes::sum(&sa[w], 32);
+        for l in 0..32 across lanes {
+          if l < k {
+            let e: i32 = sel[w][l].max(0).min(255);
+            indices[l] = e;
+            weights[l] = sg[e] / (total + 0.00000000000000000001) * scale;
+          }
         }
       }
     }
