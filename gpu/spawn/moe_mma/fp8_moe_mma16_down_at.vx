@@ -17,6 +17,16 @@ ensures reads_only(t)
   };
 }
 
+fn address1i(t: &Tensor<i32, [?], Memory::HBM>) on Topology::Device -> i64
+ensures reads_only(t)
+{
+  return mlir!( inputs : (%t = t : memref<?xi32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+    %p = memref.extract_aligned_pointer_as_index %t : memref<?xi32> -> index
+    %r = arith.index_cast %p : index to i64
+    macro.yield %r : i64
+  };
+}
+
 fn address1u(t: &Tensor<u32, [?], Memory::HBM>) on Topology::Device -> i64
 ensures reads_only(t)
 {
@@ -37,24 +47,30 @@ ensures writes_only()
   };
 }
 
+fn slot_of_rank_warp(ids: i64, k: i32, rank: i32) on Topology::Device -> i32
+ensures writes_only()
+{
+  return mlir!( inputs : (%i = ids : i64, %k = k : i32, %r = rank : i32), returns : i32, dialects : ["llvm"],
+                ensures : [writes_only()]) {
+    %s = llvm.inline_asm has_side_effects "{ .reg .b32 l, id, other, r, ball; .reg .b64 addr; .reg .pred inr, lt, hit; mov.u32 l, %laneid; mov.u32 id, 2147483647; setp.lt.s32 inr, l, $2; mul.wide.u32 addr, l, 4; add.s64 addr, addr, $1; @inr ld.global.nc.u32 id, [addr]; mov.u32 r, 0; shfl.sync.idx.b32 other, id, 0, 31, -1; setp.lt.s32 lt, other, id; @lt add.u32 r, r, 1; shfl.sync.idx.b32 other, id, 1, 31, -1; setp.lt.s32 lt, other, id; @lt add.u32 r, r, 1; shfl.sync.idx.b32 other, id, 2, 31, -1; setp.lt.s32 lt, other, id; @lt add.u32 r, r, 1; shfl.sync.idx.b32 other, id, 3, 31, -1; setp.lt.s32 lt, other, id; @lt add.u32 r, r, 1; shfl.sync.idx.b32 other, id, 4, 31, -1; setp.lt.s32 lt, other, id; @lt add.u32 r, r, 1; shfl.sync.idx.b32 other, id, 5, 31, -1; setp.lt.s32 lt, other, id; @lt add.u32 r, r, 1; shfl.sync.idx.b32 other, id, 6, 31, -1; setp.lt.s32 lt, other, id; @lt add.u32 r, r, 1; shfl.sync.idx.b32 other, id, 7, 31, -1; setp.lt.s32 lt, other, id; @lt add.u32 r, r, 1; shfl.sync.idx.b32 other, id, 8, 31, -1; setp.lt.s32 lt, other, id; @lt add.u32 r, r, 1; setp.eq.u32 hit, r, $3; and.pred hit, hit, inr; vote.sync.ballot.b32 ball, hit, -1; bfind.u32 $0, ball; }", "=r,l,r,r" %i, %k, %r : (i64, i32, i32) -> i32
+    macro.yield %s : i32
+  };
+}
+
 pub fn glm_vx_spawn_fp8_moe_mma16_down_at(out: &mut Tensor<f32, [?], Memory::HBM>, down: &Tensor<u32, [?], Memory::HBM>,
                                         scales: &Tensor<f32, [?], Memory::HBM>, act: &Tensor<f32, [?], Memory::HBM>,
                                         weights: &Tensor<f32, [?], Memory::HBM>, ids: &Tensor<i32, [?], Memory::HBM>,
                                         k: i32, experts: i32, rows: i32, cols: i32) -> void {
   spawn on(Topology::Device) {
     for rb in 0..(rows + 15) / 16 across blocks {
-      let mut ranks = unsafe { Tensor<i32, [9, 32], Memory::SMEM>::uninit() };
       let mut part = unsafe { Tensor<f32, [9, 16], Memory::SMEM>::uninit() };
       for w in 0..9 across subgroups {
-        for lane in 0..32 across lanes {
-          ranks[w][lane] = id_rank!(ids, k, lane);
-        }
         for lane in 0..32 across lanes {
           let mut v: f32 = 0.0;
           // Whole warps take these branches together (mma.sync and the shuffles need all 32 lanes).
           if w < k && k <= 9 && rows % 16 == 0 && cols % 256 == 0 && cols > 0 {
-            let slot: i32 = slot_of_rank!(ranks, w, k, w);
-            let expert: i32 = ids[slot];
+            let slot: i32 = slot_of_rank_warp(address1i(ids), k, w);
+            let expert: i32 = if slot >= 0 && slot < k { ids[slot] } else { -1 };
             if expert >= 0 && expert < experts {
               let n: i64 = cols as i64;
               let e: i64 = expert as i64;
