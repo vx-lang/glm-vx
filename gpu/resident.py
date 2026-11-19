@@ -63,9 +63,12 @@ the same bits as its own three launches.
 fp8_moe_cvt_down2, which spreads the short rows of a tensor-parallel slice over more subgroups: the same
 bits.
 
-``moe_mma=True`` (with ``fp8_kernels='cvt'``) runs it on the FP8 tensor cores instead
-(gpu/spawn/moe_mma/fp8_moe_mma_down_at, sm_89+): the experts' inputs quantized to E4M3 in groups of 128 as
-SGLang does before its FP8 GEMMs, mma.sync straight from the FP8 weights. Not the CUDA cores' bits; where
+``moe_mma=True`` (or ``'f16'``, with ``fp8_kernels='cvt'``) runs it on the tensor cores instead
+(gpu/spawn/moe_mma/fp8_moe_mma16_down_at, sm_89+): the FP8 weights unpacked to f16 in registers, the experts'
+inputs in f16 (a power-of-two scale a group of 128), mma.sync.m16n8k16 with f32 sums; within 2e-4 of the CUDA
+cores' result. ``moe_mma='e4m3'`` quantizes the inputs to E4M3 instead, as SGLang does before its FP8 GEMMs
+(fp8_moe_mma_down_at, mma.sync e4m3: on sm_90 ptxas makes it the same f16 HMMA, so it is slower and 2e-2 off).
+Not the CUDA cores' bits; where
 k > 9, the expert width is not a multiple of 256, the hidden size not of 16 or the GPU is older than sm_89, the
 down projection stays down2's or down's.
 
@@ -295,7 +298,9 @@ class ResidentGLM:
             raise ValueError("moe_down2 needs device_experts=True and fp8_kernels='cvt'")
         # moe_mma: the down projection on the FP8 tensor cores (gpu/spawn/moe_mma, inline PTX: no CPU copy, so
         # only on a GPU of sm_89 or later). Changes bits: validation/moe_mma_check.py, then GSM8K.
-        self.moe_mma = bool(moe_mma)
+        if moe_mma not in (False, True, 'f16', 'e4m3'):
+            raise ValueError(f"moe_mma is False, True, 'f16' or 'e4m3', not {moe_mma!r}")
+        self.moe_mma = {True: 'f16', False: False}.get(moe_mma, moe_mma)
         if self.moe_mma and not (self.device_experts and fp8_kernels == 'cvt'):
             raise ValueError("moe_mma needs device_experts=True and fp8_kernels='cvt'")
         # fuse_router: a MoE layer's router projection and the router in one launch (gpu/spawn/router_bf16:
@@ -1196,7 +1201,7 @@ class ResidentGLM:
                     **gate_args, **common)
         down_kernel = kernel + ('down2' if self.moe_down2 and kernel == 'fp8_moe_cvt_' else 'down') + suffix
         if self.moe_mma and kernel == 'fp8_moe_cvt_' and not suffix and k <= 9 and hidden % 16 == 0 and inter % 256 == 0:
-            down_kernel = 'moe_mma/fp8_moe_mma_down_at'
+            down_kernel = 'moe_mma/fp8_moe_mma' + ('16' if self.moe_mma == 'f16' else '') + '_down_at'
         self._spawn(down_kernel, out=self.moe_sum, act=act, weights=self.route_weights, rows=hidden,
                     cols=inter, **down_args, **common)
 

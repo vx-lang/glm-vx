@@ -387,11 +387,13 @@ def test_moe_mma_needs_cvt_and_falls_back_without_fp8_tensor_cores():
                            moe_down2=True, moe_mma=True)
     try:
         resident.forward(TOKENS[0])
-        assert resident.launches.get('fp8_moe_cvt_down2_ref') and 'moe_mma/fp8_moe_mma_down_at' not in resident.launches
+        assert resident.launches.get('fp8_moe_cvt_down2_ref') and not any('moe_mma' in k for k in resident.launches)
     finally:
         resident.close()
     with pytest.raises(ValueError, match='moe_mma'):
         ResidentGLM(model, ctx=Context(), moe_mma=True)
+    with pytest.raises(ValueError, match='moe_mma'):
+        ResidentGLM(model, ctx=Context(), device_experts=True, fp8_kernels='cvt', moe_mma='fp4')
 
 
 def fp8_bf16_router_model(seed, **overrides):

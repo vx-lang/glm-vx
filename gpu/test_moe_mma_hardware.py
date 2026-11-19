@@ -30,5 +30,6 @@ def test_fp8_moe_mma_down_matches_the_model_of_its_arithmetic(context, rows, col
     from validation.moe_mma_check import run
     r = run(context, context.stream(), SPAWN, np.random.default_rng(rows + cols + k), rows, cols, experts, k, repeats=1)
     assert r['finite']
-    assert r['mma_vs_model'] < 2e-5
+    assert r['mma_vs_model'] < 2e-5 and r['mma16_vs_model'] < 2e-5
+    assert r['mma16_vs_down2'] < 2e-3  # f16 act: about 5e-4 relative a value
     assert r['down2_vs_model'] < 5e-2

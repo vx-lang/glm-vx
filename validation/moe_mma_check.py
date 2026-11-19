@@ -5,7 +5,8 @@ down projection on the FP8 tensor cores, against
      max(amax, 1e-10) / 448, act * (1 / scale) rounded to the nearest code, gpu/fp8_quant.e4m3_encode), the dots
      in float64, times the weight and act scales, the router weights, the experts in ascending id order. Only
      the tensor cores' f32 sums differ, so the error must be small (--tolerance, relative to max |out|);
-  2. fp8_moe_cvt_down2, the kernel it replaces (act in f32 on the CUDA cores): the difference is what quantizing
+  1b. the same for fp8_moe_mma16_down_at, act in f16 (a power of two a group, then f16 rounding);
+  2. fp8_moe_cvt_down2, the kernel they replace (act in f32 on the CUDA cores): the difference is what quantizing
      act to E4M3 costs, reported, not checked;
 
 then the GPU time of each (CUDA events, the median of --repeats, L2 flushed before each launch).
@@ -25,8 +26,21 @@ from gpu.fp8_quant import e4m3_encode, e4m3_values
 GROUP = 128
 
 
-def model(codes, scales, act, weights, ids, rows, cols):
-    """The kernel's arithmetic in float64: out [rows]."""
+def act_codes(x, mode):
+    """act's groups [tiles, 128] as the kernels round them: (values float64, scale float64 [tiles])."""
+    amax = np.abs(x).max(-1)
+    if mode == 'f16':  # a power of two puts the max in [2^14, 2^15): exact, then f16 (fp8_moe_mma16_down_at)
+        m = np.maximum(amax, np.float32(2.0 ** -100)).astype(np.float32)
+        scale = ((m.view(np.uint32) & np.uint32(0x7F800000)) - np.uint32(14 << 23)).view(np.float32)
+        inv = (np.uint32(0x7F000000) - scale.view(np.uint32)).view(np.float32)
+        return (x * inv[:, None]).astype(np.float32).astype(np.float16).astype(np.float64), scale.astype(np.float64)
+    scale = (np.maximum(amax, np.float32(1e-10)) / np.float32(448)).astype(np.float32)
+    inv = (np.float32(1) / scale).astype(np.float32)
+    return e4m3_values()[e4m3_encode((x * inv[:, None]).astype(np.float32))].astype(np.float64), scale.astype(np.float64)
+
+
+def model(codes, scales, act, weights, ids, rows, cols, mode='e4m3'):
+    """The kernel's arithmetic in float64: out [rows]; mode 'e4m3' (fp8_moe_mma_down_at) or 'f16' (mma16)."""
     table = e4m3_values()
     order = np.argsort(ids, kind='stable')  # place s -> slot
     srows, tiles = -(-rows // 128), cols // 128
@@ -34,13 +48,11 @@ def model(codes, scales, act, weights, ids, rows, cols):
     for s, slot in enumerate(order):
         e = int(ids[slot])
         x = act[s * cols:(s + 1) * cols].astype(np.float32).reshape(tiles, GROUP)
-        scale = (np.maximum(np.abs(x).max(-1), np.float32(1e-10)) / np.float32(448)).astype(np.float32)
-        inv = (np.float32(1) / scale).astype(np.float32)
-        q = table[e4m3_encode((x * inv[:, None]).astype(np.float32))].astype(np.float64)  # [tiles, 128]
+        q, scale = act_codes(x, mode)  # [tiles, 128], [tiles]
         w = table[codes[e]].astype(np.float64).reshape(rows, tiles, GROUP)
         dots = np.einsum('rtk,tk->rt', w, q)  # [rows, tiles]
         ws = scales[e].reshape(srows, tiles)[np.arange(rows) // 128]  # [rows, tiles]
-        out += float(weights[slot]) * (dots * ws * scale.astype(np.float64)[None, :]).sum(1)
+        out += float(weights[slot]) * (dots * ws * scale[None, :]).sum(1)
     return out
 
 
@@ -59,6 +71,7 @@ def run(ctx, stream, spawn, rng, rows, cols, experts, k, repeats, kernel=None):
                 rows=rows, cols=cols)
     outs = {}
     kernels = {'mma': SpawnKernel(ctx, Path(kernel or spawn / 'moe_mma' / 'fp8_moe_mma_down_at.ptx')),
+               'mma16': SpawnKernel(ctx, spawn / 'moe_mma' / 'fp8_moe_mma16_down_at.ptx'),
                'down2': SpawnKernel(ctx, spawn / 'fp8_moe_cvt_down2.ptx')}
     times = {}
     for name, kernel in kernels.items():
@@ -68,12 +81,14 @@ def run(ctx, stream, spawn, rng, rows, cols, experts, k, repeats, kernel=None):
         outs[name] = np.frombuffer(out.download(), np.float32).astype(np.float64)
         times[name] = event_us(ctx, stream, spawn, lambda: kernel.launch(stream=stream, out=out, **args), repeats)
     ref = model(codes, scales, act, weights, ids, rows, cols)
+    ref16 = model(codes, scales, act, weights, ids, rows, cols, 'f16')
     peak = float(np.abs(ref).max())
     rel = lambda a, b: float(np.abs(a - b).max() / peak)
     return dict(rows=rows, cols=cols, experts=experts, k=k, max_abs_out=peak,
-                finite=bool(np.isfinite(outs['mma']).all()),
-                mma_vs_model=rel(outs['mma'], ref), down2_vs_model=rel(outs['down2'], ref),
-                mma_vs_down2=rel(outs['mma'], outs['down2']),
+                finite=bool(np.isfinite(outs['mma']).all() and np.isfinite(outs['mma16']).all()),
+                mma_vs_model=rel(outs['mma'], ref), mma16_vs_model=rel(outs['mma16'], ref16),
+                down2_vs_model=rel(outs['down2'], ref),
+                mma_vs_down2=rel(outs['mma'], outs['down2']), mma16_vs_down2=rel(outs['mma16'], outs['down2']),
                 weight_mb=k * rows * cols / 1e6, us=times,
                 tb_per_s={n: k * rows * cols / us / 1e6 for n, us in times.items()})
 
@@ -99,7 +114,7 @@ def main(argv=None):
     rng = np.random.default_rng(args.seed)
     results = [run(ctx, stream, spawn, rng, args.rows, c, args.experts, args.k, args.repeats, args.kernel) for c in args.cols]
     ctx.close()
-    ok = all(r['finite'] and r['mma_vs_model'] <= args.tolerance for r in results)
+    ok = all(r['finite'] and r['mma_vs_model'] <= args.tolerance and r['mma16_vs_model'] <= args.tolerance for r in results)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(dict(ok=ok, tolerance=args.tolerance, kernel=str(args.kernel or 'moe_mma/fp8_moe_mma_down_at.ptx'),
                                            results=results), indent=2) + '\n')
