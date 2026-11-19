@@ -296,3 +296,23 @@ def test_two_ranks_mha_prompt_past_index_topk():
     np.testing.assert_allclose(chunk_last, last, rtol=1e-4, atol=1e-4 * float(np.abs(last).max()))
     np.testing.assert_allclose(chunk_after, after, rtol=1e-4, atol=1e-4 * float(np.abs(after).max()))
     assert launches.get('mha_prefill_sparse', 0) == model.n_layers
+
+
+@pytest.mark.parametrize('topk', [16, 4])
+def test_every_prefill_option_together(topk):
+    # z32's configuration: cuBLASLt rows, the routed experts grouped, MHA attention, the router over the rows. Dense
+    # (index_topk 16): within a few % of the largest logit. Past index_topk 4, e4m3 activations move the indexer's
+    # scores enough to change which 4 of a few keys a query takes, so the prompt's last logits move by ~30% here
+    # (cuBLASLt rows alone do it too); the decode step after the prompt stays within a few %.
+    from gpu.test_resident import fp8_bf16_router_model
+    model = fp8_bf16_router_model(41, hidden_size=128, moe_intermediate_size=128, index_topk=topk)
+    (last, after, _, _), (chunk_last, chunk_after, _, launches) = run(
+        model, [PROMPT[:3], PROMPT[3:]], prefill_gemm='cublaslt', prefill_moe='grouped', prefill_attention='mha',
+        device_experts=True, fuse_router=True)
+    scale = float(np.abs(last).max())
+    if topk == 16:
+        np.testing.assert_allclose(chunk_last, last, atol=0.05 * scale)
+    np.testing.assert_allclose(chunk_after, after, atol=0.05 * scale)
+    names = ('cublaslt_fp8_rows', 'grouped_moe', 'mha_prefill') + (('mha_prefill_sparse', 'topk_select_rows') if topk == 4 else ())
+    for name in names:
+        assert launches.get(name, 0) > 0, name
