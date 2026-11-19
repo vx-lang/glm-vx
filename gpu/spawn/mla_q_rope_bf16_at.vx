@@ -38,8 +38,10 @@ pub fn glm_vx_spawn_mla_q_rope_bf16_at(q_t: &mut Tensor<bf16, [?, ?, ?], Memory:
               let b: f32 = if live { x[xb + (2 * p + 1) as i64] } else { 0.0 };
               let c: f32 = cosine[p];
               let s: f32 = sine[p];
-              qr_t[g][hh * 64 + p][h] = (if live { a * c - b * s } else { 0.0 }) as bf16;
-              qr_t[g][hh * 64 + 32 + p][h] = (if live { b * c + a * s } else { 0.0 }) as bf16;
+              let even: f32 = if live { a * c - b * s } else { 0.0 };
+              let odd: f32 = if live { b * c + a * s } else { 0.0 };
+              qr_t[g][hh * 64 + p][h] = even as bf16;
+              qr_t[g][hh * 64 + 32 + p][h] = odd as bf16;
             }
           }
         }
