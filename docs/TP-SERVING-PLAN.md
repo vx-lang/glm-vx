@@ -196,7 +196,18 @@ with the FP8 weights loaded straight into each lane's registers. The floor is a 
 
 **Kernels to write, in order** (the time a step is z5's TP8 profile at 1000 tokens):
 
-1. **MoE down with FP8 MMA** (1.3 ms a step today, `down2`). Target 8 us a layer or less: about −0.7 ms a
+1. **MoE down on the tensor cores: done on one H200, not yet on 8** (db1c749,
+   `evidence/h200-20261118-z18`, `-z20`).
+   - `ResidentGLM(moe_mma=True)`, `gpu/spawn/moe_mma/fp8_moe_mma16_down_at`: the FP8 weights unpacked to f16
+     in registers, act in f16, `mma.sync.m16n8k16`.
+   - 10.5 us against `down2`'s 18.5 (ncu, TP8 shapes), within 2e-4 of `down2`'s result.
+   - On sm_90, `mma.sync` e4m3 is the same f16 HMMA after ptxas unpacks both operands (z19), so E4M3 activations
+     buy no speed there.
+   - Next: GSM8K and W1 on the 8x H200, then the router writing sorted ids, which removes the kernel's 1.7 us
+     rank lookup.
+
+   The plan as first written:
+   **MoE down with FP8 MMA** (1.3 ms a step today, `down2`). Target 8 us a layer or less: about −0.7 ms a
    token, the largest single item. It needs Vx's tile matmul with f8e4m3 operands, and the A operand straight
    from registers (asked of vx-94). The probe's layout is the reference:
    - 16 rows a warp;
