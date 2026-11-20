@@ -83,22 +83,39 @@ def warp_ptx(bf16_keys=False):
 F32_1E_4, F32_448, F32_1 = '0f38D1B717', '0f43E00000', '0f3F800000'
 
 
-def key_fp8_ptx():
-    """index_key_fp8_at's lane: $1 the address of key dims 4 l .. 4 l + 3 (f32). Returns ($0) the four
-    e4m3 codes in one word (low half) and the row's scale's bits (high half). SGLang's indexer_k.cuh:
-    each value rounded to bf16 first, scale = max(1e-4, amax) / 448, codes = e4m3(x * (1 / scale)),
-    round to nearest, saturating."""
-    p = ['{', '.reg .f32 x<4>, m, t, s, inv;', '.reg .b16 h<3>;', '.reg .b32 w, sb;',
-         'ld.global.v4.f32 {x0, x1, x2, x3}, [$1];']
+def key_fp8_mlir():
+    """index_key_fp8_at's lane as llvm and nvvm ops: %k the address of key dims 4 l .. 4 l + 3 (f32). Yields
+    (%r) the four e4m3 codes in one word (low half) and the row's scale's bits (high half). SGLang's
+    indexer_k.cuh: each value rounded to bf16 first, scale = max(1e-4, amax) / 448, codes = e4m3(x * (1 /
+    scale)), round to nearest, saturating."""
+    p = ['%p = llvm.inttoptr %k : i64 to !llvm.ptr<1>',
+         '%x = llvm.load %p {alignment = 16 : i64} : !llvm.ptr<1> -> vector<4xf32>',
+         '%all = llvm.mlir.constant(-1 : i32) : i32', '%clamp = llvm.mlir.constant(31 : i32) : i32']
     for i in range(4):
-        p += [f'cvt.rn.bf16.f32 h2, x{i};', f'cvt.f32.bf16 x{i}, h2;']
-    p += ['abs.f32 m, x0;'] + [f'abs.f32 t, x{i}; max.f32 m, m, t;' for i in (1, 2, 3)]
-    p += [f'shfl.sync.bfly.b32 t, m, {k}, 31, -1; max.f32 m, m, t;' for k in (16, 8, 4, 2, 1)]
-    p += [f'max.f32 s, m, {F32_1E_4};', f'div.rn.f32 s, s, {F32_448};', f'div.rn.f32 inv, {F32_1}, s;']
-    p += [f'mul.f32 x{i}, x{i}, inv;' for i in range(4)]
-    p += ['cvt.rn.satfinite.e4m3x2.f32 h0, x1, x0;', 'cvt.rn.satfinite.e4m3x2.f32 h1, x3, x2;',
-          'mov.b32 w, {h0, h1};', 'mov.b32 sb, s;', 'mov.b64 $0, {w, sb};', '}']
-    return ' '.join(p)
+        p += [f'%i{i} = llvm.mlir.constant({i} : i32) : i32', f'%e{i} = llvm.extractelement %x[%i{i} : i32] : vector<4xf32>',
+              f'%h{i} = llvm.fptrunc %e{i} : f32 to bf16', f'%x{i} = llvm.fpext %h{i} : bf16 to f32',
+              f'%a{i} = llvm.call_intrinsic "llvm.fabs.f32"(%x{i}) : (f32) -> f32']
+    p.append('%m0 = llvm.intr.maxnum(%a0, %a1) : (f32, f32) -> f32')
+    p += [f'%m{i} = llvm.intr.maxnum(%m{i - 1}, %a{i + 1}) : (f32, f32) -> f32' for i in (1, 2)]
+    m = '%m2'
+    for k in (16, 8, 4, 2, 1):
+        p += [f'%o{k} = llvm.mlir.constant({k} : i32) : i32', f'%t{k} = nvvm.shfl.sync bfly %all, {m}, %o{k}, %clamp : f32 -> f32',
+              f'%n{k} = llvm.intr.maxnum({m}, %t{k}) : (f32, f32) -> f32']
+        m = f'%n{k}'
+    # A plain fdiv of 1.0 becomes rcp.rn.f32, the same value; llvm.nvvm.div.rn.f keeps div.rn.f32.
+    p += ['%floor = llvm.mlir.constant(1.0e-4 : f32) : f32', '%c448 = llvm.mlir.constant(448.0 : f32) : f32',
+          '%one = llvm.mlir.constant(1.0 : f32) : f32', f'%amax = llvm.intr.maxnum({m}, %floor) : (f32, f32) -> f32',
+          '%s = llvm.fdiv %amax, %c448 : f32', '%inv = llvm.call_intrinsic "llvm.nvvm.div.rn.f"(%one, %s) : (f32, f32) -> f32']
+    p += [f'%y{i} = llvm.fmul %x{i}, %inv : f32' for i in range(4)]
+    # nvvm.convert.f32x2.to.f8x2 a, b puts b in the low byte.
+    p += ['%q0 = nvvm.convert.f32x2.to.f8x2 %y1, %y0 {rnd = #nvvm.fp_rnd_mode<rn>, sat = #nvvm.sat_mode<satfinite>} : i16 (f8E4M3FN)',
+          '%q1 = nvvm.convert.f32x2.to.f8x2 %y3, %y2 {rnd = #nvvm.fp_rnd_mode<rn>, sat = #nvvm.sat_mode<satfinite>} : i16 (f8E4M3FN)',
+          '%u0 = llvm.mlir.poison : vector<2xi16>', '%u1 = llvm.insertelement %q0, %u0[%i0 : i32] : vector<2xi16>',
+          '%u2 = llvm.insertelement %q1, %u1[%i1 : i32] : vector<2xi16>', '%w = llvm.bitcast %u2 : vector<2xi16> to i32',
+          '%sb = llvm.bitcast %s : f32 to i32', '%v0 = llvm.mlir.poison : vector<2xi32>',
+          '%v1 = llvm.insertelement %w, %v0[%i0 : i32] : vector<2xi32>', '%v2 = llvm.insertelement %sb, %v1[%i1 : i32] : vector<2xi32>',
+          '%r = llvm.bitcast %v2 : vector<2xi32> to i64']
+    return '\n'.join('    ' + line for line in p)
 
 
 def scores_fp8_ptx():
@@ -210,8 +227,10 @@ def key_fp8_source():
 fn index_key_fp8_lane(k: i64) on Topology::Device -> i64
 ensures writes_only()
 {{
-  return mlir!( inputs : (%k = k : i64), returns : i64, dialects : ["llvm"], ensures : [writes_only()]) {{
-    %r = llvm.inline_asm has_side_effects "{key_fp8_ptx()}", "=l,l" %k : (i64) -> i64
+  // One lane's 4 dims at the byte address k to e4m3 codes, with the warp's amax by shfl.sync.bfly.
+  // The result is the 4 codes (lower dim in the lower byte) | the scale's bits << 32.
+  return mlir!( inputs : (%k = k : i64), returns : i64, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {{
+{key_fp8_mlir()}
     macro.yield %r : i64
   }};
 }}
