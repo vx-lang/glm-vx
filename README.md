@@ -67,7 +67,7 @@ the CPU kernels have none. (The toolchain still writes a few instructions as inl
 conversion, LLVM's NVPTX backend an `exit` after a failed check.) What remains in our code:
 
 - **the FP8 tensor-core instructions Vx cannot generate yet**: `mma.sync` e4m3 (`index_mma/index_scores_fp8_at` and
-  its `_hist` twin, the four `moe_mma/` kernels) and Hopper's `wgmma` (`fp8_gemm/wgmma_m64n128k32.vx`).
+  its `_hist` twin, `moe_mma/fp8_moe_mma_down_at`) and Hopper's `wgmma` (`fp8_gemm/wgmma_m64n128k32.vx`).
   [Vx #3701](https://github.com/vx-lang/Vx/issues/3701) makes the compiler generate the FP8 `mma.sync` with an LLVM
   intrinsic, and [#3702](https://github.com/vx-lang/Vx/issues/3702) makes it generate `wgmma` with NVVM ops; with
   these, they can drop their PTX for plain Vx or MLIR ops.
@@ -75,6 +75,8 @@ conversion, LLVM's NVPTX backend an `exit` after a failed check.) What remains i
   slower at every context from 3001 to 200000 tokens ([data](docs/benchmarks/2026-11-20-h200-index-scores/),
   [#65](https://github.com/vx-lang/glm-vx/issues/65)). Every other converted kernel is as fast as its inline PTX or
   faster.
+- **the warp bodies of the three `moe_mma/fp8_moe_mma16*` kernels**: f16 `mma.sync`, which NVVM has; not converted
+  yet. For the down projection, `moe_mma='vx16'` (below) is the plain Vx replacement.
 - **two single instructions** where the op costs registers: `mbarrier.init` (`fp8_gemm/sm90.vx`) and one `%laneid`
   read in four index kernels; and **a routing helper** (a shuffle, a ballot and `bfind`) in the MoE kernels.
 
