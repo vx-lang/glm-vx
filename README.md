@@ -62,15 +62,16 @@ flowchart TB
 
 **Inline PTX: little is left.** Where Vx cannot yet generate an instruction, a kernel embeds it as inline PTX in an
 `mlir!` block. Since 2026-11-20 most of that is MLIR / NVVM ops instead: in the 144 built Vx files under
-`gpu/spawn`, inline PTX went from 77 places in 21 files to **23 places in 14**, and the built PTX from 562 inline-asm
-blocks to **144**. The 9 other GPU kernel files and all the CPU kernels have none. What remains:
+`gpu/spawn`, inline PTX went from 77 places in 21 files to **23 places in 14**. The 9 other GPU kernel files and all
+the CPU kernels have none. (vxc itself still emits a few instructions as inline asm in its own lowering, such as
+`exit` and the e4m3 to f16 conversion; Vx's work on #3701 and #3702 covers those too.) What remains in our code:
 
 - **the FP8 tensor-core instructions Vx cannot generate yet**: `mma.sync` e4m3 (`index_mma/index_scores_fp8_at` and
   its `_hist` twin, the four `moe_mma/` kernels) and Hopper's `wgmma` (`fp8_gemm/wgmma_m64n128k32.vx`). [Vx #3701](https://github.com/vx-lang/Vx/issues/3701)
   makes the compiler generate the FP8 `mma.sync` with an LLVM intrinsic, and [#3702](https://github.com/vx-lang/Vx/issues/3702) makes it generate `wgmma`
   with NVVM ops; with these, they can drop their PTX for plain Vx or MLIR ops.
-- **`index_scores_mma_at`'s warp body** (and its `_hist` twin's), kept because the ops version ran 3-6.5% slower
-  on the H200 ([#65](https://github.com/vx-lang/glm-vx/issues/65)).
+- **`index_scores_mma_at`'s warp body** (and its `_hist` twin's), kept because the ops version ran slower on the
+  H200 ([#65](https://github.com/vx-lang/glm-vx/issues/65)).
 - **two single instructions** where the op costs registers: `mbarrier.init` (`fp8_gemm/sm90.vx`) and one `%laneid`
   read in four index kernels.
 
