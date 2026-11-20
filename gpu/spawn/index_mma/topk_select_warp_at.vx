@@ -36,8 +36,10 @@ macro_rules! topk_key32 {
 fn match_any(x: i32) on Topology::Device -> i32
 ensures writes_only()
 {
-  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
-    %r = llvm.inline_asm has_side_effects "match.any.sync.b32 $0, $1, -1;", "=r,r" %x : (i32) -> i32
+  // match.any.sync.b32 with all 32 lanes in the mask.
+  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {
+    %m = llvm.mlir.constant(-1 : i32) : i32
+    %r = nvvm.match.sync any %m, %x : i32 -> i32
     macro.yield %r : i32
   };
 }
@@ -46,8 +48,13 @@ ensures writes_only()
 fn count_lanes(p: i32) on Topology::Device -> i32
 ensures writes_only()
 {
-  return mlir!( inputs : (%p = p : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
-    %r = llvm.inline_asm has_side_effects "{ .reg .pred q; .reg .b32 m; setp.ne.s32 q, $1, 0; vote.sync.ballot.b32 m, q, -1; popc.b32 $0, m; }", "=r,r" %p : (i32) -> i32
+  // setp.ne.s32, vote.sync.ballot.b32 with all 32 lanes in the mask, then popc.b32.
+  return mlir!( inputs : (%p = p : i32), returns : i32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {
+    %z = llvm.mlir.constant(0 : i32) : i32
+    %m = llvm.mlir.constant(-1 : i32) : i32
+    %q = llvm.icmp "ne" %p, %z : i32
+    %b = nvvm.vote.sync ballot %m, %q -> i32
+    %r = llvm.intr.ctpop(%b) : (i32) -> i32
     macro.yield %r : i32
   };
 }
@@ -56,7 +63,23 @@ fn popc(x: i32) on Topology::Device -> i32
 ensures writes_only()
 {
   return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
-    %r = llvm.inline_asm "popc.b32 $0, $1;", "=r,r" %x : (i32) -> i32
+    %r = llvm.intr.ctpop(%x) : (i32) -> i32
+    macro.yield %r : i32
+  };
+}
+
+// v plus the v of the lane o above (shfl.sync.down.b32, clamp 31, all 32 lanes), if that lane is in the warp.
+fn shfl_down_add(v: i32, o: i32) on Topology::Device -> i32
+ensures writes_only()
+{
+  return mlir!( inputs : (%v = v : i32, %o = o : i32), returns : i32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {
+    %m = llvm.mlir.constant(-1 : i32) : i32
+    %c = llvm.mlir.constant(31 : i32) : i32
+    %s = nvvm.shfl.sync down %m, %v, %o, %c {return_value_and_is_valid} : i32 -> !llvm.struct<(i32, i1)>
+    %t = llvm.extractvalue %s[0] : !llvm.struct<(i32, i1)>
+    %p = llvm.extractvalue %s[1] : !llvm.struct<(i32, i1)>
+    %a = llvm.add %v, %t : i32
+    %r = llvm.select %p, %a, %v : i1, i32
     macro.yield %r : i32
   };
 }
@@ -66,8 +89,21 @@ ensures writes_only()
 fn warp_suffix_sum(x: i32) on Topology::Device -> i32
 ensures writes_only()
 {
-  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
-    %r = llvm.inline_asm has_side_effects "{ .reg .b32 v, t; .reg .pred p; mov.b32 v, $1; shfl.sync.down.b32 t|p, v, 1, 31, -1; @p add.s32 v, v, t; shfl.sync.down.b32 t|p, v, 2, 31, -1; @p add.s32 v, v, t; shfl.sync.down.b32 t|p, v, 4, 31, -1; @p add.s32 v, v, t; shfl.sync.down.b32 t|p, v, 8, 31, -1; @p add.s32 v, v, t; shfl.sync.down.b32 t|p, v, 16, 31, -1; @p add.s32 v, v, t; mov.b32 $0, v; }", "=r,r" %x : (i32) -> i32
+  return shfl_down_add(shfl_down_add(shfl_down_add(shfl_down_add(shfl_down_add(x, 1), 2), 4), 8), 16);
+}
+
+// v plus the v of the lane o below (shfl.sync.up.b32, clamp 0, all 32 lanes), if that lane is in the warp.
+fn shfl_up_add(v: i32, o: i32) on Topology::Device -> i32
+ensures writes_only()
+{
+  return mlir!( inputs : (%v = v : i32, %o = o : i32), returns : i32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {
+    %m = llvm.mlir.constant(-1 : i32) : i32
+    %c = llvm.mlir.constant(0 : i32) : i32
+    %s = nvvm.shfl.sync up %m, %v, %o, %c {return_value_and_is_valid} : i32 -> !llvm.struct<(i32, i1)>
+    %t = llvm.extractvalue %s[0] : !llvm.struct<(i32, i1)>
+    %p = llvm.extractvalue %s[1] : !llvm.struct<(i32, i1)>
+    %a = llvm.add %v, %t : i32
+    %r = llvm.select %p, %a, %v : i1, i32
     macro.yield %r : i32
   };
 }
@@ -77,10 +113,7 @@ ensures writes_only()
 fn warp_prefix_sum(x: i32) on Topology::Device -> i32
 ensures writes_only()
 {
-  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
-    %r = llvm.inline_asm has_side_effects "{ .reg .b32 v, t; .reg .pred p; mov.b32 v, $1; shfl.sync.up.b32 t|p, v, 1, 0, -1; @p add.s32 v, v, t; shfl.sync.up.b32 t|p, v, 2, 0, -1; @p add.s32 v, v, t; shfl.sync.up.b32 t|p, v, 4, 0, -1; @p add.s32 v, v, t; shfl.sync.up.b32 t|p, v, 8, 0, -1; @p add.s32 v, v, t; shfl.sync.up.b32 t|p, v, 16, 0, -1; @p add.s32 v, v, t; mov.b32 $0, v; }", "=r,r" %x : (i32) -> i32
-    macro.yield %r : i32
-  };
+  return shfl_up_add(shfl_up_add(shfl_up_add(shfl_up_add(shfl_up_add(x, 1), 2), 4), 8), 16);
 }
 
 pub fn glm_vx_spawn_topk_select_warp_at(out_ids: &mut Tensor<i32, [?], Memory::HBM>, scores: &Tensor<i32, [?], Memory::HBM>,
