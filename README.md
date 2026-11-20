@@ -60,18 +60,25 @@ flowchart TB
 - **The same kernels build for the CPU**, so most kernel tests run on a CPU emulator; `gpu/test_*_hardware.py` run
   them on a GPU.
 
-**Inline PTX.** Where Vx cannot yet generate an instruction, a kernel embeds it as inline PTX in an `mlir!` block.
-On `main` that is 25 of the 152 Vx files under `gpu/spawn` (4 of them experiments that are not built), mostly
-Hopper's FP8 tensor-core instructions: `mma.sync` e4m3 and `wgmma`, with TMA and mbarriers, in `index_mma/`,
-`moe_mma/` and `fp8_gemm/`. The 9 other GPU kernel files and all the CPU kernels have none. A branch
-(`nvvm-ops-not-ptx`, not merged yet) moves most of it to MLIR / NVVM ops. Vx issue #3701 makes the compiler
-generate the FP8 `mma.sync` with an LLVM intrinsic, and #3702 makes it generate `wgmma` with NVVM ops; with these,
-the FP8 and `wgmma` kernels can drop their PTX for plain Vx or MLIR ops.
+**Inline PTX: little is left.** Where Vx cannot yet generate an instruction, a kernel embeds it as inline PTX in an
+`mlir!` block. Since 2026-11-20 most of that is MLIR / NVVM ops instead: in the 144 built Vx files under
+`gpu/spawn`, inline PTX went from 77 places in 21 files to **23 places in 14**, and the built PTX from 562 inline-asm
+blocks to **144**. The 9 other GPU kernel files and all the CPU kernels have none. What remains:
+
+- **the FP8 tensor-core instructions Vx cannot generate yet**: `mma.sync` e4m3 (`index_mma/index_scores_fp8_at` and
+  its `_hist` twin, the four `moe_mma/` kernels) and Hopper's `wgmma` (`fp8_gemm/wgmma_m64n128k32.vx`). [Vx #3701](https://github.com/vx-lang/Vx/issues/3701)
+  makes the compiler generate the FP8 `mma.sync` with an LLVM intrinsic, and [#3702](https://github.com/vx-lang/Vx/issues/3702) makes it generate `wgmma`
+  with NVVM ops; with these, they can drop their PTX for plain Vx or MLIR ops.
+- **`index_scores_mma_at`'s warp body** (and its `_hist` twin's), kept because the ops version ran 3-6.5% slower
+  on the H200 ([#65](https://github.com/vx-lang/glm-vx/issues/65)).
+- **two single instructions** where the op costs registers: `mbarrier.init` (`fp8_gemm/sm90.vx`) and one `%laneid`
+  read in four index kernels.
 
 ## Run
 
 **GPU (8x H200).** Linux, an NVIDIA driver and CUDA's `ptxas` (tested with CUDA 13.0, driver 580), Python 3.10+,
-LLVM 22 with MLIR, and Vx main from 2026-11-19 on (the grouped FP8 GEMM needs Vx #3664 and #3670).
+LLVM 22 with MLIR, and Vx main from 2026-11-19 on (the grouped FP8 GEMM needs Vx #3664 and #3670); tested with
+Vx 10c6f478f.
 
 ```sh
 python3 -m venv .venv && .venv/bin/pip install -e '.[test]'
