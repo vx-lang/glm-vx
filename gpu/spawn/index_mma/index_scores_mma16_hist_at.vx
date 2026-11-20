@@ -27,8 +27,9 @@ macro_rules! topk_key32 {
 fn match_any(x: i32) on Topology::Device -> i32
 ensures writes_only()
 {
-  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
-    %r = llvm.inline_asm has_side_effects "match.any.sync.b32 $0, $1, -1;", "=r,r" %x : (i32) -> i32
+  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {
+    %all = llvm.mlir.constant(-1 : i32) : i32
+    %r = nvvm.match.sync any %all, %x : i32 -> i32
     macro.yield %r : i32
   };
 }
@@ -37,7 +38,7 @@ fn popc(x: i32) on Topology::Device -> i32
 ensures writes_only()
 {
   return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
-    %r = llvm.inline_asm "popc.b32 $0, $1;", "=r,r" %x : (i32) -> i32
+    %r = llvm.intr.ctpop(%x) : (i32) -> i32
     macro.yield %r : i32
   };
 }
