@@ -112,6 +112,16 @@ toolchain with `scripts/pod_restore.sh` (built on a pod by `scripts/pod_build_bu
 
 ## Serving performance
 
+**Against SGLang on 8x H200.** GLM-5.3 (block FP8), batch 1, `--tp 8` on both sides, measured with SGLang's own
+benchmark client. Median time per output token:
+- W1 (1000 tokens in, 1000 out): 8.55 ms against SGLang's 9.18.
+- ShareGPT: 8.34 ms against 9.00.
+- W3 (32768 in, 256 out): 9.58 ms against 9.43.
+
+TTFT is still 7x SGLang's on W1. GSM8K is 0.920; SGLang's two runs scored 0.915 and 0.935. The table, the method
+and the caveats are in [docs/TP-SERVING-PLAN.md](docs/TP-SERVING-PLAN.md#where-we-stand-updated-2026-11-20). The
+main caveat: SGLang was measured once, on another VM, without speculative decoding.
+
 [Implemented optimizations and current evidence](docs/OPTIMIZATION-PROGRESS.md)
 cover packed GGUF kernels, SIMD batched prefill, exact heap selection, prefix
 reuse, official eager validation and an explicit tensor-core GEMM path.

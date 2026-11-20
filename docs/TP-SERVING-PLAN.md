@@ -4,22 +4,43 @@ This is a plan. A number is a measurement only when an evidence directory is nam
 marked "expected" is an estimate from z5's profile. Precision rule: FP8 is allowed where SGLang uses FP8, and
 nothing goes below SGLang (no FP4).
 
-## Where we stand
+## Where we stand (updated 2026-11-20)
 
-GLM-5.3 (block FP8) on the Nebius 8x H200, both engines at concurrency 1, with the same client and flags
-(`sglang.benchmark.serving`):
+GLM-5.3 (block FP8) on the Nebius 8x H200, batch 1.
+- **Client.** Both engines are measured with SGLang 0.5.22's `sglang.benchmark.serving` at concurrency 1. SGLang is
+  measured on its native endpoint; glm-vx is measured on `/v1/completions` (`--backend vllm`). SGLang through
+  `/v1/completions` gives the same W1 TPOT (z6).
+- **Workloads.** W1 and W3 use the commands in `benchmarks/SGLANG-SETUP.md`: the `random` dataset at fixed
+  lengths, seed 42. ShareGPT uses `--dataset-name sharegpt --num-prompts 50`.
+- **glm-vx options.** `device_decode`, `moe_mma`, `fuse_mla_q`, `moe_down2`, `fuse_router`, chunked prefill and
+  `topk_bitmap`.
 
-| workload | SGLang `--tp 8` (z6) | glm-vx `--tp 8`, best so far | glm-vx / SGLang |
+| workload | SGLang `--tp 8` (z6) | glm-vx `--tp 8` | glm-vx / SGLang |
 |---|---|---|---|
-| W1 1000/1000: TPOT median | 9.18 ms | 9.53 ms (z10: polling + `moe_down2` + `fuse_router`) | 1.04 |
-| ShareGPT 50: TPOT median | 9.00 ms | 9.60 ms (z8 c, before `fuse_router`) | 1.07 |
-| W3 32768/256: TPOT median | 9.43 ms | 11.17 ms (z8 c, before `fuse_router`) | 1.18 |
-| W1: TTFT median | 88.7 ms | 8681 ms (z10) | 98 |
-| W3: TTFT median | 2623 ms | 336344 ms (z8 c) | 128 |
+| W1 1000/1000: TPOT median | 9.18 ms | 8.55 ms (z35; z27d the same) | 0.93 |
+| W1: TTFT median | 88.7 ms | 624 ms (z35) | 7.0 |
+| W1: E2E median | ~9260 ms (computed: 88.7 + 999 x 9.18) | 9165 ms (z35) | 0.99 |
+| ShareGPT 50: TPOT median | 9.00 ms | 8.34 ms (z27d) | 0.93 |
+| ShareGPT 50: TTFT median | 50.4 ms | 1959 ms (z27d, before chunked prefill) | 39 |
+| W3 32768/256: TPOT median | 9.43 ms | 9.58 ms (z36) | 1.02 |
+| W3: TTFT median | 2623 ms | 114 s (z36) | 43 |
 
-GSM8K, 5-shot, 200 questions: glm-vx 0.920 (z7, which has z8 c's bits), against SGLang's 0.915 (z6) and 0.935
-(z9, SGLang's own runner). SGLang's two runs differ on 14 questions, so these are the same accuracy.
-`fuse_router` changes the router's rounding, and its GSM8K run (z11) was cut off by a preemption.
+GSM8K, 5-shot, 200 questions:
+- glm-vx scores 0.920, both with z27d's options (including `fuse_router` and `moe_mma`) and before them (z7).
+- SGLang scores 0.915 (z6) and 0.935 (z9, SGLang's own runner). Its two runs differ on 14 questions, so all of
+  these are the same accuracy.
+
+Caveats:
+- **SGLang ran once, on another VM, without speculative decoding.** Its fastest batch-1 configuration uses
+  NEXTN, which typically cuts TPOT 1.5-2x. The same-VM rerun, with and without NEXTN, is still to do (item 9.4).
+- **Prompt counts differ on W3.** glm-vx ran 2 prompts (`W3_PROMPTS=2`); SGLang ran 8.
+- **ShareGPT's TTFT predates chunked prefill.** It has not been rerun since.
+- **The glm-vx rows are single runs.** Each is one run of one server, not alternated rounds.
+
+On 2026-11-18, when the plan below was written, the glm-vx column read:
+- W1 TPOT 9.53 ms and TTFT 8681 ms (z10);
+- ShareGPT TPOT 9.60 ms (z8 c);
+- W3 TPOT 11.17 ms and TTFT 336 s (z8 c).
 
 ## The decode gap is in the server, not the step
 
