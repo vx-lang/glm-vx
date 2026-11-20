@@ -4,10 +4,13 @@
    "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::complete_tx::bytes": 2,
    "fence.mbarrier_init.release.cluster": 1,
    "fence.proxy.tensormap::generic.acquire.sys": 2,
-   "mbarrier.arrive.expect_tx.shared::cta.b64": 1,
-   "mbarrier.arrive.shared::cta.b64": 1,
+   "mbarrier.arrive.expect_tx.shared.b64": 1,
+   "mbarrier.arrive.expect_tx.shared::cta.b64": 0,
+   "mbarrier.arrive.shared.b64": 1,
+   "mbarrier.arrive.shared::cta.b64": 0,
    "mbarrier.init.shared::cta.b64": 8,
-   "mbarrier.try_wait.parity.shared::cta.b64": 2,
+   "mbarrier.try_wait.parity.shared.b64": 2,
+   "mbarrier.try_wait.parity.shared::cta.b64": 0,
    "prefetch.tensormap": 2,
    "wgmma.commit_group.sync.aligned": 1,
    "wgmma.fence.sync.aligned": 1,
@@ -26,13 +29,16 @@
   "instructions": {
    "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::complete_tx::bytes": 2,
    "cvt.rn.bf16.f32": 64,
-   "cvt.u32.u16": 64,
+   "cvt.u32.u16": 0,
    "fence.mbarrier_init.release.cluster": 1,
    "fence.proxy.tensormap::generic.acquire.sys": 2,
-   "mbarrier.arrive.expect_tx.shared::cta.b64": 1,
-   "mbarrier.arrive.shared::cta.b64": 1,
+   "mbarrier.arrive.expect_tx.shared.b64": 1,
+   "mbarrier.arrive.expect_tx.shared::cta.b64": 0,
+   "mbarrier.arrive.shared.b64": 1,
+   "mbarrier.arrive.shared::cta.b64": 0,
    "mbarrier.init.shared::cta.b64": 8,
-   "mbarrier.try_wait.parity.shared::cta.b64": 2,
+   "mbarrier.try_wait.parity.shared.b64": 2,
+   "mbarrier.try_wait.parity.shared::cta.b64": 0,
    "prefetch.tensormap": 2,
    "st.global.b16": 64,
    "st.global.b32": 64,
@@ -47,7 +53,7 @@
  "fp8_gemm/fp8_gemm_reduce": {
   "instructions": {
    "cvt.rn.bf16.f32": 1,
-   "cvt.u32.u16": 1
+   "cvt.u32.u16": 0
   },
   "max_registers": 32,
   "max_stack_and_spill_bytes": 0
@@ -77,7 +83,7 @@
    "cvt.rn.bf16x2.f32": 2,
    "ld.global.nc.v4.b32": 1
   },
-  "max_registers": 14,
+  "max_registers": 13,
   "max_stack_and_spill_bytes": 0
  },
  "index_mma/index_scores_chunk_at": {
@@ -202,11 +208,11 @@
    "vote.sync.ballot.b32": 8
   },
   "max_registers": 32,
-  "max_stack_and_spill_bytes": 88
+  "max_stack_and_spill_bytes": 24
  },
  "index_mma/topk_mb_write_at": {
   "instructions": {
-   "popc.b32": 40,
+   "popc.b32": 30,
    "vote.sync.ballot.b32": 40
   },
   "max_registers": 32,
@@ -214,7 +220,7 @@
  },
  "index_mma/topk_select_ilp_at": {
   "instructions": {
-   "popc.b32": 24,
+   "popc.b32": 20,
    "shfl.sync.down.b32": 20,
    "vote.sync.ballot.b32": 24
   },
@@ -223,7 +229,7 @@
  },
  "index_mma/topk_select_ilp_hist_at": {
   "instructions": {
-   "popc.b32": 24,
+   "popc.b32": 20,
    "shfl.sync.down.b32": 20,
    "vote.sync.ballot.b32": 24
   },

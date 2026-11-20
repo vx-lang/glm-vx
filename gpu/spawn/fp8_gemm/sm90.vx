@@ -16,10 +16,9 @@ ensures reads_only(t)
   };
 }
 
-// The mbarrier helpers stay inline PTX: the nvvm mbarrier ops make LLVM 22 write `.shared`, not
-// the `.shared::cta` that this PTX has.
-
 // mbarrier.init (9.7.13.15.9): the barrier at `bar` expects `count` arrivals a phase.
+// It stays inline PTX: with nvvm.mbarrier.init, LLVM keeps the 8 barrier addresses in registers
+// across the tile loop, and the m64 kernels need 3 more registers.
 fn mbar_init(bar: i64, count: i32) on Topology::Device -> i32
 ensures writes_only()
 {
@@ -48,8 +47,10 @@ ensures writes_only()
 fn mbar_arrive_expect_tx(bar: i64, bytes: i32) on Topology::Device -> i32
 ensures writes_only()
 {
-  return mlir!( inputs : (%b = bar : i64, %n = bytes : i32), returns : i32, dialects : ["llvm", "arith"], ensures : [writes_only()]) {
-    llvm.inline_asm has_side_effects "{ .reg .b64 st; mbarrier.arrive.expect_tx.shared::cta.b64 st, [$0], $1; }", "l,r" %b, %n : (i64, i32) -> ()
+  return mlir!( inputs : (%b = bar : i64, %n = bytes : i32), returns : i32, dialects : ["nvvm", "llvm", "arith"], ensures : [writes_only()]) {
+    // mbarrier.arrive.expect_tx.shared.b64 _, [bar], bytes
+    %bp = llvm.inttoptr %b : i64 to !llvm.ptr<3>
+    nvvm.mbarrier.arrive.expect_tx %bp, %n : !llvm.ptr<3>, i32
     %z = arith.constant 0 : i32
     macro.yield %z : i32
   };
@@ -60,8 +61,10 @@ ensures writes_only()
 fn mbar_arrive(bar: i64) on Topology::Device -> i32
 ensures writes_only()
 {
-  return mlir!( inputs : (%b = bar : i64), returns : i32, dialects : ["llvm", "arith"], ensures : [writes_only()]) {
-    llvm.inline_asm has_side_effects "{ .reg .b64 st; mbarrier.arrive.shared::cta.b64 st, [$0]; }", "l" %b : (i64) -> ()
+  return mlir!( inputs : (%b = bar : i64), returns : i32, dialects : ["nvvm", "llvm", "arith"], ensures : [writes_only()]) {
+    // mbarrier.arrive.shared.b64 _, [bar]
+    %bp = llvm.inttoptr %b : i64 to !llvm.ptr<3>
+    nvvm.mbarrier.arrive %bp : !llvm.ptr<3>
     %z = arith.constant 0 : i32
     macro.yield %z : i32
   };
@@ -73,8 +76,11 @@ ensures writes_only()
 fn mbar_try_wait(bar: i64, parity: i32) on Topology::Device -> i32
 ensures writes_only()
 {
-  return mlir!( inputs : (%b = bar : i64, %p = parity : i32), returns : i32, dialects : ["llvm", "arith"], ensures : [writes_only()]) {
-    %r = llvm.inline_asm has_side_effects "{ .reg .pred p; mbarrier.try_wait.parity.shared::cta.b64 p, [$1], $2; selp.u32 $0, 1, 0, p; }", "=r,l,r" %b, %p : (i64, i32) -> i32
+  return mlir!( inputs : (%b = bar : i64, %p = parity : i32), returns : i32, dialects : ["nvvm", "llvm", "arith"], ensures : [writes_only()]) {
+    // mbarrier.try_wait.parity.shared.b64 done, [bar], parity
+    %bp = llvm.inttoptr %b : i64 to !llvm.ptr<3>
+    %done = nvvm.mbarrier.try_wait %bp, %p : !llvm.ptr<3>, i32 -> i1
+    %r = arith.extui %done : i1 to i32
     macro.yield %r : i32
   };
 }
@@ -149,13 +155,14 @@ ensures writes_only()
   return ((addr & 262143) >> 4) | (1 << 16) | (64 << 32) | (1 << 62);
 }
 
-// f32 to bfloat16 bits, round to nearest even (cvt.rn.bf16.f32, 9.7.9.21; sm_80+). It stays inline
-// PTX: with llvm ops, LLVM drops the cvt.u32.u16 when the caller keeps only the low 16 bits.
+// f32 to bfloat16 bits, round to nearest even (cvt.rn.bf16.f32, 9.7.9.21; sm_80+).
 fn bf16_bits(x: f32) on Topology::Device -> i32
 ensures writes_only()
 {
   return mlir!( inputs : (%x = x : f32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
-    %r = llvm.inline_asm "{ .reg .b16 h; cvt.rn.bf16.f32 h, $1; cvt.u32.u16 $0, h; }", "=r,f" %x : (f32) -> i32
+    %h = llvm.fptrunc %x : f32 to bf16
+    %i = llvm.bitcast %h : bf16 to i16
+    %r = llvm.zext %i : i16 to i32
     macro.yield %r : i32
   };
 }
@@ -201,7 +208,15 @@ fn st_global_bf16x2(addr: i64, lo: f32, hi: f32) on Topology::Device -> i32
 ensures writes_only()
 {
   return mlir!( inputs : (%a = addr : i64, %l = lo : f32, %h = hi : f32), returns : i32, dialects : ["llvm", "arith"], ensures : [writes_only()]) {
-    llvm.inline_asm has_side_effects "{ .reg .b32 w; cvt.rn.bf16x2.f32 w, $2, $1; st.global.b32 [$0], w; }", "l,f,f" %a, %l, %h : (i64, f32, f32) -> ()
+    // cvt.rn.bf16x2.f32 w, hi, lo; st.global.b32 [addr], w
+    %u = llvm.mlir.undef : vector<2xf32>
+    %i0 = llvm.mlir.constant(0 : i32) : i32
+    %i1 = llvm.mlir.constant(1 : i32) : i32
+    %v0 = llvm.insertelement %l, %u[%i0 : i32] : vector<2xf32>
+    %v = llvm.insertelement %h, %v0[%i1 : i32] : vector<2xf32>
+    %w = llvm.fptrunc %v : vector<2xf32> to vector<2xbf16>
+    %p = llvm.inttoptr %a : i64 to !llvm.ptr<1>
+    llvm.store %w, %p {alignment = 4 : i64} : vector<2xbf16>, !llvm.ptr<1>
     %z = arith.constant 0 : i32
     macro.yield %z : i32
   };

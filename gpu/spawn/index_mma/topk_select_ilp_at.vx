@@ -53,10 +53,14 @@ ensures writes_only()
 fn count_lanes(p: i32) on Topology::Device -> i32
 ensures writes_only()
 {
-  // Inline PTX: with llvm.intr.ctpop, LLVM turns place!'s count_lanes(x) > 0 into a test of the ballot
-  // and drops its popc.b32.
-  return mlir!( inputs : (%p = p : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
-    %r = llvm.inline_asm has_side_effects "{ .reg .pred q; .reg .b32 m; setp.ne.s32 q, $1, 0; vote.sync.ballot.b32 m, q, -1; popc.b32 $0, m; }", "=r,r" %p : (i32) -> i32
+  // setp.ne.s32, vote.sync.ballot.b32 with all 32 lanes in the mask, then popc.b32. Where a caller
+  // only tests count_lanes(x) > 0, LLVM tests the ballot and drops the popc.b32.
+  return mlir!( inputs : (%p = p : i32), returns : i32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {
+    %z = llvm.mlir.constant(0 : i32) : i32
+    %m = llvm.mlir.constant(-1 : i32) : i32
+    %q = llvm.icmp "ne" %p, %z : i32
+    %b = nvvm.vote.sync ballot %m, %q -> i32
+    %r = llvm.intr.ctpop(%b) : (i32) -> i32
     macro.yield %r : i32
   };
 }
