@@ -116,6 +116,51 @@ def warp_mlir(bf16_keys=False):
     return '\n'.join('    ' + line for line in p)
 
 
+
+def warp_ptx():
+    """The PTX of one lane's work, returning ($0) the score of token first + lane. Operands: $1 to $4
+    the key rows first + g, + 8, + 16 and + 24 (byte address of dim 4 c), $5 q row g (dim 4 c),
+    $6 weights[2 c], $7 scale."""
+    p = ['{', '.reg .b32 a<%d>;' % (8 * STEPS), '.reg .f32 x<4>, y<4>, z<4>, c<8>;', '.reg .b32 b<2>, l, src;',
+         '.reg .f32 t, acc<4>, w0, w1, sh<4>;', '.reg .pred q1, q2, q3;']
+    for s in range(STEPS):
+        for m, (k0, k1) in enumerate((('$1', '$2'), ('$3', '$4'))):
+            base = 8 * s + 4 * m
+            p.append(f'ld.global.nc.v4.f32 {{x0, x1, x2, x3}}, [{k0}+{64 * s}];')
+            p.append(f'ld.global.nc.v4.f32 {{y0, y1, y2, y3}}, [{k1}+{64 * s}];')
+            # A of tile m: (row g, cols 2c..), (row g + 8, ..), (row g, cols 2c + 8..), (row g + 8, ..);
+            # cvt.rn.bf16x2.f32 d, hi, lo puts the lower k in the low half.
+            p += [f'cvt.rn.bf16x2.f32 a{base}, x1, x0;', f'cvt.rn.bf16x2.f32 a{base + 1}, y1, y0;',
+                  f'cvt.rn.bf16x2.f32 a{base + 2}, x3, x2;', f'cvt.rn.bf16x2.f32 a{base + 3}, y3, y2;']
+    p += [f'mov.f32 acc{i}, 0f00000000;' for i in range(4)]
+    for n in range(TILES):
+        p += [f'mov.f32 c{i}, 0f00000000;' for i in range(8)]
+        for s in range(STEPS):
+            p.append(f'ld.global.nc.v4.f32 {{z0, z1, z2, z3}}, [$5+{n * 8 * DIM * 4 + 64 * s}];')
+            p += ['cvt.rn.bf16x2.f32 b0, z1, z0;', 'cvt.rn.bf16x2.f32 b1, z3, z2;']
+            for m in range(2):
+                base = 8 * s + 4 * m
+                cs = ', '.join(f'c{4 * m + i}' for i in range(4))
+                p.append(f'mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {{{cs}}}, '
+                         f'{{a{base}, a{base + 1}, a{base + 2}, a{base + 3}}}, {{b0, b1}}, {{{cs}}};')
+        # Tile m: c[4m], c[4m+1] row g (+ 16 m), heads 8 n + 2 c and + 1; c[4m+2], c[4m+3] row g + 8 (+ 16 m).
+        p.append(f'ld.global.nc.v2.f32 {{w0, w1}}, [$6+{32 * n}];')
+        for m in range(2):
+            for i, acc, w in ((0, 2 * m, 'w0'), (1, 2 * m, 'w1'), (2, 2 * m + 1, 'w0'), (3, 2 * m + 1, 'w1')):
+                p += [f'mul.f32 t, c{4 * m + i}, $7;', 'max.f32 t, t, 0f00000000;',
+                      f'fma.rn.f32 acc{acc}, {w}, t, acc{acc};']
+    # acc0..3: rows g, g + 8, g + 16, g + 24 of this lane's column c; add the four columns.
+    for i in range(4):
+        for m in (1, 2):
+            p += [f'shfl.sync.bfly.b32 t, acc{i}, {m}, 31, -1;', f'add.f32 acc{i}, acc{i}, t;']
+    # Lane l takes row l: acc[l / 8] of lane 4 (l % 8).
+    p += ['mov.u32 l, %laneid;', 'and.b32 src, l, 7;', 'shl.b32 src, src, 2;']
+    p += [f'shfl.sync.idx.b32 sh{i}, acc{i}, src, 31, -1;' for i in range(4)]
+    p += ['shr.u32 l, l, 3;', 'setp.eq.u32 q1, l, 1;', 'setp.eq.u32 q2, l, 2;', 'setp.eq.u32 q3, l, 3;',
+          'mov.f32 $0, sh0;', '@q1 mov.f32 $0, sh1;', '@q2 mov.f32 $0, sh2;', '@q3 mov.f32 $0, sh3;', '}']
+    return ' '.join(p)
+
+
 F32_1E_4, F32_448, F32_1 = '0f38D1B717', '0f43E00000', '0f3F800000'
 
 
@@ -351,10 +396,40 @@ pub fn glm_vx_spawn_index_scores_fp8_at(out: &mut Tensor<f32, [?], Memory::HBM>,
 
 
 
+def warp_fn(bf16_keys=False):
+    """index_scores_mma_warp. The f32-key kernels keep the warp's work as one inline-PTX block: as llvm and
+    nvvm ops, the same 472 SASS instructions and 132 registers came in another order from ptxas, and
+    index_scores_mma_at ran 3% to 6.5% slower on an H200. The bf16-key kernels use the ops."""
+    if not bf16_keys:
+        return '''// One lane's part of a warp's 32 scores (gen_index_mma.py's warp_ptx): the score of token first + lane.
+// It reads the keys, q and weights through their addresses and writes no memory.
+fn index_scores_mma_warp(k0: i64, k1: i64, k2: i64, k3: i64, q: i64, w: i64, scale: f32) on Topology::Device -> f32
+ensures writes_only()
+{
+  return mlir!( inputs : (%k0 = k0 : i64, %k1 = k1 : i64, %k2 = k2 : i64, %k3 = k3 : i64, %q = q : i64, %w = w : i64,
+                          %s = scale : f32), returns : f32, dialects : ["llvm"], ensures : [writes_only()]) {
+    %r = llvm.inline_asm has_side_effects "''' + warp_ptx() + '''", "=f,l,l,l,l,l,l,f" %k0, %k1, %k2, %k3, %q, %w, %s : (i64, i64, i64, i64, i64, i64, f32) -> f32
+    macro.yield %r : f32
+  };
+}'''
+    return '''// One lane's part of a warp's 32 scores (gen_index_mma.py's warp_mlir): the score of token first + lane.
+// It reads the keys, q and weights through their addresses and writes no memory.
+fn index_scores_mma_warp(k0: i64, k1: i64, k2: i64, k3: i64, q: i64, w: i64, scale: f32) on Topology::Device -> f32
+ensures writes_only()
+{
+  // ld.global.nc loads of the keys, q and weights, cvt.rn.bf16x2.f32 by fptrunc, mma.sync.m16n8k16 bf16,
+  // and shfl.sync to add the four lanes of a token and give lane l the score of token first + l.
+  return mlir!( inputs : (%k0 = k0 : i64, %k1 = k1 : i64, %k2 = k2 : i64, %k3 = k3 : i64, %q = q : i64, %w = w : i64,
+                          %s = scale : f32), returns : f32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {
+''' + warp_mlir(bf16_keys) + '''
+    macro.yield %r : f32
+  };
+}'''
+
+
 def source():
-    body = warp_mlir()
     return f'''// Generated by gen_index_mma.py: the indexer's scores on the tensor cores (#32), a warp's work one
-// mlir! block of llvm and nvvm ops; the layout is in the generator's docstring. Needs heads == {HEADS} and dim == {DIM}, keys with max_tokens
+// inline-PTX block in an mlir! macro; the layout is in the generator's docstring. Needs heads == {HEADS} and dim == {DIM}, keys with max_tokens
 // rows; otherwise it writes nothing. A block of {WARPS} warps takes {TOKENS_PER_BLOCK} tokens.
 // spawn-include: ../device.vx
 
@@ -378,19 +453,7 @@ ensures reads_only(t)
   }};
 }}
 
-// One lane's part of a warp's 32 scores (gen_index_mma.py's warp_mlir): the score of token first + lane.
-// It reads the keys, q and weights through their addresses and writes no memory.
-fn index_scores_mma_warp(k0: i64, k1: i64, k2: i64, k3: i64, q: i64, w: i64, scale: f32) on Topology::Device -> f32
-ensures writes_only()
-{{
-  // ld.global.nc loads of the keys, q and weights, cvt.rn.bf16x2.f32 by fptrunc, mma.sync.m16n8k16 bf16,
-  // and shfl.sync to add the four lanes of a token and give lane l the score of token first + l.
-  return mlir!( inputs : (%k0 = k0 : i64, %k1 = k1 : i64, %k2 = k2 : i64, %k3 = k3 : i64, %q = q : i64, %w = w : i64,
-                          %s = scale : f32), returns : f32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {{
-{body}
-    macro.yield %r : f32
-  }};
-}}
+{warp_fn()}
 
 pub fn glm_vx_spawn_index_scores_mma_at(out: &mut Tensor<f32, [?], Memory::HBM>, q: &Tensor<f32, [?, ?], Memory::HBM>,
                                         keys: &Tensor<f32, [?, ?], Memory::HBM>, weights: &Tensor<f32, [?], Memory::HBM>,
@@ -552,7 +615,8 @@ def source16():
     swap('// Generated by gen_index_mma.py: the indexer\'s scores on the tensor cores (#32),',
          '// Generated by gen_index_mma.py: index_scores_mma_at over bf16 key rows (index_key_bf16_at\'s words\n'
          '// [max_tokens, 64]: half the bytes, the same scores bit for bit). The indexer\'s scores on the tensor cores (#32),')
-    swap(warp_mlir(), warp_mlir(bf16_keys=True))
+    swap(warp_fn(), warp_fn(bf16_keys=True))
+    swap("a warp's work one\n// inline-PTX block in an mlir! macro;", "a warp's work one\n// mlir! block of llvm and nvvm ops;")
     swap('fn index_scores_mma_warp(', 'fn index_scores_mma16_warp(')
     swap('let score: f32 = index_scores_mma_warp(', 'let score: f32 = index_scores_mma16_warp(')
     swap('pub fn glm_vx_spawn_index_scores_mma_at(out: &mut Tensor<f32, [?], Memory::HBM>, q: &Tensor<f32, [?, ?], Memory::HBM>,\n'
