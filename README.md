@@ -61,19 +61,27 @@ flowchart TB
   them on a GPU.
 
 **Inline PTX: little is left.** Where Vx cannot yet generate an instruction, a kernel embeds it as inline PTX in an
-`mlir!` block. Since 2026-11-20 most of that is MLIR / NVVM ops instead: in the 144 built Vx files under
-`gpu/spawn`, inline PTX went from 77 places in 21 files to **23 places in 14**. The 9 other GPU kernel files and all
-the CPU kernels have none. (vxc itself still emits a few instructions as inline asm in its own lowering, such as
-`exit` and the e4m3 to f16 conversion; Vx's work on #3701 and #3702 covers those too.) What remains in our code:
+`mlir!` block. Since 2026-11-20 most of that is MLIR / NVVM ops instead: in the 145 built Vx files under
+`gpu/spawn`, inline PTX went from 77 places in 21 files to **24 places in 15**. The 9 other GPU kernel files and all
+the CPU kernels have none. (The toolchain still writes a few instructions as inline asm itself: vxc the e4m3 to f16
+conversion, LLVM's NVPTX backend an `exit` after a failed check.) What remains in our code:
 
 - **the FP8 tensor-core instructions Vx cannot generate yet**: `mma.sync` e4m3 (`index_mma/index_scores_fp8_at` and
-  its `_hist` twin, the four `moe_mma/` kernels) and Hopper's `wgmma` (`fp8_gemm/wgmma_m64n128k32.vx`). [Vx #3701](https://github.com/vx-lang/Vx/issues/3701)
-  makes the compiler generate the FP8 `mma.sync` with an LLVM intrinsic, and [#3702](https://github.com/vx-lang/Vx/issues/3702) makes it generate `wgmma`
-  with NVVM ops; with these, they can drop their PTX for plain Vx or MLIR ops.
-- **`index_scores_mma_at`'s warp body** (and its `_hist` twin's), kept because the ops version ran slower on the
-  H200 ([#65](https://github.com/vx-lang/glm-vx/issues/65)).
+  its `_hist` twin, the four `moe_mma/` kernels) and Hopper's `wgmma` (`fp8_gemm/wgmma_m64n128k32.vx`).
+  [Vx #3701](https://github.com/vx-lang/Vx/issues/3701) makes the compiler generate the FP8 `mma.sync` with an LLVM
+  intrinsic, and [#3702](https://github.com/vx-lang/Vx/issues/3702) makes it generate `wgmma` with NVVM ops; with
+  these, they can drop their PTX for plain Vx or MLIR ops.
+- **`index_scores_mma_at`'s warp body** (and its `_hist` twin's): as ops it ran 2.6% to 7.9% slower on one H200,
+  slower at every context from 3001 to 200000 tokens ([data](docs/benchmarks/2026-11-20-h200-index-scores/),
+  [#65](https://github.com/vx-lang/glm-vx/issues/65)). Every other converted kernel is as fast as its inline PTX or
+  faster.
 - **two single instructions** where the op costs registers: `mbarrier.init` (`fp8_gemm/sm90.vx`) and one `%laneid`
-  read in four index kernels.
+  read in four index kernels; and **a routing helper** (a shuffle, a ballot and `bfind`) in the MoE kernels.
+
+**A matmul in plain Vx beats the inline PTX.** `moe_mma='vx16'` runs the decode MoE down projection as a Vx lane
+matmul with its weights read straight from HBM (Vx #3694, #3696): 11.90 µs against 13.61 µs for the inline PTX
+kernel served now (0.874x), GLM-5.3 in block FP8 at one rank of 8, on one H200
+([data](docs/benchmarks/2026-11-20-h200-moe-down/)). It is off by default until an 8-GPU W1 and GSM8K run.
 
 ## Run
 
