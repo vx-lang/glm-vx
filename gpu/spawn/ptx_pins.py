@@ -27,11 +27,13 @@ SPECIAL = re.compile(r'^(mma|wgmma|shfl|vote|match|cvt|cp\.async|mbarrier|fence|
 
 
 def instructions(text):
-    """The instruction forms in PTX text: the opcode with its qualifiers, without a predicate."""
+    """The instruction forms in PTX text: the opcode with its qualifiers, without a predicate. A load or a
+    store of 32 or 64 bits is the same instruction as .b, .f, .u or .s, so all four count as .b: LLVM writes
+    .b where inline PTX may have written .f32."""
     for part in re.split(r'[;\n]', text.replace('{', ' ').replace('}', ' ')):
         part = re.sub(r'^\s*@!?%?\w+\s+', '', part).strip()
         if part and not part.startswith(('.', '//', '$')) and not part.endswith(':'):
-            yield part.split()[0]
+            yield re.sub(r'^((?:ld|st)\..*\.)[bfus](32|64)$', r'\1b\2', part.split()[0])
 
 
 def pins(ptx):

@@ -35,7 +35,7 @@
    "mbarrier.try_wait.parity.shared::cta.b64": 2,
    "prefetch.tensormap": 2,
    "st.global.b16": 64,
-   "st.global.f32": 64,
+   "st.global.b32": 64,
    "wgmma.commit_group.sync.aligned": 1,
    "wgmma.fence.sync.aligned": 1,
    "wgmma.mma_async.sync.aligned.m64n128k32.f32.e4m3.e4m3": 4,
@@ -55,7 +55,7 @@
  "index_mma/index_key_bf16_at": {
   "instructions": {
    "cvt.rn.bf16x2.f32": 2,
-   "ld.global.nc.v4.f32": 1
+   "ld.global.nc.v4.b32": 1
   },
   "max_registers": 14,
   "max_stack_and_spill_bytes": 0
@@ -66,7 +66,7 @@
    "cvt.rn.bf16.f32": 4,
    "cvt.rn.satfinite.e4m3x2.f32": 2,
    "div.rn.f32": 2,
-   "ld.global.v4.f32": 1,
+   "ld.global.v4.b32": 1,
    "shfl.sync.bfly.b32": 5
   },
   "max_registers": 22,
@@ -75,7 +75,7 @@
  "index_mma/index_q_bf16_at": {
   "instructions": {
    "cvt.rn.bf16x2.f32": 2,
-   "ld.global.nc.v4.f32": 1
+   "ld.global.nc.v4.b32": 1
   },
   "max_registers": 14,
   "max_stack_and_spill_bytes": 0
@@ -86,8 +86,7 @@
    "cp.async.cg.shared.global": 4,
    "cp.async.commit_group": 2,
    "cp.async.wait_group": 2,
-   "ld.global.nc.v2.b32": 32,
-   "ld.global.nc.v2.f32": 4,
+   "ld.global.nc.v2.b32": 36,
    "ld.shared.v2.b32": 32,
    "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32": 64,
    "shfl.sync.bfly.b32": 8,
@@ -102,8 +101,7 @@
    "cp.async.cg.shared.global": 4,
    "cp.async.commit_group": 2,
    "cp.async.wait_group": 2,
-   "ld.global.nc.v2.b32": 32,
-   "ld.global.nc.v2.f32": 4,
+   "ld.global.nc.v2.b32": 36,
    "ld.shared.v2.b32": 32,
    "match.any.sync.b32": 1,
    "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32": 64,
@@ -118,10 +116,9 @@
   "instructions": {
    "cvt.rn.satfinite.e4m3x2.f32": 64,
    "div.rn.f32": 8,
-   "ld.global.nc.f32": 4,
-   "ld.global.nc.v2.f32": 4,
-   "ld.global.nc.v4.f32": 32,
-   "ld.global.nc.v4.u32": 8,
+   "ld.global.nc.b32": 5,
+   "ld.global.nc.v2.b32": 4,
+   "ld.global.nc.v4.b32": 40,
    "mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32": 32,
    "shfl.sync.bfly.b32": 16,
    "shfl.sync.idx.b32": 12
@@ -133,10 +130,9 @@
   "instructions": {
    "cvt.rn.satfinite.e4m3x2.f32": 64,
    "div.rn.f32": 8,
-   "ld.global.nc.f32": 4,
-   "ld.global.nc.v2.f32": 4,
-   "ld.global.nc.v4.f32": 32,
-   "ld.global.nc.v4.u32": 8,
+   "ld.global.nc.b32": 5,
+   "ld.global.nc.v2.b32": 4,
+   "ld.global.nc.v4.b32": 40,
    "match.any.sync.b32": 1,
    "mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32": 32,
    "popc.b32": 1,
@@ -149,9 +145,8 @@
  "index_mma/index_scores_mma16_at": {
   "instructions": {
    "cvt.rn.bf16x2.f32": 64,
-   "ld.global.nc.v2.b32": 32,
-   "ld.global.nc.v2.f32": 4,
-   "ld.global.nc.v4.f32": 32,
+   "ld.global.nc.v2.b32": 36,
+   "ld.global.nc.v4.b32": 32,
    "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32": 64,
    "shfl.sync.bfly.b32": 8,
    "shfl.sync.idx.b32": 4
@@ -162,9 +157,8 @@
  "index_mma/index_scores_mma16_hist_at": {
   "instructions": {
    "cvt.rn.bf16x2.f32": 64,
-   "ld.global.nc.v2.b32": 32,
-   "ld.global.nc.v2.f32": 4,
-   "ld.global.nc.v4.f32": 32,
+   "ld.global.nc.v2.b32": 36,
+   "ld.global.nc.v4.b32": 32,
    "match.any.sync.b32": 1,
    "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32": 64,
    "popc.b32": 1,
@@ -177,8 +171,8 @@
  "index_mma/index_scores_mma_at": {
   "instructions": {
    "cvt.rn.bf16x2.f32": 128,
-   "ld.global.nc.v2.f32": 4,
-   "ld.global.nc.v4.f32": 64,
+   "ld.global.nc.v2.b32": 4,
+   "ld.global.nc.v4.b32": 64,
    "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32": 64,
    "shfl.sync.bfly.b32": 8,
    "shfl.sync.idx.b32": 4
@@ -189,8 +183,8 @@
  "index_mma/index_scores_mma_hist_at": {
   "instructions": {
    "cvt.rn.bf16x2.f32": 128,
-   "ld.global.nc.v2.f32": 4,
-   "ld.global.nc.v4.f32": 64,
+   "ld.global.nc.v2.b32": 4,
+   "ld.global.nc.v4.b32": 64,
    "match.any.sync.b32": 1,
    "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32": 64,
    "popc.b32": 1,
