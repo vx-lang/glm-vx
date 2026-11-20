@@ -65,7 +65,9 @@ def record(build):
         if numbers is None:
             sys.exit(f'{kernel}: build with PTXAS set, so that the pins have the register counts')
         kept = old.get(kernel, {}).get('instructions', {})
-        out[kernel] = {'instructions': pins(ptx, kept), 'max_registers': numbers[0], 'max_stack_and_spill_bytes': numbers[1]}
+        manifest = json.loads((build / f'{kernel}.json').read_text())
+        out[kernel] = {'instructions': pins(ptx, kept), 'max_registers': numbers[0], 'max_stack_and_spill_bytes': numbers[1],
+                       'ptxas_arch': manifest['ptxas_arch']}
     return out
 
 

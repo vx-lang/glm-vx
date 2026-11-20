@@ -18,12 +18,14 @@
    "wgmma.wait_group.sync.aligned": 1
   },
   "max_registers": 161,
-  "max_stack_and_spill_bytes": 0
+  "max_stack_and_spill_bytes": 0,
+  "ptxas_arch": "sm_90a"
  },
  "fp8_gemm/fp8_gemm_grouped_plan": {
   "instructions": {},
   "max_registers": 20,
-  "max_stack_and_spill_bytes": 0
+  "max_stack_and_spill_bytes": 0,
+  "ptxas_arch": "sm_90a"
  },
  "fp8_gemm/fp8_gemm_m64": {
   "instructions": {
@@ -48,7 +50,8 @@
    "wgmma.wait_group.sync.aligned": 1
   },
   "max_registers": 227,
-  "max_stack_and_spill_bytes": 0
+  "max_stack_and_spill_bytes": 0,
+  "ptxas_arch": "sm_90a"
  },
  "fp8_gemm/fp8_gemm_reduce": {
   "instructions": {
@@ -56,7 +59,8 @@
    "cvt.u32.u16": 0
   },
   "max_registers": 32,
-  "max_stack_and_spill_bytes": 0
+  "max_stack_and_spill_bytes": 0,
+  "ptxas_arch": "sm_90a"
  },
  "index_mma/index_key_bf16_at": {
   "instructions": {
@@ -64,7 +68,8 @@
    "ld.global.nc.v4.b32": 1
   },
   "max_registers": 14,
-  "max_stack_and_spill_bytes": 0
+  "max_stack_and_spill_bytes": 0,
+  "ptxas_arch": "sm_80"
  },
  "index_mma/index_key_fp8_at": {
   "instructions": {
@@ -76,7 +81,8 @@
    "shfl.sync.bfly.b32": 5
   },
   "max_registers": 22,
-  "max_stack_and_spill_bytes": 0
+  "max_stack_and_spill_bytes": 0,
+  "ptxas_arch": "sm_90a"
  },
  "index_mma/index_q_bf16_at": {
   "instructions": {
@@ -84,7 +90,8 @@
    "ld.global.nc.v4.b32": 1
   },
   "max_registers": 13,
-  "max_stack_and_spill_bytes": 0
+  "max_stack_and_spill_bytes": 0,
+  "ptxas_arch": "sm_80"
  },
  "index_mma/index_scores_chunk_at": {
   "instructions": {
@@ -99,7 +106,8 @@
    "shfl.sync.idx.b32": 4
   },
   "max_registers": 128,
-  "max_stack_and_spill_bytes": 0
+  "max_stack_and_spill_bytes": 0,
+  "ptxas_arch": "sm_80"
  },
  "index_mma/index_scores_chunk_hist_at": {
   "instructions": {
@@ -116,7 +124,8 @@
    "shfl.sync.idx.b32": 4
   },
   "max_registers": 129,
-  "max_stack_and_spill_bytes": 0
+  "max_stack_and_spill_bytes": 0,
+  "ptxas_arch": "sm_80"
  },
  "index_mma/index_scores_fp8_at": {
   "instructions": {
@@ -130,7 +139,8 @@
    "shfl.sync.idx.b32": 12
   },
   "max_registers": 108,
-  "max_stack_and_spill_bytes": 0
+  "max_stack_and_spill_bytes": 0,
+  "ptxas_arch": "sm_90a"
  },
  "index_mma/index_scores_fp8_hist_at": {
   "instructions": {
@@ -146,7 +156,8 @@
    "shfl.sync.idx.b32": 12
   },
   "max_registers": 112,
-  "max_stack_and_spill_bytes": 0
+  "max_stack_and_spill_bytes": 0,
+  "ptxas_arch": "sm_90a"
  },
  "index_mma/index_scores_mma16_at": {
   "instructions": {
@@ -158,7 +169,8 @@
    "shfl.sync.idx.b32": 4
   },
   "max_registers": 128,
-  "max_stack_and_spill_bytes": 0
+  "max_stack_and_spill_bytes": 0,
+  "ptxas_arch": "sm_80"
  },
  "index_mma/index_scores_mma16_hist_at": {
   "instructions": {
@@ -172,7 +184,8 @@
    "shfl.sync.idx.b32": 4
   },
   "max_registers": 130,
-  "max_stack_and_spill_bytes": 0
+  "max_stack_and_spill_bytes": 0,
+  "ptxas_arch": "sm_80"
  },
  "index_mma/index_scores_mma_at": {
   "instructions": {
@@ -184,7 +197,8 @@
    "shfl.sync.idx.b32": 4
   },
   "max_registers": 132,
-  "max_stack_and_spill_bytes": 0
+  "max_stack_and_spill_bytes": 0,
+  "ptxas_arch": "sm_80"
  },
  "index_mma/index_scores_mma_hist_at": {
   "instructions": {
@@ -198,7 +212,8 @@
    "shfl.sync.idx.b32": 4
   },
   "max_registers": 134,
-  "max_stack_and_spill_bytes": 0
+  "max_stack_and_spill_bytes": 0,
+  "ptxas_arch": "sm_80"
  },
  "index_mma/topk_mb_list_at": {
   "instructions": {
@@ -208,7 +223,8 @@
    "vote.sync.ballot.b32": 8
   },
   "max_registers": 32,
-  "max_stack_and_spill_bytes": 24
+  "max_stack_and_spill_bytes": 24,
+  "ptxas_arch": "sm_80"
  },
  "index_mma/topk_mb_write_at": {
   "instructions": {
@@ -216,7 +232,8 @@
    "vote.sync.ballot.b32": 40
   },
   "max_registers": 32,
-  "max_stack_and_spill_bytes": 0
+  "max_stack_and_spill_bytes": 0,
+  "ptxas_arch": "sm_80"
  },
  "index_mma/topk_select_ilp_at": {
   "instructions": {
@@ -225,7 +242,8 @@
    "vote.sync.ballot.b32": 24
   },
   "max_registers": 30,
-  "max_stack_and_spill_bytes": 0
+  "max_stack_and_spill_bytes": 0,
+  "ptxas_arch": "sm_80"
  },
  "index_mma/topk_select_ilp_hist_at": {
   "instructions": {
@@ -234,7 +252,8 @@
    "vote.sync.ballot.b32": 24
   },
   "max_registers": 31,
-  "max_stack_and_spill_bytes": 0
+  "max_stack_and_spill_bytes": 0,
+  "ptxas_arch": "sm_80"
  },
  "index_mma/topk_select_warp_at": {
   "instructions": {
@@ -245,6 +264,7 @@
    "vote.sync.ballot.b32": 1
   },
   "max_registers": 27,
-  "max_stack_and_spill_bytes": 0
+  "max_stack_and_spill_bytes": 0,
+  "ptxas_arch": "sm_80"
  }
 }
