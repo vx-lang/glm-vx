@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Write index_scores_mma_at.vx (#32): the indexer's scores on the tensor cores, the warp's whole
-work one inline-PTX block in an mlir! macro. Run from anywhere; rerun after editing, and commit the
+work one mlir! block of llvm and nvvm ops. Run from anywhere; rerun after editing, and commit the
 output (build.sh checks it with --check).
 
 out[t] = sum over the 32 heads of weights[h] * relu(scale * (q[h] . keys[t])), dim 128, for every
@@ -30,54 +30,90 @@ STEPS, TILES = DIM // 16, HEADS // 8
 TOKENS_PER_BLOCK, WARPS = 128, 4
 
 
-def warp_ptx(bf16_keys=False):
-    """The PTX of one lane's work, returning ($0) the score of token first + lane. Operands: $1 to $4
-    the key rows first + g, + 8, + 16 and + 24 (byte address of dim 4 c), $5 q row g (dim 4 c),
-    $6 weights[2 c], $7 scale. With bf16_keys the key rows are bf16 (index_key_bf16_at's words, the same
+MMA_RESULT = '!llvm.struct<(f32, f32, f32, f32)>'
+MMA_ATTRS = ('{layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, '
+             'multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>}')
+
+
+def warp_mlir(bf16_keys=False):
+    """One lane's work as llvm and nvvm ops, yielding (%r) the score of token first + lane. Operands: %k0 to
+    %k3 the key rows first + g, + 8, + 16 and + 24 (byte address of dim 4 c), %q q row g (dim 4 c), %w
+    weights[2 c], %s scale. With bf16_keys the key rows are bf16 (index_key_bf16_at's words, the same
     cvt.rn.bf16x2.f32 of the same values): one 8-byte load is the two A registers that the f32 path
     makes from a float4, so the scores are the same bits from half the bytes."""
-    p = ['{', '.reg .b32 a<%d>;' % (8 * STEPS), '.reg .f32 x<4>, y<4>, z<4>, c<8>;', '.reg .b32 b<2>, l, src;',
-         '.reg .f32 t, acc<4>, w0, w1, sh<4>;', '.reg .pred q1, q2, q3;']
+    p = ['%zero = llvm.mlir.constant(0.0 : f32) : f32', '%all = llvm.mlir.constant(-1 : i32) : i32',
+         '%clamp = llvm.mlir.constant(31 : i32) : i32']
+    p += [f'%i{i} = llvm.mlir.constant({i} : i32) : i32' for i in range(4)]
+    p += [f'%pk{r} = llvm.inttoptr %k{r} : i64 to !llvm.ptr<1>' for r in range(4)]
+    p += ['%pq = llvm.inttoptr %q : i64 to !llvm.ptr<1>', '%pw = llvm.inttoptr %w : i64 to !llvm.ptr<1>']
+
+    def load(name, ptr, offset, ty, align, freeze=False):
+        p.extend([f'%{name}_p = llvm.getelementptr {ptr}[{offset}] : (!llvm.ptr<1>) -> !llvm.ptr<1>, i8',
+                  f'%{name}{"_l" if freeze else ""} = llvm.load %{name}_p {{alignment = {align} : i64, invariant}} '
+                  f': !llvm.ptr<1> -> {ty}'])
+        if freeze:
+            # LLVM splits a vector load that only feeds extractelement into scalar loads and drops the
+            # invariant flag with it (no ld.global.nc). A freeze in between keeps one ld.global.nc.v2.b32.
+            p.append(f'%{name} = llvm.freeze %{name}_l : {ty}')
+
+    def words(name, x):
+        """The bf16x2 words of the float4 %x: word 0 is dims 0 (low half) and 1, word 1 dims 2 and 3."""
+        p.extend([f'%{name}_h = llvm.fptrunc %{x} : vector<4xf32> to vector<4xbf16>',
+                  f'%{name} = llvm.bitcast %{name}_h : vector<4xbf16> to vector<2xi32>'])
+
+    # a[8 s + 4 m + i]: A of k-step s, tile m: (row g, cols 2c..), (row g + 8, ..), (row g, cols 2c + 8..),
+    # (row g + 8, ..). An f32 float4 gives words 0 and 2 of its row, a bf16 8-byte load the same two words.
     for s in range(STEPS):
-        for m, (k0, k1) in enumerate((('$1', '$2'), ('$3', '$4'))):
-            base = 8 * s + 4 * m
-            if bf16_keys:
-                p.append(f'ld.global.nc.v2.b32 {{a{base}, a{base + 2}}}, [{k0}+{32 * s}];')
-                p.append(f'ld.global.nc.v2.b32 {{a{base + 1}, a{base + 3}}}, [{k1}+{32 * s}];')
-                continue
-            p.append(f'ld.global.nc.v4.f32 {{x0, x1, x2, x3}}, [{k0}+{64 * s}];')
-            p.append(f'ld.global.nc.v4.f32 {{y0, y1, y2, y3}}, [{k1}+{64 * s}];')
-            # A of tile m: (row g, cols 2c..), (row g + 8, ..), (row g, cols 2c + 8..), (row g + 8, ..);
-            # cvt.rn.bf16x2.f32 d, hi, lo puts the lower k in the low half.
-            p += [f'cvt.rn.bf16x2.f32 a{base}, x1, x0;', f'cvt.rn.bf16x2.f32 a{base + 1}, y1, y0;',
-                  f'cvt.rn.bf16x2.f32 a{base + 2}, x3, x2;', f'cvt.rn.bf16x2.f32 a{base + 3}, y3, y2;']
-    p += [f'mov.f32 acc{i}, 0f00000000;' for i in range(4)]
-    for n in range(TILES):
-        p += [f'mov.f32 c{i}, 0f00000000;' for i in range(8)]
-        for s in range(STEPS):
-            p.append(f'ld.global.nc.v4.f32 {{z0, z1, z2, z3}}, [$5+{n * 8 * DIM * 4 + 64 * s}];')
-            p += ['cvt.rn.bf16x2.f32 b0, z1, z0;', 'cvt.rn.bf16x2.f32 b1, z3, z2;']
-            for m in range(2):
-                base = 8 * s + 4 * m
-                cs = ', '.join(f'c{4 * m + i}' for i in range(4))
-                p.append(f'mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {{{cs}}}, '
-                         f'{{a{base}, a{base + 1}, a{base + 2}, a{base + 3}}}, {{b0, b1}}, {{{cs}}};')
-        # Tile m: c[4m], c[4m+1] row g (+ 16 m), heads 8 n + 2 c and + 1; c[4m+2], c[4m+3] row g + 8 (+ 16 m).
-        p.append(f'ld.global.nc.v2.f32 {{w0, w1}}, [$6+{32 * n}];')
         for m in range(2):
-            for i, acc, w in ((0, 2 * m, 'w0'), (1, 2 * m, 'w1'), (2, 2 * m + 1, 'w0'), (3, 2 * m + 1, 'w1')):
-                p += [f'mul.f32 t, c{4 * m + i}, $7;', 'max.f32 t, t, 0f00000000;',
-                      f'fma.rn.f32 acc{acc}, {w}, t, acc{acc};']
+            base = 8 * s + 4 * m
+            for j, r in enumerate((2 * m, 2 * m + 1)):
+                if bf16_keys:
+                    load(f'kw{base + j}', f'%pk{r}', 32 * s, 'vector<2xi32>', 8, freeze=True)
+                else:
+                    load(f'kx{base + j}', f'%pk{r}', 64 * s, 'vector<4xf32>', 16)
+                    words(f'kw{base + j}', f'kx{base + j}')
+                p += [f'%a{base + j} = llvm.extractelement %kw{base + j}[%i0 : i32] : vector<2xi32>',
+                      f'%a{base + j + 2} = llvm.extractelement %kw{base + j}[%i1 : i32] : vector<2xi32>']
+    acc = ['%zero'] * 4
+    for n in range(TILES):
+        c = ['%zero'] * 8
+        for s in range(STEPS):
+            load(f'z{n}_{s}', '%pq', n * 8 * DIM * 4 + 64 * s, 'vector<4xf32>', 16)
+            words(f'b{n}_{s}', f'z{n}_{s}')
+            p += [f'%b{n}_{s}_{i} = llvm.extractelement %b{n}_{s}[%i{i} : i32] : vector<2xi32>' for i in range(2)]
+            for m in range(2):
+                base, d = 8 * s + 4 * m, f'%d{n}_{s}_{m}'
+                p.append(f'{d} = nvvm.mma.sync A[%a{base}, %a{base + 1}, %a{base + 2}, %a{base + 3}] '
+                         f'B[%b{n}_{s}_0, %b{n}_{s}_1] C[{", ".join(c[4 * m:4 * m + 4])}] {MMA_ATTRS} '
+                         f': (i32, i32, f32) -> {MMA_RESULT}')
+                for i in range(4):
+                    p.append(f'{d}_{i} = llvm.extractvalue {d}[{i}] : {MMA_RESULT}')
+                    c[4 * m + i] = f'{d}_{i}'
+        # Tile m: c[4m], c[4m+1] row g (+ 16 m), heads 8 n + 2 c and + 1; c[4m+2], c[4m+3] row g + 8 (+ 16 m).
+        load(f'w{n}', '%pw', 32 * n, 'vector<2xf32>', 8, freeze=True)
+        p += [f'%w{n}_{i} = llvm.extractelement %w{n}[%i{i} : i32] : vector<2xf32>' for i in range(2)]
+        for m in range(2):
+            for i, a, w in ((0, 2 * m, 0), (1, 2 * m, 1), (2, 2 * m + 1, 0), (3, 2 * m + 1, 1)):
+                v = f'%t{n}_{m}_{i}'
+                p += [f'{v}m = llvm.fmul {c[4 * m + i]}, %s : f32', f'{v} = llvm.intr.maxnum({v}m, %zero) : (f32, f32) -> f32',
+                      f'{v}a = llvm.intr.fma(%w{n}_{w}, {v}, {acc[a]}) : (f32, f32, f32) -> f32']
+                acc[a] = f'{v}a'
     # acc0..3: rows g, g + 8, g + 16, g + 24 of this lane's column c; add the four columns.
     for i in range(4):
         for m in (1, 2):
-            p += [f'shfl.sync.bfly.b32 t, acc{i}, {m}, 31, -1;', f'add.f32 acc{i}, acc{i}, t;']
-    # Lane l takes row l: acc[l / 8] of lane 4 (l % 8).
-    p += ['mov.u32 l, %laneid;', 'and.b32 src, l, 7;', 'shl.b32 src, src, 2;']
-    p += [f'shfl.sync.idx.b32 sh{i}, acc{i}, src, 31, -1;' for i in range(4)]
-    p += ['shr.u32 l, l, 3;', 'setp.eq.u32 q1, l, 1;', 'setp.eq.u32 q2, l, 2;', 'setp.eq.u32 q3, l, 3;',
-          'mov.f32 $0, sh0;', '@q1 mov.f32 $0, sh1;', '@q2 mov.f32 $0, sh2;', '@q3 mov.f32 $0, sh3;', '}']
-    return ' '.join(p)
+            p += [f'%x{i}_{m} = nvvm.shfl.sync bfly %all, {acc[i]}, %i{m}, %clamp : f32 -> f32',
+                  f'%acc{i}_{m} = llvm.fadd {acc[i]}, %x{i}_{m} : f32']
+            acc[i] = f'%acc{i}_{m}'
+    # Lane l takes row l: acc[l / 8] of lane 4 (l % 8). nvvm.read.ptx.sreg.laneid would move out of the
+    # kernel's loop over blocks, and its values there cost 2 more registers, so %laneid stays inline asm.
+    p += ['%l = llvm.inline_asm has_side_effects "mov.u32 $0, %laneid;", "=r" : () -> i32', '%c7 = llvm.mlir.constant(7 : i32) : i32', '%l7 = llvm.and %l, %c7 : i32',
+          '%src = llvm.shl %l7, %i2 : i32']
+    p += [f'%sh{i} = nvvm.shfl.sync idx %all, {acc[i]}, %src, %clamp : f32 -> f32' for i in range(4)]
+    p += ['%row = llvm.lshr %l, %i3 : i32', '%q1 = llvm.icmp "eq" %row, %i1 : i32',
+          '%r1 = llvm.select %q1, %sh1, %sh0 : i1, f32', '%q2 = llvm.icmp "eq" %row, %i2 : i32',
+          '%r2 = llvm.select %q2, %sh2, %r1 : i1, f32', '%q3 = llvm.icmp "eq" %row, %i3 : i32',
+          '%r = llvm.select %q3, %sh3, %r2 : i1, f32']
+    return '\n'.join('    ' + line for line in p)
 
 
 F32_1E_4, F32_448, F32_1 = '0f38D1B717', '0f43E00000', '0f3F800000'
@@ -316,9 +352,9 @@ pub fn glm_vx_spawn_index_scores_fp8_at(out: &mut Tensor<f32, [?], Memory::HBM>,
 
 
 def source():
-    ptx = warp_ptx()
+    body = warp_mlir()
     return f'''// Generated by gen_index_mma.py: the indexer's scores on the tensor cores (#32), a warp's work one
-// inline-PTX block in an mlir! macro; the layout is in the generator's docstring. Needs heads == {HEADS} and dim == {DIM}, keys with max_tokens
+// mlir! block of llvm and nvvm ops; the layout is in the generator's docstring. Needs heads == {HEADS} and dim == {DIM}, keys with max_tokens
 // rows; otherwise it writes nothing. A block of {WARPS} warps takes {TOKENS_PER_BLOCK} tokens.
 // spawn-include: ../device.vx
 
@@ -342,14 +378,16 @@ ensures reads_only(t)
   }};
 }}
 
-// One lane's part of a warp's 32 scores (gen_index_mma.py's warp_ptx): the score of token first + lane.
+// One lane's part of a warp's 32 scores (gen_index_mma.py's warp_mlir): the score of token first + lane.
 // It reads the keys, q and weights through their addresses and writes no memory.
 fn index_scores_mma_warp(k0: i64, k1: i64, k2: i64, k3: i64, q: i64, w: i64, scale: f32) on Topology::Device -> f32
 ensures writes_only()
 {{
+  // ld.global.nc loads of the keys, q and weights, cvt.rn.bf16x2.f32 by fptrunc, mma.sync.m16n8k16 bf16,
+  // and shfl.sync to add the four lanes of a token and give lane l the score of token first + l.
   return mlir!( inputs : (%k0 = k0 : i64, %k1 = k1 : i64, %k2 = k2 : i64, %k3 = k3 : i64, %q = q : i64, %w = w : i64,
-                          %s = scale : f32), returns : f32, dialects : ["llvm"], ensures : [writes_only()]) {{
-    %r = llvm.inline_asm has_side_effects "{ptx}", "=f,l,l,l,l,l,l,f" %k0, %k1, %k2, %k3, %q, %w, %s : (i64, i64, i64, i64, i64, i64, f32) -> f32
+                          %s = scale : f32), returns : f32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {{
+{body}
     macro.yield %r : f32
   }};
 }}
@@ -513,7 +551,7 @@ def source16():
     swap('// Generated by gen_index_mma.py: the indexer\'s scores on the tensor cores (#32),',
          '// Generated by gen_index_mma.py: index_scores_mma_at over bf16 key rows (index_key_bf16_at\'s words\n'
          '// [max_tokens, 64]: half the bytes, the same scores bit for bit). The indexer\'s scores on the tensor cores (#32),')
-    swap(warp_ptx(), warp_ptx(bf16_keys=True))
+    swap(warp_mlir(), warp_mlir(bf16_keys=True))
     swap('fn index_scores_mma_warp(', 'fn index_scores_mma16_warp(')
     swap('let score: f32 = index_scores_mma_warp(', 'let score: f32 = index_scores_mma16_warp(')
     swap('pub fn glm_vx_spawn_index_scores_mma_at(out: &mut Tensor<f32, [?], Memory::HBM>, q: &Tensor<f32, [?, ?], Memory::HBM>,\n'
