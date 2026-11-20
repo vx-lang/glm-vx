@@ -787,7 +787,7 @@ macro_rules! index_chunk_query {
     %x3_2o = llvm.mlir.constant(2 : i32) : i32
     %x3_2s = nvvm.shfl.sync bfly %all, %x3_1, %x3_2o, %clamp : f32 -> f32
     %x3_2 = llvm.fadd %x3_1, %x3_2s : f32
-    %lane = nvvm.read.ptx.sreg.laneid : i32
+    %lane = llvm.inline_asm has_side_effects "mov.u32 $0, %laneid;", "=r" : () -> i32
     %seven = llvm.mlir.constant(7 : i32) : i32
     %two = llvm.mlir.constant(2 : i32) : i32
     %low = llvm.and %lane, %seven : i32
@@ -796,15 +796,14 @@ macro_rules! index_chunk_query {
     %sh1 = nvvm.shfl.sync idx %all, %x1_2, %src, %clamp : f32 -> f32
     %sh2 = nvvm.shfl.sync idx %all, %x2_2, %src, %clamp : f32 -> f32
     %sh3 = nvvm.shfl.sync idx %all, %x3_2, %src, %clamp : f32 -> f32
-    %c8 = llvm.mlir.constant(8 : i32) : i32
-    %c16 = llvm.mlir.constant(16 : i32) : i32
-    %bit3 = llvm.and %lane, %c8 : i32
-    %bit4 = llvm.and %lane, %c16 : i32
-    %odd = llvm.icmp "ne" %bit3, %e0 : i32
-    %high = llvm.icmp "ne" %bit4, %e0 : i32
-    %r01 = llvm.select %odd, %sh1, %sh0 : i1, f32
-    %r23 = llvm.select %odd, %sh3, %sh2 : i1, f32
-    %r = llvm.select %high, %r23, %r01 : i1, f32
+    %three = llvm.mlir.constant(3 : i32) : i32
+    %row = llvm.lshr %lane, %three : i32
+    %q1 = llvm.icmp "eq" %row, %e1 : i32
+    %q2 = llvm.icmp "eq" %row, %two : i32
+    %q3 = llvm.icmp "eq" %row, %three : i32
+    %r1 = llvm.select %q1, %sh1, %sh0 : i1, f32
+    %r2 = llvm.select %q2, %sh2, %r1 : i1, f32
+    %r = llvm.select %q3, %sh3, %r2 : i1, f32
     macro.yield %r : f32
           };
           dv_s

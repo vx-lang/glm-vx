@@ -826,7 +826,7 @@ macro_rules! index_chunk_query {
     %x3_2o = llvm.mlir.constant(2 : i32) : i32
     %x3_2s = nvvm.shfl.sync bfly %all, %x3_1, %x3_2o, %clamp : f32 -> f32
     %x3_2 = llvm.fadd %x3_1, %x3_2s : f32
-    %lane = nvvm.read.ptx.sreg.laneid : i32
+    %lane = llvm.inline_asm has_side_effects "mov.u32 $0, %laneid;", "=r" : () -> i32
     %seven = llvm.mlir.constant(7 : i32) : i32
     %two = llvm.mlir.constant(2 : i32) : i32
     %low = llvm.and %lane, %seven : i32

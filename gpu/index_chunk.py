@@ -150,7 +150,8 @@ def run_mlir(text, operands, memory):
     for line in filter(None, (s.strip() for s in text.split('\n'))):
         name, _, inst = line.partition(' = ') if re.match(r'%\w+ = ', line) else ('', '', line)
         op = inst.split()[0].split('(')[0]
-        args = [values[v] for v in _VALUE.findall(inst[len(op):].split(' : ')[0].split('{')[0])]
+        operand_text = re.sub(r'"[^"]*"', '', inst[len(op):])
+        args = [values[v] for v in _VALUE.findall(operand_text.split(' : ')[0].split('{')[0])]
         if op == 'llvm.mlir.constant':
             number = re.search(r'\(([-\d.e]+) : (\w+)\)', inst)
             bits = np.float32(number[1]).view(np.uint32) if number[2] == 'f32' else int(number[1]) & 0xFFFFFFFF
@@ -176,7 +177,7 @@ def run_mlir(text, operands, memory):
             assert (mask == 0xFFFFFFFF).all() and (clamp == 31).all(), line
             lanes = (lane_ids ^ b) if ' bfly ' in inst else b
             r = x[lanes % 32]
-        elif op == 'nvvm.read.ptx.sreg.laneid':
+        elif op == 'nvvm.read.ptx.sreg.laneid' or (op == 'llvm.inline_asm' and '"mov.u32 $0, %laneid;"' in inst):
             r = lane_ids.copy()
         elif op == 'nvvm.cp.async.shared.global':
             assert ', 16, cache = cg ' in inst, line
@@ -248,7 +249,7 @@ def emulate(q_words, key_words, weights, start, scale, max_tokens=None, out=None
     mem.add_global(QB, q_words)
     mem.add_global(KB, key_words)
     mem.add_global(WB, weights.astype(np.float32))
-    query_text = G.query_mlir(hist is not None)
+    query_text = G.query_mlir()
     scale_bits = np.full(32, np.float32(scale).view(np.uint32), np.uint32)
     for b in range(qtiles * ktiles):
         mem.shared = np.zeros(2 * G.BUFFER * 4, np.uint8)

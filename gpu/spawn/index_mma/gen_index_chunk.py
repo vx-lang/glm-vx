@@ -60,7 +60,7 @@ def key_loads():
     return loads
 
 
-def query_mlir(hist):
+def query_mlir():
     """One lane's score for one query, as the body of an mlir! block: %r the score of key first + lane.
     %a0..%a63 the A fragments, %qs the shared address of word 2 c of head row g of the query's buffer,
     %w the address of weights[i][2 c], %sc the scale."""
@@ -112,24 +112,18 @@ def query_mlir(hist):
                   f'{v}s = nvvm.shfl.sync bfly %all, {acc[i]}, {v}o, %clamp : f32 -> f32',
                   f'{v} = llvm.fadd {acc[i]}, {v}s : f32']
             acc[i] = v
-    # Lane l takes row l: acc[l / 8] of lane 4 (l % 8). The two ways to pick the acc give the same value.
-    # ptxas needs the fewest registers with l / 8 in the _hist_at kernel, and with bits 3 and 4 of l in the other.
-    p += ['%lane = nvvm.read.ptx.sreg.laneid : i32', '%seven = llvm.mlir.constant(7 : i32) : i32',
+    # Lane l takes row l: acc[l / 8] of lane 4 (l % 8). nvvm.read.ptx.sreg.laneid would move out of the
+    # kernel's loop over blocks, and its values there cost registers, so %laneid stays inline asm.
+    p += ['%lane = llvm.inline_asm has_side_effects "mov.u32 $0, %laneid;", "=r" : () -> i32',
+          '%seven = llvm.mlir.constant(7 : i32) : i32',
           '%two = llvm.mlir.constant(2 : i32) : i32', '%low = llvm.and %lane, %seven : i32',
           '%src = llvm.shl %low, %two : i32']
     p += [f'%sh{i} = nvvm.shfl.sync idx %all, {acc[i]}, %src, %clamp : f32 -> f32' for i in range(4)]
-    if hist:
-        p += ['%three = llvm.mlir.constant(3 : i32) : i32', '%row = llvm.lshr %lane, %three : i32',
-              '%q1 = llvm.icmp "eq" %row, %e1 : i32',
-              '%q2 = llvm.icmp "eq" %row, %two : i32', '%q3 = llvm.icmp "eq" %row, %three : i32',
-              '%r1 = llvm.select %q1, %sh1, %sh0 : i1, f32', '%r2 = llvm.select %q2, %sh2, %r1 : i1, f32',
-              '%r = llvm.select %q3, %sh3, %r2 : i1, f32']
-    else:
-        p += ['%c8 = llvm.mlir.constant(8 : i32) : i32', '%c16 = llvm.mlir.constant(16 : i32) : i32',
-              '%bit3 = llvm.and %lane, %c8 : i32', '%bit4 = llvm.and %lane, %c16 : i32',
-              '%odd = llvm.icmp "ne" %bit3, %e0 : i32', '%high = llvm.icmp "ne" %bit4, %e0 : i32',
-              '%r01 = llvm.select %odd, %sh1, %sh0 : i1, f32', '%r23 = llvm.select %odd, %sh3, %sh2 : i1, f32',
-              '%r = llvm.select %high, %r23, %r01 : i1, f32']
+    p += ['%three = llvm.mlir.constant(3 : i32) : i32', '%row = llvm.lshr %lane, %three : i32',
+          '%q1 = llvm.icmp "eq" %row, %e1 : i32',
+          '%q2 = llvm.icmp "eq" %row, %two : i32', '%q3 = llvm.icmp "eq" %row, %three : i32',
+          '%r1 = llvm.select %q1, %sh1, %sh0 : i1, f32', '%r2 = llvm.select %q2, %sh2, %r1 : i1, f32',
+          '%r = llvm.select %q3, %sh3, %r2 : i1, f32']
     return '\n'.join('    ' + line for line in p)
 
 
@@ -273,7 +267,7 @@ macro_rules! index_chunk_query {{
           let dv_s: f32 = mlir!( inputs : (%a = dv_a : memref<64xi32>, %qs = dv_qs : i64, %w = dv_w : i64, %sc = dv_scale : f32),
                                 returns : f32, dialects : ["llvm", "nvvm", "memref", "arith"], ensures : [reads_only(dv_a)]) {{
 {read_lines}
-{query_mlir(hist)}
+{query_mlir()}
     macro.yield %r : f32
           }};
           dv_s
