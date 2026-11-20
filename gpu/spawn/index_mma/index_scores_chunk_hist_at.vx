@@ -60,8 +60,9 @@ macro_rules! topk_key32 {
 fn match_any(x: i32) on Topology::Device -> i32
 ensures writes_only()
 {
-  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
-    %r = llvm.inline_asm has_side_effects "match.any.sync.b32 $0, $1, -1;", "=r,r" %x : (i32) -> i32
+  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {
+    %all = llvm.mlir.constant(-1 : i32) : i32
+    %r = nvvm.match.sync any %all, %x : i32 -> i32
     macro.yield %r : i32
   };
 }
@@ -70,7 +71,7 @@ fn popc(x: i32) on Topology::Device -> i32
 ensures writes_only()
 {
   return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
-    %r = llvm.inline_asm "popc.b32 $0, $1;", "=r,r" %x : (i32) -> i32
+    %r = llvm.intr.ctpop(%x) : (i32) -> i32
     macro.yield %r : i32
   };
 }
@@ -79,14 +80,20 @@ ensures writes_only()
 fn index_chunk_load2(at: i64) on Topology::Device -> i64
 ensures writes_only()
 {
+  // An invariant 8-byte load from a global pointer: ld.global.nc.v2.b32. The freeze keeps LLVM from
+  // making it one 64-bit load.
   return mlir!( inputs : (%x = at : i64), returns : i64, dialects : ["llvm"], ensures : [writes_only()]) {
-    %r = llvm.inline_asm has_side_effects "{ .reg .b32 lo, hi; ld.global.nc.v2.b32 {lo, hi}, [$1]; mov.b64 $0, {lo, hi}; }", "=l,l" %x : (i64) -> i64
+    %p = llvm.inttoptr %x : i64 to !llvm.ptr<1>
+    %v = llvm.load %p {alignment = 8 : i64, invariant} : !llvm.ptr<1> -> vector<2xi32>
+    %f = llvm.freeze %v : vector<2xi32>
+    %r = llvm.bitcast %f : vector<2xi32> to i64
     macro.yield %r : i64
   };
 }
 
-// One lane's score for one query (gen_index_chunk.py's query_ptx), from the A fragments in `$a` and the
-// query's q in shared memory. It reads its addresses and writes no memory.
+// One lane's score for one query (gen_index_chunk.py's query_mlir), from the A fragments in `$a` and the
+// query's q in shared memory: 64 mma.sync with B from ld.shared.v2, then the heads' sum and 12 shfl.sync.
+// It reads its addresses and writes no memory.
 macro_rules! index_chunk_query {
     ($a:ident, $qs:expr, $w:expr, $scale:expr) => {
         unsafe {
@@ -95,7 +102,7 @@ macro_rules! index_chunk_query {
           let dv_scale: f32 = $scale;
           let dv_a = &$a;
           let dv_s: f32 = mlir!( inputs : (%a = dv_a : memref<64xi32>, %qs = dv_qs : i64, %w = dv_w : i64, %sc = dv_scale : f32),
-                                returns : f32, dialects : ["llvm", "memref", "arith"], ensures : [reads_only(dv_a)]) {
+                                returns : f32, dialects : ["llvm", "nvvm", "memref", "arith"], ensures : [reads_only(dv_a)]) {
     %i0 = arith.constant 0 : index
     %a0 = memref.load %a[%i0] : memref<64xi32>
     %i1 = arith.constant 1 : index
@@ -224,7 +231,618 @@ macro_rules! index_chunk_query {
     %a62 = memref.load %a[%i62] : memref<64xi32>
     %i63 = arith.constant 63 : index
     %a63 = memref.load %a[%i63] : memref<64xi32>
-    %r = llvm.inline_asm has_side_effects "{ .reg .b32 b0, b1, l, src; .reg .f32 c<8>, t, acc<4>, w0, w1, sh<4>; .reg .pred q1, q2, q3; mov.f32 acc0, 0f00000000; mov.f32 acc1, 0f00000000; mov.f32 acc2, 0f00000000; mov.f32 acc3, 0f00000000; mov.f32 c0, 0f00000000; mov.f32 c1, 0f00000000; mov.f32 c2, 0f00000000; mov.f32 c3, 0f00000000; mov.f32 c4, 0f00000000; mov.f32 c5, 0f00000000; mov.f32 c6, 0f00000000; mov.f32 c7, 0f00000000; ld.shared.v2.b32 {b0, b1}, [$65+0]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$1, $2, $3, $4}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$5, $6, $7, $8}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+32]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$9, $10, $11, $12}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$13, $14, $15, $16}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+64]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$17, $18, $19, $20}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$21, $22, $23, $24}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+96]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$25, $26, $27, $28}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$29, $30, $31, $32}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+128]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$33, $34, $35, $36}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$37, $38, $39, $40}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+160]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$41, $42, $43, $44}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$45, $46, $47, $48}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+192]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$49, $50, $51, $52}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$53, $54, $55, $56}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+224]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$57, $58, $59, $60}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$61, $62, $63, $64}, {b0, b1}, {c4, c5, c6, c7}; ld.global.nc.v2.f32 {w0, w1}, [$66+0]; mul.f32 t, c0, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc0, w0, t, acc0; mul.f32 t, c1, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc0, w1, t, acc0; mul.f32 t, c2, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc1, w0, t, acc1; mul.f32 t, c3, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc1, w1, t, acc1; mul.f32 t, c4, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc2, w0, t, acc2; mul.f32 t, c5, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc2, w1, t, acc2; mul.f32 t, c6, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc3, w0, t, acc3; mul.f32 t, c7, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc3, w1, t, acc3; mov.f32 c0, 0f00000000; mov.f32 c1, 0f00000000; mov.f32 c2, 0f00000000; mov.f32 c3, 0f00000000; mov.f32 c4, 0f00000000; mov.f32 c5, 0f00000000; mov.f32 c6, 0f00000000; mov.f32 c7, 0f00000000; ld.shared.v2.b32 {b0, b1}, [$65+2304]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$1, $2, $3, $4}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$5, $6, $7, $8}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+2336]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$9, $10, $11, $12}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$13, $14, $15, $16}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+2368]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$17, $18, $19, $20}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$21, $22, $23, $24}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+2400]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$25, $26, $27, $28}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$29, $30, $31, $32}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+2432]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$33, $34, $35, $36}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$37, $38, $39, $40}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+2464]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$41, $42, $43, $44}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$45, $46, $47, $48}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+2496]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$49, $50, $51, $52}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$53, $54, $55, $56}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+2528]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$57, $58, $59, $60}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$61, $62, $63, $64}, {b0, b1}, {c4, c5, c6, c7}; ld.global.nc.v2.f32 {w0, w1}, [$66+32]; mul.f32 t, c0, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc0, w0, t, acc0; mul.f32 t, c1, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc0, w1, t, acc0; mul.f32 t, c2, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc1, w0, t, acc1; mul.f32 t, c3, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc1, w1, t, acc1; mul.f32 t, c4, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc2, w0, t, acc2; mul.f32 t, c5, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc2, w1, t, acc2; mul.f32 t, c6, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc3, w0, t, acc3; mul.f32 t, c7, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc3, w1, t, acc3; mov.f32 c0, 0f00000000; mov.f32 c1, 0f00000000; mov.f32 c2, 0f00000000; mov.f32 c3, 0f00000000; mov.f32 c4, 0f00000000; mov.f32 c5, 0f00000000; mov.f32 c6, 0f00000000; mov.f32 c7, 0f00000000; ld.shared.v2.b32 {b0, b1}, [$65+4608]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$1, $2, $3, $4}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$5, $6, $7, $8}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+4640]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$9, $10, $11, $12}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$13, $14, $15, $16}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+4672]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$17, $18, $19, $20}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$21, $22, $23, $24}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+4704]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$25, $26, $27, $28}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$29, $30, $31, $32}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+4736]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$33, $34, $35, $36}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$37, $38, $39, $40}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+4768]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$41, $42, $43, $44}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$45, $46, $47, $48}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+4800]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$49, $50, $51, $52}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$53, $54, $55, $56}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+4832]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$57, $58, $59, $60}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$61, $62, $63, $64}, {b0, b1}, {c4, c5, c6, c7}; ld.global.nc.v2.f32 {w0, w1}, [$66+64]; mul.f32 t, c0, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc0, w0, t, acc0; mul.f32 t, c1, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc0, w1, t, acc0; mul.f32 t, c2, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc1, w0, t, acc1; mul.f32 t, c3, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc1, w1, t, acc1; mul.f32 t, c4, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc2, w0, t, acc2; mul.f32 t, c5, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc2, w1, t, acc2; mul.f32 t, c6, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc3, w0, t, acc3; mul.f32 t, c7, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc3, w1, t, acc3; mov.f32 c0, 0f00000000; mov.f32 c1, 0f00000000; mov.f32 c2, 0f00000000; mov.f32 c3, 0f00000000; mov.f32 c4, 0f00000000; mov.f32 c5, 0f00000000; mov.f32 c6, 0f00000000; mov.f32 c7, 0f00000000; ld.shared.v2.b32 {b0, b1}, [$65+6912]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$1, $2, $3, $4}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$5, $6, $7, $8}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+6944]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$9, $10, $11, $12}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$13, $14, $15, $16}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+6976]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$17, $18, $19, $20}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$21, $22, $23, $24}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+7008]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$25, $26, $27, $28}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$29, $30, $31, $32}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+7040]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$33, $34, $35, $36}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$37, $38, $39, $40}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+7072]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$41, $42, $43, $44}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$45, $46, $47, $48}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+7104]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$49, $50, $51, $52}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$53, $54, $55, $56}, {b0, b1}, {c4, c5, c6, c7}; ld.shared.v2.b32 {b0, b1}, [$65+7136]; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c0, c1, c2, c3}, {$57, $58, $59, $60}, {b0, b1}, {c0, c1, c2, c3}; mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {c4, c5, c6, c7}, {$61, $62, $63, $64}, {b0, b1}, {c4, c5, c6, c7}; ld.global.nc.v2.f32 {w0, w1}, [$66+96]; mul.f32 t, c0, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc0, w0, t, acc0; mul.f32 t, c1, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc0, w1, t, acc0; mul.f32 t, c2, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc1, w0, t, acc1; mul.f32 t, c3, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc1, w1, t, acc1; mul.f32 t, c4, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc2, w0, t, acc2; mul.f32 t, c5, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc2, w1, t, acc2; mul.f32 t, c6, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc3, w0, t, acc3; mul.f32 t, c7, $67; max.f32 t, t, 0f00000000; fma.rn.f32 acc3, w1, t, acc3; shfl.sync.bfly.b32 t, acc0, 1, 31, -1; add.f32 acc0, acc0, t; shfl.sync.bfly.b32 t, acc0, 2, 31, -1; add.f32 acc0, acc0, t; shfl.sync.bfly.b32 t, acc1, 1, 31, -1; add.f32 acc1, acc1, t; shfl.sync.bfly.b32 t, acc1, 2, 31, -1; add.f32 acc1, acc1, t; shfl.sync.bfly.b32 t, acc2, 1, 31, -1; add.f32 acc2, acc2, t; shfl.sync.bfly.b32 t, acc2, 2, 31, -1; add.f32 acc2, acc2, t; shfl.sync.bfly.b32 t, acc3, 1, 31, -1; add.f32 acc3, acc3, t; shfl.sync.bfly.b32 t, acc3, 2, 31, -1; add.f32 acc3, acc3, t; mov.u32 l, %laneid; and.b32 src, l, 7; shl.b32 src, src, 2; shfl.sync.idx.b32 sh0, acc0, src, 31, -1; shfl.sync.idx.b32 sh1, acc1, src, 31, -1; shfl.sync.idx.b32 sh2, acc2, src, 31, -1; shfl.sync.idx.b32 sh3, acc3, src, 31, -1; shr.u32 l, l, 3; setp.eq.u32 q1, l, 1; setp.eq.u32 q2, l, 2; setp.eq.u32 q3, l, 3; mov.f32 $0, sh0; @q1 mov.f32 $0, sh1; @q2 mov.f32 $0, sh2; @q3 mov.f32 $0, sh3; }", "=f,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,r,l,l,f" %a0, %a1, %a2, %a3, %a4, %a5, %a6, %a7, %a8, %a9, %a10, %a11, %a12, %a13, %a14, %a15, %a16, %a17, %a18, %a19, %a20, %a21, %a22, %a23, %a24, %a25, %a26, %a27, %a28, %a29, %a30, %a31, %a32, %a33, %a34, %a35, %a36, %a37, %a38, %a39, %a40, %a41, %a42, %a43, %a44, %a45, %a46, %a47, %a48, %a49, %a50, %a51, %a52, %a53, %a54, %a55, %a56, %a57, %a58, %a59, %a60, %a61, %a62, %a63, %qs, %w, %sc : (i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i64, i64, f32) -> f32
+    %qp = llvm.inttoptr %qs : i64 to !llvm.ptr<3>
+    %wp = llvm.inttoptr %w : i64 to !llvm.ptr<1>
+    %zero = llvm.mlir.constant(0.0 : f32) : f32
+    %all = llvm.mlir.constant(-1 : i32) : i32
+    %clamp = llvm.mlir.constant(31 : i32) : i32
+    %e0 = llvm.mlir.constant(0 : i32) : i32
+    %e1 = llvm.mlir.constant(1 : i32) : i32
+    %b0_0p = llvm.getelementptr %qp[0] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b0_0 = llvm.load %b0_0p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b0_0x = llvm.extractelement %b0_0[%e0 : i32] : vector<2xi32>
+    %b0_0y = llvm.extractelement %b0_0[%e1 : i32] : vector<2xi32>
+    %d0_0_0 = nvvm.mma.sync A[%a0, %a1, %a2, %a3] B[%b0_0x, %b0_0y] C[%zero, %zero, %zero, %zero] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d0_0_0c0 = llvm.extractvalue %d0_0_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_0_0c1 = llvm.extractvalue %d0_0_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_0_0c2 = llvm.extractvalue %d0_0_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_0_0c3 = llvm.extractvalue %d0_0_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_0_1 = nvvm.mma.sync A[%a4, %a5, %a6, %a7] B[%b0_0x, %b0_0y] C[%zero, %zero, %zero, %zero] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d0_0_1c0 = llvm.extractvalue %d0_0_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_0_1c1 = llvm.extractvalue %d0_0_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_0_1c2 = llvm.extractvalue %d0_0_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_0_1c3 = llvm.extractvalue %d0_0_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b0_1p = llvm.getelementptr %qp[32] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b0_1 = llvm.load %b0_1p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b0_1x = llvm.extractelement %b0_1[%e0 : i32] : vector<2xi32>
+    %b0_1y = llvm.extractelement %b0_1[%e1 : i32] : vector<2xi32>
+    %d0_1_0 = nvvm.mma.sync A[%a8, %a9, %a10, %a11] B[%b0_1x, %b0_1y] C[%d0_0_0c0, %d0_0_0c1, %d0_0_0c2, %d0_0_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d0_1_0c0 = llvm.extractvalue %d0_1_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_1_0c1 = llvm.extractvalue %d0_1_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_1_0c2 = llvm.extractvalue %d0_1_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_1_0c3 = llvm.extractvalue %d0_1_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_1_1 = nvvm.mma.sync A[%a12, %a13, %a14, %a15] B[%b0_1x, %b0_1y] C[%d0_0_1c0, %d0_0_1c1, %d0_0_1c2, %d0_0_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d0_1_1c0 = llvm.extractvalue %d0_1_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_1_1c1 = llvm.extractvalue %d0_1_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_1_1c2 = llvm.extractvalue %d0_1_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_1_1c3 = llvm.extractvalue %d0_1_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b0_2p = llvm.getelementptr %qp[64] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b0_2 = llvm.load %b0_2p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b0_2x = llvm.extractelement %b0_2[%e0 : i32] : vector<2xi32>
+    %b0_2y = llvm.extractelement %b0_2[%e1 : i32] : vector<2xi32>
+    %d0_2_0 = nvvm.mma.sync A[%a16, %a17, %a18, %a19] B[%b0_2x, %b0_2y] C[%d0_1_0c0, %d0_1_0c1, %d0_1_0c2, %d0_1_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d0_2_0c0 = llvm.extractvalue %d0_2_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_2_0c1 = llvm.extractvalue %d0_2_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_2_0c2 = llvm.extractvalue %d0_2_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_2_0c3 = llvm.extractvalue %d0_2_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_2_1 = nvvm.mma.sync A[%a20, %a21, %a22, %a23] B[%b0_2x, %b0_2y] C[%d0_1_1c0, %d0_1_1c1, %d0_1_1c2, %d0_1_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d0_2_1c0 = llvm.extractvalue %d0_2_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_2_1c1 = llvm.extractvalue %d0_2_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_2_1c2 = llvm.extractvalue %d0_2_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_2_1c3 = llvm.extractvalue %d0_2_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b0_3p = llvm.getelementptr %qp[96] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b0_3 = llvm.load %b0_3p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b0_3x = llvm.extractelement %b0_3[%e0 : i32] : vector<2xi32>
+    %b0_3y = llvm.extractelement %b0_3[%e1 : i32] : vector<2xi32>
+    %d0_3_0 = nvvm.mma.sync A[%a24, %a25, %a26, %a27] B[%b0_3x, %b0_3y] C[%d0_2_0c0, %d0_2_0c1, %d0_2_0c2, %d0_2_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d0_3_0c0 = llvm.extractvalue %d0_3_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_3_0c1 = llvm.extractvalue %d0_3_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_3_0c2 = llvm.extractvalue %d0_3_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_3_0c3 = llvm.extractvalue %d0_3_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_3_1 = nvvm.mma.sync A[%a28, %a29, %a30, %a31] B[%b0_3x, %b0_3y] C[%d0_2_1c0, %d0_2_1c1, %d0_2_1c2, %d0_2_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d0_3_1c0 = llvm.extractvalue %d0_3_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_3_1c1 = llvm.extractvalue %d0_3_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_3_1c2 = llvm.extractvalue %d0_3_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_3_1c3 = llvm.extractvalue %d0_3_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b0_4p = llvm.getelementptr %qp[128] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b0_4 = llvm.load %b0_4p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b0_4x = llvm.extractelement %b0_4[%e0 : i32] : vector<2xi32>
+    %b0_4y = llvm.extractelement %b0_4[%e1 : i32] : vector<2xi32>
+    %d0_4_0 = nvvm.mma.sync A[%a32, %a33, %a34, %a35] B[%b0_4x, %b0_4y] C[%d0_3_0c0, %d0_3_0c1, %d0_3_0c2, %d0_3_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d0_4_0c0 = llvm.extractvalue %d0_4_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_4_0c1 = llvm.extractvalue %d0_4_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_4_0c2 = llvm.extractvalue %d0_4_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_4_0c3 = llvm.extractvalue %d0_4_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_4_1 = nvvm.mma.sync A[%a36, %a37, %a38, %a39] B[%b0_4x, %b0_4y] C[%d0_3_1c0, %d0_3_1c1, %d0_3_1c2, %d0_3_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d0_4_1c0 = llvm.extractvalue %d0_4_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_4_1c1 = llvm.extractvalue %d0_4_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_4_1c2 = llvm.extractvalue %d0_4_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_4_1c3 = llvm.extractvalue %d0_4_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b0_5p = llvm.getelementptr %qp[160] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b0_5 = llvm.load %b0_5p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b0_5x = llvm.extractelement %b0_5[%e0 : i32] : vector<2xi32>
+    %b0_5y = llvm.extractelement %b0_5[%e1 : i32] : vector<2xi32>
+    %d0_5_0 = nvvm.mma.sync A[%a40, %a41, %a42, %a43] B[%b0_5x, %b0_5y] C[%d0_4_0c0, %d0_4_0c1, %d0_4_0c2, %d0_4_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d0_5_0c0 = llvm.extractvalue %d0_5_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_5_0c1 = llvm.extractvalue %d0_5_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_5_0c2 = llvm.extractvalue %d0_5_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_5_0c3 = llvm.extractvalue %d0_5_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_5_1 = nvvm.mma.sync A[%a44, %a45, %a46, %a47] B[%b0_5x, %b0_5y] C[%d0_4_1c0, %d0_4_1c1, %d0_4_1c2, %d0_4_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d0_5_1c0 = llvm.extractvalue %d0_5_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_5_1c1 = llvm.extractvalue %d0_5_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_5_1c2 = llvm.extractvalue %d0_5_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_5_1c3 = llvm.extractvalue %d0_5_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b0_6p = llvm.getelementptr %qp[192] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b0_6 = llvm.load %b0_6p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b0_6x = llvm.extractelement %b0_6[%e0 : i32] : vector<2xi32>
+    %b0_6y = llvm.extractelement %b0_6[%e1 : i32] : vector<2xi32>
+    %d0_6_0 = nvvm.mma.sync A[%a48, %a49, %a50, %a51] B[%b0_6x, %b0_6y] C[%d0_5_0c0, %d0_5_0c1, %d0_5_0c2, %d0_5_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d0_6_0c0 = llvm.extractvalue %d0_6_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_6_0c1 = llvm.extractvalue %d0_6_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_6_0c2 = llvm.extractvalue %d0_6_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_6_0c3 = llvm.extractvalue %d0_6_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_6_1 = nvvm.mma.sync A[%a52, %a53, %a54, %a55] B[%b0_6x, %b0_6y] C[%d0_5_1c0, %d0_5_1c1, %d0_5_1c2, %d0_5_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d0_6_1c0 = llvm.extractvalue %d0_6_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_6_1c1 = llvm.extractvalue %d0_6_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_6_1c2 = llvm.extractvalue %d0_6_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_6_1c3 = llvm.extractvalue %d0_6_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b0_7p = llvm.getelementptr %qp[224] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b0_7 = llvm.load %b0_7p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b0_7x = llvm.extractelement %b0_7[%e0 : i32] : vector<2xi32>
+    %b0_7y = llvm.extractelement %b0_7[%e1 : i32] : vector<2xi32>
+    %d0_7_0 = nvvm.mma.sync A[%a56, %a57, %a58, %a59] B[%b0_7x, %b0_7y] C[%d0_6_0c0, %d0_6_0c1, %d0_6_0c2, %d0_6_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d0_7_0c0 = llvm.extractvalue %d0_7_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_7_0c1 = llvm.extractvalue %d0_7_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_7_0c2 = llvm.extractvalue %d0_7_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_7_0c3 = llvm.extractvalue %d0_7_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_7_1 = nvvm.mma.sync A[%a60, %a61, %a62, %a63] B[%b0_7x, %b0_7y] C[%d0_6_1c0, %d0_6_1c1, %d0_6_1c2, %d0_6_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d0_7_1c0 = llvm.extractvalue %d0_7_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_7_1c1 = llvm.extractvalue %d0_7_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_7_1c2 = llvm.extractvalue %d0_7_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d0_7_1c3 = llvm.extractvalue %d0_7_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %w0p = llvm.getelementptr %wp[0] : (!llvm.ptr<1>) -> !llvm.ptr<1>, i8
+    %w0l = llvm.load %w0p {alignment = 8 : i64, invariant} : !llvm.ptr<1> -> vector<2xf32>
+    %w0 = llvm.freeze %w0l : vector<2xf32>
+    %w0x = llvm.extractelement %w0[%e0 : i32] : vector<2xf32>
+    %w0y = llvm.extractelement %w0[%e1 : i32] : vector<2xf32>
+    %t0_0_0m = llvm.fmul %d0_7_0c0, %sc : f32
+    %t0_0_0 = llvm.intr.maxnum(%t0_0_0m, %zero) : (f32, f32) -> f32
+    %t0_0_0a = llvm.intr.fma(%w0x, %t0_0_0, %zero) : (f32, f32, f32) -> f32
+    %t0_0_1m = llvm.fmul %d0_7_0c1, %sc : f32
+    %t0_0_1 = llvm.intr.maxnum(%t0_0_1m, %zero) : (f32, f32) -> f32
+    %t0_0_1a = llvm.intr.fma(%w0y, %t0_0_1, %t0_0_0a) : (f32, f32, f32) -> f32
+    %t0_0_2m = llvm.fmul %d0_7_0c2, %sc : f32
+    %t0_0_2 = llvm.intr.maxnum(%t0_0_2m, %zero) : (f32, f32) -> f32
+    %t0_0_2a = llvm.intr.fma(%w0x, %t0_0_2, %zero) : (f32, f32, f32) -> f32
+    %t0_0_3m = llvm.fmul %d0_7_0c3, %sc : f32
+    %t0_0_3 = llvm.intr.maxnum(%t0_0_3m, %zero) : (f32, f32) -> f32
+    %t0_0_3a = llvm.intr.fma(%w0y, %t0_0_3, %t0_0_2a) : (f32, f32, f32) -> f32
+    %t0_1_0m = llvm.fmul %d0_7_1c0, %sc : f32
+    %t0_1_0 = llvm.intr.maxnum(%t0_1_0m, %zero) : (f32, f32) -> f32
+    %t0_1_0a = llvm.intr.fma(%w0x, %t0_1_0, %zero) : (f32, f32, f32) -> f32
+    %t0_1_1m = llvm.fmul %d0_7_1c1, %sc : f32
+    %t0_1_1 = llvm.intr.maxnum(%t0_1_1m, %zero) : (f32, f32) -> f32
+    %t0_1_1a = llvm.intr.fma(%w0y, %t0_1_1, %t0_1_0a) : (f32, f32, f32) -> f32
+    %t0_1_2m = llvm.fmul %d0_7_1c2, %sc : f32
+    %t0_1_2 = llvm.intr.maxnum(%t0_1_2m, %zero) : (f32, f32) -> f32
+    %t0_1_2a = llvm.intr.fma(%w0x, %t0_1_2, %zero) : (f32, f32, f32) -> f32
+    %t0_1_3m = llvm.fmul %d0_7_1c3, %sc : f32
+    %t0_1_3 = llvm.intr.maxnum(%t0_1_3m, %zero) : (f32, f32) -> f32
+    %t0_1_3a = llvm.intr.fma(%w0y, %t0_1_3, %t0_1_2a) : (f32, f32, f32) -> f32
+    %b1_0p = llvm.getelementptr %qp[2304] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b1_0 = llvm.load %b1_0p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b1_0x = llvm.extractelement %b1_0[%e0 : i32] : vector<2xi32>
+    %b1_0y = llvm.extractelement %b1_0[%e1 : i32] : vector<2xi32>
+    %d1_0_0 = nvvm.mma.sync A[%a0, %a1, %a2, %a3] B[%b1_0x, %b1_0y] C[%zero, %zero, %zero, %zero] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d1_0_0c0 = llvm.extractvalue %d1_0_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_0_0c1 = llvm.extractvalue %d1_0_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_0_0c2 = llvm.extractvalue %d1_0_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_0_0c3 = llvm.extractvalue %d1_0_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_0_1 = nvvm.mma.sync A[%a4, %a5, %a6, %a7] B[%b1_0x, %b1_0y] C[%zero, %zero, %zero, %zero] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d1_0_1c0 = llvm.extractvalue %d1_0_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_0_1c1 = llvm.extractvalue %d1_0_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_0_1c2 = llvm.extractvalue %d1_0_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_0_1c3 = llvm.extractvalue %d1_0_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b1_1p = llvm.getelementptr %qp[2336] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b1_1 = llvm.load %b1_1p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b1_1x = llvm.extractelement %b1_1[%e0 : i32] : vector<2xi32>
+    %b1_1y = llvm.extractelement %b1_1[%e1 : i32] : vector<2xi32>
+    %d1_1_0 = nvvm.mma.sync A[%a8, %a9, %a10, %a11] B[%b1_1x, %b1_1y] C[%d1_0_0c0, %d1_0_0c1, %d1_0_0c2, %d1_0_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d1_1_0c0 = llvm.extractvalue %d1_1_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_1_0c1 = llvm.extractvalue %d1_1_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_1_0c2 = llvm.extractvalue %d1_1_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_1_0c3 = llvm.extractvalue %d1_1_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_1_1 = nvvm.mma.sync A[%a12, %a13, %a14, %a15] B[%b1_1x, %b1_1y] C[%d1_0_1c0, %d1_0_1c1, %d1_0_1c2, %d1_0_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d1_1_1c0 = llvm.extractvalue %d1_1_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_1_1c1 = llvm.extractvalue %d1_1_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_1_1c2 = llvm.extractvalue %d1_1_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_1_1c3 = llvm.extractvalue %d1_1_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b1_2p = llvm.getelementptr %qp[2368] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b1_2 = llvm.load %b1_2p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b1_2x = llvm.extractelement %b1_2[%e0 : i32] : vector<2xi32>
+    %b1_2y = llvm.extractelement %b1_2[%e1 : i32] : vector<2xi32>
+    %d1_2_0 = nvvm.mma.sync A[%a16, %a17, %a18, %a19] B[%b1_2x, %b1_2y] C[%d1_1_0c0, %d1_1_0c1, %d1_1_0c2, %d1_1_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d1_2_0c0 = llvm.extractvalue %d1_2_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_2_0c1 = llvm.extractvalue %d1_2_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_2_0c2 = llvm.extractvalue %d1_2_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_2_0c3 = llvm.extractvalue %d1_2_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_2_1 = nvvm.mma.sync A[%a20, %a21, %a22, %a23] B[%b1_2x, %b1_2y] C[%d1_1_1c0, %d1_1_1c1, %d1_1_1c2, %d1_1_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d1_2_1c0 = llvm.extractvalue %d1_2_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_2_1c1 = llvm.extractvalue %d1_2_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_2_1c2 = llvm.extractvalue %d1_2_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_2_1c3 = llvm.extractvalue %d1_2_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b1_3p = llvm.getelementptr %qp[2400] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b1_3 = llvm.load %b1_3p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b1_3x = llvm.extractelement %b1_3[%e0 : i32] : vector<2xi32>
+    %b1_3y = llvm.extractelement %b1_3[%e1 : i32] : vector<2xi32>
+    %d1_3_0 = nvvm.mma.sync A[%a24, %a25, %a26, %a27] B[%b1_3x, %b1_3y] C[%d1_2_0c0, %d1_2_0c1, %d1_2_0c2, %d1_2_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d1_3_0c0 = llvm.extractvalue %d1_3_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_3_0c1 = llvm.extractvalue %d1_3_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_3_0c2 = llvm.extractvalue %d1_3_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_3_0c3 = llvm.extractvalue %d1_3_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_3_1 = nvvm.mma.sync A[%a28, %a29, %a30, %a31] B[%b1_3x, %b1_3y] C[%d1_2_1c0, %d1_2_1c1, %d1_2_1c2, %d1_2_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d1_3_1c0 = llvm.extractvalue %d1_3_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_3_1c1 = llvm.extractvalue %d1_3_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_3_1c2 = llvm.extractvalue %d1_3_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_3_1c3 = llvm.extractvalue %d1_3_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b1_4p = llvm.getelementptr %qp[2432] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b1_4 = llvm.load %b1_4p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b1_4x = llvm.extractelement %b1_4[%e0 : i32] : vector<2xi32>
+    %b1_4y = llvm.extractelement %b1_4[%e1 : i32] : vector<2xi32>
+    %d1_4_0 = nvvm.mma.sync A[%a32, %a33, %a34, %a35] B[%b1_4x, %b1_4y] C[%d1_3_0c0, %d1_3_0c1, %d1_3_0c2, %d1_3_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d1_4_0c0 = llvm.extractvalue %d1_4_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_4_0c1 = llvm.extractvalue %d1_4_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_4_0c2 = llvm.extractvalue %d1_4_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_4_0c3 = llvm.extractvalue %d1_4_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_4_1 = nvvm.mma.sync A[%a36, %a37, %a38, %a39] B[%b1_4x, %b1_4y] C[%d1_3_1c0, %d1_3_1c1, %d1_3_1c2, %d1_3_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d1_4_1c0 = llvm.extractvalue %d1_4_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_4_1c1 = llvm.extractvalue %d1_4_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_4_1c2 = llvm.extractvalue %d1_4_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_4_1c3 = llvm.extractvalue %d1_4_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b1_5p = llvm.getelementptr %qp[2464] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b1_5 = llvm.load %b1_5p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b1_5x = llvm.extractelement %b1_5[%e0 : i32] : vector<2xi32>
+    %b1_5y = llvm.extractelement %b1_5[%e1 : i32] : vector<2xi32>
+    %d1_5_0 = nvvm.mma.sync A[%a40, %a41, %a42, %a43] B[%b1_5x, %b1_5y] C[%d1_4_0c0, %d1_4_0c1, %d1_4_0c2, %d1_4_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d1_5_0c0 = llvm.extractvalue %d1_5_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_5_0c1 = llvm.extractvalue %d1_5_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_5_0c2 = llvm.extractvalue %d1_5_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_5_0c3 = llvm.extractvalue %d1_5_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_5_1 = nvvm.mma.sync A[%a44, %a45, %a46, %a47] B[%b1_5x, %b1_5y] C[%d1_4_1c0, %d1_4_1c1, %d1_4_1c2, %d1_4_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d1_5_1c0 = llvm.extractvalue %d1_5_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_5_1c1 = llvm.extractvalue %d1_5_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_5_1c2 = llvm.extractvalue %d1_5_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_5_1c3 = llvm.extractvalue %d1_5_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b1_6p = llvm.getelementptr %qp[2496] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b1_6 = llvm.load %b1_6p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b1_6x = llvm.extractelement %b1_6[%e0 : i32] : vector<2xi32>
+    %b1_6y = llvm.extractelement %b1_6[%e1 : i32] : vector<2xi32>
+    %d1_6_0 = nvvm.mma.sync A[%a48, %a49, %a50, %a51] B[%b1_6x, %b1_6y] C[%d1_5_0c0, %d1_5_0c1, %d1_5_0c2, %d1_5_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d1_6_0c0 = llvm.extractvalue %d1_6_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_6_0c1 = llvm.extractvalue %d1_6_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_6_0c2 = llvm.extractvalue %d1_6_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_6_0c3 = llvm.extractvalue %d1_6_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_6_1 = nvvm.mma.sync A[%a52, %a53, %a54, %a55] B[%b1_6x, %b1_6y] C[%d1_5_1c0, %d1_5_1c1, %d1_5_1c2, %d1_5_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d1_6_1c0 = llvm.extractvalue %d1_6_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_6_1c1 = llvm.extractvalue %d1_6_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_6_1c2 = llvm.extractvalue %d1_6_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_6_1c3 = llvm.extractvalue %d1_6_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b1_7p = llvm.getelementptr %qp[2528] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b1_7 = llvm.load %b1_7p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b1_7x = llvm.extractelement %b1_7[%e0 : i32] : vector<2xi32>
+    %b1_7y = llvm.extractelement %b1_7[%e1 : i32] : vector<2xi32>
+    %d1_7_0 = nvvm.mma.sync A[%a56, %a57, %a58, %a59] B[%b1_7x, %b1_7y] C[%d1_6_0c0, %d1_6_0c1, %d1_6_0c2, %d1_6_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d1_7_0c0 = llvm.extractvalue %d1_7_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_7_0c1 = llvm.extractvalue %d1_7_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_7_0c2 = llvm.extractvalue %d1_7_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_7_0c3 = llvm.extractvalue %d1_7_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_7_1 = nvvm.mma.sync A[%a60, %a61, %a62, %a63] B[%b1_7x, %b1_7y] C[%d1_6_1c0, %d1_6_1c1, %d1_6_1c2, %d1_6_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d1_7_1c0 = llvm.extractvalue %d1_7_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_7_1c1 = llvm.extractvalue %d1_7_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_7_1c2 = llvm.extractvalue %d1_7_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d1_7_1c3 = llvm.extractvalue %d1_7_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %w1p = llvm.getelementptr %wp[32] : (!llvm.ptr<1>) -> !llvm.ptr<1>, i8
+    %w1l = llvm.load %w1p {alignment = 8 : i64, invariant} : !llvm.ptr<1> -> vector<2xf32>
+    %w1 = llvm.freeze %w1l : vector<2xf32>
+    %w1x = llvm.extractelement %w1[%e0 : i32] : vector<2xf32>
+    %w1y = llvm.extractelement %w1[%e1 : i32] : vector<2xf32>
+    %t1_0_0m = llvm.fmul %d1_7_0c0, %sc : f32
+    %t1_0_0 = llvm.intr.maxnum(%t1_0_0m, %zero) : (f32, f32) -> f32
+    %t1_0_0a = llvm.intr.fma(%w1x, %t1_0_0, %t0_0_1a) : (f32, f32, f32) -> f32
+    %t1_0_1m = llvm.fmul %d1_7_0c1, %sc : f32
+    %t1_0_1 = llvm.intr.maxnum(%t1_0_1m, %zero) : (f32, f32) -> f32
+    %t1_0_1a = llvm.intr.fma(%w1y, %t1_0_1, %t1_0_0a) : (f32, f32, f32) -> f32
+    %t1_0_2m = llvm.fmul %d1_7_0c2, %sc : f32
+    %t1_0_2 = llvm.intr.maxnum(%t1_0_2m, %zero) : (f32, f32) -> f32
+    %t1_0_2a = llvm.intr.fma(%w1x, %t1_0_2, %t0_0_3a) : (f32, f32, f32) -> f32
+    %t1_0_3m = llvm.fmul %d1_7_0c3, %sc : f32
+    %t1_0_3 = llvm.intr.maxnum(%t1_0_3m, %zero) : (f32, f32) -> f32
+    %t1_0_3a = llvm.intr.fma(%w1y, %t1_0_3, %t1_0_2a) : (f32, f32, f32) -> f32
+    %t1_1_0m = llvm.fmul %d1_7_1c0, %sc : f32
+    %t1_1_0 = llvm.intr.maxnum(%t1_1_0m, %zero) : (f32, f32) -> f32
+    %t1_1_0a = llvm.intr.fma(%w1x, %t1_1_0, %t0_1_1a) : (f32, f32, f32) -> f32
+    %t1_1_1m = llvm.fmul %d1_7_1c1, %sc : f32
+    %t1_1_1 = llvm.intr.maxnum(%t1_1_1m, %zero) : (f32, f32) -> f32
+    %t1_1_1a = llvm.intr.fma(%w1y, %t1_1_1, %t1_1_0a) : (f32, f32, f32) -> f32
+    %t1_1_2m = llvm.fmul %d1_7_1c2, %sc : f32
+    %t1_1_2 = llvm.intr.maxnum(%t1_1_2m, %zero) : (f32, f32) -> f32
+    %t1_1_2a = llvm.intr.fma(%w1x, %t1_1_2, %t0_1_3a) : (f32, f32, f32) -> f32
+    %t1_1_3m = llvm.fmul %d1_7_1c3, %sc : f32
+    %t1_1_3 = llvm.intr.maxnum(%t1_1_3m, %zero) : (f32, f32) -> f32
+    %t1_1_3a = llvm.intr.fma(%w1y, %t1_1_3, %t1_1_2a) : (f32, f32, f32) -> f32
+    %b2_0p = llvm.getelementptr %qp[4608] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b2_0 = llvm.load %b2_0p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b2_0x = llvm.extractelement %b2_0[%e0 : i32] : vector<2xi32>
+    %b2_0y = llvm.extractelement %b2_0[%e1 : i32] : vector<2xi32>
+    %d2_0_0 = nvvm.mma.sync A[%a0, %a1, %a2, %a3] B[%b2_0x, %b2_0y] C[%zero, %zero, %zero, %zero] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d2_0_0c0 = llvm.extractvalue %d2_0_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_0_0c1 = llvm.extractvalue %d2_0_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_0_0c2 = llvm.extractvalue %d2_0_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_0_0c3 = llvm.extractvalue %d2_0_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_0_1 = nvvm.mma.sync A[%a4, %a5, %a6, %a7] B[%b2_0x, %b2_0y] C[%zero, %zero, %zero, %zero] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d2_0_1c0 = llvm.extractvalue %d2_0_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_0_1c1 = llvm.extractvalue %d2_0_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_0_1c2 = llvm.extractvalue %d2_0_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_0_1c3 = llvm.extractvalue %d2_0_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b2_1p = llvm.getelementptr %qp[4640] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b2_1 = llvm.load %b2_1p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b2_1x = llvm.extractelement %b2_1[%e0 : i32] : vector<2xi32>
+    %b2_1y = llvm.extractelement %b2_1[%e1 : i32] : vector<2xi32>
+    %d2_1_0 = nvvm.mma.sync A[%a8, %a9, %a10, %a11] B[%b2_1x, %b2_1y] C[%d2_0_0c0, %d2_0_0c1, %d2_0_0c2, %d2_0_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d2_1_0c0 = llvm.extractvalue %d2_1_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_1_0c1 = llvm.extractvalue %d2_1_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_1_0c2 = llvm.extractvalue %d2_1_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_1_0c3 = llvm.extractvalue %d2_1_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_1_1 = nvvm.mma.sync A[%a12, %a13, %a14, %a15] B[%b2_1x, %b2_1y] C[%d2_0_1c0, %d2_0_1c1, %d2_0_1c2, %d2_0_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d2_1_1c0 = llvm.extractvalue %d2_1_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_1_1c1 = llvm.extractvalue %d2_1_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_1_1c2 = llvm.extractvalue %d2_1_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_1_1c3 = llvm.extractvalue %d2_1_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b2_2p = llvm.getelementptr %qp[4672] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b2_2 = llvm.load %b2_2p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b2_2x = llvm.extractelement %b2_2[%e0 : i32] : vector<2xi32>
+    %b2_2y = llvm.extractelement %b2_2[%e1 : i32] : vector<2xi32>
+    %d2_2_0 = nvvm.mma.sync A[%a16, %a17, %a18, %a19] B[%b2_2x, %b2_2y] C[%d2_1_0c0, %d2_1_0c1, %d2_1_0c2, %d2_1_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d2_2_0c0 = llvm.extractvalue %d2_2_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_2_0c1 = llvm.extractvalue %d2_2_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_2_0c2 = llvm.extractvalue %d2_2_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_2_0c3 = llvm.extractvalue %d2_2_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_2_1 = nvvm.mma.sync A[%a20, %a21, %a22, %a23] B[%b2_2x, %b2_2y] C[%d2_1_1c0, %d2_1_1c1, %d2_1_1c2, %d2_1_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d2_2_1c0 = llvm.extractvalue %d2_2_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_2_1c1 = llvm.extractvalue %d2_2_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_2_1c2 = llvm.extractvalue %d2_2_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_2_1c3 = llvm.extractvalue %d2_2_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b2_3p = llvm.getelementptr %qp[4704] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b2_3 = llvm.load %b2_3p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b2_3x = llvm.extractelement %b2_3[%e0 : i32] : vector<2xi32>
+    %b2_3y = llvm.extractelement %b2_3[%e1 : i32] : vector<2xi32>
+    %d2_3_0 = nvvm.mma.sync A[%a24, %a25, %a26, %a27] B[%b2_3x, %b2_3y] C[%d2_2_0c0, %d2_2_0c1, %d2_2_0c2, %d2_2_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d2_3_0c0 = llvm.extractvalue %d2_3_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_3_0c1 = llvm.extractvalue %d2_3_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_3_0c2 = llvm.extractvalue %d2_3_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_3_0c3 = llvm.extractvalue %d2_3_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_3_1 = nvvm.mma.sync A[%a28, %a29, %a30, %a31] B[%b2_3x, %b2_3y] C[%d2_2_1c0, %d2_2_1c1, %d2_2_1c2, %d2_2_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d2_3_1c0 = llvm.extractvalue %d2_3_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_3_1c1 = llvm.extractvalue %d2_3_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_3_1c2 = llvm.extractvalue %d2_3_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_3_1c3 = llvm.extractvalue %d2_3_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b2_4p = llvm.getelementptr %qp[4736] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b2_4 = llvm.load %b2_4p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b2_4x = llvm.extractelement %b2_4[%e0 : i32] : vector<2xi32>
+    %b2_4y = llvm.extractelement %b2_4[%e1 : i32] : vector<2xi32>
+    %d2_4_0 = nvvm.mma.sync A[%a32, %a33, %a34, %a35] B[%b2_4x, %b2_4y] C[%d2_3_0c0, %d2_3_0c1, %d2_3_0c2, %d2_3_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d2_4_0c0 = llvm.extractvalue %d2_4_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_4_0c1 = llvm.extractvalue %d2_4_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_4_0c2 = llvm.extractvalue %d2_4_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_4_0c3 = llvm.extractvalue %d2_4_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_4_1 = nvvm.mma.sync A[%a36, %a37, %a38, %a39] B[%b2_4x, %b2_4y] C[%d2_3_1c0, %d2_3_1c1, %d2_3_1c2, %d2_3_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d2_4_1c0 = llvm.extractvalue %d2_4_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_4_1c1 = llvm.extractvalue %d2_4_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_4_1c2 = llvm.extractvalue %d2_4_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_4_1c3 = llvm.extractvalue %d2_4_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b2_5p = llvm.getelementptr %qp[4768] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b2_5 = llvm.load %b2_5p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b2_5x = llvm.extractelement %b2_5[%e0 : i32] : vector<2xi32>
+    %b2_5y = llvm.extractelement %b2_5[%e1 : i32] : vector<2xi32>
+    %d2_5_0 = nvvm.mma.sync A[%a40, %a41, %a42, %a43] B[%b2_5x, %b2_5y] C[%d2_4_0c0, %d2_4_0c1, %d2_4_0c2, %d2_4_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d2_5_0c0 = llvm.extractvalue %d2_5_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_5_0c1 = llvm.extractvalue %d2_5_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_5_0c2 = llvm.extractvalue %d2_5_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_5_0c3 = llvm.extractvalue %d2_5_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_5_1 = nvvm.mma.sync A[%a44, %a45, %a46, %a47] B[%b2_5x, %b2_5y] C[%d2_4_1c0, %d2_4_1c1, %d2_4_1c2, %d2_4_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d2_5_1c0 = llvm.extractvalue %d2_5_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_5_1c1 = llvm.extractvalue %d2_5_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_5_1c2 = llvm.extractvalue %d2_5_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_5_1c3 = llvm.extractvalue %d2_5_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b2_6p = llvm.getelementptr %qp[4800] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b2_6 = llvm.load %b2_6p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b2_6x = llvm.extractelement %b2_6[%e0 : i32] : vector<2xi32>
+    %b2_6y = llvm.extractelement %b2_6[%e1 : i32] : vector<2xi32>
+    %d2_6_0 = nvvm.mma.sync A[%a48, %a49, %a50, %a51] B[%b2_6x, %b2_6y] C[%d2_5_0c0, %d2_5_0c1, %d2_5_0c2, %d2_5_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d2_6_0c0 = llvm.extractvalue %d2_6_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_6_0c1 = llvm.extractvalue %d2_6_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_6_0c2 = llvm.extractvalue %d2_6_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_6_0c3 = llvm.extractvalue %d2_6_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_6_1 = nvvm.mma.sync A[%a52, %a53, %a54, %a55] B[%b2_6x, %b2_6y] C[%d2_5_1c0, %d2_5_1c1, %d2_5_1c2, %d2_5_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d2_6_1c0 = llvm.extractvalue %d2_6_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_6_1c1 = llvm.extractvalue %d2_6_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_6_1c2 = llvm.extractvalue %d2_6_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_6_1c3 = llvm.extractvalue %d2_6_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b2_7p = llvm.getelementptr %qp[4832] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b2_7 = llvm.load %b2_7p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b2_7x = llvm.extractelement %b2_7[%e0 : i32] : vector<2xi32>
+    %b2_7y = llvm.extractelement %b2_7[%e1 : i32] : vector<2xi32>
+    %d2_7_0 = nvvm.mma.sync A[%a56, %a57, %a58, %a59] B[%b2_7x, %b2_7y] C[%d2_6_0c0, %d2_6_0c1, %d2_6_0c2, %d2_6_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d2_7_0c0 = llvm.extractvalue %d2_7_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_7_0c1 = llvm.extractvalue %d2_7_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_7_0c2 = llvm.extractvalue %d2_7_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_7_0c3 = llvm.extractvalue %d2_7_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_7_1 = nvvm.mma.sync A[%a60, %a61, %a62, %a63] B[%b2_7x, %b2_7y] C[%d2_6_1c0, %d2_6_1c1, %d2_6_1c2, %d2_6_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d2_7_1c0 = llvm.extractvalue %d2_7_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_7_1c1 = llvm.extractvalue %d2_7_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_7_1c2 = llvm.extractvalue %d2_7_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d2_7_1c3 = llvm.extractvalue %d2_7_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %w2p = llvm.getelementptr %wp[64] : (!llvm.ptr<1>) -> !llvm.ptr<1>, i8
+    %w2l = llvm.load %w2p {alignment = 8 : i64, invariant} : !llvm.ptr<1> -> vector<2xf32>
+    %w2 = llvm.freeze %w2l : vector<2xf32>
+    %w2x = llvm.extractelement %w2[%e0 : i32] : vector<2xf32>
+    %w2y = llvm.extractelement %w2[%e1 : i32] : vector<2xf32>
+    %t2_0_0m = llvm.fmul %d2_7_0c0, %sc : f32
+    %t2_0_0 = llvm.intr.maxnum(%t2_0_0m, %zero) : (f32, f32) -> f32
+    %t2_0_0a = llvm.intr.fma(%w2x, %t2_0_0, %t1_0_1a) : (f32, f32, f32) -> f32
+    %t2_0_1m = llvm.fmul %d2_7_0c1, %sc : f32
+    %t2_0_1 = llvm.intr.maxnum(%t2_0_1m, %zero) : (f32, f32) -> f32
+    %t2_0_1a = llvm.intr.fma(%w2y, %t2_0_1, %t2_0_0a) : (f32, f32, f32) -> f32
+    %t2_0_2m = llvm.fmul %d2_7_0c2, %sc : f32
+    %t2_0_2 = llvm.intr.maxnum(%t2_0_2m, %zero) : (f32, f32) -> f32
+    %t2_0_2a = llvm.intr.fma(%w2x, %t2_0_2, %t1_0_3a) : (f32, f32, f32) -> f32
+    %t2_0_3m = llvm.fmul %d2_7_0c3, %sc : f32
+    %t2_0_3 = llvm.intr.maxnum(%t2_0_3m, %zero) : (f32, f32) -> f32
+    %t2_0_3a = llvm.intr.fma(%w2y, %t2_0_3, %t2_0_2a) : (f32, f32, f32) -> f32
+    %t2_1_0m = llvm.fmul %d2_7_1c0, %sc : f32
+    %t2_1_0 = llvm.intr.maxnum(%t2_1_0m, %zero) : (f32, f32) -> f32
+    %t2_1_0a = llvm.intr.fma(%w2x, %t2_1_0, %t1_1_1a) : (f32, f32, f32) -> f32
+    %t2_1_1m = llvm.fmul %d2_7_1c1, %sc : f32
+    %t2_1_1 = llvm.intr.maxnum(%t2_1_1m, %zero) : (f32, f32) -> f32
+    %t2_1_1a = llvm.intr.fma(%w2y, %t2_1_1, %t2_1_0a) : (f32, f32, f32) -> f32
+    %t2_1_2m = llvm.fmul %d2_7_1c2, %sc : f32
+    %t2_1_2 = llvm.intr.maxnum(%t2_1_2m, %zero) : (f32, f32) -> f32
+    %t2_1_2a = llvm.intr.fma(%w2x, %t2_1_2, %t1_1_3a) : (f32, f32, f32) -> f32
+    %t2_1_3m = llvm.fmul %d2_7_1c3, %sc : f32
+    %t2_1_3 = llvm.intr.maxnum(%t2_1_3m, %zero) : (f32, f32) -> f32
+    %t2_1_3a = llvm.intr.fma(%w2y, %t2_1_3, %t2_1_2a) : (f32, f32, f32) -> f32
+    %b3_0p = llvm.getelementptr %qp[6912] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b3_0 = llvm.load %b3_0p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b3_0x = llvm.extractelement %b3_0[%e0 : i32] : vector<2xi32>
+    %b3_0y = llvm.extractelement %b3_0[%e1 : i32] : vector<2xi32>
+    %d3_0_0 = nvvm.mma.sync A[%a0, %a1, %a2, %a3] B[%b3_0x, %b3_0y] C[%zero, %zero, %zero, %zero] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d3_0_0c0 = llvm.extractvalue %d3_0_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_0_0c1 = llvm.extractvalue %d3_0_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_0_0c2 = llvm.extractvalue %d3_0_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_0_0c3 = llvm.extractvalue %d3_0_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_0_1 = nvvm.mma.sync A[%a4, %a5, %a6, %a7] B[%b3_0x, %b3_0y] C[%zero, %zero, %zero, %zero] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d3_0_1c0 = llvm.extractvalue %d3_0_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_0_1c1 = llvm.extractvalue %d3_0_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_0_1c2 = llvm.extractvalue %d3_0_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_0_1c3 = llvm.extractvalue %d3_0_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b3_1p = llvm.getelementptr %qp[6944] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b3_1 = llvm.load %b3_1p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b3_1x = llvm.extractelement %b3_1[%e0 : i32] : vector<2xi32>
+    %b3_1y = llvm.extractelement %b3_1[%e1 : i32] : vector<2xi32>
+    %d3_1_0 = nvvm.mma.sync A[%a8, %a9, %a10, %a11] B[%b3_1x, %b3_1y] C[%d3_0_0c0, %d3_0_0c1, %d3_0_0c2, %d3_0_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d3_1_0c0 = llvm.extractvalue %d3_1_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_1_0c1 = llvm.extractvalue %d3_1_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_1_0c2 = llvm.extractvalue %d3_1_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_1_0c3 = llvm.extractvalue %d3_1_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_1_1 = nvvm.mma.sync A[%a12, %a13, %a14, %a15] B[%b3_1x, %b3_1y] C[%d3_0_1c0, %d3_0_1c1, %d3_0_1c2, %d3_0_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d3_1_1c0 = llvm.extractvalue %d3_1_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_1_1c1 = llvm.extractvalue %d3_1_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_1_1c2 = llvm.extractvalue %d3_1_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_1_1c3 = llvm.extractvalue %d3_1_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b3_2p = llvm.getelementptr %qp[6976] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b3_2 = llvm.load %b3_2p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b3_2x = llvm.extractelement %b3_2[%e0 : i32] : vector<2xi32>
+    %b3_2y = llvm.extractelement %b3_2[%e1 : i32] : vector<2xi32>
+    %d3_2_0 = nvvm.mma.sync A[%a16, %a17, %a18, %a19] B[%b3_2x, %b3_2y] C[%d3_1_0c0, %d3_1_0c1, %d3_1_0c2, %d3_1_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d3_2_0c0 = llvm.extractvalue %d3_2_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_2_0c1 = llvm.extractvalue %d3_2_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_2_0c2 = llvm.extractvalue %d3_2_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_2_0c3 = llvm.extractvalue %d3_2_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_2_1 = nvvm.mma.sync A[%a20, %a21, %a22, %a23] B[%b3_2x, %b3_2y] C[%d3_1_1c0, %d3_1_1c1, %d3_1_1c2, %d3_1_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d3_2_1c0 = llvm.extractvalue %d3_2_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_2_1c1 = llvm.extractvalue %d3_2_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_2_1c2 = llvm.extractvalue %d3_2_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_2_1c3 = llvm.extractvalue %d3_2_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b3_3p = llvm.getelementptr %qp[7008] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b3_3 = llvm.load %b3_3p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b3_3x = llvm.extractelement %b3_3[%e0 : i32] : vector<2xi32>
+    %b3_3y = llvm.extractelement %b3_3[%e1 : i32] : vector<2xi32>
+    %d3_3_0 = nvvm.mma.sync A[%a24, %a25, %a26, %a27] B[%b3_3x, %b3_3y] C[%d3_2_0c0, %d3_2_0c1, %d3_2_0c2, %d3_2_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d3_3_0c0 = llvm.extractvalue %d3_3_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_3_0c1 = llvm.extractvalue %d3_3_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_3_0c2 = llvm.extractvalue %d3_3_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_3_0c3 = llvm.extractvalue %d3_3_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_3_1 = nvvm.mma.sync A[%a28, %a29, %a30, %a31] B[%b3_3x, %b3_3y] C[%d3_2_1c0, %d3_2_1c1, %d3_2_1c2, %d3_2_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d3_3_1c0 = llvm.extractvalue %d3_3_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_3_1c1 = llvm.extractvalue %d3_3_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_3_1c2 = llvm.extractvalue %d3_3_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_3_1c3 = llvm.extractvalue %d3_3_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b3_4p = llvm.getelementptr %qp[7040] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b3_4 = llvm.load %b3_4p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b3_4x = llvm.extractelement %b3_4[%e0 : i32] : vector<2xi32>
+    %b3_4y = llvm.extractelement %b3_4[%e1 : i32] : vector<2xi32>
+    %d3_4_0 = nvvm.mma.sync A[%a32, %a33, %a34, %a35] B[%b3_4x, %b3_4y] C[%d3_3_0c0, %d3_3_0c1, %d3_3_0c2, %d3_3_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d3_4_0c0 = llvm.extractvalue %d3_4_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_4_0c1 = llvm.extractvalue %d3_4_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_4_0c2 = llvm.extractvalue %d3_4_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_4_0c3 = llvm.extractvalue %d3_4_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_4_1 = nvvm.mma.sync A[%a36, %a37, %a38, %a39] B[%b3_4x, %b3_4y] C[%d3_3_1c0, %d3_3_1c1, %d3_3_1c2, %d3_3_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d3_4_1c0 = llvm.extractvalue %d3_4_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_4_1c1 = llvm.extractvalue %d3_4_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_4_1c2 = llvm.extractvalue %d3_4_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_4_1c3 = llvm.extractvalue %d3_4_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b3_5p = llvm.getelementptr %qp[7072] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b3_5 = llvm.load %b3_5p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b3_5x = llvm.extractelement %b3_5[%e0 : i32] : vector<2xi32>
+    %b3_5y = llvm.extractelement %b3_5[%e1 : i32] : vector<2xi32>
+    %d3_5_0 = nvvm.mma.sync A[%a40, %a41, %a42, %a43] B[%b3_5x, %b3_5y] C[%d3_4_0c0, %d3_4_0c1, %d3_4_0c2, %d3_4_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d3_5_0c0 = llvm.extractvalue %d3_5_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_5_0c1 = llvm.extractvalue %d3_5_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_5_0c2 = llvm.extractvalue %d3_5_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_5_0c3 = llvm.extractvalue %d3_5_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_5_1 = nvvm.mma.sync A[%a44, %a45, %a46, %a47] B[%b3_5x, %b3_5y] C[%d3_4_1c0, %d3_4_1c1, %d3_4_1c2, %d3_4_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d3_5_1c0 = llvm.extractvalue %d3_5_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_5_1c1 = llvm.extractvalue %d3_5_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_5_1c2 = llvm.extractvalue %d3_5_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_5_1c3 = llvm.extractvalue %d3_5_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b3_6p = llvm.getelementptr %qp[7104] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b3_6 = llvm.load %b3_6p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b3_6x = llvm.extractelement %b3_6[%e0 : i32] : vector<2xi32>
+    %b3_6y = llvm.extractelement %b3_6[%e1 : i32] : vector<2xi32>
+    %d3_6_0 = nvvm.mma.sync A[%a48, %a49, %a50, %a51] B[%b3_6x, %b3_6y] C[%d3_5_0c0, %d3_5_0c1, %d3_5_0c2, %d3_5_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d3_6_0c0 = llvm.extractvalue %d3_6_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_6_0c1 = llvm.extractvalue %d3_6_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_6_0c2 = llvm.extractvalue %d3_6_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_6_0c3 = llvm.extractvalue %d3_6_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_6_1 = nvvm.mma.sync A[%a52, %a53, %a54, %a55] B[%b3_6x, %b3_6y] C[%d3_5_1c0, %d3_5_1c1, %d3_5_1c2, %d3_5_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d3_6_1c0 = llvm.extractvalue %d3_6_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_6_1c1 = llvm.extractvalue %d3_6_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_6_1c2 = llvm.extractvalue %d3_6_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_6_1c3 = llvm.extractvalue %d3_6_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %b3_7p = llvm.getelementptr %qp[7136] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %b3_7 = llvm.load %b3_7p {alignment = 8 : i64} : !llvm.ptr<3> -> vector<2xi32>
+    %b3_7x = llvm.extractelement %b3_7[%e0 : i32] : vector<2xi32>
+    %b3_7y = llvm.extractelement %b3_7[%e1 : i32] : vector<2xi32>
+    %d3_7_0 = nvvm.mma.sync A[%a56, %a57, %a58, %a59] B[%b3_7x, %b3_7y] C[%d3_6_0c0, %d3_6_0c1, %d3_6_0c2, %d3_6_0c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d3_7_0c0 = llvm.extractvalue %d3_7_0[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_7_0c1 = llvm.extractvalue %d3_7_0[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_7_0c2 = llvm.extractvalue %d3_7_0[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_7_0c3 = llvm.extractvalue %d3_7_0[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_7_1 = nvvm.mma.sync A[%a60, %a61, %a62, %a63] B[%b3_7x, %b3_7y] C[%d3_6_1c0, %d3_6_1c1, %d3_6_1c2, %d3_6_1c3] {layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = #nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>
+    %d3_7_1c0 = llvm.extractvalue %d3_7_1[0] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_7_1c1 = llvm.extractvalue %d3_7_1[1] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_7_1c2 = llvm.extractvalue %d3_7_1[2] : !llvm.struct<(f32, f32, f32, f32)>
+    %d3_7_1c3 = llvm.extractvalue %d3_7_1[3] : !llvm.struct<(f32, f32, f32, f32)>
+    %w3p = llvm.getelementptr %wp[96] : (!llvm.ptr<1>) -> !llvm.ptr<1>, i8
+    %w3l = llvm.load %w3p {alignment = 8 : i64, invariant} : !llvm.ptr<1> -> vector<2xf32>
+    %w3 = llvm.freeze %w3l : vector<2xf32>
+    %w3x = llvm.extractelement %w3[%e0 : i32] : vector<2xf32>
+    %w3y = llvm.extractelement %w3[%e1 : i32] : vector<2xf32>
+    %t3_0_0m = llvm.fmul %d3_7_0c0, %sc : f32
+    %t3_0_0 = llvm.intr.maxnum(%t3_0_0m, %zero) : (f32, f32) -> f32
+    %t3_0_0a = llvm.intr.fma(%w3x, %t3_0_0, %t2_0_1a) : (f32, f32, f32) -> f32
+    %t3_0_1m = llvm.fmul %d3_7_0c1, %sc : f32
+    %t3_0_1 = llvm.intr.maxnum(%t3_0_1m, %zero) : (f32, f32) -> f32
+    %t3_0_1a = llvm.intr.fma(%w3y, %t3_0_1, %t3_0_0a) : (f32, f32, f32) -> f32
+    %t3_0_2m = llvm.fmul %d3_7_0c2, %sc : f32
+    %t3_0_2 = llvm.intr.maxnum(%t3_0_2m, %zero) : (f32, f32) -> f32
+    %t3_0_2a = llvm.intr.fma(%w3x, %t3_0_2, %t2_0_3a) : (f32, f32, f32) -> f32
+    %t3_0_3m = llvm.fmul %d3_7_0c3, %sc : f32
+    %t3_0_3 = llvm.intr.maxnum(%t3_0_3m, %zero) : (f32, f32) -> f32
+    %t3_0_3a = llvm.intr.fma(%w3y, %t3_0_3, %t3_0_2a) : (f32, f32, f32) -> f32
+    %t3_1_0m = llvm.fmul %d3_7_1c0, %sc : f32
+    %t3_1_0 = llvm.intr.maxnum(%t3_1_0m, %zero) : (f32, f32) -> f32
+    %t3_1_0a = llvm.intr.fma(%w3x, %t3_1_0, %t2_1_1a) : (f32, f32, f32) -> f32
+    %t3_1_1m = llvm.fmul %d3_7_1c1, %sc : f32
+    %t3_1_1 = llvm.intr.maxnum(%t3_1_1m, %zero) : (f32, f32) -> f32
+    %t3_1_1a = llvm.intr.fma(%w3y, %t3_1_1, %t3_1_0a) : (f32, f32, f32) -> f32
+    %t3_1_2m = llvm.fmul %d3_7_1c2, %sc : f32
+    %t3_1_2 = llvm.intr.maxnum(%t3_1_2m, %zero) : (f32, f32) -> f32
+    %t3_1_2a = llvm.intr.fma(%w3x, %t3_1_2, %t2_1_3a) : (f32, f32, f32) -> f32
+    %t3_1_3m = llvm.fmul %d3_7_1c3, %sc : f32
+    %t3_1_3 = llvm.intr.maxnum(%t3_1_3m, %zero) : (f32, f32) -> f32
+    %t3_1_3a = llvm.intr.fma(%w3y, %t3_1_3, %t3_1_2a) : (f32, f32, f32) -> f32
+    %x0_1o = llvm.mlir.constant(1 : i32) : i32
+    %x0_1s = nvvm.shfl.sync bfly %all, %t3_0_1a, %x0_1o, %clamp : f32 -> f32
+    %x0_1 = llvm.fadd %t3_0_1a, %x0_1s : f32
+    %x0_2o = llvm.mlir.constant(2 : i32) : i32
+    %x0_2s = nvvm.shfl.sync bfly %all, %x0_1, %x0_2o, %clamp : f32 -> f32
+    %x0_2 = llvm.fadd %x0_1, %x0_2s : f32
+    %x1_1o = llvm.mlir.constant(1 : i32) : i32
+    %x1_1s = nvvm.shfl.sync bfly %all, %t3_0_3a, %x1_1o, %clamp : f32 -> f32
+    %x1_1 = llvm.fadd %t3_0_3a, %x1_1s : f32
+    %x1_2o = llvm.mlir.constant(2 : i32) : i32
+    %x1_2s = nvvm.shfl.sync bfly %all, %x1_1, %x1_2o, %clamp : f32 -> f32
+    %x1_2 = llvm.fadd %x1_1, %x1_2s : f32
+    %x2_1o = llvm.mlir.constant(1 : i32) : i32
+    %x2_1s = nvvm.shfl.sync bfly %all, %t3_1_1a, %x2_1o, %clamp : f32 -> f32
+    %x2_1 = llvm.fadd %t3_1_1a, %x2_1s : f32
+    %x2_2o = llvm.mlir.constant(2 : i32) : i32
+    %x2_2s = nvvm.shfl.sync bfly %all, %x2_1, %x2_2o, %clamp : f32 -> f32
+    %x2_2 = llvm.fadd %x2_1, %x2_2s : f32
+    %x3_1o = llvm.mlir.constant(1 : i32) : i32
+    %x3_1s = nvvm.shfl.sync bfly %all, %t3_1_3a, %x3_1o, %clamp : f32 -> f32
+    %x3_1 = llvm.fadd %t3_1_3a, %x3_1s : f32
+    %x3_2o = llvm.mlir.constant(2 : i32) : i32
+    %x3_2s = nvvm.shfl.sync bfly %all, %x3_1, %x3_2o, %clamp : f32 -> f32
+    %x3_2 = llvm.fadd %x3_1, %x3_2s : f32
+    %lane = nvvm.read.ptx.sreg.laneid : i32
+    %seven = llvm.mlir.constant(7 : i32) : i32
+    %two = llvm.mlir.constant(2 : i32) : i32
+    %low = llvm.and %lane, %seven : i32
+    %src = llvm.shl %low, %two : i32
+    %sh0 = nvvm.shfl.sync idx %all, %x0_2, %src, %clamp : f32 -> f32
+    %sh1 = nvvm.shfl.sync idx %all, %x1_2, %src, %clamp : f32 -> f32
+    %sh2 = nvvm.shfl.sync idx %all, %x2_2, %src, %clamp : f32 -> f32
+    %sh3 = nvvm.shfl.sync idx %all, %x3_2, %src, %clamp : f32 -> f32
+    %three = llvm.mlir.constant(3 : i32) : i32
+    %row = llvm.lshr %lane, %three : i32
+    %q1 = llvm.icmp "eq" %row, %e1 : i32
+    %q2 = llvm.icmp "eq" %row, %two : i32
+    %q3 = llvm.icmp "eq" %row, %three : i32
+    %r1 = llvm.select %q1, %sh1, %sh0 : i1, f32
+    %r2 = llvm.select %q2, %sh2, %r1 : i1, f32
+    %r = llvm.select %q3, %sh3, %r2 : i1, f32
     macro.yield %r : f32
           };
           dv_s
@@ -236,8 +854,14 @@ macro_rules! index_chunk_query {
 fn index_chunk_copy(shared: i64, global: i64) on Topology::Device -> i32
 ensures writes_only()
 {
-  return mlir!( inputs : (%s = shared : i64, %g = global : i64), returns : i32, dialects : ["llvm", "arith"], ensures : [writes_only()]) {
-    llvm.inline_asm has_side_effects "cp.async.cg.shared.global [$0], [$1], 16; cp.async.cg.shared.global [$0+16], [$1+16], 16; cp.async.commit_group;", "l,l" %s, %g : (i64, i64) -> ()
+  return mlir!( inputs : (%s = shared : i64, %g = global : i64), returns : i32, dialects : ["llvm", "nvvm", "arith"], ensures : [writes_only()]) {
+    %sp = llvm.inttoptr %s : i64 to !llvm.ptr<3>
+    %gp = llvm.inttoptr %g : i64 to !llvm.ptr<1>
+    %sp1 = llvm.getelementptr %sp[16] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    %gp1 = llvm.getelementptr %gp[16] : (!llvm.ptr<1>) -> !llvm.ptr<1>, i8
+    nvvm.cp.async.shared.global %sp, %gp, 16, cache = cg : !llvm.ptr<3>, !llvm.ptr<1>
+    nvvm.cp.async.shared.global %sp1, %gp1, 16, cache = cg : !llvm.ptr<3>, !llvm.ptr<1>
+    nvvm.cp.async.commit.group
     %z = arith.constant 0 : i32
     macro.yield %z : i32
   };
@@ -247,8 +871,11 @@ ensures writes_only()
 fn index_chunk_wait(x: i32) on Topology::Device -> i32
 ensures writes_only()
 {
-  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
-    llvm.inline_asm has_side_effects "cp.async.wait_group 0; bar.sync 1, 256;", "" : () -> ()
+  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {
+    %id = llvm.mlir.constant(1 : i32) : i32
+    %n = llvm.mlir.constant(256 : i32) : i32
+    nvvm.cp.async.wait.group 0
+    nvvm.barrier id = %id number_of_threads = %n
     macro.yield %x : i32
   };
 }

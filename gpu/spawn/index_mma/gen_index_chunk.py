@@ -21,7 +21,7 @@ query i < rows (position start + i) and key j <= start + i; the other elements a
 - _hist_at also counts each row's scores by their top 12 bits into hist[i * 4096 + bin] (as
   index_scores_mma_hist_at does for one query), for the top-k's first pass.
 
-The q copy and the barrier are inline PTX in the lane loop (cp.async, bar.sync 1, 256): the shared
+The q copy and the barrier are nvvm ops in the lane loop (cp.async, bar.sync 1, 256): the shared
 buffer is the block's, and the A fragments must stay in registers from one query to the next, so the
 loop over queries cannot be a series of lane loops. The fragments are the lane's own REG tensor, written
 element by element (32 two-word loads) and read through a shared borrow, which Vx main accepts.
@@ -60,55 +60,88 @@ def key_loads():
     return loads
 
 
-def load2_ptx():
-    """$1 an address; $0 its two words, the first in the low half."""
-    return '{ .reg .b32 lo, hi; ld.global.nc.v2.b32 {lo, hi}, [$1]; mov.b64 $0, {lo, hi}; }'
-
-
-def query_ptx():
-    """One lane's score for one query: $0 the score of key first + lane. $1..$64 the A fragments (a[k] is
-    $(k + 1)), $65 the shared address of word 2 c of head row g of the query's buffer, $66 the address of
-    weights[i][2 c], $67 the scale."""
-    a = lambda k: f'${k + 1}'
-    p = ['{', '.reg .b32 b0, b1, l, src;', '.reg .f32 c<8>, t, acc<4>, w0, w1, sh<4>;', '.reg .pred q1, q2, q3;']
-    p += [f'mov.f32 acc{i}, 0f00000000;' for i in range(4)]
+def query_mlir(hist):
+    """One lane's score for one query, as the body of an mlir! block: %r the score of key first + lane.
+    %a0..%a63 the A fragments, %qs the shared address of word 2 c of head row g of the query's buffer,
+    %w the address of weights[i][2 c], %sc the scale."""
+    p = ['%qp = llvm.inttoptr %qs : i64 to !llvm.ptr<3>', '%wp = llvm.inttoptr %w : i64 to !llvm.ptr<1>',
+         '%zero = llvm.mlir.constant(0.0 : f32) : f32', '%all = llvm.mlir.constant(-1 : i32) : i32',
+         '%clamp = llvm.mlir.constant(31 : i32) : i32', '%e0 = llvm.mlir.constant(0 : i32) : i32',
+         '%e1 = llvm.mlir.constant(1 : i32) : i32']
+    mma = ('{layoutA = #nvvm.mma_layout<row>, layoutB = #nvvm.mma_layout<col>, multiplicandAPtxType = '
+           '#nvvm.mma_type<bf16>, multiplicandBPtxType = #nvvm.mma_type<bf16>, shape = #nvvm.shape<m = 16, n = 8, '
+           'k = 16>} : (i32, i32, f32) -> !llvm.struct<(f32, f32, f32, f32)>')
+    acc = ['%zero'] * 4
     for n in range(TILES):
-        p += [f'mov.f32 c{i}, 0f00000000;' for i in range(8)]
+        c = ['%zero'] * 8
         for s in range(STEPS):
             # B of head 8 n + g, dims 16 s + 4 c + {0..3}: words 8 s + 2 c and + 1 of its row.
-            p.append(f'ld.shared.v2.b32 {{b0, b1}}, [$65+{4 * (8 * n * PITCH + 8 * s)}];')
+            b = f'%b{n}_{s}'
+            p += [f'{b}p = llvm.getelementptr %qp[{4 * (8 * n * PITCH + 8 * s)}] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8',
+                  f'{b} = llvm.load {b}p {{alignment = 8 : i64}} : !llvm.ptr<3> -> vector<2xi32>',
+                  f'{b}x = llvm.extractelement {b}[%e0 : i32] : vector<2xi32>',
+                  f'{b}y = llvm.extractelement {b}[%e1 : i32] : vector<2xi32>']
             for m in range(2):
-                cs = ', '.join(f'c{4 * m + i}' for i in range(4))
-                aw = ', '.join(a(a_index(s, m, i)) for i in range(4))
-                p.append(f'mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {{{cs}}}, {{{aw}}}, {{b0, b1}}, {{{cs}}};')
+                d = f'%d{n}_{s}_{m}'
+                aw = ', '.join(f'%a{a_index(s, m, i)}' for i in range(4))
+                cs = ', '.join(c[4 * m:4 * m + 4])
+                p.append(f'{d} = nvvm.mma.sync A[{aw}] B[{b}x, {b}y] C[{cs}] {mma}')
+                for i in range(4):
+                    p.append(f'{d}c{i} = llvm.extractvalue {d}[{i}] : !llvm.struct<(f32, f32, f32, f32)>')
+                    c[4 * m + i] = f'{d}c{i}'
         # Tile m: c[4m], c[4m+1] row g (+ 16 m), heads 8 n + 2 c and + 1; c[4m+2], c[4m+3] row g + 8 (+ 16 m).
-        p.append(f'ld.global.nc.v2.f32 {{w0, w1}}, [$66+{32 * n}];')
+        # The freeze keeps LLVM from splitting the load in two, which drops its invariant mark (.nc).
+        p += [f'%w{n}p = llvm.getelementptr %wp[{32 * n}] : (!llvm.ptr<1>) -> !llvm.ptr<1>, i8',
+              f'%w{n}l = llvm.load %w{n}p {{alignment = 8 : i64, invariant}} : !llvm.ptr<1> -> vector<2xf32>',
+              f'%w{n} = llvm.freeze %w{n}l : vector<2xf32>']
+        w = [f'%w{n}x', f'%w{n}y']
+        p += [f'{w[0]} = llvm.extractelement %w{n}[%e0 : i32] : vector<2xf32>',
+              f'{w[1]} = llvm.extractelement %w{n}[%e1 : i32] : vector<2xf32>']
         for m in range(2):
-            for i, acc, w in ((0, 2 * m, 'w0'), (1, 2 * m, 'w1'), (2, 2 * m + 1, 'w0'), (3, 2 * m + 1, 'w1')):
-                p += [f'mul.f32 t, c{4 * m + i}, $67;', 'max.f32 t, t, 0f00000000;',
-                      f'fma.rn.f32 acc{acc}, {w}, t, acc{acc};']
+            for i, a, wi in ((0, 2 * m, 0), (1, 2 * m, 1), (2, 2 * m + 1, 0), (3, 2 * m + 1, 1)):
+                t = f'%t{n}_{m}_{i}'
+                p += [f'{t}m = llvm.fmul {c[4 * m + i]}, %sc : f32',
+                      f'{t} = llvm.intr.maxnum({t}m, %zero) : (f32, f32) -> f32',
+                      f'{t}a = llvm.intr.fma({w[wi]}, {t}, {acc[a]}) : (f32, f32, f32) -> f32']
+                acc[a] = f'{t}a'
     # acc0..3: rows g, g + 8, g + 16, g + 24 of this lane's column c; add the four columns.
     for i in range(4):
         for m in (1, 2):
-            p += [f'shfl.sync.bfly.b32 t, acc{i}, {m}, 31, -1;', f'add.f32 acc{i}, acc{i}, t;']
-    # Lane l takes row l: acc[l / 8] of lane 4 (l % 8).
-    p += ['mov.u32 l, %laneid;', 'and.b32 src, l, 7;', 'shl.b32 src, src, 2;']
-    p += [f'shfl.sync.idx.b32 sh{i}, acc{i}, src, 31, -1;' for i in range(4)]
-    p += ['shr.u32 l, l, 3;', 'setp.eq.u32 q1, l, 1;', 'setp.eq.u32 q2, l, 2;', 'setp.eq.u32 q3, l, 3;',
-          'mov.f32 $0, sh0;', '@q1 mov.f32 $0, sh1;', '@q2 mov.f32 $0, sh2;', '@q3 mov.f32 $0, sh3;', '}']
-    return ' '.join(p)
+            v = f'%x{i}_{m}'
+            p += [f'{v}o = llvm.mlir.constant({m} : i32) : i32',
+                  f'{v}s = nvvm.shfl.sync bfly %all, {acc[i]}, {v}o, %clamp : f32 -> f32',
+                  f'{v} = llvm.fadd {acc[i]}, {v}s : f32']
+            acc[i] = v
+    # Lane l takes row l: acc[l / 8] of lane 4 (l % 8). The two ways to pick the acc give the same value.
+    # ptxas needs the fewest registers with l / 8 in the _hist_at kernel, and with bits 3 and 4 of l in the other.
+    p += ['%lane = nvvm.read.ptx.sreg.laneid : i32', '%seven = llvm.mlir.constant(7 : i32) : i32',
+          '%two = llvm.mlir.constant(2 : i32) : i32', '%low = llvm.and %lane, %seven : i32',
+          '%src = llvm.shl %low, %two : i32']
+    p += [f'%sh{i} = nvvm.shfl.sync idx %all, {acc[i]}, %src, %clamp : f32 -> f32' for i in range(4)]
+    if hist:
+        p += ['%three = llvm.mlir.constant(3 : i32) : i32', '%row = llvm.lshr %lane, %three : i32',
+              '%q1 = llvm.icmp "eq" %row, %e1 : i32',
+              '%q2 = llvm.icmp "eq" %row, %two : i32', '%q3 = llvm.icmp "eq" %row, %three : i32',
+              '%r1 = llvm.select %q1, %sh1, %sh0 : i1, f32', '%r2 = llvm.select %q2, %sh2, %r1 : i1, f32',
+              '%r = llvm.select %q3, %sh3, %r2 : i1, f32']
+    else:
+        p += ['%c8 = llvm.mlir.constant(8 : i32) : i32', '%c16 = llvm.mlir.constant(16 : i32) : i32',
+              '%bit3 = llvm.and %lane, %c8 : i32', '%bit4 = llvm.and %lane, %c16 : i32',
+              '%odd = llvm.icmp "ne" %bit3, %e0 : i32', '%high = llvm.icmp "ne" %bit4, %e0 : i32',
+              '%r01 = llvm.select %odd, %sh1, %sh0 : i1, f32', '%r23 = llvm.select %odd, %sh3, %sh2 : i1, f32',
+              '%r = llvm.select %high, %r23, %r01 : i1, f32']
+    return '\n'.join('    ' + line for line in p)
 
 
-def copy_ptx():
-    """$0 the shared address and $1 the global address of this thread's 8 words of a query's q."""
-    return ('cp.async.cg.shared.global [$0], [$1], 16; cp.async.cg.shared.global [$0+16], [$1+16], 16; '
-            'cp.async.commit_group;')
-
-
-def wait_ptx():
-    """All of this thread's copies landed, then the block's: the next query's q is in shared memory, and
-    no warp still reads the buffer that the next copy overwrites."""
-    return f'cp.async.wait_group 0; bar.sync 1, {THREADS};'
+def copy_mlir():
+    """The body of an mlir! block that copies 32 bytes from global address %g to shared address %s."""
+    return '\n'.join('    ' + line for line in [
+        '%sp = llvm.inttoptr %s : i64 to !llvm.ptr<3>', '%gp = llvm.inttoptr %g : i64 to !llvm.ptr<1>',
+        '%sp1 = llvm.getelementptr %sp[16] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8',
+        '%gp1 = llvm.getelementptr %gp[16] : (!llvm.ptr<1>) -> !llvm.ptr<1>, i8',
+        'nvvm.cp.async.shared.global %sp, %gp, 16, cache = cg : !llvm.ptr<3>, !llvm.ptr<1>',
+        'nvvm.cp.async.shared.global %sp1, %gp1, 16, cache = cg : !llvm.ptr<3>, !llvm.ptr<1>',
+        'nvvm.cp.async.commit.group'])
 
 
 ADDRESS_HELPERS = """fn address2(t: &Tensor<f32, [?, ?], Memory::HBM>) on Topology::Device -> i64
@@ -171,14 +204,12 @@ pub fn glm_vx_spawn_index_q_bf16_at(words: &mut Tensor<i32, [?], Memory::HBM>, q
 
 
 def scores_source(hist=False):
-    regs = ', '.join(['i32'] * 64)
     key_lines = '\n'.join(
         f'          let v{n}: i64 = index_chunk_load2(k_{row} + {offset});\n'
         f'          a[{lo}] = (v{n} & 4294967295) as i32;\n          a[{hi}] = ((v{n} >> 32) & 4294967295) as i32;'
         for n, (row, offset, lo, hi) in enumerate(key_loads()))
     read_lines = '\n'.join(f'    %i{k} = arith.constant {k} : index\n    %a{k} = memref.load %a[%i{k}] : memref<64xi32>'
                            for k in range(64))
-    a_operands = ', '.join(f'%a{k}' for k in range(64))
     name = 'index_scores_chunk_hist_at' if hist else 'index_scores_chunk_at'
     hist_param = '\n' + ' ' * len(f'pub fn glm_vx_spawn_{name}(') + 'hist: &mut Tensor<u32, [?], Memory::HBM>,' if hist else ''
     head = (f"// With hist: the top-k's first pass folded in. hist[i * 4096 + bin] counts row i's scores by their top\n"
@@ -218,14 +249,20 @@ ensures reads_only(t)
 fn index_chunk_load2(at: i64) on Topology::Device -> i64
 ensures writes_only()
 {{
+  // An invariant 8-byte load from a global pointer: ld.global.nc.v2.b32. The freeze keeps LLVM from
+  // making it one 64-bit load.
   return mlir!( inputs : (%x = at : i64), returns : i64, dialects : ["llvm"], ensures : [writes_only()]) {{
-    %r = llvm.inline_asm has_side_effects "{load2_ptx()}", "=l,l" %x : (i64) -> i64
+    %p = llvm.inttoptr %x : i64 to !llvm.ptr<1>
+    %v = llvm.load %p {{alignment = 8 : i64, invariant}} : !llvm.ptr<1> -> vector<2xi32>
+    %f = llvm.freeze %v : vector<2xi32>
+    %r = llvm.bitcast %f : vector<2xi32> to i64
     macro.yield %r : i64
   }};
 }}
 
-// One lane's score for one query (gen_index_chunk.py's query_ptx), from the A fragments in `$a` and the
-// query's q in shared memory. It reads its addresses and writes no memory.
+// One lane's score for one query (gen_index_chunk.py's query_mlir), from the A fragments in `$a` and the
+// query's q in shared memory: 64 mma.sync with B from ld.shared.v2, then the heads' sum and 12 shfl.sync.
+// It reads its addresses and writes no memory.
 macro_rules! index_chunk_query {{
     ($a:ident, $qs:expr, $w:expr, $scale:expr) => {{
         unsafe {{
@@ -234,9 +271,9 @@ macro_rules! index_chunk_query {{
           let dv_scale: f32 = $scale;
           let dv_a = &$a;
           let dv_s: f32 = mlir!( inputs : (%a = dv_a : memref<64xi32>, %qs = dv_qs : i64, %w = dv_w : i64, %sc = dv_scale : f32),
-                                returns : f32, dialects : ["llvm", "memref", "arith"], ensures : [reads_only(dv_a)]) {{
+                                returns : f32, dialects : ["llvm", "nvvm", "memref", "arith"], ensures : [reads_only(dv_a)]) {{
 {read_lines}
-    %r = llvm.inline_asm has_side_effects "{query_ptx()}", "=f,{",".join(["r"] * 64)},l,l,f" {a_operands}, %qs, %w, %sc : ({regs}, i64, i64, f32) -> f32
+{query_mlir(hist)}
     macro.yield %r : f32
           }};
           dv_s
@@ -248,8 +285,8 @@ macro_rules! index_chunk_query {{
 fn index_chunk_copy(shared: i64, global: i64) on Topology::Device -> i32
 ensures writes_only()
 {{
-  return mlir!( inputs : (%s = shared : i64, %g = global : i64), returns : i32, dialects : ["llvm", "arith"], ensures : [writes_only()]) {{
-    llvm.inline_asm has_side_effects "{copy_ptx()}", "l,l" %s, %g : (i64, i64) -> ()
+  return mlir!( inputs : (%s = shared : i64, %g = global : i64), returns : i32, dialects : ["llvm", "nvvm", "arith"], ensures : [writes_only()]) {{
+{copy_mlir()}
     %z = arith.constant 0 : i32
     macro.yield %z : i32
   }};
@@ -259,8 +296,11 @@ ensures writes_only()
 fn index_chunk_wait(x: i32) on Topology::Device -> i32
 ensures writes_only()
 {{
-  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {{
-    llvm.inline_asm has_side_effects "{wait_ptx()}", "" : () -> ()
+  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {{
+    %id = llvm.mlir.constant(1 : i32) : i32
+    %n = llvm.mlir.constant({THREADS} : i32) : i32
+    nvvm.cp.async.wait.group 0
+    nvvm.barrier id = %id number_of_threads = %n
     macro.yield %x : i32
   }};
 }}
@@ -349,8 +389,9 @@ macro_rules! topk_key32 {
 fn match_any(x: i32) on Topology::Device -> i32
 ensures writes_only()
 {
-  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
-    %r = llvm.inline_asm has_side_effects "match.any.sync.b32 $0, $1, -1;", "=r,r" %x : (i32) -> i32
+  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {
+    %all = llvm.mlir.constant(-1 : i32) : i32
+    %r = nvvm.match.sync any %all, %x : i32 -> i32
     macro.yield %r : i32
   };
 }
@@ -359,7 +400,7 @@ fn popc(x: i32) on Topology::Device -> i32
 ensures writes_only()
 {
   return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
-    %r = llvm.inline_asm "popc.b32 $0, $1;", "=r,r" %x : (i32) -> i32
+    %r = llvm.intr.ctpop(%x) : (i32) -> i32
     macro.yield %r : i32
   };
 }
