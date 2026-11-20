@@ -111,12 +111,6 @@ def wait_ptx():
     return f'cp.async.wait_group 0; bar.sync 1, {THREADS};'
 
 
-def q_bf16_ptx():
-    """$1 the address of 4 dims of q (f32); $0 their two bf16 words, the low word first."""
-    return ' '.join(['{', '.reg .f32 x<4>;', '.reg .b32 u, v;', 'ld.global.nc.v4.f32 {x0, x1, x2, x3}, [$1];',
-                     'cvt.rn.bf16x2.f32 u, x1, x0;', 'cvt.rn.bf16x2.f32 v, x3, x2;', 'mov.b64 $0, {u, v};', '}'])
-
-
 ADDRESS_HELPERS = """fn address2(t: &Tensor<f32, [?, ?], Memory::HBM>) on Topology::Device -> i64
 ensures reads_only(t)
 {
@@ -149,8 +143,13 @@ def q_bf16_source():
 fn index_q_bf16_lane(x: i64) on Topology::Device -> i64
 ensures writes_only()
 {{
+  // 4 dims of q at the byte address x: ld.global.nc.v4.f32, then two cvt.rn.bf16x2.f32 (the low half of
+  // each word is the lower dim). The result is word0 | word1 << 32.
   return mlir!( inputs : (%x = x : i64), returns : i64, dialects : ["llvm"], ensures : [writes_only()]) {{
-    %r = llvm.inline_asm has_side_effects "{q_bf16_ptx()}", "=l,l" %x : (i64) -> i64
+    %p = llvm.inttoptr %x : i64 to !llvm.ptr<1>
+    %v = llvm.load %p {{alignment = 16 : i64, invariant}} : !llvm.ptr<1> -> vector<4xf32>
+    %h = llvm.fptrunc %v : vector<4xf32> to vector<4xbf16>
+    %r = llvm.bitcast %h : vector<4xbf16> to i64
     macro.yield %r : i64
   }};
 }}
