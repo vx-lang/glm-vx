@@ -1,9 +1,10 @@
 """The PTX instructions that a kernel must keep, so that moving its inline PTX to MLIR ops changes nothing.
 
-`pins(ptx)` gives each special instruction form (an `mma`, `shfl`, `cvt`, load, store and so on, with all its
-qualifiers) that the kernel's inline-asm regions use, and the count of that form in the whole kernel.
-test_ptx_pins.py checks the built PTX against gpu/spawn/ptx_pins.json. To record new pins after a change
-that is meant to change the PTX, run: python3 gpu/spawn/ptx_pins.py --update
+`pins(ptx, kept)` gives each special instruction form (an `mma`, `shfl`, `cvt`, load, store and so on, with
+all its qualifiers) that the kernel's inline-asm regions use or that `kept` names, and the count of that form
+in the whole kernel. test_ptx_pins.py checks the built PTX against gpu/spawn/ptx_pins.json. To record new
+pins after a change that is meant to change the PTX, run: python3 gpu/spawn/ptx_pins.py --update. It keeps
+every form already pinned, so a form whose inline PTX moved to MLIR ops stays pinned, at its new count.
 """
 import argparse
 import json
@@ -36,10 +37,11 @@ def instructions(text):
             yield re.sub(r'^((?:ld|st)\..*\.)[bfus](32|64)$', r'\1b\2', part.split()[0])
 
 
-def pins(ptx):
-    """Each special form that the inline-asm regions of `ptx` use, and its count in all of `ptx`."""
+def pins(ptx, kept=()):
+    """Each special form that the inline-asm regions of `ptx` use or that `kept` names, and its count in all
+    of `ptx`."""
     asm = ''.join(re.findall(r'// begin inline asm\n(.*?)// end inline asm', ptx, re.S))
-    forms = {f for f in instructions(asm) if SPECIAL.match(f)}
+    forms = {f for f in instructions(asm) if SPECIAL.match(f)} | set(kept)
     counts = Counter(instructions(ptx))
     return {f: counts[f] for f in sorted(forms)}
 
@@ -55,13 +57,15 @@ def ptxas_numbers(manifest):
 
 
 def record(build):
+    old = json.loads(PINS.read_text()) if PINS.exists() else {}
     out = {}
     for kernel in KERNELS:
         ptx = (build / f'{kernel}.ptx').read_text()
         numbers = ptxas_numbers(json.loads((build / f'{kernel}.json').read_text()))
         if numbers is None:
             sys.exit(f'{kernel}: build with PTXAS set, so that the pins have the register counts')
-        out[kernel] = {'instructions': pins(ptx), 'max_registers': numbers[0], 'max_stack_and_spill_bytes': numbers[1]}
+        kept = old.get(kernel, {}).get('instructions', {})
+        out[kernel] = {'instructions': pins(ptx, kept), 'max_registers': numbers[0], 'max_stack_and_spill_bytes': numbers[1]}
     return out
 
 
