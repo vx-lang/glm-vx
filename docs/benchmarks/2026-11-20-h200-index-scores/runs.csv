@@ -1,0 +1,745 @@
+kernel_option,round,build,tokens,column,us
+mma,1,ops,3001,scores,7.2
+mma,1,ops,3001,scores_hist,6.4
+mma,1,ops,3001,topk_select_at,16.1
+mma,1,ops,3001,ilp,17.2
+mma,1,ops,3001,ilp_hist,13.7
+mma,1,ops,3001,topk_mb,30.2
+mma,1,ops,3001,bitmap,11.2
+mma,1,ops,3001,before,23.4
+mma,1,ops,3001,after (one block),20.2
+mma,1,ops,3001,after (blocks),36.6
+mma,1,ops,3001,after (bitmap),17.7
+mma,1,ops,8192,scores,8.1
+mma,1,ops,8192,scores_hist,7.3
+mma,1,ops,8192,topk_select_at,22.8
+mma,1,ops,8192,ilp,20.3
+mma,1,ops,8192,ilp_hist,15.8
+mma,1,ops,8192,topk_mb,30.7
+mma,1,ops,8192,bitmap,11.6
+mma,1,ops,8192,before,30.8
+mma,1,ops,8192,after (one block),23.1
+mma,1,ops,8192,after (blocks),38.0
+mma,1,ops,8192,after (bitmap),18.9
+mma,1,ops,32768,scores,12.0
+mma,1,ops,32768,scores_hist,12.5
+mma,1,ops,32768,topk_select_at,68.0
+mma,1,ops,32768,ilp,36.5
+mma,1,ops,32768,ilp_hist,27.6
+mma,1,ops,32768,topk_mb,31.7
+mma,1,ops,32768,bitmap,14.6
+mma,1,ops,32768,before,80.0
+mma,1,ops,32768,after (one block),40.1
+mma,1,ops,32768,after (blocks),44.2
+mma,1,ops,32768,after (bitmap),27.1
+mma,1,ops,65536,scores,18.8
+mma,1,ops,65536,scores_hist,20.5
+mma,1,ops,65536,topk_select_at,145.2
+mma,1,ops,65536,ilp,57.5
+mma,1,ops,65536,ilp_hist,42.1
+mma,1,ops,65536,topk_mb,30.4
+mma,1,ops,65536,bitmap,20.4
+mma,1,ops,65536,before,164.0
+mma,1,ops,65536,after (one block),62.6
+mma,1,ops,65536,after (blocks),50.9
+mma,1,ops,65536,after (bitmap),40.9
+mma,1,ops,131072,scores,28.4
+mma,1,ops,131072,scores_hist,32.8
+mma,1,ops,131072,topk_select_at,277.2
+mma,1,ops,131072,ilp,93.1
+mma,1,ops,131072,ilp_hist,65.7
+mma,1,ops,131072,topk_mb,31.6
+mma,1,ops,131072,before,305.5
+mma,1,ops,131072,after (one block),98.5
+mma,1,ops,131072,after (blocks),64.4
+mma,1,ops,200000,scores,37.2
+mma,1,ops,200000,scores_hist,45.1
+mma,1,ops,200000,topk_select_at,344.5
+mma,1,ops,200000,ilp,131.4
+mma,1,ops,200000,ilp_hist,90.7
+mma,1,ops,200000,topk_mb,31.7
+mma,1,ops,200000,before,381.7
+mma,1,ops,200000,after (one block),135.8
+mma,1,ops,200000,after (blocks),76.9
+mma,1,ptx,3001,scores,7.1
+mma,1,ptx,3001,scores_hist,6.5
+mma,1,ptx,3001,topk_select_at,16.2
+mma,1,ptx,3001,ilp,17.5
+mma,1,ptx,3001,ilp_hist,14.0
+mma,1,ptx,3001,topk_mb,30.3
+mma,1,ptx,3001,bitmap,11.3
+mma,1,ptx,3001,before,23.3
+mma,1,ptx,3001,after (one block),20.6
+mma,1,ptx,3001,after (blocks),36.8
+mma,1,ptx,3001,after (bitmap),17.8
+mma,1,ptx,8192,scores,7.8
+mma,1,ptx,8192,scores_hist,7.6
+mma,1,ptx,8192,topk_select_at,23.1
+mma,1,ptx,8192,ilp,20.5
+mma,1,ptx,8192,ilp_hist,16.3
+mma,1,ptx,8192,topk_mb,31.2
+mma,1,ptx,8192,bitmap,11.9
+mma,1,ptx,8192,before,30.9
+mma,1,ptx,8192,after (one block),23.9
+mma,1,ptx,8192,after (blocks),38.8
+mma,1,ptx,8192,after (bitmap),19.5
+mma,1,ptx,32768,scores,11.8
+mma,1,ptx,32768,scores_hist,12.8
+mma,1,ptx,32768,topk_select_at,68.3
+mma,1,ptx,32768,ilp,36.9
+mma,1,ptx,32768,ilp_hist,28.4
+mma,1,ptx,32768,topk_mb,32.3
+mma,1,ptx,32768,bitmap,15.0
+mma,1,ptx,32768,before,80.0
+mma,1,ptx,32768,after (one block),41.2
+mma,1,ptx,32768,after (blocks),45.1
+mma,1,ptx,32768,after (bitmap),27.8
+mma,1,ptx,65536,scores,18.3
+mma,1,ptx,65536,scores_hist,20.9
+mma,1,ptx,65536,topk_select_at,145.3
+mma,1,ptx,65536,ilp,58.3
+mma,1,ptx,65536,ilp_hist,43.2
+mma,1,ptx,65536,topk_mb,31.0
+mma,1,ptx,65536,bitmap,20.7
+mma,1,ptx,65536,before,163.6
+mma,1,ptx,65536,after (one block),64.1
+mma,1,ptx,65536,after (blocks),51.9
+mma,1,ptx,65536,after (bitmap),41.6
+mma,1,ptx,131072,scores,28.0
+mma,1,ptx,131072,scores_hist,33.5
+mma,1,ptx,131072,topk_select_at,277.4
+mma,1,ptx,131072,ilp,95.6
+mma,1,ptx,131072,ilp_hist,68.0
+mma,1,ptx,131072,topk_mb,31.9
+mma,1,ptx,131072,before,305.4
+mma,1,ptx,131072,after (one block),101.6
+mma,1,ptx,131072,after (blocks),65.4
+mma,1,ptx,200000,scores,35.6
+mma,1,ptx,200000,scores_hist,45.5
+mma,1,ptx,200000,topk_select_at,344.3
+mma,1,ptx,200000,ilp,135.1
+mma,1,ptx,200000,ilp_hist,94.8
+mma,1,ptx,200000,topk_mb,32.1
+mma,1,ptx,200000,before,379.9
+mma,1,ptx,200000,after (one block),140.2
+mma,1,ptx,200000,after (blocks),77.5
+mma,2,ops,3001,scores,7.4
+mma,2,ops,3001,scores_hist,6.5
+mma,2,ops,3001,topk_select_at,16.2
+mma,2,ops,3001,ilp,17.3
+mma,2,ops,3001,ilp_hist,13.9
+mma,2,ops,3001,topk_mb,30.4
+mma,2,ops,3001,bitmap,11.1
+mma,2,ops,3001,before,23.7
+mma,2,ops,3001,after (one block),20.4
+mma,2,ops,3001,after (blocks),36.9
+mma,2,ops,3001,after (bitmap),17.6
+mma,2,ops,8192,scores,8.2
+mma,2,ops,8192,scores_hist,7.3
+mma,2,ops,8192,topk_select_at,23.0
+mma,2,ops,8192,ilp,20.4
+mma,2,ops,8192,ilp_hist,15.8
+mma,2,ops,8192,topk_mb,31.3
+mma,2,ops,8192,bitmap,11.7
+mma,2,ops,8192,before,31.2
+mma,2,ops,8192,after (one block),23.1
+mma,2,ops,8192,after (blocks),38.6
+mma,2,ops,8192,after (bitmap),19.0
+mma,2,ops,32768,scores,12.1
+mma,2,ops,32768,scores_hist,12.4
+mma,2,ops,32768,topk_select_at,68.1
+mma,2,ops,32768,ilp,36.5
+mma,2,ops,32768,ilp_hist,27.7
+mma,2,ops,32768,topk_mb,32.0
+mma,2,ops,32768,bitmap,14.8
+mma,2,ops,32768,before,80.2
+mma,2,ops,32768,after (one block),40.1
+mma,2,ops,32768,after (blocks),44.4
+mma,2,ops,32768,after (bitmap),27.2
+mma,2,ops,65536,scores,19.0
+mma,2,ops,65536,scores_hist,20.7
+mma,2,ops,65536,topk_select_at,144.9
+mma,2,ops,65536,ilp,57.3
+mma,2,ops,65536,ilp_hist,42.5
+mma,2,ops,65536,topk_mb,30.7
+mma,2,ops,65536,bitmap,20.7
+mma,2,ops,65536,before,164.0
+mma,2,ops,65536,after (one block),63.1
+mma,2,ops,65536,after (blocks),51.4
+mma,2,ops,65536,after (bitmap),41.3
+mma,2,ops,131072,scores,28.6
+mma,2,ops,131072,scores_hist,33.1
+mma,2,ops,131072,topk_select_at,277.2
+mma,2,ops,131072,ilp,93.1
+mma,2,ops,131072,ilp_hist,65.8
+mma,2,ops,131072,topk_mb,31.8
+mma,2,ops,131072,before,305.9
+mma,2,ops,131072,after (one block),98.8
+mma,2,ops,131072,after (blocks),64.9
+mma,2,ops,200000,scores,37.0
+mma,2,ops,200000,scores_hist,45.6
+mma,2,ops,200000,topk_select_at,344.9
+mma,2,ops,200000,ilp,131.9
+mma,2,ops,200000,ilp_hist,90.8
+mma,2,ops,200000,topk_mb,32.2
+mma,2,ops,200000,before,381.9
+mma,2,ops,200000,after (one block),136.5
+mma,2,ops,200000,after (blocks),77.8
+mma,2,ptx,3001,scores,6.9
+mma,2,ptx,3001,scores_hist,6.4
+mma,2,ptx,3001,topk_select_at,16.1
+mma,2,ptx,3001,ilp,17.2
+mma,2,ptx,3001,ilp_hist,13.7
+mma,2,ptx,3001,topk_mb,30.1
+mma,2,ptx,3001,bitmap,11.1
+mma,2,ptx,3001,before,23.0
+mma,2,ptx,3001,after (one block),20.0
+mma,2,ptx,3001,after (blocks),36.5
+mma,2,ptx,3001,after (bitmap),17.4
+mma,2,ptx,8192,scores,7.6
+mma,2,ptx,8192,scores_hist,7.3
+mma,2,ptx,8192,topk_select_at,22.9
+mma,2,ptx,8192,ilp,20.3
+mma,2,ptx,8192,ilp_hist,15.8
+mma,2,ptx,8192,topk_mb,31.3
+mma,2,ptx,8192,bitmap,11.8
+mma,2,ptx,8192,before,30.5
+mma,2,ptx,8192,after (one block),23.1
+mma,2,ptx,8192,after (blocks),38.6
+mma,2,ptx,8192,after (bitmap),19.1
+mma,2,ptx,32768,scores,11.5
+mma,2,ptx,32768,scores_hist,12.5
+mma,2,ptx,32768,topk_select_at,68.0
+mma,2,ptx,32768,ilp,36.9
+mma,2,ptx,32768,ilp_hist,28.2
+mma,2,ptx,32768,topk_mb,31.8
+mma,2,ptx,32768,bitmap,14.9
+mma,2,ptx,32768,before,79.6
+mma,2,ptx,32768,after (one block),40.7
+mma,2,ptx,32768,after (blocks),44.4
+mma,2,ptx,32768,after (bitmap),27.4
+mma,2,ptx,65536,scores,18.4
+mma,2,ptx,65536,scores_hist,20.8
+mma,2,ptx,65536,topk_select_at,145.2
+mma,2,ptx,65536,ilp,58.2
+mma,2,ptx,65536,ilp_hist,42.9
+mma,2,ptx,65536,topk_mb,30.6
+mma,2,ptx,65536,bitmap,20.7
+mma,2,ptx,65536,before,163.6
+mma,2,ptx,65536,after (one block),63.7
+mma,2,ptx,65536,after (blocks),51.4
+mma,2,ptx,65536,after (bitmap),41.5
+mma,2,ptx,131072,scores,27.2
+mma,2,ptx,131072,scores_hist,33.6
+mma,2,ptx,131072,topk_select_at,277.5
+mma,2,ptx,131072,ilp,95.5
+mma,2,ptx,131072,ilp_hist,67.7
+mma,2,ptx,131072,topk_mb,31.5
+mma,2,ptx,131072,before,304.7
+mma,2,ptx,131072,after (one block),101.4
+mma,2,ptx,131072,after (blocks),65.1
+mma,2,ptx,200000,scores,35.6
+mma,2,ptx,200000,scores_hist,45.2
+mma,2,ptx,200000,topk_select_at,344.3
+mma,2,ptx,200000,ilp,135.4
+mma,2,ptx,200000,ilp_hist,94.1
+mma,2,ptx,200000,topk_mb,31.8
+mma,2,ptx,200000,before,379.9
+mma,2,ptx,200000,after (one block),139.4
+mma,2,ptx,200000,after (blocks),77.0
+mma,3,ops,3001,scores,7.3
+mma,3,ops,3001,scores_hist,6.3
+mma,3,ops,3001,topk_select_at,16.1
+mma,3,ops,3001,ilp,17.2
+mma,3,ops,3001,ilp_hist,13.8
+mma,3,ops,3001,topk_mb,30.0
+mma,3,ops,3001,bitmap,10.9
+mma,3,ops,3001,before,23.4
+mma,3,ops,3001,after (one block),20.1
+mma,3,ops,3001,after (blocks),36.3
+mma,3,ops,3001,after (bitmap),17.3
+mma,3,ops,8192,scores,8.2
+mma,3,ops,8192,scores_hist,7.3
+mma,3,ops,8192,topk_select_at,22.9
+mma,3,ops,8192,ilp,20.4
+mma,3,ops,8192,ilp_hist,15.8
+mma,3,ops,8192,topk_mb,30.9
+mma,3,ops,8192,bitmap,11.7
+mma,3,ops,8192,before,31.1
+mma,3,ops,8192,after (one block),23.2
+mma,3,ops,8192,after (blocks),38.2
+mma,3,ops,8192,after (bitmap),19.0
+mma,3,ops,32768,scores,11.9
+mma,3,ops,32768,scores_hist,12.4
+mma,3,ops,32768,topk_select_at,68.0
+mma,3,ops,32768,ilp,36.4
+mma,3,ops,32768,ilp_hist,27.9
+mma,3,ops,32768,topk_mb,31.8
+mma,3,ops,32768,bitmap,14.8
+mma,3,ops,32768,before,79.9
+mma,3,ops,32768,after (one block),40.2
+mma,3,ops,32768,after (blocks),44.2
+mma,3,ops,32768,after (bitmap),27.1
+mma,3,ops,65536,scores,19.0
+mma,3,ops,65536,scores_hist,20.8
+mma,3,ops,65536,topk_select_at,144.8
+mma,3,ops,65536,ilp,57.3
+mma,3,ops,65536,ilp_hist,41.9
+mma,3,ops,65536,topk_mb,30.4
+mma,3,ops,65536,bitmap,20.8
+mma,3,ops,65536,before,163.8
+mma,3,ops,65536,after (one block),62.7
+mma,3,ops,65536,after (blocks),51.3
+mma,3,ops,65536,after (bitmap),41.6
+mma,3,ops,131072,scores,28.4
+mma,3,ops,131072,scores_hist,33.4
+mma,3,ops,131072,topk_select_at,277.6
+mma,3,ops,131072,ilp,93.6
+mma,3,ops,131072,ilp_hist,65.5
+mma,3,ops,131072,topk_mb,31.6
+mma,3,ops,131072,before,306.0
+mma,3,ops,131072,after (one block),98.9
+mma,3,ops,131072,after (blocks),65.0
+mma,3,ops,200000,scores,36.7
+mma,3,ops,200000,scores_hist,45.3
+mma,3,ops,200000,topk_select_at,344.4
+mma,3,ops,200000,ilp,131.5
+mma,3,ops,200000,ilp_hist,90.7
+mma,3,ops,200000,topk_mb,31.6
+mma,3,ops,200000,before,381.2
+mma,3,ops,200000,after (one block),136.0
+mma,3,ops,200000,after (blocks),76.9
+mma,3,ptx,3001,scores,6.9
+mma,3,ptx,3001,scores_hist,6.5
+mma,3,ptx,3001,topk_select_at,16.1
+mma,3,ptx,3001,ilp,17.3
+mma,3,ptx,3001,ilp_hist,13.9
+mma,3,ptx,3001,topk_mb,30.2
+mma,3,ptx,3001,bitmap,11.1
+mma,3,ptx,3001,before,23.1
+mma,3,ptx,3001,after (one block),20.4
+mma,3,ptx,3001,after (blocks),36.7
+mma,3,ptx,3001,after (bitmap),17.6
+mma,3,ptx,8192,scores,7.6
+mma,3,ptx,8192,scores_hist,7.3
+mma,3,ptx,8192,topk_select_at,23.0
+mma,3,ptx,8192,ilp,20.4
+mma,3,ptx,8192,ilp_hist,15.9
+mma,3,ptx,8192,topk_mb,31.3
+mma,3,ptx,8192,bitmap,11.9
+mma,3,ptx,8192,before,30.6
+mma,3,ptx,8192,after (one block),23.3
+mma,3,ptx,8192,after (blocks),38.7
+mma,3,ptx,8192,after (bitmap),19.2
+mma,3,ptx,32768,scores,11.7
+mma,3,ptx,32768,scores_hist,12.5
+mma,3,ptx,32768,topk_select_at,68.1
+mma,3,ptx,32768,ilp,37.0
+mma,3,ptx,32768,ilp_hist,28.4
+mma,3,ptx,32768,topk_mb,32.0
+mma,3,ptx,32768,bitmap,15.0
+mma,3,ptx,32768,before,79.8
+mma,3,ptx,32768,after (one block),40.9
+mma,3,ptx,32768,after (blocks),44.6
+mma,3,ptx,32768,after (bitmap),27.6
+mma,3,ptx,65536,scores,18.4
+mma,3,ptx,65536,scores_hist,20.8
+mma,3,ptx,65536,topk_select_at,145.1
+mma,3,ptx,65536,ilp,58.2
+mma,3,ptx,65536,ilp_hist,43.1
+mma,3,ptx,65536,topk_mb,30.8
+mma,3,ptx,65536,bitmap,20.7
+mma,3,ptx,65536,before,163.5
+mma,3,ptx,65536,after (one block),63.9
+mma,3,ptx,65536,after (blocks),51.6
+mma,3,ptx,65536,after (bitmap),41.5
+mma,3,ptx,131072,scores,27.3
+mma,3,ptx,131072,scores_hist,33.4
+mma,3,ptx,131072,topk_select_at,277.0
+mma,3,ptx,131072,ilp,95.6
+mma,3,ptx,131072,ilp_hist,67.9
+mma,3,ptx,131072,topk_mb,31.7
+mma,3,ptx,131072,before,304.3
+mma,3,ptx,131072,after (one block),101.2
+mma,3,ptx,131072,after (blocks),65.1
+mma,3,ptx,200000,scores,35.9
+mma,3,ptx,200000,scores_hist,45.5
+mma,3,ptx,200000,topk_select_at,345.1
+mma,3,ptx,200000,ilp,135.3
+mma,3,ptx,200000,ilp_hist,94.6
+mma,3,ptx,200000,topk_mb,31.8
+mma,3,ptx,200000,before,381.0
+mma,3,ptx,200000,after (one block),140.1
+mma,3,ptx,200000,after (blocks),77.2
+mma16,1,ops,3001,scores,6.9
+mma16,1,ops,3001,scores_hist,6.2
+mma16,1,ops,3001,topk_select_at,16.1
+mma16,1,ops,3001,ilp,17.3
+mma16,1,ops,3001,ilp_hist,13.8
+mma16,1,ops,3001,topk_mb,29.7
+mma16,1,ops,3001,bitmap,11.0
+mma16,1,ops,3001,before,23.0
+mma16,1,ops,3001,after (one block),20.1
+mma16,1,ops,3001,after (blocks),35.9
+mma16,1,ops,3001,after (bitmap),17.2
+mma16,1,ops,8192,scores,7.1
+mma16,1,ops,8192,scores_hist,6.7
+mma16,1,ops,8192,topk_select_at,22.8
+mma16,1,ops,8192,ilp,20.2
+mma16,1,ops,8192,ilp_hist,15.7
+mma16,1,ops,8192,topk_mb,31.3
+mma16,1,ops,8192,bitmap,11.6
+mma16,1,ops,8192,before,29.9
+mma16,1,ops,8192,after (one block),22.4
+mma16,1,ops,8192,after (blocks),38.0
+mma16,1,ops,8192,after (bitmap),18.3
+mma16,1,ops,32768,scores,9.4
+mma16,1,ops,32768,scores_hist,11.4
+mma16,1,ops,32768,topk_select_at,68.1
+mma16,1,ops,32768,ilp,36.6
+mma16,1,ops,32768,ilp_hist,27.9
+mma16,1,ops,32768,topk_mb,32.0
+mma16,1,ops,32768,bitmap,15.0
+mma16,1,ops,32768,before,77.5
+mma16,1,ops,32768,after (one block),39.3
+mma16,1,ops,32768,after (blocks),43.4
+mma16,1,ops,32768,after (bitmap),26.4
+mma16,1,ops,65536,scores,13.0
+mma16,1,ops,65536,scores_hist,18.3
+mma16,1,ops,65536,topk_select_at,144.0
+mma16,1,ops,65536,ilp,57.3
+mma16,1,ops,65536,ilp_hist,42.4
+mma16,1,ops,65536,topk_mb,30.6
+mma16,1,ops,65536,bitmap,20.5
+mma16,1,ops,65536,before,157.0
+mma16,1,ops,65536,after (one block),60.7
+mma16,1,ops,65536,after (blocks),48.9
+mma16,1,ops,65536,after (bitmap),38.9
+mma16,1,ops,131072,scores,21.3
+mma16,1,ops,131072,scores_hist,28.7
+mma16,1,ops,131072,topk_select_at,277.3
+mma16,1,ops,131072,ilp,93.2
+mma16,1,ops,131072,ilp_hist,65.6
+mma16,1,ops,131072,topk_mb,31.3
+mma16,1,ops,131072,before,298.7
+mma16,1,ops,131072,after (one block),94.2
+mma16,1,ops,131072,after (blocks),60.0
+mma16,1,ops,200000,scores,27.9
+mma16,1,ops,200000,scores_hist,38.8
+mma16,1,ops,200000,topk_select_at,344.5
+mma16,1,ops,200000,ilp,131.8
+mma16,1,ops,200000,ilp_hist,90.5
+mma16,1,ops,200000,topk_mb,31.9
+mma16,1,ops,200000,before,372.4
+mma16,1,ops,200000,after (one block),129.3
+mma16,1,ops,200000,after (blocks),70.7
+mma16,1,ptx,3001,scores,7.0
+mma16,1,ptx,3001,scores_hist,6.3
+mma16,1,ptx,3001,topk_select_at,16.2
+mma16,1,ptx,3001,ilp,17.4
+mma16,1,ptx,3001,ilp_hist,14.0
+mma16,1,ptx,3001,topk_mb,29.8
+mma16,1,ptx,3001,bitmap,11.1
+mma16,1,ptx,3001,before,23.2
+mma16,1,ptx,3001,after (one block),20.2
+mma16,1,ptx,3001,after (blocks),36.1
+mma16,1,ptx,3001,after (bitmap),17.3
+mma16,1,ptx,8192,scores,7.2
+mma16,1,ptx,8192,scores_hist,7.2
+mma16,1,ptx,8192,topk_select_at,22.9
+mma16,1,ptx,8192,ilp,20.5
+mma16,1,ptx,8192,ilp_hist,15.9
+mma16,1,ptx,8192,topk_mb,31.7
+mma16,1,ptx,8192,bitmap,12.1
+mma16,1,ptx,8192,before,30.1
+mma16,1,ptx,8192,after (one block),23.0
+mma16,1,ptx,8192,after (blocks),38.8
+mma16,1,ptx,8192,after (bitmap),19.2
+mma16,1,ptx,32768,scores,9.7
+mma16,1,ptx,32768,scores_hist,11.5
+mma16,1,ptx,32768,topk_select_at,68.2
+mma16,1,ptx,32768,ilp,37.1
+mma16,1,ptx,32768,ilp_hist,28.6
+mma16,1,ptx,32768,topk_mb,32.0
+mma16,1,ptx,32768,bitmap,15.2
+mma16,1,ptx,32768,before,78.0
+mma16,1,ptx,32768,after (one block),40.1
+mma16,1,ptx,32768,after (blocks),43.5
+mma16,1,ptx,32768,after (bitmap),26.7
+mma16,1,ptx,65536,scores,13.1
+mma16,1,ptx,65536,scores_hist,18.7
+mma16,1,ptx,65536,topk_select_at,144.2
+mma16,1,ptx,65536,ilp,58.4
+mma16,1,ptx,65536,ilp_hist,43.6
+mma16,1,ptx,65536,topk_mb,30.9
+mma16,1,ptx,65536,bitmap,20.7
+mma16,1,ptx,65536,before,157.3
+mma16,1,ptx,65536,after (one block),62.3
+mma16,1,ptx,65536,after (blocks),49.6
+mma16,1,ptx,65536,after (bitmap),39.5
+mma16,1,ptx,131072,scores,21.6
+mma16,1,ptx,131072,scores_hist,28.7
+mma16,1,ptx,131072,topk_select_at,277.4
+mma16,1,ptx,131072,ilp,95.4
+mma16,1,ptx,131072,ilp_hist,67.9
+mma16,1,ptx,131072,topk_mb,31.6
+mma16,1,ptx,131072,before,298.9
+mma16,1,ptx,131072,after (one block),96.7
+mma16,1,ptx,131072,after (blocks),60.3
+mma16,1,ptx,200000,scores,27.9
+mma16,1,ptx,200000,scores_hist,38.7
+mma16,1,ptx,200000,topk_select_at,344.2
+mma16,1,ptx,200000,ilp,135.3
+mma16,1,ptx,200000,ilp_hist,94.8
+mma16,1,ptx,200000,topk_mb,32.1
+mma16,1,ptx,200000,before,372.0
+mma16,1,ptx,200000,after (one block),133.5
+mma16,1,ptx,200000,after (blocks),70.9
+mma16,2,ops,3001,scores,6.9
+mma16,2,ops,3001,scores_hist,6.4
+mma16,2,ops,3001,topk_select_at,16.2
+mma16,2,ops,3001,ilp,17.4
+mma16,2,ops,3001,ilp_hist,13.9
+mma16,2,ops,3001,topk_mb,29.9
+mma16,2,ops,3001,bitmap,11.3
+mma16,2,ops,3001,before,23.2
+mma16,2,ops,3001,after (one block),20.3
+mma16,2,ops,3001,after (blocks),36.3
+mma16,2,ops,3001,after (bitmap),17.7
+mma16,2,ops,8192,scores,7.3
+mma16,2,ops,8192,scores_hist,6.9
+mma16,2,ops,8192,topk_select_at,22.9
+mma16,2,ops,8192,ilp,20.4
+mma16,2,ops,8192,ilp_hist,15.9
+mma16,2,ops,8192,topk_mb,31.4
+mma16,2,ops,8192,bitmap,11.8
+mma16,2,ops,8192,before,30.2
+mma16,2,ops,8192,after (one block),22.8
+mma16,2,ops,8192,after (blocks),38.3
+mma16,2,ops,8192,after (bitmap),18.7
+mma16,2,ops,32768,scores,9.7
+mma16,2,ops,32768,scores_hist,11.6
+mma16,2,ops,32768,topk_select_at,68.4
+mma16,2,ops,32768,ilp,36.7
+mma16,2,ops,32768,ilp_hist,27.9
+mma16,2,ops,32768,topk_mb,32.1
+mma16,2,ops,32768,bitmap,15.1
+mma16,2,ops,32768,before,78.0
+mma16,2,ops,32768,after (one block),39.6
+mma16,2,ops,32768,after (blocks),43.7
+mma16,2,ops,32768,after (bitmap),26.7
+mma16,2,ops,65536,scores,13.1
+mma16,2,ops,65536,scores_hist,18.6
+mma16,2,ops,65536,topk_select_at,143.7
+mma16,2,ops,65536,ilp,57.5
+mma16,2,ops,65536,ilp_hist,42.6
+mma16,2,ops,65536,topk_mb,30.8
+mma16,2,ops,65536,bitmap,20.6
+mma16,2,ops,65536,before,156.8
+mma16,2,ops,65536,after (one block),61.2
+mma16,2,ops,65536,after (blocks),49.4
+mma16,2,ops,65536,after (bitmap),39.2
+mma16,2,ops,131072,scores,21.5
+mma16,2,ops,131072,scores_hist,28.9
+mma16,2,ops,131072,topk_select_at,277.2
+mma16,2,ops,131072,ilp,93.1
+mma16,2,ops,131072,ilp_hist,65.9
+mma16,2,ops,131072,topk_mb,31.5
+mma16,2,ops,131072,before,298.7
+mma16,2,ops,131072,after (one block),94.8
+mma16,2,ops,131072,after (blocks),60.4
+mma16,2,ops,200000,scores,27.9
+mma16,2,ops,200000,scores_hist,38.5
+mma16,2,ops,200000,topk_select_at,344.5
+mma16,2,ops,200000,ilp,131.9
+mma16,2,ops,200000,ilp_hist,91.3
+mma16,2,ops,200000,topk_mb,32.1
+mma16,2,ops,200000,before,372.4
+mma16,2,ops,200000,after (one block),129.9
+mma16,2,ops,200000,after (blocks),70.6
+mma16,2,ptx,3001,scores,7.0
+mma16,2,ptx,3001,scores_hist,6.4
+mma16,2,ptx,3001,topk_select_at,16.2
+mma16,2,ptx,3001,ilp,17.4
+mma16,2,ptx,3001,ilp_hist,13.8
+mma16,2,ptx,3001,topk_mb,29.8
+mma16,2,ptx,3001,bitmap,11.1
+mma16,2,ptx,3001,before,23.2
+mma16,2,ptx,3001,after (one block),20.2
+mma16,2,ptx,3001,after (blocks),36.2
+mma16,2,ptx,3001,after (bitmap),17.5
+mma16,2,ptx,8192,scores,7.2
+mma16,2,ptx,8192,scores_hist,6.9
+mma16,2,ptx,8192,topk_select_at,22.8
+mma16,2,ptx,8192,ilp,20.4
+mma16,2,ptx,8192,ilp_hist,15.8
+mma16,2,ptx,8192,topk_mb,31.6
+mma16,2,ptx,8192,bitmap,11.6
+mma16,2,ptx,8192,before,30.0
+mma16,2,ptx,8192,after (one block),22.6
+mma16,2,ptx,8192,after (blocks),38.4
+mma16,2,ptx,8192,after (bitmap),18.5
+mma16,2,ptx,32768,scores,9.6
+mma16,2,ptx,32768,scores_hist,11.6
+mma16,2,ptx,32768,topk_select_at,68.3
+mma16,2,ptx,32768,ilp,37.1
+mma16,2,ptx,32768,ilp_hist,28.5
+mma16,2,ptx,32768,topk_mb,32.1
+mma16,2,ptx,32768,bitmap,14.7
+mma16,2,ptx,32768,before,77.9
+mma16,2,ptx,32768,after (one block),40.1
+mma16,2,ptx,32768,after (blocks),43.7
+mma16,2,ptx,32768,after (bitmap),26.4
+mma16,2,ptx,65536,scores,13.2
+mma16,2,ptx,65536,scores_hist,18.5
+mma16,2,ptx,65536,topk_select_at,144.2
+mma16,2,ptx,65536,ilp,58.4
+mma16,2,ptx,65536,ilp_hist,43.6
+mma16,2,ptx,65536,topk_mb,30.7
+mma16,2,ptx,65536,bitmap,20.5
+mma16,2,ptx,65536,before,157.3
+mma16,2,ptx,65536,after (one block),62.1
+mma16,2,ptx,65536,after (blocks),49.2
+mma16,2,ptx,65536,after (bitmap),39.0
+mma16,2,ptx,131072,scores,21.5
+mma16,2,ptx,131072,scores_hist,28.9
+mma16,2,ptx,131072,topk_select_at,277.2
+mma16,2,ptx,131072,ilp,95.4
+mma16,2,ptx,131072,ilp_hist,68.0
+mma16,2,ptx,131072,topk_mb,31.7
+mma16,2,ptx,131072,before,298.8
+mma16,2,ptx,131072,after (one block),96.9
+mma16,2,ptx,131072,after (blocks),60.6
+mma16,2,ptx,200000,scores,28.3
+mma16,2,ptx,200000,scores_hist,38.8
+mma16,2,ptx,200000,topk_select_at,344.1
+mma16,2,ptx,200000,ilp,135.3
+mma16,2,ptx,200000,ilp_hist,94.4
+mma16,2,ptx,200000,topk_mb,31.9
+mma16,2,ptx,200000,before,372.4
+mma16,2,ptx,200000,after (one block),133.2
+mma16,2,ptx,200000,after (blocks),70.7
+mma16,3,ops,3001,scores,6.8
+mma16,3,ops,3001,scores_hist,6.3
+mma16,3,ops,3001,topk_select_at,16.1
+mma16,3,ops,3001,ilp,17.4
+mma16,3,ops,3001,ilp_hist,13.7
+mma16,3,ops,3001,topk_mb,29.7
+mma16,3,ops,3001,bitmap,10.9
+mma16,3,ops,3001,before,23.0
+mma16,3,ops,3001,after (one block),20.0
+mma16,3,ops,3001,after (blocks),36.0
+mma16,3,ops,3001,after (bitmap),17.2
+mma16,3,ops,8192,scores,7.2
+mma16,3,ops,8192,scores_hist,6.8
+mma16,3,ops,8192,topk_select_at,22.9
+mma16,3,ops,8192,ilp,20.3
+mma16,3,ops,8192,ilp_hist,15.7
+mma16,3,ops,8192,topk_mb,31.4
+mma16,3,ops,8192,bitmap,11.5
+mma16,3,ops,8192,before,30.1
+mma16,3,ops,8192,after (one block),22.6
+mma16,3,ops,8192,after (blocks),38.3
+mma16,3,ops,8192,after (bitmap),18.4
+mma16,3,ops,32768,scores,9.4
+mma16,3,ops,32768,scores_hist,11.6
+mma16,3,ops,32768,topk_select_at,68.0
+mma16,3,ops,32768,ilp,36.7
+mma16,3,ops,32768,ilp_hist,28.0
+mma16,3,ops,32768,topk_mb,31.6
+mma16,3,ops,32768,bitmap,14.6
+mma16,3,ops,32768,before,77.4
+mma16,3,ops,32768,after (one block),39.6
+mma16,3,ops,32768,after (blocks),43.2
+mma16,3,ops,32768,after (bitmap),26.2
+mma16,3,ops,65536,scores,13.0
+mma16,3,ops,65536,scores_hist,18.3
+mma16,3,ops,65536,topk_select_at,144.0
+mma16,3,ops,65536,ilp,57.3
+mma16,3,ops,65536,ilp_hist,42.3
+mma16,3,ops,65536,topk_mb,30.8
+mma16,3,ops,65536,bitmap,20.6
+mma16,3,ops,65536,before,157.0
+mma16,3,ops,65536,after (one block),60.6
+mma16,3,ops,65536,after (blocks),49.1
+mma16,3,ops,65536,after (bitmap),38.9
+mma16,3,ops,131072,scores,21.2
+mma16,3,ops,131072,scores_hist,28.9
+mma16,3,ops,131072,topk_select_at,277.4
+mma16,3,ops,131072,ilp,92.9
+mma16,3,ops,131072,ilp_hist,65.5
+mma16,3,ops,131072,topk_mb,31.3
+mma16,3,ops,131072,before,298.6
+mma16,3,ops,131072,after (one block),94.4
+mma16,3,ops,131072,after (blocks),60.2
+mma16,3,ops,200000,scores,27.9
+mma16,3,ops,200000,scores_hist,38.4
+mma16,3,ops,200000,topk_select_at,344.3
+mma16,3,ops,200000,ilp,131.7
+mma16,3,ops,200000,ilp_hist,90.4
+mma16,3,ops,200000,topk_mb,31.9
+mma16,3,ops,200000,before,372.2
+mma16,3,ops,200000,after (one block),128.9
+mma16,3,ops,200000,after (blocks),70.4
+mma16,3,ptx,3001,scores,7.0
+mma16,3,ptx,3001,scores_hist,6.1
+mma16,3,ptx,3001,topk_select_at,16.2
+mma16,3,ptx,3001,ilp,17.4
+mma16,3,ptx,3001,ilp_hist,13.9
+mma16,3,ptx,3001,topk_mb,29.9
+mma16,3,ptx,3001,bitmap,11.5
+mma16,3,ptx,3001,before,23.2
+mma16,3,ptx,3001,after (one block),20.0
+mma16,3,ptx,3001,after (blocks),36.1
+mma16,3,ptx,3001,after (bitmap),17.6
+mma16,3,ptx,8192,scores,7.2
+mma16,3,ptx,8192,scores_hist,6.8
+mma16,3,ptx,8192,topk_select_at,22.9
+mma16,3,ptx,8192,ilp,20.5
+mma16,3,ptx,8192,ilp_hist,15.9
+mma16,3,ptx,8192,topk_mb,31.5
+mma16,3,ptx,8192,bitmap,11.8
+mma16,3,ptx,8192,before,30.1
+mma16,3,ptx,8192,after (one block),22.7
+mma16,3,ptx,8192,after (blocks),38.4
+mma16,3,ptx,8192,after (bitmap),18.6
+mma16,3,ptx,32768,scores,9.6
+mma16,3,ptx,32768,scores_hist,11.5
+mma16,3,ptx,32768,topk_select_at,68.2
+mma16,3,ptx,32768,ilp,37.2
+mma16,3,ptx,32768,ilp_hist,28.6
+mma16,3,ptx,32768,topk_mb,32.2
+mma16,3,ptx,32768,bitmap,15.1
+mma16,3,ptx,32768,before,77.8
+mma16,3,ptx,32768,after (one block),40.1
+mma16,3,ptx,32768,after (blocks),43.7
+mma16,3,ptx,32768,after (bitmap),26.6
+mma16,3,ptx,65536,scores,13.2
+mma16,3,ptx,65536,scores_hist,18.4
+mma16,3,ptx,65536,topk_select_at,143.9
+mma16,3,ptx,65536,ilp,58.5
+mma16,3,ptx,65536,ilp_hist,43.7
+mma16,3,ptx,65536,topk_mb,30.8
+mma16,3,ptx,65536,bitmap,20.6
+mma16,3,ptx,65536,before,157.1
+mma16,3,ptx,65536,after (one block),62.1
+mma16,3,ptx,65536,after (blocks),49.1
+mma16,3,ptx,65536,after (bitmap),39.0
+mma16,3,ptx,131072,scores,21.7
+mma16,3,ptx,131072,scores_hist,28.9
+mma16,3,ptx,131072,topk_select_at,277.6
+mma16,3,ptx,131072,ilp,95.4
+mma16,3,ptx,131072,ilp_hist,68.0
+mma16,3,ptx,131072,topk_mb,31.6
+mma16,3,ptx,131072,before,299.3
+mma16,3,ptx,131072,after (one block),96.8
+mma16,3,ptx,131072,after (blocks),60.4
+mma16,3,ptx,200000,scores,27.9
+mma16,3,ptx,200000,scores_hist,38.6
+mma16,3,ptx,200000,topk_select_at,344.7
+mma16,3,ptx,200000,ilp,135.2
+mma16,3,ptx,200000,ilp_hist,94.5
+mma16,3,ptx,200000,topk_mb,32.2
+mma16,3,ptx,200000,before,372.6
+mma16,3,ptx,200000,after (one block),133.1
+mma16,3,ptx,200000,after (blocks),70.8

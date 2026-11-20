@@ -1,0 +1,121 @@
+// fp8_moe_mma16_down_at's arithmetic with the tensor-core part as a plain Vx matmul (Vx #3694: a tile of a lane
+// matmul in HBM; #3696: a lane loads 16 bytes of the tile's row at once): one TP8 rank of GLM-5.3's routed experts'
+// down projection in decode, an expert width of 256. A block takes 16 rows, a warp an expert:
+//   acc[w] = (down[tile] as f32) @ (xs[w] as f32)
+// where down[tile] is the expert's [16, 256] block of rows, e4m3 in HBM, and xs[w] is act in f16, [256, 8], in shared
+// memory (a Vx matmul's second tile is in memory; fp8_moe_mma16_down_at keeps act in registers). Columns 0-3 of xs hold
+// the first group of 128 columns of act (rows 128-255 zero) and columns 4-7 the second, so each group keeps its own
+// scales in f32: act times a power of two that puts the group's max in [2^14, 2^15) (fp8_moe_mma16_down_at's, exact),
+// then f16; out row r = sum over experts of (s0 ws0 C[r][0] + s1 ws1 C[r][4]) * the expert's router weight.
+// On the H200 at one rank of 8 (6144 x 256, k = 9): 11.3 us against fp8_moe_mma16_down_at's 13.4 us, the same DRAM
+// bytes and 37% fewer instructions (glm-vx #63). Needs Vx 10c6f478f or later. Arguments as fp8_moe_mma16_down_at, with
+// down as [experts * rows / 16, 16, 256] (the codes' bytes); needs k <= 9, rows % 16 == 0 and cols == 256, otherwise
+// out is zeros (ResidentGLM(moe_mma='vx16') keeps fp8_moe_mma16_down_at there).
+// No inline PTX: each warp finds its routing slot in plain Vx too, over the ids in shared memory.
+// spawn-include: ../device.vx
+
+pub fn glm_vx_spawn_fp8_moe_vxmm16_down_at(out: &mut Tensor<f32, [?], Memory::HBM>, down: &Tensor<f8e4m3, [?, 16, 256], Memory::HBM>,
+                                           scales: &Tensor<f32, [?], Memory::HBM>, act: &Tensor<f32, [?], Memory::HBM>,
+                                           weights: &Tensor<f32, [?], Memory::HBM>, ids: &Tensor<i32, [?], Memory::HBM>,
+                                           k: i32, experts: i32, rows: i32, cols: i32) -> void {
+  spawn on(Topology::Device) {
+    for rb in 0..(rows + 15) / 16 across blocks {
+      let mut xs = unsafe { Tensor<f16, [9, 256, 8], Memory::SMEM>::uninit() };
+      let mut acc = unsafe { Tensor<f32, [9, 16, 8], Memory::SMEM>::uninit() };
+      let mut part = unsafe { Tensor<f32, [9, 16], Memory::SMEM>::uninit() };
+      let mut tile = unsafe { Tensor<i32, [9], Memory::SMEM>::uninit() };
+      let mut f = unsafe { Tensor<f32, [9, 2], Memory::SMEM>::uninit() };
+      let mut pm0 = unsafe { Tensor<f32, [9, 32], Memory::SMEM>::uninit() };
+      let mut pm1 = unsafe { Tensor<f32, [9, 32], Memory::SMEM>::uninit() };
+      for w in 0..9 across subgroups {
+        // act's rows are in rank order (fp8_moe_cvt_gate_up's): warp w takes the expert of rank w, the number of ids
+        // below it, the last slot of that rank as slot_of_rank_warp does. Each lane loads the k <= 9 ids and ranks
+        // them in registers: nine independent loads and compares, no shared memory or sync.
+        for lane in 0..32 across lanes {
+          let ok: bool = w < k && k <= 9 && rows % 16 == 0 && cols == 256;
+          let e0: i32 = if 0 < k && k <= 9 { ids[0] } else { 2147483647 };
+          let e1: i32 = if 1 < k && k <= 9 { ids[1] } else { 2147483647 };
+          let e2: i32 = if 2 < k && k <= 9 { ids[2] } else { 2147483647 };
+          let e3: i32 = if 3 < k && k <= 9 { ids[3] } else { 2147483647 };
+          let e4: i32 = if 4 < k && k <= 9 { ids[4] } else { 2147483647 };
+          let e5: i32 = if 5 < k && k <= 9 { ids[5] } else { 2147483647 };
+          let e6: i32 = if 6 < k && k <= 9 { ids[6] } else { 2147483647 };
+          let e7: i32 = if 7 < k && k <= 9 { ids[7] } else { 2147483647 };
+          let e8: i32 = if 8 < k && k <= 9 { ids[8] } else { 2147483647 };
+          let r0: i32 = (if e1 < e0 { 1 } else { 0 }) + (if e2 < e0 { 1 } else { 0 }) + (if e3 < e0 { 1 } else { 0 }) + (if e4 < e0 { 1 } else { 0 }) + (if e5 < e0 { 1 } else { 0 }) + (if e6 < e0 { 1 } else { 0 }) + (if e7 < e0 { 1 } else { 0 }) + (if e8 < e0 { 1 } else { 0 });
+          let r1: i32 = (if e0 < e1 { 1 } else { 0 }) + (if e2 < e1 { 1 } else { 0 }) + (if e3 < e1 { 1 } else { 0 }) + (if e4 < e1 { 1 } else { 0 }) + (if e5 < e1 { 1 } else { 0 }) + (if e6 < e1 { 1 } else { 0 }) + (if e7 < e1 { 1 } else { 0 }) + (if e8 < e1 { 1 } else { 0 });
+          let r2: i32 = (if e0 < e2 { 1 } else { 0 }) + (if e1 < e2 { 1 } else { 0 }) + (if e3 < e2 { 1 } else { 0 }) + (if e4 < e2 { 1 } else { 0 }) + (if e5 < e2 { 1 } else { 0 }) + (if e6 < e2 { 1 } else { 0 }) + (if e7 < e2 { 1 } else { 0 }) + (if e8 < e2 { 1 } else { 0 });
+          let r3: i32 = (if e0 < e3 { 1 } else { 0 }) + (if e1 < e3 { 1 } else { 0 }) + (if e2 < e3 { 1 } else { 0 }) + (if e4 < e3 { 1 } else { 0 }) + (if e5 < e3 { 1 } else { 0 }) + (if e6 < e3 { 1 } else { 0 }) + (if e7 < e3 { 1 } else { 0 }) + (if e8 < e3 { 1 } else { 0 });
+          let r4: i32 = (if e0 < e4 { 1 } else { 0 }) + (if e1 < e4 { 1 } else { 0 }) + (if e2 < e4 { 1 } else { 0 }) + (if e3 < e4 { 1 } else { 0 }) + (if e5 < e4 { 1 } else { 0 }) + (if e6 < e4 { 1 } else { 0 }) + (if e7 < e4 { 1 } else { 0 }) + (if e8 < e4 { 1 } else { 0 });
+          let r5: i32 = (if e0 < e5 { 1 } else { 0 }) + (if e1 < e5 { 1 } else { 0 }) + (if e2 < e5 { 1 } else { 0 }) + (if e3 < e5 { 1 } else { 0 }) + (if e4 < e5 { 1 } else { 0 }) + (if e6 < e5 { 1 } else { 0 }) + (if e7 < e5 { 1 } else { 0 }) + (if e8 < e5 { 1 } else { 0 });
+          let r6: i32 = (if e0 < e6 { 1 } else { 0 }) + (if e1 < e6 { 1 } else { 0 }) + (if e2 < e6 { 1 } else { 0 }) + (if e3 < e6 { 1 } else { 0 }) + (if e4 < e6 { 1 } else { 0 }) + (if e5 < e6 { 1 } else { 0 }) + (if e7 < e6 { 1 } else { 0 }) + (if e8 < e6 { 1 } else { 0 });
+          let r7: i32 = (if e0 < e7 { 1 } else { 0 }) + (if e1 < e7 { 1 } else { 0 }) + (if e2 < e7 { 1 } else { 0 }) + (if e3 < e7 { 1 } else { 0 }) + (if e4 < e7 { 1 } else { 0 }) + (if e5 < e7 { 1 } else { 0 }) + (if e6 < e7 { 1 } else { 0 }) + (if e8 < e7 { 1 } else { 0 });
+          let r8: i32 = (if e0 < e8 { 1 } else { 0 }) + (if e1 < e8 { 1 } else { 0 }) + (if e2 < e8 { 1 } else { 0 }) + (if e3 < e8 { 1 } else { 0 }) + (if e4 < e8 { 1 } else { 0 }) + (if e5 < e8 { 1 } else { 0 }) + (if e6 < e8 { 1 } else { 0 }) + (if e7 < e8 { 1 } else { 0 });
+          let mut slot: i32 = -1;
+          if ok && 0 < k && r0 == w { slot = 0; }
+          if ok && 1 < k && r1 == w { slot = 1; }
+          if ok && 2 < k && r2 == w { slot = 2; }
+          if ok && 3 < k && r3 == w { slot = 3; }
+          if ok && 4 < k && r4 == w { slot = 4; }
+          if ok && 5 < k && r5 == w { slot = 5; }
+          if ok && 6 < k && r6 == w { slot = 6; }
+          if ok && 7 < k && r7 == w { slot = 7; }
+          if ok && 8 < k && r8 == w { slot = 8; }
+          let expert: i32 = if slot == 0 { e0 } else if slot == 1 { e1 } else if slot == 2 { e2 } else if slot == 3 { e3 } else if slot == 4 { e4 } else if slot == 5 { e5 } else if slot == 6 { e6 } else if slot == 7 { e7 } else if slot == 8 { e8 } else { -1 };
+          let valid: bool = ok && expert >= 0 && expert < experts;
+          // Each group's max |act|: lane l holds columns l, l + 32, .. (neighbouring lanes, neighbouring act).
+          let mut m0: f32 = 0.0;
+          let mut m1: f32 = 0.0;
+          for q in 0..8 {
+            let x: f32 = if ok { act[w * 256 + q * 32 + lane] } else { 0.0 };
+            let a: f32 = if x < 0.0 { 0.0 - x } else { x };
+            if q < 4 { if a > m0 { m0 = a; } } else { if a > m1 { m1 = a; } }
+          }
+          pm0[w][lane] = m0;
+          pm1[w][lane] = m1;
+          if lane == 0 {
+            let sb: i32 = ((if valid { expert } else { 0 }) * ((rows + 127) / 128) + (rb * 16) / 128) * 2;
+            tile[w] = if valid { expert * (rows / 16) + rb } else { 0 };
+            let rw: f32 = if valid { weights[slot] } else { 0.0 };
+            f[w][0] = if valid { scales[sb] * rw } else { 0.0 };
+            f[w][1] = if valid { scales[sb + 1] * rw } else { 0.0 };
+          }
+        }
+        let a0: f32 = lanes::max(&pm0[w], 32);
+        let a1: f32 = lanes::max(&pm1[w], 32);
+        // fp8_moe_mma16_down_at's scale: the max's exponent less 14 (the max times 1 / s is in [2^14, 2^15)), at
+        // least 2^-100; 1 / s from the bits, exact.
+        let e0: u32 = ((if a0 > f32::from_bits(226492416) { a0 } else { f32::from_bits(226492416) }).to_bits() & 2139095040) - 117440512;
+        let e1: u32 = ((if a1 > f32::from_bits(226492416) { a1 } else { f32::from_bits(226492416) }).to_bits() & 2139095040) - 117440512;
+        let s0: f32 = f32::from_bits(e0);
+        let s1: f32 = f32::from_bits(e1);
+        let i0: f32 = f32::from_bits(2130706432 - e0);
+        let i1: f32 = f32::from_bits(2130706432 - e1);
+        for lane in 0..32 across lanes {
+          let ok: bool = w < k && k <= 9 && cols == 256;
+          for q in 0..8 {
+            let r: i32 = q * 32 + lane;
+            let x: f32 = if ok { act[w * 256 + r] } else { 0.0 };
+            let v: f16 = (x * (if q < 4 { i0 } else { i1 })) as f16;
+            for n in 0..4 {
+              xs[w][r][n] = if q < 4 { v } else { 0.0 as f16 };
+              xs[w][r][n + 4] = if q < 4 { 0.0 as f16 } else { v };
+            }
+          }
+        }
+        acc[w] = (down[tile[w]] as f32) @ (xs[w] as f32);
+        for lane in 0..32 across lanes {
+          if lane < 16 { part[w][lane] = (s0 * f[w][0]) * acc[w][lane][0] + (s1 * f[w][1]) * acc[w][lane][4]; }
+        }
+      }
+      for j in 0..16 across lanes {
+        if rb * 16 + j < rows {
+          let mut sum: f32 = 0.0;
+          for q in 0..9 { sum = sum + part[q][j]; }
+          out[rb * 16 + j] = sum;
+        }
+      }
+    }
+  }
+  return;
+}
