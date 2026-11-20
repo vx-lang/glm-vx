@@ -5,7 +5,8 @@ down projection on the FP8 tensor cores, against
      max(amax, 1e-10) / 448, act * (1 / scale) rounded to the nearest code, gpu/fp8_quant.e4m3_encode), the dots
      in float64, times the weight and act scales, the router weights, the experts in ascending id order. Only
      the tensor cores' f32 sums differ, so the error must be small (--tolerance, relative to max |out|);
-  1b. the same for fp8_moe_mma16_down_at, act in f16 (a power of two a group, then f16 rounding);
+  1b. the same for fp8_moe_mma16_down_at, act in f16 (a power of two a group, then f16 rounding), and for
+      fp8_moe_vxmm16_down_at (its arithmetic as a plain Vx matmul; an expert width of 256 only, when built);
   1c. fp8_moe_mma16_gate_up_at (gate, up and SwiGLU, x in f16) the same way, at the transposed shapes (inter
       rows of each, the hidden size of columns);
   2. fp8_moe_cvt_down2 / fp8_moe_cvt_gate_up, the kernels they replace (act in f32 on the CUDA cores): the difference is what quantizing
@@ -126,22 +127,30 @@ def run(ctx, stream, spawn, rng, rows, cols, experts, k, repeats, kernel=None):
     kernels = {'mma': SpawnKernel(ctx, Path(kernel or spawn / 'moe_mma' / 'fp8_moe_mma_down_at.ptx')),
                'mma16': SpawnKernel(ctx, spawn / 'moe_mma' / 'fp8_moe_mma16_down_at.ptx'),
                'down2': SpawnKernel(ctx, spawn / 'fp8_moe_cvt_down2.ptx')}
+    vx16 = spawn / 'moe_mma' / 'fp8_moe_vxmm16_down_at.ptx'
+    if cols == 256 and vx16.exists():  # the codes as [tiles, 16, 256]: tile e * rows / 16 + b is expert e's rows 16 b ..
+        kernels['vxmm16'] = SpawnKernel(ctx, vx16)
+    tiles = ctx.tensor((experts * rows // 16, 16, cols), 'uint8', codes.tobytes()) if 'vxmm16' in kernels else None
     times = {}
     for name, kernel in kernels.items():
         out = ctx.tensor((rows,), 'float32', np.full(rows, np.nan, np.float32).tobytes())
-        kernel.launch(stream=stream, out=out, **args)
+        kargs = dict(args, down=tiles) if name == 'vxmm16' else args
+        kernel.launch(stream=stream, out=out, **kargs)
         stream.synchronize()
         outs[name] = np.frombuffer(out.download(), np.float32).astype(np.float64)
-        times[name] = event_us(ctx, stream, spawn, lambda: kernel.launch(stream=stream, out=out, **args), repeats)
+        times[name] = event_us(ctx, stream, spawn, lambda: kernel.launch(stream=stream, out=out, **kargs), repeats)
     ref = model(codes, scales, act, weights, ids, rows, cols)
     ref16 = model(codes, scales, act, weights, ids, rows, cols, 'f16')
     peak = float(np.abs(ref).max())
     rel = lambda a, b: float(np.abs(a - b).max() / peak)
+    vx = {}
+    if 'vxmm16' in outs:
+        vx = dict(vxmm16_vs_model=rel(outs['vxmm16'], ref16), vxmm16_vs_mma16=rel(outs['vxmm16'], outs['mma16']))
     return dict(rows=rows, cols=cols, experts=experts, k=k, max_abs_out=peak,
-                finite=bool(np.isfinite(outs['mma']).all() and np.isfinite(outs['mma16']).all()),
+                finite=bool(all(np.isfinite(o).all() for n, o in outs.items() if n != 'down2')),
                 mma_vs_model=rel(outs['mma'], ref), mma16_vs_model=rel(outs['mma16'], ref16),
                 down2_vs_model=rel(outs['down2'], ref),
-                mma_vs_down2=rel(outs['mma'], outs['down2']), mma16_vs_down2=rel(outs['mma16'], outs['down2']),
+                mma_vs_down2=rel(outs['mma'], outs['down2']), mma16_vs_down2=rel(outs['mma16'], outs['down2']), **vx,
                 weight_mb=k * rows * cols / 1e6, us=times,
                 tb_per_s={n: k * rows * cols / us / 1e6 for n, us in times.items()})
 
@@ -168,7 +177,8 @@ def main(argv=None):
     results = [run(ctx, stream, spawn, rng, args.rows, c, args.experts, args.k, args.repeats, args.kernel) for c in args.cols]
     gate_ups = [run_gate_up(ctx, stream, spawn, rng, c, args.rows, args.experts, args.k, args.repeats) for c in args.cols]
     ctx.close()
-    ok = all(r['finite'] and r['mma_vs_model'] <= args.tolerance and r['mma16_vs_model'] <= args.tolerance for r in results)
+    ok = all(r['finite'] and r['mma_vs_model'] <= args.tolerance and r['mma16_vs_model'] <= args.tolerance
+             and r.get('vxmm16_vs_model', 0.0) <= args.tolerance for r in results)
     ok = ok and all(r['finite'] and r['gu16_vs_model'] <= args.tolerance and r['gu16p_vs_model'] <= args.tolerance
                     for r in gate_ups)
     results += gate_ups

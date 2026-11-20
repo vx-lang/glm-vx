@@ -68,6 +68,9 @@ bits.
 inputs in f16 (a power-of-two scale a group of 128), mma.sync.m16n8k16 with f32 sums; within 2e-4 of the CUDA
 cores' result. ``moe_mma='e4m3'`` quantizes the inputs to E4M3 instead, as SGLang does before its FP8 GEMMs
 (fp8_moe_mma_down_at, mma.sync e4m3: on sm_90 ptxas makes it the same f16 HMMA, so it is slower and 2e-2 off).
+``moe_mma='vx16'`` is 'f16''s arithmetic with the tensor-core part as a plain Vx matmul (fp8_moe_vxmm16_down_at:
+the expert's [16, 256] block of codes in HBM, act in shared memory; Vx 10c6f478f or later), for an expert width of
+256 (one rank of 8 on GLM-5.3), 'f16''s kernel otherwise: 11.3 us against 13.4 on the H200 (#63).
 Not the CUDA cores' bits; where
 k > 9, the expert width is not a multiple of 256, the hidden size not of 16 or the GPU is older than sm_89, the
 down projection stays down2's or down's.
@@ -342,8 +345,8 @@ class ResidentGLM:
             raise ValueError("moe_down2 needs device_experts=True and fp8_kernels='cvt'")
         # moe_mma: the down projection on the FP8 tensor cores (gpu/spawn/moe_mma, inline PTX: no CPU copy, so
         # only on a GPU of sm_89 or later). Changes bits: validation/moe_mma_check.py, then GSM8K.
-        if moe_mma not in (False, True, 'f16', 'e4m3'):
-            raise ValueError(f"moe_mma is False, True, 'f16' or 'e4m3', not {moe_mma!r}")
+        if moe_mma not in (False, True, 'f16', 'e4m3', 'vx16'):
+            raise ValueError(f"moe_mma is False, True, 'f16', 'e4m3' or 'vx16', not {moe_mma!r}")
         self.moe_mma = {True: 'f16', False: False}.get(moe_mma, moe_mma)
         if self.moe_mma and not (self.device_experts and fp8_kernels == 'cvt'):
             raise ValueError("moe_mma needs device_experts=True and fp8_kernels='cvt'")
@@ -1253,7 +1256,12 @@ class ResidentGLM:
                     **gate_args, **common)
         down_kernel = kernel + ('down2' if self.moe_down2 and kernel == 'fp8_moe_cvt_' else 'down') + suffix
         if self.moe_mma and kernel == 'fp8_moe_cvt_' and not suffix and k <= 9 and hidden % 16 == 0 and inter % 256 == 0:
-            down_kernel = 'moe_mma/fp8_moe_mma' + ('16' if self.moe_mma == 'f16' else '') + '_down_at'
+            down_kernel = 'moe_mma/fp8_moe_mma' + ('16' if self.moe_mma in ('f16', 'vx16') else '') + '_down_at'
+            if self.moe_mma == 'vx16' and inter == 256:
+                # the codes as [tiles, 16, 256]: tile e * hidden / 16 + b is expert e's rows 16 b .. 16 b + 15
+                codes = down[1][0]
+                down_kernel = 'moe_mma/fp8_moe_vxmm16_down_at'
+                down_args = dict(down_args, down=codes.view((int(np.prod(codes.shape)) // 4096, 16, 256), 'uint8'))
         self._spawn(down_kernel, out=self.moe_sum, act=act, weights=self.route_weights, rows=hidden,
                     cols=inter, **down_args, **common)
 
