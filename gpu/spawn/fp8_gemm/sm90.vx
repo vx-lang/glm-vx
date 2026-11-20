@@ -1,7 +1,8 @@
 // sm_90 helpers for the FP8 GEMM: mbarrier, TMA (cp.async.bulk.tensor) and wgmma descriptors, as
-// inline PTX in mlir! blocks. Each takes and returns scalars only; a shared address is the
-// shared::cta byte address (memref.extract_aligned_pointer_as_index of a `memref<.., 3>`), which
-// PTX takes as a 64-bit register in a [..] operand. Section numbers are the PTX ISA 8.x manual's.
+// nvvm and llvm ops or inline PTX in mlir! blocks. Each takes and returns scalars only; a shared
+// address is the shared::cta byte address (memref.extract_aligned_pointer_as_index of a
+// `memref<.., 3>`), which PTX takes as a 64-bit register in a [..] operand.
+// Section numbers are the PTX ISA 8.x manual's.
 
 // The generic address of a global tensor's first byte: here, a CUtensorMap that the host encoded
 // and copied into device memory before the launch (gpu/fp8_gemm.py).
@@ -14,6 +15,9 @@ ensures reads_only(t)
     macro.yield %r : i64
   };
 }
+
+// The mbarrier helpers stay inline PTX: the nvvm mbarrier ops make LLVM 22 write `.shared`, not
+// the `.shared::cta` that this PTX has.
 
 // mbarrier.init (9.7.13.15.9): the barrier at `bar` expects `count` arrivals a phase.
 fn mbar_init(bar: i64, count: i32) on Topology::Device -> i32
@@ -31,8 +35,9 @@ ensures writes_only()
 fn fence_barrier_init() on Topology::Device -> i32
 ensures writes_only()
 {
-  return mlir!( inputs : (), returns : i32, dialects : ["llvm", "arith"], ensures : [writes_only()]) {
-    llvm.inline_asm has_side_effects "fence.mbarrier_init.release.cluster;", "" : () -> ()
+  return mlir!( inputs : (), returns : i32, dialects : ["nvvm", "arith"], ensures : [writes_only()]) {
+    // fence.mbarrier_init.release.cluster
+    nvvm.fence.mbarrier.init
     %z = arith.constant 0 : i32
     macro.yield %z : i32
   };
@@ -91,8 +96,11 @@ ensures writes_only()
 fn fence_tensormap_acquire(map: i64) on Topology::Device -> i32
 ensures writes_only()
 {
-  return mlir!( inputs : (%m = map : i64), returns : i32, dialects : ["llvm", "arith"], ensures : [writes_only()]) {
-    llvm.inline_asm has_side_effects "fence.proxy.tensormap::generic.acquire.sys [$0], 128;", "l" %m : (i64) -> ()
+  return mlir!( inputs : (%m = map : i64), returns : i32, dialects : ["nvvm", "llvm", "arith"], ensures : [writes_only()]) {
+    // fence.proxy.tensormap::generic.acquire.sys [map], 128
+    %p = llvm.inttoptr %m : i64 to !llvm.ptr
+    %n = arith.constant 128 : i32
+    nvvm.fence.proxy.acquire #nvvm.mem_scope<sys> %p, %n
     %z = arith.constant 0 : i32
     macro.yield %z : i32
   };
@@ -102,8 +110,10 @@ ensures writes_only()
 fn prefetch_tensormap(map: i64) on Topology::Device -> i32
 ensures writes_only()
 {
-  return mlir!( inputs : (%m = map : i64), returns : i32, dialects : ["llvm", "arith"], ensures : [writes_only()]) {
-    llvm.inline_asm has_side_effects "prefetch.tensormap [$0];", "l" %m : (i64) -> ()
+  return mlir!( inputs : (%m = map : i64), returns : i32, dialects : ["nvvm", "llvm", "arith"], ensures : [writes_only()]) {
+    // prefetch.tensormap [map]
+    %p = llvm.inttoptr %m : i64 to !llvm.ptr
+    nvvm.prefetch tensormap, %p : !llvm.ptr
     %z = arith.constant 0 : i32
     macro.yield %z : i32
   };
@@ -117,8 +127,12 @@ fn tma_load_2d(dst: i64, map: i64, c0: i32, c1: i32, bar: i64) on Topology::Devi
 ensures writes_only()
 {
   return mlir!( inputs : (%d = dst : i64, %m = map : i64, %x = c0 : i32, %y = c1 : i32, %b = bar : i64), returns : i32,
-                dialects : ["llvm", "arith"], ensures : [writes_only()]) {
-    llvm.inline_asm has_side_effects "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::complete_tx::bytes [$0], [$1, {$2, $3}], [$4];", "l,l,r,r,l" %d, %m, %x, %y, %b : (i64, i64, i32, i32, i64) -> ()
+                dialects : ["nvvm", "llvm", "arith"], ensures : [writes_only()]) {
+    // cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::complete_tx::bytes [dst], [map, {c0, c1}], [bar]
+    %dp = llvm.inttoptr %d : i64 to !llvm.ptr<7>
+    %mp = llvm.inttoptr %m : i64 to !llvm.ptr
+    %bp = llvm.inttoptr %b : i64 to !llvm.ptr<3>
+    nvvm.cp.async.bulk.tensor.shared.cluster.global %dp, %mp, %bp, box[%x, %y] : !llvm.ptr<7>, !llvm.ptr
     %z = arith.constant 0 : i32
     macro.yield %z : i32
   };
@@ -135,7 +149,8 @@ ensures writes_only()
   return ((addr & 262143) >> 4) | (1 << 16) | (64 << 32) | (1 << 62);
 }
 
-// f32 to bfloat16 bits, round to nearest even (cvt.rn.bf16.f32, 9.7.9.21; sm_80+).
+// f32 to bfloat16 bits, round to nearest even (cvt.rn.bf16.f32, 9.7.9.21; sm_80+). It stays inline
+// PTX: with llvm ops, LLVM drops the cvt.u32.u16 when the caller keeps only the low 16 bits.
 fn bf16_bits(x: f32) on Topology::Device -> i32
 ensures writes_only()
 {
@@ -172,7 +187,9 @@ fn st_global_f32(addr: i64, v: f32) on Topology::Device -> i32
 ensures writes_only()
 {
   return mlir!( inputs : (%a = addr : i64, %v = v : f32), returns : i32, dialects : ["llvm", "arith"], ensures : [writes_only()]) {
-    llvm.inline_asm has_side_effects "st.global.f32 [$0], $1;", "l,f" %a, %v : (i64, f32) -> ()
+    // st.global.b32 [addr], v
+    %p = llvm.inttoptr %a : i64 to !llvm.ptr<1>
+    llvm.store %v, %p {alignment = 4 : i64} : f32, !llvm.ptr<1>
     %z = arith.constant 0 : i32
     macro.yield %z : i32
   };
@@ -195,7 +212,9 @@ ensures writes_only()
 {
   return mlir!( inputs : (%a = addr : i64, %v = v : i32), returns : i32, dialects : ["llvm", "arith"], ensures : [writes_only()]) {
     %h = arith.trunci %v : i32 to i16
-    llvm.inline_asm has_side_effects "st.global.b16 [$0], $1;", "l,h" %a, %h : (i64, i16) -> ()
+    // st.global.b16 [addr], v
+    %p = llvm.inttoptr %a : i64 to !llvm.ptr<1>
+    llvm.store %h, %p {alignment = 2 : i64} : i16, !llvm.ptr<1>
     %z = arith.constant 0 : i32
     macro.yield %z : i32
   };
