@@ -20,7 +20,7 @@ from gpu.runtime import DeviceTensor
 
 _SCALAR = {'i32': C.c_int32, 'i64': C.c_int64, 'f32': C.c_float}
 _ELEMENT = {'f32': 'float32', 'u32': 'uint32', 'u16': 'uint16', 'u8': 'uint8', 'i32': 'int32', 'i64': 'int64', 'u64': 'uint64',
-            'bf16': 'uint16'}  # bf16 tensors hold the bits as uint16
+            'bf16': 'uint16', 'f16': 'uint16', 'f8e4m3': 'uint8'}  # 16- and 8-bit floats: their bits as unsigned integers
 
 
 _OPS = {ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b, ast.Mult: lambda a, b: a * b,

@@ -73,7 +73,7 @@ def test_kernel_params_takes_the_element_from_the_vx_type():
 
 
 @pytest.mark.parametrize('change', [{'mutable': True}, {'rank': 4, 'words': 11}, {'rank': 2, 'words': 5},
-                                    {'type': '&Tensor<f16, [?], Memory::HBM>'}])
+                                    {'type': '&Tensor<f64, [?], Memory::HBM>'}])
 def test_kernel_params_refuses_what_launch_cannot_pass(change):
     with pytest.raises(ValueError):
         build.kernel_params([vx_param('x', '&Tensor<f32, [?], Memory::HBM>') | change])
@@ -82,6 +82,12 @@ def test_kernel_params_refuses_what_launch_cannot_pass(change):
 def test_kernel_params_takes_a_rank_2_tensor():
     p = vx_param('out', '&mut Tensor<f32, [?, ?], Memory::HBM>') | {'rank': 2, 'words': 7}
     assert build.kernel_params([p])[0]['rank'] == 2
+
+
+def test_kernel_params_takes_an_fp8_tile_tensor():
+    # A lane matmul's first tile in HBM (Vx #3694): e4m3 codes, [tiles, 16, 256] (gpu/spawn/moe_mma/fp8_moe_vxmm16_down_at).
+    p = vx_param('down', '&Tensor<f8e4m3, [?, 16, 256], Memory::HBM>') | {'rank': 3, 'words': 9}
+    assert [(q['element'], q['rank']) for q in build.kernel_params([p])] == [('f8e4m3', 3)]
 
 
 def test_kernel_params_takes_a_rank_3_tensor():
@@ -145,6 +151,14 @@ def test_a_row_base_plus_row_times_stride_is_traced():
     # A rank-2 write out[row][col]: the address is the addend of a mad, not a factor.
     body = '\tmad.lo.s64 \t%rd9, %rd7, %rd8, %rd1;\n\tmad.lo.s64 \t%rd12, %rd1, %rd10, %rd11;\n'
     assert build.derived(body, '%rd1') == {'%rd1', '%rd9'}
+
+
+def test_an_fp8_tensor_may_be_loaded_in_words():
+    # ADD_PTX loads a with ld.global.b32: four e4m3 codes (or two f16) a word, as a tile's 16-byte loads do.
+    build.check_params(ADD_PTX, 'K', params('out: mut f32[?], a: f8e4m3[?], b: f32[?], n: i32'))
+    build.check_params(ADD_PTX, 'K', params('out: mut f32[?], a: f16[?], b: f32[?], n: i32'))
+    with pytest.raises(ValueError, match='bits wide'):
+        build.check_params(ADD_PTX, 'K', params('out: mut f32[?], a: u8[?], b: f32[?], n: i32'))
 
 
 def test_an_i64_tensor_may_be_loaded_in_32_bit_halves():

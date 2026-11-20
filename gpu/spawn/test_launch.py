@@ -111,3 +111,12 @@ def test_a_block_other_than_the_manifests_is_refused(tmp_path):
         kernel.launch(4, 64, n=3)
     kernel.launch(4, 128, n=3)  # any grid: the kernels stride over the grid they get
     assert fake.launched == [(4, 128, 0)]
+
+
+def test_every_element_build_accepts_launches_as_a_dtype_of_its_width():
+    # build.py's manifest elements and launch.py's DeviceTensor dtypes: f16, bf16 and f8e4m3 travel as their bits.
+    import numpy as np
+    from gpu.spawn import build, launch
+    assert set(launch._ELEMENT) == set(build.ELEMENT_BITS)
+    for element, bits in build.ELEMENT_BITS.items():
+        assert np.dtype(launch._ELEMENT[element]).itemsize * 8 == bits, element
