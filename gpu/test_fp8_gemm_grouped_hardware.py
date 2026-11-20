@@ -10,6 +10,7 @@ gpu/build/fp8_gemm_grouped_hardware.json.
     VXC=... PTXAS=... gpu/spawn/fp8_gemm/build.sh
     OMP_NUM_THREADS=16 python -m pytest -q gpu/test_fp8_gemm_grouped_hardware.py
 """
+import gc
 import json
 import os
 import time
@@ -90,11 +91,18 @@ def run_case(grouped, rows, experts, n, k, *, seed, timed, bf16=False):
                                ('gemm', lambda: kernels(da, dsa, db, dsb, out, tiles, rows=rows, n=n, k=k,
                                                         experts=experts, stream=stream))]:
                 start, end = ctx.event(), ctx.event()
-                start.record(stream)
-                for _ in range(reps):
-                    call()
-                end.record(stream)
-                end.synchronize()
+                # A gen-2 collection while the loop launches (7-11 ms here) lets the stream run dry, and the
+                # events time the gap as the kernel's: up to 2x at 18432 rows.
+                gc.collect()
+                gc.disable()
+                try:
+                    start.record(stream)
+                    for _ in range(reps):
+                        call()
+                    end.record(stream)
+                    end.synchronize()
+                finally:
+                    gc.enable()
                 record[f'{name}_us'] = start.elapsed_ms(end) * 1e3 / reps
             # Bytes the GEMM must read at least: the weights and scales of each expert with rows, A,
             # a_scale, and C written once.

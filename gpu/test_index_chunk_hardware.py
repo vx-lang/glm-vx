@@ -9,6 +9,7 @@ appends a record to $GLM_VX_INDEX_CHUNK_JSON, default gpu/build/index_chunk_hard
     VXC=... PTXAS=... gpu/spawn/index_mma/build.sh
     OMP_NUM_THREADS=16 python -m pytest -q gpu/test_index_chunk_hardware.py
 """
+import gc
 import json
 import os
 import time
@@ -71,11 +72,19 @@ def run(kernels, rows, start, cap, *, seed, hist=False, timed=False):
         if timed:
             reps = 10
             start_event, end_event = ctx.event(), ctx.event()
-            start_event.record(stream)
-            for _ in range(reps):
-                scores(out, q_words, dk, dw, rows=rows, start=start, max_tokens=cap, scale=SCALE, hist=dhist, stream=stream)
-            end_event.record(stream)
-            end_event.synchronize()
+            # A gen-2 collection while the loop launches lets the stream run dry, and the events time the gap
+            # as the kernel's (gpu/test_fp8_gemm_grouped_hardware.py saw up to 2x).
+            gc.collect()
+            gc.disable()
+            try:
+                start_event.record(stream)
+                for _ in range(reps):
+                    scores(out, q_words, dk, dw, rows=rows, start=start, max_tokens=cap, scale=SCALE, hist=dhist,
+                           stream=stream)
+                end_event.record(stream)
+                end_event.synchronize()
+            finally:
+                gc.enable()
             record['us'] = start_event.elapsed_ms(end_event) * 1e3 / reps
             # Multiply-adds of the written elements: 32 heads x 128 dims each.
             pairs = rows * start + rows * (rows + 1) // 2

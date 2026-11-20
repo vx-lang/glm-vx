@@ -9,6 +9,7 @@ precision) to a JSON file: $GLM_VX_FP8_GEMM_JSON, default gpu/build/fp8_gemm_har
     VXC=... PTXAS=... gpu/spawn/fp8_gemm/build.sh
     OMP_NUM_THREADS=16 python -m pytest -q gpu/test_fp8_gemm_hardware.py
 """
+import gc
 import hashlib
 import json
 import os
@@ -84,11 +85,18 @@ def run_case(gemm, m, n, k, *, bf16, timed, seed):
                 kernels(da, dsa, db, dsb, out, m=m, n=n, k=k, stream=stream)
             start, end = ctx.event(), ctx.event()
             reps = 20
-            start.record(stream)
-            for _ in range(reps):
-                kernels(da, dsa, db, dsb, out, m=m, n=n, k=k, stream=stream)
-            end.record(stream)
-            end.synchronize()
+            # A gen-2 collection while the loop launches lets the stream run dry, and the events time the gap
+            # as the kernel's (gpu/test_fp8_gemm_grouped_hardware.py saw up to 2x).
+            gc.collect()
+            gc.disable()
+            try:
+                start.record(stream)
+                for _ in range(reps):
+                    kernels(da, dsa, db, dsb, out, m=m, n=n, k=k, stream=stream)
+                end.record(stream)
+                end.synchronize()
+            finally:
+                gc.enable()
             seconds = start.elapsed_ms(end) / 1e3 / reps
             record.update({'time_us': seconds * 1e6, 'tflops': 2 * m * n * k / seconds / 1e12,
                            'gbps': F.bytes_moved(m, n, k, out_bytes=2 if bf16 else 4) / seconds / 1e9})
