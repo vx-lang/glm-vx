@@ -1,0 +1,336 @@
+// JSON (RFC 8259) for request bodies (#68, step 2). It takes bytes and gives a tree, and holds no
+// capability. Limits: the caller bounds the bytes, and arrays and objects nest at most MAX_DEPTH.
+// The text must be UTF-8. Numbers stay as their span of the input, for `i64::parse` and
+// `f64::parse` to read when a field needs one.
+import front::bytes;
+import std::string;
+import std::unicode;
+import std::vec;
+
+struct Member {
+  key : Vec<u8>,
+  value : Value,
+}
+
+enum Value {
+  Null,
+  Bool(bool),
+  // Bytes `from..to` of the input, which match JSON's number grammar.
+  Number(i32, i32),
+  // The UTF-8 bytes of a string, with its escapes decoded.
+  Text(Vec<u8>),
+  Array(Vec<Value>),
+  Object(Vec<Member>),
+}
+
+struct Parsed {
+  value : Value,
+  end : i32,
+}
+
+struct JsonError {
+  // The byte offset where the input stopped being JSON.
+  at : i32,
+}
+
+pub fn max_depth() -> i32 {
+  return 32;
+}
+
+fn fail<T>(at : i32) -> Result<T, JsonError> {
+  return Result<T, JsonError>::Err(JsonError { at : at });
+}
+
+fn is_space(b : u8) -> bool {
+  return b == 32u8 || b == 9u8 || b == 10u8 || b == 13u8;
+}
+
+fn skip_space(bytes : &Vec<u8>, i : i32) -> i32 {
+  let mut k = i;
+  while k < bytes.len() && is_space(bytes[k]) {
+    k = k + 1;
+  }
+  return k;
+}
+
+fn is_digit(bytes : &Vec<u8>, k : i32) -> bool {
+  return k < bytes.len() && bytes[k] >= 48u8 && bytes[k] <= 57u8;
+}
+
+// True when bytes `i..` start with `word`.
+fn starts_with(bytes : &Vec<u8>, i : i32, word : &Vec<u8>) -> bool {
+  if i + word.len() > bytes.len() {
+    return false;
+  }
+  for k in 0..word.len() {
+    if bytes[i + k] != word[k] {
+      return false;
+    }
+  }
+  return true;
+}
+
+// The whole input as one JSON value, with only white space after it.
+pub fn parse(bytes : &Vec<u8>) -> Result<Value, JsonError> {
+  match String::from_utf8(bytes) {
+    Result<String, Utf8Error>::Ok(_s) => {}
+    Result<String, Utf8Error>::Err(e) => { return fail<Value>(e.valid_up_to); }
+  }
+  let parsed = value_at(bytes, skip_space(bytes, 0), 0)?;
+  let end = skip_space(bytes, parsed.end);
+  if end != bytes.len() {
+    return fail<Value>(end);
+  }
+  return Result<Value, JsonError>::Ok(parsed.value);
+}
+
+fn value_at(bytes : &Vec<u8>, i : i32, depth : i32) -> Result<Parsed, JsonError> {
+  if i >= bytes.len() {
+    return fail<Parsed>(i);
+  }
+  let b = bytes[i];
+  if b == 123u8 {
+    return object_at(bytes, i, depth + 1);
+  }
+  if b == 91u8 {
+    return array_at(bytes, i, depth + 1);
+  }
+  if b == 34u8 {
+    let s = string_at(bytes, i)?;
+    return Result<Parsed, JsonError>::Ok(Parsed { value : Value::Text(s.text), end : s.end });
+  }
+  if b == 45u8 || is_digit(bytes, i) {
+    let end = number_end(bytes, i)?;
+    return Result<Parsed, JsonError>::Ok(Parsed { value : Value::Number(i, end), end : end });
+  }
+  if starts_with(bytes, i, &lit("true" as *const u8, 4)) {
+    return Result<Parsed, JsonError>::Ok(Parsed { value : Value::Bool(true), end : i + 4 });
+  }
+  if starts_with(bytes, i, &lit("false" as *const u8, 5)) {
+    return Result<Parsed, JsonError>::Ok(Parsed { value : Value::Bool(false), end : i + 5 });
+  }
+  if starts_with(bytes, i, &lit("null" as *const u8, 4)) {
+    return Result<Parsed, JsonError>::Ok(Parsed { value : Value::Null, end : i + 4 });
+  }
+  return fail<Parsed>(i);
+}
+
+// The end of the number that starts at `i`: -?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?
+fn number_end(bytes : &Vec<u8>, i : i32) -> Result<i32, JsonError> {
+  let mut k = i;
+  if bytes[k] == 45u8 {
+    k = k + 1;
+  }
+  if !is_digit(bytes, k) {
+    return fail<i32>(k);
+  }
+  if bytes[k] == 48u8 {
+    k = k + 1;
+  } else {
+    while is_digit(bytes, k) {
+      k = k + 1;
+    }
+  }
+  if k < bytes.len() && bytes[k] == 46u8 {
+    k = k + 1;
+    if !is_digit(bytes, k) {
+      return fail<i32>(k);
+    }
+    while is_digit(bytes, k) {
+      k = k + 1;
+    }
+  }
+  if k < bytes.len() && (bytes[k] == 101u8 || bytes[k] == 69u8) {
+    k = k + 1;
+    if k < bytes.len() && (bytes[k] == 43u8 || bytes[k] == 45u8) {
+      k = k + 1;
+    }
+    if !is_digit(bytes, k) {
+      return fail<i32>(k);
+    }
+    while is_digit(bytes, k) {
+      k = k + 1;
+    }
+  }
+  return Result<i32, JsonError>::Ok(k);
+}
+
+struct Str {
+  text : Vec<u8>,
+  end : i32,
+}
+
+fn hex_digit(b : u8) -> i32 {
+  if b >= 48u8 && b <= 57u8 {
+    return (b - 48u8) as i32;
+  }
+  if b >= 97u8 && b <= 102u8 {
+    return (b - 87u8) as i32;
+  }
+  if b >= 65u8 && b <= 70u8 {
+    return (b - 55u8) as i32;
+  }
+  return -1;
+}
+
+// The four hex digits at `k`, or -1.
+fn hex4(bytes : &Vec<u8>, k : i32) -> i32 {
+  if k + 4 > bytes.len() {
+    return -1;
+  }
+  let mut v = 0;
+  for j in 0..4 {
+    let d = hex_digit(bytes[k + j]);
+    if d < 0 {
+      return -1;
+    }
+    v = v * 16 + d;
+  }
+  return v;
+}
+
+// Append the UTF-8 of code point `c` (not a surrogate, at most U+10FFFF).
+fn push_utf8(out : &mut Vec<u8>, c : i32) -> void {
+  if c < 128 {
+    out.push(c as u8);
+  } else if c < 2048 {
+    out.push((192 + c / 64) as u8);
+    out.push((128 + c % 64) as u8);
+  } else if c < 65536 {
+    out.push((224 + c / 4096) as u8);
+    out.push((128 + (c / 64) % 64) as u8);
+    out.push((128 + c % 64) as u8);
+  } else {
+    out.push((240 + c / 262144) as u8);
+    out.push((128 + (c / 4096) % 64) as u8);
+    out.push((128 + (c / 64) % 64) as u8);
+    out.push((128 + c % 64) as u8);
+  }
+}
+
+// The string whose opening quote is at `i`. A lone surrogate escape is an error, since the text
+// must be UTF-8.
+fn string_at(bytes : &Vec<u8>, i : i32) -> Result<Str, JsonError> {
+  let mut out = Vec<u8>::new();
+  let mut k = i + 1;
+  while k < bytes.len() {
+    let b = bytes[k];
+    if b == 34u8 {
+      return Result<Str, JsonError>::Ok(Str { text : out, end : k + 1 });
+    }
+    if b < 32u8 {
+      return fail<Str>(k);
+    }
+    if b != 92u8 {
+      out.push(b);
+      k = k + 1;
+      continue;
+    }
+    if k + 1 >= bytes.len() {
+      return fail<Str>(k);
+    }
+    let e = bytes[k + 1];
+    if e == 34u8 || e == 92u8 || e == 47u8 {
+      out.push(e);
+    } else if e == 98u8 {
+      out.push(8u8);
+    } else if e == 102u8 {
+      out.push(12u8);
+    } else if e == 110u8 {
+      out.push(10u8);
+    } else if e == 114u8 {
+      out.push(13u8);
+    } else if e == 116u8 {
+      out.push(9u8);
+    } else if e == 117u8 {
+      let high = hex4(bytes, k + 2);
+      if high < 0 {
+        return fail<Str>(k);
+      }
+      if high >= 56320 && high <= 57343 {
+        return fail<Str>(k);  // a low surrogate first
+      }
+      if high >= 55296 && high <= 56319 {
+        if k + 12 > bytes.len() || bytes[k + 6] != 92u8 || bytes[k + 7] != 117u8 {
+          return fail<Str>(k);
+        }
+        let low = hex4(bytes, k + 8);
+        if low < 56320 || low > 57343 {
+          return fail<Str>(k);
+        }
+        push_utf8(&mut out, 65536 + (high - 55296) * 1024 + (low - 56320));
+        k = k + 12;
+        continue;
+      }
+      push_utf8(&mut out, high);
+      k = k + 6;
+      continue;
+    } else {
+      return fail<Str>(k);
+    }
+    k = k + 2;
+  }
+  return fail<Str>(k);
+}
+
+fn array_at(bytes : &Vec<u8>, i : i32, depth : i32) -> Result<Parsed, JsonError> {
+  if depth > max_depth() {
+    return fail<Parsed>(i);
+  }
+  let mut items = Vec<Value>::new();
+  let mut k = skip_space(bytes, i + 1);
+  if k < bytes.len() && bytes[k] == 93u8 {
+    return Result<Parsed, JsonError>::Ok(Parsed { value : Value::Array(items), end : k + 1 });
+  }
+  while true {
+    let item = value_at(bytes, k, depth)?;
+    items.push(item.value);
+    k = skip_space(bytes, item.end);
+    if k >= bytes.len() {
+      return fail<Parsed>(k);
+    }
+    if bytes[k] == 93u8 {
+      return Result<Parsed, JsonError>::Ok(Parsed { value : Value::Array(items), end : k + 1 });
+    }
+    if bytes[k] != 44u8 {
+      return fail<Parsed>(k);
+    }
+    k = skip_space(bytes, k + 1);
+  }
+  return fail<Parsed>(k);
+}
+
+fn object_at(bytes : &Vec<u8>, i : i32, depth : i32) -> Result<Parsed, JsonError> {
+  if depth > max_depth() {
+    return fail<Parsed>(i);
+  }
+  let mut members = Vec<Member>::new();
+  let mut k = skip_space(bytes, i + 1);
+  if k < bytes.len() && bytes[k] == 125u8 {
+    return Result<Parsed, JsonError>::Ok(Parsed { value : Value::Object(members), end : k + 1 });
+  }
+  while true {
+    if k >= bytes.len() || bytes[k] != 34u8 {
+      return fail<Parsed>(k);
+    }
+    let key = string_at(bytes, k)?;
+    k = skip_space(bytes, key.end);
+    if k >= bytes.len() || bytes[k] != 58u8 {
+      return fail<Parsed>(k);
+    }
+    let item = value_at(bytes, skip_space(bytes, k + 1), depth)?;
+    members.push(Member { key : key.text, value : item.value });
+    k = skip_space(bytes, item.end);
+    if k >= bytes.len() {
+      return fail<Parsed>(k);
+    }
+    if bytes[k] == 125u8 {
+      return Result<Parsed, JsonError>::Ok(Parsed { value : Value::Object(members), end : k + 1 });
+    }
+    if bytes[k] != 44u8 {
+      return fail<Parsed>(k);
+    }
+    k = skip_space(bytes, k + 1);
+  }
+  return fail<Parsed>(k);
+}

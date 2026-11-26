@@ -1,0 +1,225 @@
+// The router and the engine reader (#68, step 2). The router is the only task with the front end's
+// standard output: it gives each request an id, writes its frames, and sends each reply of the
+// engine to the request's connection. The reader is the only task with standard input. Neither
+// gets a `Network`, `Files` or `Environment`.
+import core::time;
+import front::link;
+import front::serve;
+import std::io;
+import std::sync::channel;
+import std::sync::select;
+import std::time;
+import std::vec;
+
+fn index(r : Result<i32, SelectError>) -> i32 {
+  match r {
+    Result<i32, SelectError>::Ok(i) => { return i; }
+    Result<i32, SelectError>::Err(_e) => { return -1; }
+  }
+}
+
+fn write(out : &mut Stdout, frame : &Vec<u8>) -> bool {
+  match out.write_all(frame) {
+    Result<u64, StdioError>::Ok(_n) => { return true; }
+    Result<u64, StdioError>::Err(_e) => { return false; }
+  }
+}
+
+fn is_final(r : &Reply) -> bool {
+  match r {
+    Reply::Done(_f) => { return true; }
+    Reply::Failed(_c, _m) => { return true; }
+    Reply::Status(_j) => { return true; }
+    _ => { return false; }
+  }
+}
+
+fn closed(e : TryRecvError) -> bool {
+  match e {
+    TryRecvError::Empty => { return false; }
+    TryRecvError::Closed => { return true; }
+  }
+}
+
+fn is_open(to : &Option<Sender<Incoming>>) -> bool {
+  match to {
+    Option<Sender<Incoming>>::Some(_tx) => { return true; }
+    Option<Sender<Incoming>>::None => { return false; }
+  }
+}
+
+// The open requests: `ids[i]` and the channel `tos[i]` of its connection, None once it ended.
+// Compacting keeps the table as small as the requests that are open. Two vectors, not one of
+// structs, because Vx main 973d80f9b cannot write a field of a Vec element (Vx #4145).
+fn compact(ids : &mut Vec<u64>, tos : &mut Vec<Option<Sender<Incoming>>>) -> void {
+  let mut kept_ids = Vec<u64>::new();
+  let mut kept_tos = Vec<Option<Sender<Incoming>>>::new();
+  let mut more = true;
+  while more {
+    match tos.pop() {
+      Option<Option<Sender<Incoming>>>::Some(to) => {
+        let id = match ids.pop() {
+          Option<u64>::Some(v) => { v }
+          Option<u64>::None => { 0u64 }
+        };
+        if is_open(&to) {
+          kept_ids.push(id);
+          kept_tos.push(to);
+        }
+      }
+      Option<Option<Sender<Incoming>>>::None => { more = false; }
+    }
+  }
+  let mut back = true;
+  while back {
+    match kept_tos.pop() {
+      Option<Option<Sender<Incoming>>>::Some(to) => {
+        match kept_ids.pop() {
+          Option<u64>::Some(v) => { ids.push(v); }
+          Option<u64>::None => {}
+        }
+        tos.push(to);
+      }
+      Option<Option<Sender<Incoming>>>::None => { back = false; }
+    }
+  }
+}
+
+// Give `m` to the connection of slot `i`. False when the connection did not take it at once: it is
+// gone or it fell behind (server.py's backpressure), and the router never waits for one client.
+fn deliver(to : &Option<Sender<Incoming>>, m : Incoming) -> bool {
+  match to {
+    Option<Sender<Incoming>>::Some(tx) => {
+      match tx.send_for(m, Duration::from_millis(0u64)) {
+        Result<void, SendError<Incoming>>::Ok() => { return true; }
+        Result<void, SendError<Incoming>>::Err(_e) => { return false; }
+      }
+    }
+    Option<Sender<Incoming>>::None => { return true; }
+  }
+}
+
+// Route until the engine closes the link. Gives 0 then, 1 when standard output broke.
+pub fn route(stdout : Stdout, asks : Receiver<Ask>, replies : Receiver<Incoming>) -> i32 {
+  let mut out = stdout;
+  let mut ids = Vec<u64>::new();
+  let mut tos = Vec<Option<Sender<Incoming>>>::new();
+  let mut dead = 0;
+  let mut next = 1u64;
+  while true {
+    let ready = index(select2(&asks, &replies));
+    if ready == 0 {
+      match asks.try_recv() {
+        Result<Ask, TryRecvError>::Ok(ask) => {
+          match ask {
+            Ask::Submit(sub, to) => {
+              let id = next;
+              next = next + 1u64;
+              let _a = to.send(Incoming { id : id, reply : Reply::Assigned(id) });
+              ids.push(id);
+              tos.push(Option<Sender<Incoming>>::Some(to));
+              if !write(&mut out, &submit_frame(id, &sub)) {
+                return 1;
+              }
+            }
+            Ask::Cancel(id) => {
+              if !write(&mut out, &id_frame(3u8, id)) {
+                return 1;
+              }
+            }
+            Ask::Status(to) => {
+              let id = next;
+              next = next + 1u64;
+              ids.push(id);
+              tos.push(Option<Sender<Incoming>>::Some(to));
+              if !write(&mut out, &id_frame(4u8, id)) {
+                return 1;
+              }
+            }
+          }
+        }
+        Result<Ask, TryRecvError>::Err(_e) => {}
+      }
+    } else if ready == 1 {
+      match replies.try_recv() {
+        Result<Incoming, TryRecvError>::Ok(m) => {
+          let last = is_final(&m.reply);
+          let m_id = m.id;
+          let mut found = -1;
+          for i in 0..ids.len() {
+            if ids[i] == m_id {
+              found = i;
+            }
+          }
+          if found >= 0 {
+            let taken = deliver(&tos[found], m);
+            if !taken && !last {
+              if !write(&mut out, &id_frame(3u8, m_id)) {
+                return 1;
+              }
+            }
+            if last || !taken {
+              tos[found] = Option<Sender<Incoming>>::None;
+              dead = dead + 1;
+              if dead > 64 {
+                compact(&mut ids, &mut tos);
+                dead = 0;
+              }
+            }
+          }
+        }
+        Result<Incoming, TryRecvError>::Err(e) => {
+          if !closed(e) {
+            continue;  // woken with nothing to take
+          }
+          // The reader ended: the engine closed the link. Tell each open request.
+          for i in 0..ids.len() {
+            let _g = deliver(&tos[i], Incoming { id : ids[i], reply : Reply::Gone });
+          }
+          return 0;
+        }
+      }
+    } else {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// Read the engine's frames from standard input until it ends, and pass each one to the router.
+// The router sees the end when this returns and drops the last `Sender`.
+pub fn read_engine(stdin : Stdin, replies : Sender<Incoming>) -> i32 {
+  let mut input = stdin;
+  let mut four = Vec<u8>::new();
+  for _i in 0..4 {
+    four.push(0u8);
+  }
+  while true {
+    match input.read_exact(&mut four) {
+      Result<u64, StdioError>::Ok(_n) => {}
+      Result<u64, StdioError>::Err(_e) => { return 0; }
+    }
+    let n = get_u32(&four, 0);
+    if n < 1u32 || n > (frame_limit() as u32) {
+      return 1;
+    }
+    let mut payload = Vec<u8>::with_capacity(n as i32);
+    for _i in 0..(n as i32) {
+      payload.push(0u8);
+    }
+    match input.read_exact(&mut payload) {
+      Result<u64, StdioError>::Ok(_n) => {}
+      Result<u64, StdioError>::Err(_e) => { return 1; }
+    }
+    match decode(&payload) {
+      Result<Incoming, i32>::Ok(m) => {
+        match replies.send(m) {
+          Result<void, SendError<Incoming>>::Ok() => {}
+          Result<void, SendError<Incoming>>::Err(_e) => { return 0; }
+        }
+      }
+      Result<Incoming, i32>::Err(_e) => { return 1; }
+    }
+  }
+  return 0;
+}

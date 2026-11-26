@@ -172,6 +172,8 @@ def parse_args(argv=None):
     p.add_argument('--packed-weights',action='store_true',help='opt in to Vx packed GGUF dot products with F32 activations')
     p.add_argument('--tokenizer',help='local tokenizer.json')
     p.add_argument('--host',default='127.0.0.1'); p.add_argument('--port',type=int,default=8000)
+    p.add_argument('--front',metavar='BINARY',help='serve HTTP through the Vx front end (front/build/glm-vx-front), '
+                   'which this process starts and feeds over its standard input and output (docs/ENGINE-LINK.md)')
     p.add_argument('--max-sequences',type=int,help=f'concurrent sequences; default 8, and 1 (the only choice) for {RESIDENT}')
     p.add_argument('--token-budget',type=int,default=8192)
     p.add_argument('--max-waiting',type=int,help=f'requests queued for capacity instead of rejected with 429; default 0, and 32 for {RESIDENT}')
@@ -193,6 +195,7 @@ def parse_args(argv=None):
     args=p.parse_args(argv)
     if args.packed_weights and (not args.gguf or args.backend != 'vx'):p.error('packed weights requires --gguf and --backend vx')
     if args.prefix_cache_mib<0:p.error('prefix cache must be nonnegative')
+    if args.front and args.port==0:p.error('--front needs a fixed --port: the front end binds it, so this process cannot report a port 0 picks')
     if args.max_pending_events<2:p.error('max pending events must be at least two')
     if args.gpu_weight_cache_mib is not None and args.gpu_weight_cache_mib<0:p.error('GPU weight cache must be nonnegative')
     if args.decoded_cache_mib<0:p.error('decoded cache must be nonnegative')
@@ -293,6 +296,19 @@ def main(argv=None):
         from tokenizers import Tokenizer
         tokenizer=Tokenizer.from_file(args.tokenizer)
     scheduler=Scheduler(model,max_sequences=args.max_sequences,token_budget=args.token_budget,prefill_chunk=args.prefill_chunk,decode_prefill_tokens=args.decode_prefill_tokens,prefix_cache_bytes=args.prefix_cache_mib*1024**2,max_pending_events=args.max_pending_events,batched_prefill=args.batched_prefill,max_waiting=args.max_waiting)
+    if args.front:
+        from .link import FrontEnd
+        front=FrontEnd(args.front,args.host,args.port,scheduler,tokenizer,name)
+        print(json.dumps({'listening':f'http://{args.host}:{args.port}','model':name,'backend':backend.name,
+                          'front':args.front}),flush=True)
+        try:code=front.wait()
+        except KeyboardInterrupt:code=0
+        finally:
+            front.close(); scheduler.close()
+            if hasattr(weights,'close'):weights.close()
+            if hasattr(backend,'close'):backend.close()
+        if code or front.error:raise SystemExit(f'error: the front end stopped with {code}: {front.error or ""}')
+        return
     server=Server((args.host,args.port),scheduler,tokenizer,name)
     print(json.dumps({'listening':f'http://{args.host}:{server.server_port}','model':name,'backend':backend.name}),flush=True)
     try:server.serve_forever()

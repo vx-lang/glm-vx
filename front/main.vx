@@ -1,0 +1,148 @@
+// glm-vx-front (#68, step 2): the HTTP front end. The engine (glm_vx/server.py --front) starts it
+// with the address to listen on, the served model's name and, for tests, the heartbeat interval of
+// streams in milliseconds. The engine holds the other end of the front end's standard input and
+// output (docs/ENGINE-LINK.md).
+//
+// `main` holds the program's rights and gives each part only what it needs:
+// - the listener gets `root.network`, once, to bind;
+// - the router gets `root.stdout`, and the engine reader `root.stdin`;
+// - a connection's handler gets its `TcpStream`, a `Sender` to the router and the model's name.
+// `root.files` and `root.env` go to nobody. The package `front` is built with
+// `--no-trusted-code front`.
+import front::bytes;
+import front::http;
+import front::link;
+import front::router;
+import front::serve;
+import std::io;
+import std::net;
+import std::string;
+import std::sync::channel;
+import std::sync::select;
+import std::vec;
+
+fn index(r : Result<i32, SelectError>) -> i32 {
+  match r {
+    Result<i32, SelectError>::Ok(i) => { return i; }
+    Result<i32, SelectError>::Err(_e) => { return -1; }
+  }
+}
+
+fn say(err : &mut Stderr, text : Vec<u8>) -> void {
+  let mut line = text;
+  line.push(10u8);
+  let _w = err.write_all(&line);
+}
+
+fn copy(bytes : &Vec<u8>) -> Vec<u8> {
+  let mut out = Vec<u8>::with_capacity(bytes.len());
+  for i in 0..bytes.len() {
+    out.push(bytes[i]);
+  }
+  return out;
+}
+
+// The router, then its result on `end`. Takes everything by value, so the task owns it.
+fn route_then_tell(stdout : Stdout, asks : Receiver<Ask>, replies : Receiver<Incoming>, end : Sender<i32>) -> void {
+  let code = route(stdout, asks, replies);
+  let _e = end.send(code);
+}
+
+// One connection, then a word on `done` so the accept loop counts it closed.
+fn serve_then_tell(stream : TcpStream, asks : Sender<Ask>, model : Vec<u8>, beat_ms : u64, done : Sender<i32>)
+-> void {
+  serve(stream, asks, model, beat_ms);
+  let _d = done.send(1);
+}
+
+// At most this many connections at once, as server.py's BoundedSemaphore(32). One past it is
+// closed at once.
+fn max_connections() -> i32 {
+  return 32;
+}
+
+fn main(root : Root, args : Vec<String>) -> i32 {
+  let mut err = root.stderr;
+  if args.len() != 3 && args.len() != 4 {
+    say(&mut err, lit("usage: glm-vx-front HOST:PORT MODEL [HEARTBEAT_MS]" as *const u8, 50));
+    return 2;
+  }
+  let model = args[2].to_bytes();
+  // server.py's Handler.heartbeat_seconds: 10 seconds.
+  let mut beat_ms = 10000u64;
+  if args.len() == 4 {
+    let text = args[3].to_bytes();
+    match u64::parse(&text, 0, text.len()) {
+      Result<u64, ParseNumberError>::Ok(v) => { beat_ms = v; }
+      Result<u64, ParseNumberError>::Err(_e) => {
+        say(&mut err, lit("glm-vx-front: HEARTBEAT_MS is not a number" as *const u8, 42));
+        return 2;
+      }
+    }
+  }
+  let listener = match TcpListener::bind(&root.network, &args[1]) {
+    Result<TcpListener, NetError>::Ok(l) => { l }
+    Result<TcpListener, NetError>::Err(_e) => {
+      say(&mut err, lit("glm-vx-front: cannot listen there" as *const u8, 33));
+      return 1;
+    }
+  };
+  let (ask_tx, ask_rx) = channel<Ask>(256);
+  let (reply_tx, reply_rx) = channel<Incoming>(1024);
+  let (done_tx, done_rx) = channel<i32>(64);
+  let stdin = root.stdin;
+  let stdout = root.stdout;
+  let mut l = listener;
+  let mut open = 0;
+  let mut result = 0;
+  tasks {
+    spawn {
+      let _r = read_engine(stdin, reply_tx);
+    };
+    // The router ends when the engine closes the link; then so does the accept loop.
+    let (end_tx, end_rx) = channel<i32>(1);
+    spawn {
+      route_then_tell(stdout, ask_rx, reply_rx, end_tx);
+    };
+    let mut serving = true;
+    while serving {
+      let ready = index(select3(&l, &done_rx, &end_rx));
+      if ready == 0 {
+        match l.accept() {
+          Result<TcpStream, NetError>::Ok(stream) => {
+            if open >= max_connections() {
+              drop(stream);
+            } else {
+              open = open + 1;
+              let asks = ask_tx.clone();
+              let name = copy(&model);
+              let done = done_tx.clone();
+              spawn {
+                serve_then_tell(stream, asks, name, beat_ms, done);
+              };
+            }
+          }
+          Result<TcpStream, NetError>::Err(_e) => {}
+        }
+      } else if ready == 1 {
+        match done_rx.try_recv() {
+          Result<i32, TryRecvError>::Ok(_d) => { open = open - 1; }
+          Result<i32, TryRecvError>::Err(e) => {
+            match e {
+              TryRecvError::Empty => {}
+              TryRecvError::Closed => { serving = false; }
+            }
+          }
+        }
+      } else {
+        match end_rx.try_recv() {
+          Result<i32, TryRecvError>::Ok(code) => { result = code; }
+          Result<i32, TryRecvError>::Err(_e) => {}
+        }
+        serving = false;
+      }
+    }
+    drop(ask_tx);
+  };
+  return result;
+}

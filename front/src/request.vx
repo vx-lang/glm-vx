@@ -1,0 +1,338 @@
+// A /v1/completions body as the engine link's SUBMIT (#68, step 2). The rules are glm_vx/server.py's
+// `Handler._options` and `Scheduler.submit`, apart from the vocabulary and the context length, which
+// the engine checks. No capability.
+import front::json;
+import front::jsonw;
+import front::bytes;
+import std::string;
+import std::vec;
+
+struct Submission {
+  // Token ids, or the UTF-8 text of a string prompt when `is_text`.
+  ids : Vec<u32>,
+  text : Vec<u8>,
+  is_text : bool,
+  max_tokens : u32,
+  temperature : f64,
+  seed : u64,
+  ignore_eos : bool,
+  stream : bool,
+  // An OpenAI client: the body has `model`. It gets OpenAI's stream framing.
+  openai : bool,
+  include_usage : bool,
+}
+
+fn same(a : &Vec<u8>, b : &Vec<u8>) -> bool {
+  if a.len() != b.len() {
+    return false;
+  }
+  for i in 0..a.len() {
+    if a[i] != b[i] {
+      return false;
+    }
+  }
+  return true;
+}
+
+fn err(message : Vec<u8>) -> Result<Submission, Vec<u8>> {
+  return Result<Submission, Vec<u8>>::Err(message);
+}
+
+// The index of the last member named `key` (JSON's last one wins, as in Python), or -1.
+fn find(members : &Vec<Member>, key : &Vec<u8>) -> i32 {
+  let mut at = -1;
+  for i in 0..members.len() {
+    if same(&members[i].key, key) {
+      at = i;
+    }
+  }
+  return at;
+}
+
+fn is_null(v : &Value) -> bool {
+  match v {
+    Value::Null => { return true; }
+    _ => { return false; }
+  }
+}
+
+// A JSON number with no fraction and no exponent, as Python's `type(v) is int`.
+fn integer_span(v : &Value, input : &Vec<u8>) -> i32 {
+  match v {
+    Value::Number(from, to) => {
+      for i in *from..*to {
+        let b = input[i];
+        if b == 46u8 || b == 101u8 || b == 69u8 {
+          return -1;
+        }
+      }
+      return *from;
+    }
+    _ => { return -1; }
+  }
+}
+
+fn number_end(v : &Value) -> i32 {
+  match v {
+    Value::Number(_from, to) => { return *to; }
+    _ => { return -1; }
+  }
+}
+
+// The names that `_options` takes: model, prompt, max_tokens, temperature, seed, stream,
+// ignore_eos, stream_options, n and best_of.
+fn known(key : &Vec<u8>) -> bool {
+  let names = lit("model,prompt,max_tokens,temperature,seed,stream,ignore_eos,stream_options,n,best_of" as *const u8,
+                  83);
+  let mut from = 0;
+  for i in 0..names.len() + 1 {
+    if i == names.len() || names[i] == 44u8 {
+      if i - from == key.len() {
+        let mut equal = true;
+        for k in 0..key.len() {
+          if names[from + k] != key[k] {
+            equal = false;
+          }
+        }
+        if equal {
+          return true;
+        }
+      }
+      from = i + 1;
+    }
+  }
+  return false;
+}
+
+fn flag(members : &Vec<Member>, name : Vec<u8>, message : Vec<u8>) -> Result<bool, Vec<u8>> {
+  let at = find(members, &name);
+  if at < 0 {
+    return Result<bool, Vec<u8>>::Ok(false);
+  }
+  match &members[at].value {
+    Value::Bool(b) => { return Result<bool, Vec<u8>>::Ok(*b); }
+    _ => { return Result<bool, Vec<u8>>::Err(message); }
+  }
+}
+
+// `n` and `best_of`: absent, null or the integer 1.
+fn only_one(members : &Vec<Member>, name : Vec<u8>, message : Vec<u8>, input : &Vec<u8>) -> bool {
+  let at = find(members, &name);
+  if at < 0 || is_null(&members[at].value) {
+    return true;
+  }
+  let from = integer_span(&members[at].value, input);
+  if from < 0 {
+    return false;
+  }
+  match i64::parse(input, from, number_end(&members[at].value)) {
+    Result<i64, ParseNumberError>::Ok(v) => { return v == 1i64; }
+    Result<i64, ParseNumberError>::Err(_e) => { return false; }
+  }
+}
+
+// The submission for `body`, or the message of a 400 reply. `model_name` is the served model.
+pub fn submission(body : &Value, input : &Vec<u8>, model_name : &Vec<u8>) -> Result<Submission, Vec<u8>> {
+  let members = match body {
+    Value::Object(m) => { m }
+    _ => { return err(lit("JSON object required" as *const u8, 20)); }
+  };
+  // Each unknown name once, in byte order (Python's sorted set), joined by ", ".
+  let mut unknown = Vec<i32>::new();
+  for i in 0..members.len() {
+    if !known(&members[i].key) {
+      let mut seen = false;
+      for k in 0..unknown.len() {
+        if same(&members[unknown[k]].key, &members[i].key) {
+          seen = true;
+        }
+      }
+      if !seen {
+        unknown.push(i);
+        let mut at = unknown.len() - 1;
+        while at > 0 && before(&members[i].key, &members[unknown[at - 1]].key) {
+          unknown[at] = unknown[at - 1];
+          at = at - 1;
+        }
+        unknown[at] = i;
+      }
+    }
+  }
+  if unknown.len() > 0 {
+    let mut message = lit("unsupported fields: " as *const u8, 20);
+    for k in 0..unknown.len() {
+      if k > 0 {
+        message.push(44u8);
+        message.push(32u8);
+      }
+      put_bytes(&mut message, &members[unknown[k]].key);
+    }
+    return err(message);
+  }
+  let model_at = find(members, &lit("model" as *const u8, 5));
+  let openai = model_at >= 0;
+  if openai {
+    let right = match &members[model_at].value {
+      Value::Text(t) => { same(t, model_name) }
+      _ => { false }
+    };
+    if !right {
+      let mut message = lit("unknown model; this server serves '" as *const u8, 35);
+      put_bytes(&mut message, model_name);
+      put_bytes(&mut message, &lit("' (see /v1/models)" as *const u8, 18));
+      return err(message);
+    }
+  }
+  let stream = flag(members, lit("stream" as *const u8, 6),
+                    lit("stream must be boolean" as *const u8, 22))?;
+  let ignore_eos = flag(members, lit("ignore_eos" as *const u8, 10),
+                        lit("ignore_eos must be boolean" as *const u8, 26))?;
+  if !only_one(members, lit("n" as *const u8, 1), Vec<u8>::new(), input) {
+    return err(lit("n must be 1" as *const u8, 11));
+  }
+  if !only_one(members, lit("best_of" as *const u8, 7), Vec<u8>::new(), input) {
+    return err(lit("best_of must be 1" as *const u8, 17));
+  }
+  let mut include_usage = false;
+  let options_at = find(members, &lit("stream_options" as *const u8, 14));
+  if options_at >= 0 && !is_null(&members[options_at].value) {
+    if !stream {
+      return err(lit("stream_options requires stream" as *const u8, 30));
+    }
+    let bad = lit("stream_options supports only boolean include_usage" as *const u8, 50);
+    match &members[options_at].value {
+      Value::Object(options) => {
+        for i in 0..options.len() {
+          if !same(&options[i].key, &lit("include_usage" as *const u8, 13)) {
+            return err(bad);
+          }
+        }
+        // Not `flag(..)?`: a value moved into a call whose Err `?` returns from inside a block is
+        // freed twice by Vx main 973d80f9b (Vx #4142).
+        match flag(options, lit("include_usage" as *const u8, 13), bad) {
+          Result<bool, Vec<u8>>::Ok(v) => { include_usage = v; }
+          Result<bool, Vec<u8>>::Err(message) => { return err(message); }
+        }
+      }
+      _ => { return err(bad); }
+    }
+  }
+  let mut ids = Vec<u32>::new();
+  let mut text = Vec<u8>::new();
+  let mut is_text = false;
+  let bad_prompt = lit("prompt must be a nonempty array of valid token IDs" as *const u8, 50);
+  let prompt_at = find(members, &lit("prompt" as *const u8, 6));
+  if prompt_at < 0 {
+    return err(bad_prompt);
+  }
+  match &members[prompt_at].value {
+    Value::Text(t) => {
+      is_text = true;
+      put_bytes(&mut text, t);
+    }
+    Value::Array(items) => {
+      if items.len() == 0 {
+        return err(bad_prompt);
+      }
+      for i in 0..items.len() {
+        let from = integer_span(&items[i], input);
+        if from < 0 {
+          return err(bad_prompt);
+        }
+        match i64::parse(input, from, number_end(&items[i])) {
+          Result<i64, ParseNumberError>::Ok(v) => {
+            if v < 0i64 || v > 4294967295i64 {
+              return err(bad_prompt);
+            }
+            ids.push(v as u32);
+          }
+          Result<i64, ParseNumberError>::Err(_e) => { return err(bad_prompt); }
+        }
+      }
+    }
+    _ => { return err(bad_prompt); }
+  }
+  let mut max_tokens = 16u32;
+  let max_at = find(members, &lit("max_tokens" as *const u8, 10));
+  if max_at >= 0 {
+    let bad = lit("max_tokens must be a positive integer" as *const u8, 37);
+    let from = integer_span(&members[max_at].value, input);
+    if from < 0 {
+      return err(bad);
+    }
+    match i64::parse(input, from, number_end(&members[max_at].value)) {
+      Result<i64, ParseNumberError>::Ok(v) => {
+        if v < 1i64 {
+          return err(bad);
+        }
+        if v > 4294967295i64 {
+          return err(lit("request exceeds context limit" as *const u8, 29));
+        }
+        max_tokens = v as u32;
+      }
+      Result<i64, ParseNumberError>::Err(_e) => {
+        return err(lit("request exceeds context limit" as *const u8, 29));
+      }
+    }
+  }
+  let mut temperature : f64 = 0.0;
+  let temp_at = find(members, &lit("temperature" as *const u8, 11));
+  if temp_at >= 0 {
+    let bad = lit("temperature must be finite and nonnegative" as *const u8, 42);
+    match &members[temp_at].value {
+      Value::Number(from, to) => {
+        match f64::parse(input, *from, *to) {
+          Result<f64, ParseNumberError>::Ok(v) => {
+            // A finite number is equal to itself and below infinity; NaN and inf are not.
+            if !(v >= 0.0) || v > 1.7976931348623157e308 {
+              return err(bad);
+            }
+            temperature = v;
+          }
+          Result<f64, ParseNumberError>::Err(_e) => { return err(bad); }
+        }
+      }
+      _ => { return err(bad); }
+    }
+  }
+  let mut seed = 0u64;
+  let seed_at = find(members, &lit("seed" as *const u8, 4));
+  if seed_at >= 0 {
+    let bad = lit("seed must be a nonnegative integer" as *const u8, 34);
+    let from = integer_span(&members[seed_at].value, input);
+    if from < 0 || input[from] == 45u8 && !is_zero(input, from, number_end(&members[seed_at].value)) {
+      return err(bad);
+    }
+    let digits = if input[from] == 45u8 { from + 1 } else { from };
+    match u64::parse(input, digits, number_end(&members[seed_at].value)) {
+      Result<u64, ParseNumberError>::Ok(v) => { seed = v; }
+      Result<u64, ParseNumberError>::Err(_e) => { return err(bad); }
+    }
+  }
+  return Result<Submission, Vec<u8>>::Ok(Submission {
+    ids : ids, text : text, is_text : is_text, max_tokens : max_tokens, temperature : temperature, seed : seed,
+    ignore_eos : ignore_eos, stream : stream, openai : openai, include_usage : include_usage
+  });
+}
+
+// True when `a` sorts before `b`, byte by byte.
+fn before(a : &Vec<u8>, b : &Vec<u8>) -> bool {
+  let mut i = 0;
+  while i < a.len() && i < b.len() {
+    if a[i] != b[i] {
+      return a[i] < b[i];
+    }
+    i = i + 1;
+  }
+  return a.len() < b.len();
+}
+
+// True when bytes `from..to` are `-0` or `0`.
+fn is_zero(input : &Vec<u8>, from : i32, to : i32) -> bool {
+  for i in from..to {
+    if input[i] != 45u8 && input[i] != 48u8 {
+      return false;
+    }
+  }
+  return true;
+}

@@ -1,0 +1,186 @@
+// The front end's side of the engine link (docs/ENGINE-LINK.md; #68, step 2). Frames to the engine,
+// and the engine's replies. No capability: main gives the router its standard output and the
+// reader its standard input.
+import front::request;
+import std::vec;
+
+fn max_payload() -> i32 {
+  return 4194304;
+}
+
+pub fn put_u8(out : &mut Vec<u8>, v : u8) -> void {
+  out.push(v);
+}
+
+pub fn put_u32(out : &mut Vec<u8>, v : u32) -> void {
+  for i in 0..4 {
+    out.push(((v >> ((i * 8) as u32)) & 255u32) as u8);
+  }
+}
+
+pub fn put_u64(out : &mut Vec<u8>, v : u64) -> void {
+  for i in 0..8 {
+    out.push(((v >> ((i * 8) as u64)) & 255u64) as u8);
+  }
+}
+
+// Bytes `at..at + 4` of `bytes`, little-endian. The caller checks the length.
+pub fn get_u32(bytes : &Vec<u8>, at : i32) -> u32 {
+  let mut v = 0u32;
+  for i in 0..4 {
+    v = v | ((bytes[at + i] as u32) << ((i * 8) as u32));
+  }
+  return v;
+}
+
+pub fn get_u64(bytes : &Vec<u8>, at : i32) -> u64 {
+  let mut v = 0u64;
+  for i in 0..8 {
+    v = v | ((bytes[at + i] as u64) << ((i * 8) as u64));
+  }
+  return v;
+}
+
+// A SUBMIT or SUBMIT_TEXT frame for `s`, with its length first.
+pub fn submit_frame(id : u64, s : &Submission) -> Vec<u8> {
+  let count = if s.is_text { s.text.len() } else { s.ids.len() };
+  let size = if s.is_text { count } else { 4 * count };
+  let mut out = Vec<u8>::new();
+  put_u32(&mut out, (34 + size) as u32);
+  put_u8(&mut out, if s.is_text { 2u8 } else { 1u8 });
+  put_u64(&mut out, id);
+  put_u32(&mut out, s.max_tokens);
+  put_u64(&mut out, s.temperature.to_bits());
+  put_u64(&mut out, s.seed);
+  put_u8(&mut out, if s.ignore_eos { 1u8 } else { 0u8 });
+  put_u32(&mut out, count as u32);
+  if s.is_text {
+    for i in 0..count {
+      out.push(s.text[i]);
+    }
+  } else {
+    for i in 0..count {
+      put_u32(&mut out, s.ids[i]);
+    }
+  }
+  return out;
+}
+
+// A CANCEL (kind 3) or STATUS (kind 4) frame.
+pub fn id_frame(kind : u8, id : u64) -> Vec<u8> {
+  let mut out = Vec<u8>::new();
+  put_u32(&mut out, 9u32);
+  put_u8(&mut out, kind);
+  put_u64(&mut out, id);
+  return out;
+}
+
+struct Finish {
+  // 1 length, 2 stop, 3 cancelled.
+  reason : u8,
+  prompt_tokens : u32,
+  completion_tokens : u32,
+  cached_prompt_tokens : u32,
+  // prefill, decode, prefix and queued seconds.
+  timings : Vec<f64>,
+  tail : Vec<u8>,
+  text : Vec<u8>,
+}
+
+enum Reply {
+  // created (Unix seconds) and the request's name.
+  Accepted(u64, Vec<u8>),
+  // The token id and its new text.
+  Token(u32, Vec<u8>),
+  Done(Finish),
+  // The code (1 busy, 2 invalid, 3 failed) and the message.
+  Failed(u8, Vec<u8>),
+  // The JSON for /health.
+  Status(Vec<u8>),
+  // The engine closed the link.
+  Gone,
+  // From the router, before the engine's replies: the request's id on the link.
+  Assigned(u64),
+}
+
+struct Incoming {
+  id : u64,
+  reply : Reply,
+}
+
+fn bytes_at(bytes : &Vec<u8>, from : i32, n : i32) -> Vec<u8> {
+  let mut out = Vec<u8>::with_capacity(n);
+  for i in from..from + n {
+    out.push(bytes[i]);
+  }
+  return out;
+}
+
+fn bad() -> Result<Incoming, i32> {
+  return Result<Incoming, i32>::Err(0);
+}
+
+// An engine payload. A malformed one is an error: the engine is the trusted side, so the front
+// end stops.
+pub fn decode(p : &Vec<u8>) -> Result<Incoming, i32> {
+  let n = p.len();
+  if n < 9 {
+    return bad();
+  }
+  let kind = p[0];
+  let id = get_u64(p, 1);
+  if kind == 129u8 {
+    if n < 17 || n != 17 + (get_u32(p, 13) as i32) {
+      return bad();
+    }
+    return Result<Incoming, i32>::Ok(Incoming {
+      id : id, reply : Reply::Token(get_u32(p, 9), bytes_at(p, 17, n - 17))
+    });
+  }
+  if kind == 130u8 {
+    if n < 62 {
+      return bad();
+    }
+    let tail = get_u32(p, 54) as i32;
+    let text = get_u32(p, 58) as i32;
+    if tail < 0 || text < 0 || n != 62 + tail + text {
+      return bad();
+    }
+    let mut timings = Vec<f64>::new();
+    for k in 0..4 {
+      timings.push(f64::from_bits(get_u64(p, 22 + 8 * k)));
+    }
+    return Result<Incoming, i32>::Ok(Incoming {
+      id : id, reply : Reply::Done(Finish {
+        reason : p[9], prompt_tokens : get_u32(p, 10), completion_tokens : get_u32(p, 14),
+        cached_prompt_tokens : get_u32(p, 18), timings : timings, tail : bytes_at(p, 62, tail),
+        text : bytes_at(p, 62 + tail, text)
+      })
+    });
+  }
+  if kind == 131u8 {
+    if n < 14 || n != 14 + (get_u32(p, 10) as i32) {
+      return bad();
+    }
+    return Result<Incoming, i32>::Ok(Incoming { id : id, reply : Reply::Failed(p[9], bytes_at(p, 14, n - 14)) });
+  }
+  if kind == 132u8 {
+    if n < 13 || n != 13 + (get_u32(p, 9) as i32) {
+      return bad();
+    }
+    return Result<Incoming, i32>::Ok(Incoming { id : id, reply : Reply::Status(bytes_at(p, 13, n - 13)) });
+  }
+  if kind == 133u8 {
+    if n < 21 || n != 21 + (get_u32(p, 17) as i32) {
+      return bad();
+    }
+    return Result<Incoming, i32>::Ok(Incoming {
+      id : id, reply : Reply::Accepted(get_u64(p, 9), bytes_at(p, 21, n - 21))
+    });
+  }
+  return bad();
+}
+
+pub fn frame_limit() -> i32 {
+  return max_payload();
+}

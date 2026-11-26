@@ -1,0 +1,425 @@
+// One connection (#68, step 2). The handler gets its `TcpStream`, a `Sender` to the router and the
+// model's name: no `Network`, `Files`, `Environment`, `Stdin` or `Stdout`. Its replies follow
+// glm_vx/server.py's `Handler`: the same JSON fields, SSE framing, heartbeats and status codes.
+import core::time;
+import front::bytes;
+import front::http;
+import front::json;
+import front::jsonw;
+import front::link;
+import front::request;
+import std::net;
+import std::string;
+import std::sync::channel;
+import std::sync::select;
+import std::time;
+import std::vec;
+
+enum Ask {
+  // A request and the channel for its replies.
+  Submit(Submission, Sender<Incoming>),
+  Cancel(u64),
+  Status(Sender<Incoming>),
+}
+
+fn index(r : Result<i32, SelectError>) -> i32 {
+  match r {
+    Result<i32, SelectError>::Ok(i) => { return i; }
+    Result<i32, SelectError>::Err(_e) => { return -1; }
+  }
+}
+
+fn reason_name(reason : u8) -> Vec<u8> {
+  if reason == 1u8 {
+    return lit("length" as *const u8, 6);
+  }
+  if reason == 2u8 {
+    return lit("stop" as *const u8, 4);
+  }
+  return lit("cancelled" as *const u8, 9);
+}
+
+// "key": with a comma before it unless it is the first.
+fn key(out : &mut Vec<u8>, name : Vec<u8>, first : bool) -> void {
+  if !first {
+    put_bytes(out, &lit(", " as *const u8, 2));
+  }
+  put_string(out, &name);
+  put_bytes(out, &lit(": " as *const u8, 2));
+}
+
+// {"id": .., "object": "text_completion", "created": .., "model": .., without its closing brace.
+fn head_fields(name : &Vec<u8>, created : u64, model : &Vec<u8>) -> Vec<u8> {
+  let mut out = Vec<u8>::new();
+  out.push(123u8);
+  key(&mut out, lit("id" as *const u8, 2), true);
+  put_string(&mut out, name);
+  key(&mut out, lit("object" as *const u8, 6), false);
+  put_string(&mut out, &lit("text_completion" as *const u8, 15));
+  key(&mut out, lit("created" as *const u8, 7), false);
+  put_int(&mut out, created);
+  key(&mut out, lit("model" as *const u8, 5), false);
+  put_string(&mut out, model);
+  return out;
+}
+
+fn usage(f : &Finish) -> Vec<u8> {
+  let mut out = Vec<u8>::new();
+  out.push(123u8);
+  key(&mut out, lit("prompt_tokens" as *const u8, 13), true);
+  put_int(&mut out, f.prompt_tokens as u64);
+  key(&mut out, lit("completion_tokens" as *const u8, 17), false);
+  put_int(&mut out, f.completion_tokens as u64);
+  key(&mut out, lit("total_tokens" as *const u8, 12), false);
+  put_int(&mut out, (f.prompt_tokens as u64) + (f.completion_tokens as u64));
+  key(&mut out, lit("prompt_tokens_details" as *const u8, 21), false);
+  put_bytes(&mut out, &lit("{\"cached_tokens\": " as *const u8, 18));
+  put_int(&mut out, f.cached_prompt_tokens as u64);
+  put_bytes(&mut out, &lit("}}" as *const u8, 2));
+  return out;
+}
+
+fn timings(f : &Finish) -> Vec<u8> {
+  let mut out = Vec<u8>::new();
+  out.push(123u8);
+  key(&mut out, lit("prefill_seconds" as *const u8, 15), true);
+  put_float(&mut out, f.timings[0]);
+  key(&mut out, lit("decode_seconds" as *const u8, 14), false);
+  put_float(&mut out, f.timings[1]);
+  key(&mut out, lit("prefix_seconds" as *const u8, 14), false);
+  put_float(&mut out, f.timings[2]);
+  key(&mut out, lit("queued_seconds" as *const u8, 14), false);
+  put_float(&mut out, f.timings[3]);
+  out.push(125u8);
+  return out;
+}
+
+fn token_ids(out : &mut Vec<u8>, ids : &Vec<u32>) -> void {
+  out.push(91u8);
+  for i in 0..ids.len() {
+    if i > 0 {
+      put_bytes(out, &lit(", " as *const u8, 2));
+    }
+    put_int(out, ids[i] as u64);
+  }
+  out.push(93u8);
+}
+
+// One choice: {"index": 0, "text": .., ["token_ids": ..,] "logprobs": null, "finish_reason": ..}
+fn choice(text : &Vec<u8>, ids : &Vec<u32>, with_ids : bool, finish : Vec<u8>) -> Vec<u8> {
+  let mut out = lit("[{\"index\": 0" as *const u8, 12);
+  key(&mut out, lit("text" as *const u8, 4), false);
+  put_string(&mut out, text);
+  if with_ids {
+    key(&mut out, lit("token_ids" as *const u8, 9), false);
+    token_ids(&mut out, ids);
+  }
+  key(&mut out, lit("logprobs" as *const u8, 8), false);
+  put_bytes(&mut out, &lit("null" as *const u8, 4));
+  key(&mut out, lit("finish_reason" as *const u8, 13), false);
+  put_bytes(&mut out, &finish);
+  put_bytes(&mut out, &lit("}]" as *const u8, 2));
+  return out;
+}
+
+fn quoted(bytes : Vec<u8>) -> Vec<u8> {
+  let mut out = Vec<u8>::new();
+  put_string(&mut out, &bytes);
+  return out;
+}
+
+fn sse(s : &mut TcpStream, json : &Vec<u8>) -> bool {
+  let mut out = lit("data: " as *const u8, 6);
+  put_bytes(&mut out, json);
+  put_bytes(&mut out, &lit("\n\n" as *const u8, 2));
+  return send(s, &out);
+}
+
+// Wait for the next reply of this request, while watching the client and the heartbeat. Gives
+// the reply, or None when the client went away (the caller cancels).
+fn next_reply(s : &mut TcpStream, rx : &Receiver<Incoming>, pending : &mut Vec<u8>, streaming : bool,
+              openai : bool, beat_ms : u64) -> Option<Reply> {
+  while true {
+    let beat = Deadline::after(Duration::from_millis(beat_ms));
+    let ready = index(select3(rx, s, &beat));
+    if ready == 0 {
+      match rx.try_recv() {
+        Result<Incoming, TryRecvError>::Ok(m) => { return Option<Reply>::Some(m.reply); }
+        Result<Incoming, TryRecvError>::Err(e) => {
+          match e {
+            TryRecvError::Empty => { continue; }
+            TryRecvError::Closed => {
+              // The router dropped this request's channel without a Gone: the connection fell behind.
+              return Option<Reply>::Some(Reply::Failed(3u8, lit("client output queue is full" as *const u8, 27)));
+            }
+          }
+        }
+      }
+    }
+    if ready == 1 {
+      // Bytes from the client: a pipelined request, kept for later, or the end of the connection.
+      if read_more(s, pending, 1u64) <= 0 {
+        return Option<Reply>::None;
+      }
+      continue;
+    }
+    if ready == 2 && streaming {
+      // An SSE comment is the usual keepalive, but sglang.bench_serving feeds every nonblank line
+      // to json.loads, so OpenAI-framed streams send a blank line (as server.py does).
+      let beat_bytes = if openai { lit("\n" as *const u8, 1) } else { lit(": keepalive\n\n" as *const u8, 13) };
+      if !send(s, &beat_bytes) {
+        return Option<Reply>::None;
+      }
+    }
+    if ready < 0 {
+      return Option<Reply>::None;
+    }
+  }
+  return Option<Reply>::None;
+}
+
+// A completion. Gives false when the connection must close.
+fn complete(s : &mut TcpStream, body : &Vec<u8>, asks : &Sender<Ask>, model : &Vec<u8>, pending : &mut Vec<u8>,
+            beat_ms : u64) -> bool {
+  let parsed = match parse(body) {
+    Result<Value, JsonError>::Ok(v) => { v }
+    Result<Value, JsonError>::Err(e) => {
+      let mut message = lit("invalid JSON at byte " as *const u8, 21);
+      put_int(&mut message, e.at as u64);
+      let _sent = send(s, &json_reply(400u32, &error_body(&message), true));
+      return false;
+    }
+  };
+  let sub = match submission(&parsed, body, model) {
+    Result<Submission, Vec<u8>>::Ok(x) => { x }
+    Result<Submission, Vec<u8>>::Err(message) => {
+      let _sent = send(s, &json_reply(400u32, &error_body(&message), true));
+      return false;
+    }
+  };
+  let stream = sub.stream;
+  let openai = sub.openai;
+  let include_usage = sub.include_usage;
+  let (tx, rx) = channel<Incoming>(64);
+  match asks.send(Ask::Submit(sub, tx)) {
+    Result<void, SendError<Ask>>::Ok() => {}
+    Result<void, SendError<Ask>>::Err(_e) => { return false; }
+  }
+  // The router's first reply is the request's id on the link; the engine's ACCEPTED or ERROR
+  // comes after it.
+  let mut id = 0u64;
+  let mut name = Vec<u8>::new();
+  let mut created = 0u64;
+  let mut ids = Vec<u32>::new();
+  let mut streaming = false;
+  let mut head = Vec<u8>::new();
+  while true {
+    let reply = match next_reply(s, &rx, pending, streaming, openai, beat_ms) {
+      Option<Reply>::Some(r) => { r }
+      Option<Reply>::None => {
+        if id > 0u64 {
+          let _c = asks.send(Ask::Cancel(id));
+        }
+        return false;
+      }
+    };
+    match reply {
+      Reply::Assigned(n) => {
+        id = n;
+      }
+      Reply::Accepted(when, n) => {
+        created = when;
+        name = n;
+        head = head_fields(&name, created, model);
+        if stream {
+          let h = http_head_sse();
+          if !send(s, &h) {
+            let _c = asks.send(Ask::Cancel(id));
+            return false;
+          }
+          streaming = true;
+        }
+      }
+      Reply::Token(token, text) => {
+        ids.push(token);
+        if streaming {
+          let mut one = Vec<u32>::new();
+          one.push(token);
+          let mut event = Vec<u8>::new();
+          put_bytes(&mut event, &head);
+          key(&mut event, lit("choices" as *const u8, 7), false);
+          put_bytes(&mut event, &choice(&text, &one, true, lit("null" as *const u8, 4)));
+          event.push(125u8);
+          if !sse(s, &event) {
+            let _c = asks.send(Ask::Cancel(id));
+            return false;
+          }
+        }
+      }
+      Reply::Done(f) => {
+        let finish = quoted(reason_name(f.reason));
+        if streaming && openai {
+          // The terminal chunk carries only the held-back text tail, so the deltas add up to the
+          // completion and no client counts the text twice.
+          let mut event = Vec<u8>::new();
+          put_bytes(&mut event, &head);
+          key(&mut event, lit("choices" as *const u8, 7), false);
+          put_bytes(&mut event, &choice(&f.tail, &ids, false, finish));
+          key(&mut event, lit("usage" as *const u8, 5), false);
+          put_bytes(&mut event, &usage(&f));
+          key(&mut event, lit("timings" as *const u8, 7), false);
+          put_bytes(&mut event, &timings(&f));
+          event.push(125u8);
+          let mut ok = sse(s, &event);
+          if include_usage {
+            let mut last = Vec<u8>::new();
+            put_bytes(&mut last, &head);
+            key(&mut last, lit("choices" as *const u8, 7), false);
+            put_bytes(&mut last, &lit("[]" as *const u8, 2));
+            key(&mut last, lit("usage" as *const u8, 5), false);
+            put_bytes(&mut last, &usage(&f));
+            last.push(125u8);
+            ok = ok && sse(s, &last);
+          }
+          let _d = send(s, &lit("data: [DONE]\n\n" as *const u8, 14));
+          return false;
+        }
+        let mut result = Vec<u8>::new();
+        put_bytes(&mut result, &head);
+        key(&mut result, lit("choices" as *const u8, 7), false);
+        put_bytes(&mut result, &choice(&f.text, &ids, true, finish));
+        key(&mut result, lit("usage" as *const u8, 5), false);
+        put_bytes(&mut result, &usage(&f));
+        key(&mut result, lit("timings" as *const u8, 7), false);
+        put_bytes(&mut result, &timings(&f));
+        result.push(125u8);
+        if streaming {
+          let _e = sse(s, &result);
+          let _d = send(s, &lit("data: [DONE]\n\n" as *const u8, 14));
+          return false;
+        }
+        return send(s, &json_reply(200u32, &result, false));
+      }
+      Reply::Failed(code, message) => {
+        if streaming {
+          let _e = sse(s, &error_body(&message));
+          let _d = send(s, &lit("data: [DONE]\n\n" as *const u8, 14));
+          return false;
+        }
+        if code == 1u8 {
+          return send(s, &json_reply(429u32, &error_body(&message), false));
+        }
+        if code == 2u8 {
+          let _sent = send(s, &json_reply(400u32, &error_body(&message), true));
+          return false;
+        }
+        let _sent = send(s, &json_reply(500u32, &error_body(&message), false));
+        return true;
+      }
+      Reply::Status(_json) => {}
+      Reply::Gone => {
+        let _sent = send(s, &json_reply(500u32, &error_body(&lit("the engine is gone" as *const u8, 18)), true));
+        return false;
+      }
+    }
+  }
+  return false;
+}
+
+fn http_head_sse() -> Vec<u8> {
+  let mut h = head(200u32, lit("text/event-stream" as *const u8, 17));
+  put_bytes(&mut h, &lit("Cache-Control: no-cache\r\nConnection: close\r\n\r\n" as *const u8, 46));
+  return h;
+}
+
+fn same(a : &Vec<u8>, b : &Vec<u8>) -> bool {
+  if a.len() != b.len() {
+    return false;
+  }
+  for i in 0..a.len() {
+    if a[i] != b[i] {
+      return false;
+    }
+  }
+  return true;
+}
+
+fn health(s : &mut TcpStream, asks : &Sender<Ask>, close : bool) -> bool {
+  let (tx, rx) = channel<Incoming>(4);
+  match asks.send(Ask::Status(tx)) {
+    Result<void, SendError<Ask>>::Ok() => {}
+    Result<void, SendError<Ask>>::Err(_e) => { return false; }
+  }
+  while true {
+    match rx.recv() {
+      Result<Incoming, RecvError>::Ok(m) => {
+        match m.reply {
+          Reply::Status(json) => { return send(s, &json_reply(200u32, &json, close)) && !close; }
+          Reply::Failed(_code, message) => { return send(s, &json_reply(500u32, &error_body(&message), close)) && !close; }
+          Reply::Gone => { return false; }
+          _ => {}
+        }
+      }
+      Result<Incoming, RecvError>::Err(_e) => { return false; }
+    }
+  }
+  return false;
+}
+
+fn models(s : &mut TcpStream, model : &Vec<u8>, close : bool) -> bool {
+  let mut body = lit("{\"object\": \"list\", \"data\": [{\"id\": " as *const u8, 35);
+  put_string(&mut body, model);
+  put_bytes(&mut body, &lit(", \"object\": \"model\", \"owned_by\": \"local\"}]}" as *const u8, 43));
+  return send(s, &json_reply(200u32, &body, close)) && !close;
+}
+
+// Serve one connection until it closes. A stream with nothing to send for `beat_ms` sends a heartbeat.
+pub fn serve(stream : TcpStream, asks : Sender<Ask>, model : Vec<u8>, beat_ms : u64) -> void {
+  let mut s = stream;
+  let mut pending = Vec<u8>::new();
+  let get = lit("GET" as *const u8, 3);
+  let post = lit("POST" as *const u8, 4);
+  while true {
+    let req = match read_request(&mut s, &mut pending) {
+      Result<HttpRequest, HttpError>::Ok(r) => { r }
+      Result<HttpRequest, HttpError>::Err(e) => {
+        match e {
+          HttpError::Refused(status, message) => {
+            let _sent = send(&mut s, &json_reply(status, &error_body(&message), true));
+          }
+          _ => {}
+        }
+        return;
+      }
+    };
+    let mut keep = false;
+    if same(&req.method, &get) {
+      if same(&req.path, &lit("/health" as *const u8, 7)) {
+        keep = health(&mut s, &asks, req.close);
+      } else if same(&req.path, &lit("/v1/models" as *const u8, 10)) {
+        keep = models(&mut s, &model, req.close);
+      } else {
+        keep = send(&mut s, &json_reply(404u32, &error_body(&lit("not found" as *const u8, 9)), req.close))
+               && !req.close;
+      }
+    } else if same(&req.method, &post) {
+      if same(&req.path, &lit("/v1/completions" as *const u8, 15)) {
+        if req.body.len() == 0 {
+          let _sent = send(&mut s, &json_reply(400u32, &error_body(&lit("body must be 1..1048576 bytes" as *const u8,
+                                                                         29)), true));
+          return;
+        }
+        keep = complete(&mut s, &req.body, &asks, &model, &mut pending, beat_ms) && !req.close;
+      } else {
+        let _sent = send(&mut s, &json_reply(404u32, &error_body(&lit("not found" as *const u8, 9)), true));
+        return;
+      }
+    } else {
+      let _sent = send(&mut s, &json_reply(501u32, &error_body(&lit("unsupported method" as *const u8, 18)), true));
+      return;
+    }
+    if !keep {
+      return;
+    }
+  }
+}

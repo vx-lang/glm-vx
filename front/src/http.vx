@@ -1,0 +1,317 @@
+// HTTP/1.1 requests and replies, with limits (#68, step 2). A connection's handler gets its own
+// `TcpStream` and nothing else: no `Network`, `Files` or `Environment`.
+//
+// Limits: the request line and headers 16 KiB, at most 64 headers, a body of 1..1048576 bytes
+// (glm_vx/server.py's limit), 30 seconds for each read. Only `Content-Length` bodies; a request with
+// `Transfer-Encoding` is refused, as server.py does, so no body is read two ways.
+import core::time;
+import front::bytes;
+import front::jsonw;
+import std::net;
+import std::string;
+import std::sync::select;
+import std::time;
+import std::vec;
+
+pub fn max_head() -> i32 {
+  return 16384;
+}
+
+pub fn max_headers() -> i32 {
+  return 64;
+}
+
+pub fn max_body() -> i32 {
+  return 1048576;
+}
+
+struct HttpRequest {
+  method : Vec<u8>,
+  path : Vec<u8>,
+  body : Vec<u8>,
+  // HTTP/1.0 without keep-alive, or `Connection: close`.
+  close : bool,
+}
+
+enum HttpError {
+  // The client closed the connection before a request began.
+  Closed,
+  // A read waited 30 seconds, or the connection broke.
+  Broken,
+  // The status and the message of the reply, after which the connection closes.
+  Refused(u32, Vec<u8>),
+}
+
+fn refuse(status : u32, message : Vec<u8>) -> Result<HttpRequest, HttpError> {
+  return Result<HttpRequest, HttpError>::Err(HttpError::Refused(status, message));
+}
+
+fn lower(b : u8) -> u8 {
+  if b >= 65u8 && b <= 90u8 {
+    return b + 32u8;
+  }
+  return b;
+}
+
+// True when bytes `from..to` of `bytes` are `word`, ignoring ASCII case.
+fn is_word(bytes : &Vec<u8>, from : i32, to : i32, word : &Vec<u8>) -> bool {
+  if to - from != word.len() {
+    return false;
+  }
+  for i in 0..word.len() {
+    if lower(bytes[from + i]) != lower(word[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// The index of "\r\n\r\n" in `bytes`, or -1.
+fn head_end(bytes : &Vec<u8>) -> i32 {
+  let mut i = 0;
+  while i + 3 < bytes.len() {
+    if bytes[i] == 13u8 && bytes[i + 1] == 10u8 && bytes[i + 2] == 13u8 && bytes[i + 3] == 10u8 {
+      return i;
+    }
+    i = i + 1;
+  }
+  return -1;
+}
+
+fn index(r : Result<i32, SelectError>) -> i32 {
+  match r {
+    Result<i32, SelectError>::Ok(i) => { return i; }
+    Result<i32, SelectError>::Err(_e) => { return -1; }
+  }
+}
+
+// Read more bytes onto `pending`: the count, 0 when the client closed, -1 for a timeout or an error.
+pub fn read_more(s : &mut TcpStream, pending : &mut Vec<u8>, seconds : u64) -> i32 {
+  let limit = Deadline::after(Duration::from_secs(seconds));
+  if index(select2(s, &limit)) != 0 {
+    return -1;
+  }
+  let mut chunk = Vec<u8>::new();
+  for _i in 0..16384 {
+    chunk.push(0u8);
+  }
+  match s.read(&mut chunk) {
+    Result<u64, NetError>::Ok(n) => {
+      for i in 0..(n as i32) {
+        pending.push(chunk[i]);
+      }
+      return n as i32;
+    }
+    Result<u64, NetError>::Err(_e) => { return -1; }
+  }
+}
+
+// Remove the first `n` bytes of `pending`.
+fn drop_front(pending : &mut Vec<u8>, n : i32) -> void {
+  let mut rest = Vec<u8>::with_capacity(pending.len() - n);
+  for i in n..pending.len() {
+    rest.push(pending[i]);
+  }
+  *pending = rest;
+}
+
+fn slice(bytes : &Vec<u8>, from : i32, to : i32) -> Vec<u8> {
+  let mut out = Vec<u8>::with_capacity(to - from);
+  for i in from..to {
+    out.push(bytes[i]);
+  }
+  return out;
+}
+
+// The next request on the connection. `pending` holds the bytes read past the last one.
+pub fn read_request(s : &mut TcpStream, pending : &mut Vec<u8>) -> Result<HttpRequest, HttpError> {
+  let mut end = head_end(pending);
+  while end < 0 {
+    if pending.len() > max_head() {
+      return refuse(431u32, lit("request header fields too large" as *const u8, 31));
+    }
+    let got = read_more(s, pending, 30u64);
+    if got == 0 && pending.len() == 0 {
+      return Result<HttpRequest, HttpError>::Err(HttpError::Closed);
+    }
+    if got <= 0 {
+      return Result<HttpRequest, HttpError>::Err(HttpError::Broken);
+    }
+    end = head_end(pending);
+  }
+  if end > max_head() {
+    return refuse(431u32, lit("request header fields too large" as *const u8, 31));
+  }
+  // The request line: METHOD SP PATH SP HTTP/1.x
+  let mut line_end = 0;
+  while pending[line_end] != 13u8 {
+    line_end = line_end + 1;
+  }
+  let mut sp1 = -1;
+  let mut sp2 = -1;
+  for i in 0..line_end {
+    if pending[i] == 32u8 {
+      if sp1 < 0 {
+        sp1 = i;
+      } else if sp2 < 0 {
+        sp2 = i;
+      } else {
+        return refuse(400u32, lit("bad request line" as *const u8, 16));
+      }
+    }
+  }
+  if sp1 <= 0 || sp2 <= sp1 + 1 || line_end - sp2 != 9 {
+    return refuse(400u32, lit("bad request line" as *const u8, 16));
+  }
+  let http10 = is_word(pending, sp2 + 1, line_end, &lit("HTTP/1.0" as *const u8, 8));
+  if !http10 && !is_word(pending, sp2 + 1, line_end, &lit("HTTP/1.1" as *const u8, 8)) {
+    return refuse(505u32, lit("HTTP version not supported" as *const u8, 26));
+  }
+  let method = slice(pending, 0, sp1);
+  let path = slice(pending, sp1 + 1, sp2);
+  // The headers.
+  let mut close = http10;
+  let mut length = -1;
+  let mut count = 0;
+  let mut at = line_end + 2;
+  while at < end + 2 {
+    let mut stop = at;
+    while pending[stop] != 13u8 {
+      stop = stop + 1;
+    }
+    if stop == at {
+      break;
+    }
+    count = count + 1;
+    if count > max_headers() {
+      return refuse(431u32, lit("too many headers" as *const u8, 16));
+    }
+    let mut colon = -1;
+    for i in at..stop {
+      if colon < 0 && pending[i] == 58u8 {
+        colon = i;
+      }
+    }
+    // A name has no space before its colon (RFC 9112, 5.1), and no line folding.
+    if colon <= at || pending[colon - 1] == 32u8 || pending[colon - 1] == 9u8 || pending[at] == 32u8
+       || pending[at] == 9u8 {
+      return refuse(400u32, lit("bad header" as *const u8, 10));
+    }
+    let mut v0 = colon + 1;
+    while v0 < stop && (pending[v0] == 32u8 || pending[v0] == 9u8) {
+      v0 = v0 + 1;
+    }
+    let mut v1 = stop;
+    while v1 > v0 && (pending[v1 - 1] == 32u8 || pending[v1 - 1] == 9u8) {
+      v1 = v1 - 1;
+    }
+    if is_word(pending, at, colon, &lit("content-length" as *const u8, 14)) {
+      if v1 == v0 || v1 - v0 > 9 {
+        return refuse(400u32, lit("bad Content-Length" as *const u8, 18));
+      }
+      let mut n = 0;
+      for i in v0..v1 {
+        if pending[i] < 48u8 || pending[i] > 57u8 {
+          return refuse(400u32, lit("bad Content-Length" as *const u8, 18));
+        }
+        n = n * 10 + ((pending[i] - 48u8) as i32);
+      }
+      if length >= 0 && length != n {
+        return refuse(400u32, lit("bad Content-Length" as *const u8, 18));
+      }
+      length = n;
+    } else if is_word(pending, at, colon, &lit("transfer-encoding" as *const u8, 17)) {
+      return refuse(400u32, lit("chunked request bodies unsupported" as *const u8, 34));
+    } else if is_word(pending, at, colon, &lit("connection" as *const u8, 10)) {
+      if is_word(pending, v0, v1, &lit("close" as *const u8, 5)) {
+        close = true;
+      } else if is_word(pending, v0, v1, &lit("keep-alive" as *const u8, 10)) {
+        close = false;
+      }
+    }
+    at = stop + 2;
+  }
+  drop_front(pending, end + 4);
+  let mut body = Vec<u8>::new();
+  if length > 0 {
+    if length > max_body() {
+      return refuse(400u32, lit("body must be 1..1048576 bytes" as *const u8, 29));
+    }
+    while pending.len() < length {
+      if read_more(s, pending, 30u64) <= 0 {
+        return Result<HttpRequest, HttpError>::Err(HttpError::Broken);
+      }
+    }
+    body = slice(pending, 0, length);
+    drop_front(pending, length);
+  }
+  return Result<HttpRequest, HttpError>::Ok(HttpRequest { method : method, path : path, body : body, close : close });
+}
+
+fn reason(status : u32) -> Vec<u8> {
+  if status == 200u32 {
+    return lit("OK" as *const u8, 2);
+  }
+  if status == 400u32 {
+    return lit("Bad Request" as *const u8, 11);
+  }
+  if status == 404u32 {
+    return lit("Not Found" as *const u8, 9);
+  }
+  if status == 429u32 {
+    return lit("Too Many Requests" as *const u8, 17);
+  }
+  if status == 431u32 {
+    return lit("Request Header Fields Too Large" as *const u8, 31);
+  }
+  if status == 501u32 {
+    return lit("Not Implemented" as *const u8, 15);
+  }
+  if status == 505u32 {
+    return lit("HTTP Version Not Supported" as *const u8, 26);
+  }
+  return lit("Internal Server Error" as *const u8, 21);
+}
+
+// The status line and the common headers, without the blank line that ends them.
+pub fn head(status : u32, content_type : Vec<u8>) -> Vec<u8> {
+  let mut out = lit("HTTP/1.1 " as *const u8, 9);
+  put_int(&mut out, status as u64);
+  out.push(32u8);
+  put_bytes(&mut out, &reason(status));
+  put_bytes(&mut out, &lit("\r\nServer: glm-vx-front\r\nContent-Type: " as *const u8, 38));
+  put_bytes(&mut out, &content_type);
+  put_bytes(&mut out, &lit("\r\n" as *const u8, 2));
+  return out;
+}
+
+// A JSON reply: the headers, Content-Length and the body.
+pub fn json_reply(status : u32, body : &Vec<u8>, close : bool) -> Vec<u8> {
+  let mut out = head(status, lit("application/json" as *const u8, 16));
+  if status == 429u32 {
+    put_bytes(&mut out, &lit("Retry-After: 1\r\n" as *const u8, 16));
+  }
+  if close {
+    put_bytes(&mut out, &lit("Connection: close\r\n" as *const u8, 19));
+  }
+  put_bytes(&mut out, &lit("Content-Length: " as *const u8, 16));
+  put_int(&mut out, body.len() as u64);
+  put_bytes(&mut out, &lit("\r\n\r\n" as *const u8, 4));
+  put_bytes(&mut out, body);
+  return out;
+}
+
+// {"error": message}
+pub fn error_body(message : &Vec<u8>) -> Vec<u8> {
+  let mut out = lit("{\"error\": " as *const u8, 10);
+  put_string(&mut out, message);
+  out.push(125u8);
+  return out;
+}
+
+pub fn send(s : &mut TcpStream, bytes : &Vec<u8>) -> bool {
+  match s.write_all(bytes) {
+    Result<u64, NetError>::Ok(_n) => { return true; }
+    Result<u64, NetError>::Err(_e) => { return false; }
+  }
+}
