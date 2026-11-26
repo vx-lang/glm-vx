@@ -267,31 +267,31 @@ def scores_fp8_ptx():
 HELPERS = """fn address1(t: &Tensor<f32, [?], Memory::HBM>) on Topology::Device -> i64
 ensures reads_only(t)
 {
-  return mlir!( inputs : (%t = t : memref<?xf32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+  return unsafe { mlir!( inputs : (%t = t : memref<?xf32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
     %p = memref.extract_aligned_pointer_as_index %t : memref<?xf32> -> index
     %r = arith.index_cast %p : index to i64
     macro.yield %r : i64
-  };
+  } };
 }
 
 fn address2(t: &Tensor<f32, [?, ?], Memory::HBM>) on Topology::Device -> i64
 ensures reads_only(t)
 {
-  return mlir!( inputs : (%t = t : memref<?x?xf32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+  return unsafe { mlir!( inputs : (%t = t : memref<?x?xf32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
     %p = memref.extract_aligned_pointer_as_index %t : memref<?x?xf32> -> index
     %r = arith.index_cast %p : index to i64
     macro.yield %r : i64
-  };
+  } };
 }
 
 fn address2i(t: &Tensor<i32, [?, ?], Memory::HBM>) on Topology::Device -> i64
 ensures reads_only(t)
 {
-  return mlir!( inputs : (%t = t : memref<?x?xi32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+  return unsafe { mlir!( inputs : (%t = t : memref<?x?xi32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
     %p = memref.extract_aligned_pointer_as_index %t : memref<?x?xi32> -> index
     %r = arith.index_cast %p : index to i64
     macro.yield %r : i64
-  };
+  } };
 }
 """
 
@@ -310,10 +310,10 @@ ensures writes_only()
 {{
   // One lane's 4 dims at the byte address k to e4m3 codes, with the warp's amax by shfl.sync.bfly.
   // The result is the 4 codes (lower dim in the lower byte) | the scale's bits << 32.
-  return mlir!( inputs : (%k = k : i64), returns : i64, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {{
+  return unsafe {{ mlir!( inputs : (%k = k : i64), returns : i64, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {{
 {key_fp8_mlir()}
     macro.yield %r : i64
-  }};
+  }} }};
 }}
 
 pub fn glm_vx_spawn_index_key_fp8_at(codes: &mut Tensor<i32, [?, ?], Memory::HBM>, scales: &mut Tensor<f32, [?], Memory::HBM>,
@@ -350,12 +350,12 @@ fn index_scores_fp8_warp(k0: i64, k1: i64, k2: i64, k3: i64, s0: i64, s1: i64, s
                          scale: f32) on Topology::Device -> f32
 ensures writes_only()
 {{
-  return mlir!( inputs : (%k0 = k0 : i64, %k1 = k1 : i64, %k2 = k2 : i64, %k3 = k3 : i64, %s0 = s0 : i64, %s1 = s1 : i64,
+  return unsafe {{ mlir!( inputs : (%k0 = k0 : i64, %k1 = k1 : i64, %k2 = k2 : i64, %k3 = k3 : i64, %s0 = s0 : i64, %s1 = s1 : i64,
                           %s2 = s2 : i64, %s3 = s3 : i64, %q = q : i64, %w = w : i64, %sc = scale : f32), returns : f32,
                 dialects : ["llvm"], ensures : [writes_only()]) {{
     %r = llvm.inline_asm has_side_effects "{scores_fp8_ptx()}", "=f,l,l,l,l,l,l,l,l,l,l,f" %k0, %k1, %k2, %k3, %s0, %s1, %s2, %s3, %q, %w, %sc : (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32) -> f32
     macro.yield %r : f32
-  }};
+  }} }};
 }}
 
 pub fn glm_vx_spawn_index_scores_fp8_at(out: &mut Tensor<f32, [?], Memory::HBM>, q: &Tensor<f32, [?, ?], Memory::HBM>,
@@ -406,11 +406,11 @@ def warp_fn(bf16_keys=False):
 fn index_scores_mma_warp(k0: i64, k1: i64, k2: i64, k3: i64, q: i64, w: i64, scale: f32) on Topology::Device -> f32
 ensures writes_only()
 {
-  return mlir!( inputs : (%k0 = k0 : i64, %k1 = k1 : i64, %k2 = k2 : i64, %k3 = k3 : i64, %q = q : i64, %w = w : i64,
+  return unsafe { mlir!( inputs : (%k0 = k0 : i64, %k1 = k1 : i64, %k2 = k2 : i64, %k3 = k3 : i64, %q = q : i64, %w = w : i64,
                           %s = scale : f32), returns : f32, dialects : ["llvm"], ensures : [writes_only()]) {
     %r = llvm.inline_asm has_side_effects "''' + warp_ptx() + '''", "=f,l,l,l,l,l,l,f" %k0, %k1, %k2, %k3, %q, %w, %s : (i64, i64, i64, i64, i64, i64, f32) -> f32
     macro.yield %r : f32
-  };
+  } };
 }'''
     return '''// One lane's part of a warp's 32 scores (gen_index_mma.py's warp_mlir): the score of token first + lane.
 // It reads the keys, q and weights through their addresses and writes no memory.
@@ -419,11 +419,11 @@ ensures writes_only()
 {
   // ld.global.nc loads of the keys, q and weights, cvt.rn.bf16x2.f32 by fptrunc, mma.sync.m16n8k16 bf16,
   // and shfl.sync to add the four lanes of a token and give lane l the score of token first + l.
-  return mlir!( inputs : (%k0 = k0 : i64, %k1 = k1 : i64, %k2 = k2 : i64, %k3 = k3 : i64, %q = q : i64, %w = w : i64,
+  return unsafe { mlir!( inputs : (%k0 = k0 : i64, %k1 = k1 : i64, %k2 = k2 : i64, %k3 = k3 : i64, %q = q : i64, %w = w : i64,
                           %s = scale : f32), returns : f32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {
 ''' + warp_mlir(bf16_keys) + '''
     macro.yield %r : f32
-  };
+  } };
 }'''
 
 
@@ -436,21 +436,21 @@ def source():
 fn address1(t: &Tensor<f32, [?], Memory::HBM>) on Topology::Device -> i64
 ensures reads_only(t)
 {{
-  return mlir!( inputs : (%t = t : memref<?xf32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {{
+  return unsafe {{ mlir!( inputs : (%t = t : memref<?xf32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {{
     %p = memref.extract_aligned_pointer_as_index %t : memref<?xf32> -> index
     %r = arith.index_cast %p : index to i64
     macro.yield %r : i64
-  }};
+  }} }};
 }}
 
 fn address2(t: &Tensor<f32, [?, ?], Memory::HBM>) on Topology::Device -> i64
 ensures reads_only(t)
 {{
-  return mlir!( inputs : (%t = t : memref<?x?xf32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {{
+  return unsafe {{ mlir!( inputs : (%t = t : memref<?x?xf32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {{
     %p = memref.extract_aligned_pointer_as_index %t : memref<?x?xf32> -> index
     %r = arith.index_cast %p : index to i64
     macro.yield %r : i64
-  }};
+  }} }};
 }}
 
 {warp_fn()}
@@ -515,20 +515,20 @@ macro_rules! topk_key32 {
 fn match_any(x: i32) on Topology::Device -> i32
 ensures writes_only()
 {
-  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {
+  return unsafe { mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {
     %all = llvm.mlir.constant(-1 : i32) : i32
     %r = nvvm.match.sync any %all, %x : i32 -> i32
     macro.yield %r : i32
-  };
+  } };
 }
 
 fn popc(x: i32) on Topology::Device -> i32
 ensures writes_only()
 {
-  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
+  return unsafe { mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
     %r = llvm.intr.ctpop(%x) : (i32) -> i32
     macro.yield %r : i32
-  };
+  } };
 }
 """
 
@@ -577,13 +577,13 @@ ensures writes_only()
 {{
   // One lane's 4 dims at the byte address k: ld.global.nc.v4.f32, then two cvt.rn.bf16x2.f32 (the low
   // half of each word is the lower dim). The result is word0 | word1 << 32.
-  return mlir!( inputs : (%k = k : i64), returns : i64, dialects : ["llvm"], ensures : [writes_only()]) {{
+  return unsafe {{ mlir!( inputs : (%k = k : i64), returns : i64, dialects : ["llvm"], ensures : [writes_only()]) {{
     %p = llvm.inttoptr %k : i64 to !llvm.ptr<1>
     %x = llvm.load %p {{alignment = 16 : i64, invariant}} : !llvm.ptr<1> -> vector<4xf32>
     %h = llvm.fptrunc %x : vector<4xf32> to vector<4xbf16>
     %r = llvm.bitcast %h : vector<4xbf16> to i64
     macro.yield %r : i64
-  }};
+  }} }};
 }}
 
 pub fn glm_vx_spawn_index_key_bf16_at(words: &mut Tensor<i32, [?, ?], Memory::HBM>, keys: &Tensor<f32, [?, ?], Memory::HBM>,

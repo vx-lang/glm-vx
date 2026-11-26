@@ -41,31 +41,31 @@
 fn ring_a_address(t: &Tensor<i32, [@RING_A_WORDS@], Memory::SMEM, aligned(1024)>) on Topology::Device -> i64
 ensures reads_only(t)
 {
-  return mlir!( inputs : (%t = t : memref<@RING_A_WORDS@xi32, 3>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+  return unsafe { mlir!( inputs : (%t = t : memref<@RING_A_WORDS@xi32, 3>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
     %p = memref.extract_aligned_pointer_as_index %t : memref<@RING_A_WORDS@xi32, 3> -> index
     %r = arith.index_cast %p : index to i64
     macro.yield %r : i64
-  };
+  } };
 }
 
 fn ring_b_address(t: &Tensor<i32, [@RING_B_WORDS@], Memory::SMEM, aligned(1024)>) on Topology::Device -> i64
 ensures reads_only(t)
 {
-  return mlir!( inputs : (%t = t : memref<@RING_B_WORDS@xi32, 3>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+  return unsafe { mlir!( inputs : (%t = t : memref<@RING_B_WORDS@xi32, 3>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
     %p = memref.extract_aligned_pointer_as_index %t : memref<@RING_B_WORDS@xi32, 3> -> index
     %r = arith.index_cast %p : index to i64
     macro.yield %r : i64
-  };
+  } };
 }
 
 fn bars_address(t: &Tensor<i64, [@BARS@], Memory::SMEM>) on Topology::Device -> i64
 ensures reads_only(t)
 {
-  return mlir!( inputs : (%t = t : memref<@BARS@xi64, 3>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+  return unsafe { mlir!( inputs : (%t = t : memref<@BARS@xi64, 3>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
     %p = memref.extract_aligned_pointer_as_index %t : memref<@BARS@xi64, 3> -> index
     %r = arith.index_cast %p : index to i64
     macro.yield %r : i64
-  };
+  } };
 }
 
 // maps: 256 bytes, the CUtensorMap of A at byte 0 and of B at byte 128 (64-byte aligned each).

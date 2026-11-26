@@ -141,31 +141,31 @@ def slot_ptx():
 HELPERS = """fn address1(t: &Tensor<f32, [?], Memory::HBM>) on Topology::Device -> i64
 ensures reads_only(t)
 {
-  return mlir!( inputs : (%t = t : memref<?xf32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+  return unsafe { mlir!( inputs : (%t = t : memref<?xf32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
     %p = memref.extract_aligned_pointer_as_index %t : memref<?xf32> -> index
     %r = arith.index_cast %p : index to i64
     macro.yield %r : i64
-  };
+  } };
 }
 
 fn address1i(t: &Tensor<i32, [?], Memory::HBM>) on Topology::Device -> i64
 ensures reads_only(t)
 {
-  return mlir!( inputs : (%t = t : memref<?xi32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+  return unsafe { mlir!( inputs : (%t = t : memref<?xi32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
     %p = memref.extract_aligned_pointer_as_index %t : memref<?xi32> -> index
     %r = arith.index_cast %p : index to i64
     macro.yield %r : i64
-  };
+  } };
 }
 
 fn address1u(t: &Tensor<u32, [?], Memory::HBM>) on Topology::Device -> i64
 ensures reads_only(t)
 {
-  return mlir!( inputs : (%t = t : memref<?xi32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+  return unsafe { mlir!( inputs : (%t = t : memref<?xi32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
     %p = memref.extract_aligned_pointer_as_index %t : memref<?xi32> -> index
     %r = arith.index_cast %p : index to i64
     macro.yield %r : i64
-  };
+  } };
 }
 """
 
@@ -192,21 +192,21 @@ def down_source(name='fp8_moe_mma_down_at', head=None, ptx=None):
 fn down_mma_warp(r0: i64, r8: i64, x: i64, ws: i64) on Topology::Device -> f32
 ensures writes_only()
 {{
-  return mlir!( inputs : (%r0 = r0 : i64, %r8 = r8 : i64, %x = x : i64, %ws = ws : i64), returns : f32,
+  return unsafe {{ mlir!( inputs : (%r0 = r0 : i64, %r8 = r8 : i64, %x = x : i64, %ws = ws : i64), returns : f32,
                 dialects : ["llvm"], ensures : [writes_only()]) {{
     %r = llvm.inline_asm has_side_effects "{ptx()}", "=f,l,l,l,l" %r0, %r8, %x, %ws : (i64, i64, i64, i64) -> f32
     macro.yield %r : f32
-  }};
+  }} }};
 }}
 
 fn slot_of_rank_warp(ids: i64, k: i32, rank: i32) on Topology::Device -> i32
 ensures writes_only()
 {{
-  return mlir!( inputs : (%i = ids : i64, %k = k : i32, %r = rank : i32), returns : i32, dialects : ["llvm"],
+  return unsafe {{ mlir!( inputs : (%i = ids : i64, %k = k : i32, %r = rank : i32), returns : i32, dialects : ["llvm"],
                 ensures : [writes_only()]) {{
     %s = llvm.inline_asm has_side_effects "{slot_ptx()}", "=r,l,r,r" %i, %k, %r : (i64, i32, i32) -> i32
     macro.yield %s : i32
-  }};
+  }} }};
 }}
 
 pub fn glm_vx_spawn_{name}(out: &mut Tensor<f32, [?], Memory::HBM>, down: &Tensor<u32, [?], Memory::HBM>,
@@ -399,21 +399,21 @@ def gate_up_source():
 fn slot_of_rank_warp(ids: i64, k: i32, rank: i32) on Topology::Device -> i32
 ensures writes_only()
 {{
-  return mlir!( inputs : (%i = ids : i64, %k = k : i32, %r = rank : i32), returns : i32, dialects : ["llvm"],
+  return unsafe {{ mlir!( inputs : (%i = ids : i64, %k = k : i32, %r = rank : i32), returns : i32, dialects : ["llvm"],
                 ensures : [writes_only()]) {{
     %s = llvm.inline_asm has_side_effects "{slot_ptx()}", "=r,l,r,r" %i, %k, %r : (i64, i32, i32) -> i32
     macro.yield %s : i32
-  }};
+  }} }};
 }}
 
 fn gate_up_mma_warp(g0: i64, g8: i64, u0: i64, u8: i64, x: i64, gs: i64, us: i64) on Topology::Device -> f32
 ensures writes_only()
 {{
-  return mlir!( inputs : (%g0 = g0 : i64, %g8 = g8 : i64, %u0 = u0 : i64, %u8 = u8 : i64, %x = x : i64, %gs = gs : i64,
+  return unsafe {{ mlir!( inputs : (%g0 = g0 : i64, %g8 = g8 : i64, %u0 = u0 : i64, %u8 = u8 : i64, %x = x : i64, %gs = gs : i64,
                           %us = us : i64), returns : f32, dialects : ["llvm"], ensures : [writes_only()]) {{
     %r = llvm.inline_asm has_side_effects "{gate_up16_ptx()}", "=f,l,l,l,l,l,l,l" %g0, %g8, %u0, %u8, %x, %gs, %us : (i64, i64, i64, i64, i64, i64, i64) -> f32
     macro.yield %r : f32
-  }};
+  }} }};
 }}
 
 pub fn glm_vx_spawn_fp8_moe_mma16_gate_up_at(act: &mut Tensor<f32, [?], Memory::HBM>, gate: &Tensor<u32, [?], Memory::HBM>,
@@ -505,12 +505,12 @@ def gate_up_p_source():
     a = text.index('              let mut seg: i64 = 0;')
     b = text.index('            }\n          }\n          part[w][lane] = v;')
     call = ("              // the warp's region of xs, a shared-window address (memref address space 3)\n"
-            f"              let sm: i64 = mlir!( inputs : (%t = &xs : memref<{GU_WARPS}x{region}xi32, 3>), returns : i64,\n"
+            f"              let sm: i64 = unsafe {{ mlir!( inputs : (%t = &xs : memref<{GU_WARPS}x{region}xi32, 3>), returns : i64,\n"
             "                                   dialects : [\"memref\", \"arith\"], ensures : [reads_only(xs)]) {\n"
             f"                %p = memref.extract_aligned_pointer_as_index %t : memref<{GU_WARPS}x{region}xi32, 3> -> index\n"
             "                %r = arith.index_cast %p : index to i64\n"
             "                macro.yield %r : i64\n"
-            "              };\n"
+            "              } };\n"
             f"              v = gate_up_mma_warp(gr, gr + 8 * n, ur, ur + 8 * n, xb, gsb, usb, sm + (w as i64) * {4 * region});\n")
     return text[:a] + call + text[b:]
 

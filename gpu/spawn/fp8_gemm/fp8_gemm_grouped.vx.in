@@ -22,31 +22,31 @@
 fn ring_a_address(t: &Tensor<i32, [@RING_A_WORDS@], Memory::SMEM, aligned(1024)>) on Topology::Device -> i64
 ensures reads_only(t)
 {
-  return mlir!( inputs : (%t = t : memref<@RING_A_WORDS@xi32, 3>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+  return unsafe { mlir!( inputs : (%t = t : memref<@RING_A_WORDS@xi32, 3>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
     %p = memref.extract_aligned_pointer_as_index %t : memref<@RING_A_WORDS@xi32, 3> -> index
     %r = arith.index_cast %p : index to i64
     macro.yield %r : i64
-  };
+  } };
 }
 
 fn ring_b_address(t: &Tensor<i32, [@RING_B_WORDS@], Memory::SMEM, aligned(1024)>) on Topology::Device -> i64
 ensures reads_only(t)
 {
-  return mlir!( inputs : (%t = t : memref<@RING_B_WORDS@xi32, 3>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+  return unsafe { mlir!( inputs : (%t = t : memref<@RING_B_WORDS@xi32, 3>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
     %p = memref.extract_aligned_pointer_as_index %t : memref<@RING_B_WORDS@xi32, 3> -> index
     %r = arith.index_cast %p : index to i64
     macro.yield %r : i64
-  };
+  } };
 }
 
 fn bars_address(t: &Tensor<i64, [@BARS@], Memory::SMEM>) on Topology::Device -> i64
 ensures reads_only(t)
 {
-  return mlir!( inputs : (%t = t : memref<@BARS@xi64, 3>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+  return unsafe { mlir!( inputs : (%t = t : memref<@BARS@xi64, 3>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
     %p = memref.extract_aligned_pointer_as_index %t : memref<@BARS@xi64, 3> -> index
     %r = arith.index_cast %p : index to i64
     macro.yield %r : i64
-  };
+  } };
 }
 
 // Tells LLVM that the second dimension of `$t` is even, so that it can merge the stores of columns
@@ -55,7 +55,7 @@ ensures reads_only(t)
 // check of Vx refuses a block that names all of `$t`.
 macro_rules! even_pitch {
     ($t:ident, $el:ident, $row:ident, $col:ident) => {
-        mlir!( inputs : (%o = $t : memref<?x?x$el>), returns : i32, dialects : ["arith", "memref", "llvm"],
+        unsafe { mlir!( inputs : (%o = $t : memref<?x?x$el>), returns : i32, dialects : ["arith", "memref", "llvm"],
                ensures : [writes_only($t[$row][$col])]) {
           %c1 = arith.constant 1 : index
           %n = memref.dim %o, %c1 : memref<?x?x$el>
@@ -65,7 +65,7 @@ macro_rules! even_pitch {
           llvm.intr.assume %e : i1
           %z = arith.constant 0 : i32
           macro.yield %z : i32
-        }
+        } }
     };
 }
 

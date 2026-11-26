@@ -37,11 +37,11 @@ fn match_any(x: i32) on Topology::Device -> i32
 ensures writes_only()
 {
   // match.any.sync.b32 with all 32 lanes in the mask.
-  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {
+  return unsafe { mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {
     %m = llvm.mlir.constant(-1 : i32) : i32
     %r = nvvm.match.sync any %m, %x : i32 -> i32
     macro.yield %r : i32
-  };
+  } };
 }
 
 // The number of lanes of this warp with p != 0 (vote.ballot, popc); all 32 lanes must call it.
@@ -49,30 +49,30 @@ fn count_lanes(p: i32) on Topology::Device -> i32
 ensures writes_only()
 {
   // setp.ne.s32, vote.sync.ballot.b32 with all 32 lanes in the mask, then popc.b32.
-  return mlir!( inputs : (%p = p : i32), returns : i32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {
+  return unsafe { mlir!( inputs : (%p = p : i32), returns : i32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {
     %z = llvm.mlir.constant(0 : i32) : i32
     %m = llvm.mlir.constant(-1 : i32) : i32
     %q = llvm.icmp "ne" %p, %z : i32
     %b = nvvm.vote.sync ballot %m, %q -> i32
     %r = llvm.intr.ctpop(%b) : (i32) -> i32
     macro.yield %r : i32
-  };
+  } };
 }
 
 fn popc(x: i32) on Topology::Device -> i32
 ensures writes_only()
 {
-  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
+  return unsafe { mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
     %r = llvm.intr.ctpop(%x) : (i32) -> i32
     macro.yield %r : i32
-  };
+  } };
 }
 
 // v plus the v of the lane o above (shfl.sync.down.b32, clamp 31, all 32 lanes), if that lane is in the warp.
 fn shfl_down_add(v: i32, o: i32) on Topology::Device -> i32
 ensures writes_only()
 {
-  return mlir!( inputs : (%v = v : i32, %o = o : i32), returns : i32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {
+  return unsafe { mlir!( inputs : (%v = v : i32, %o = o : i32), returns : i32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {
     %m = llvm.mlir.constant(-1 : i32) : i32
     %c = llvm.mlir.constant(31 : i32) : i32
     %s = nvvm.shfl.sync down %m, %v, %o, %c {return_value_and_is_valid} : i32 -> !llvm.struct<(i32, i1)>
@@ -81,7 +81,7 @@ ensures writes_only()
     %a = llvm.add %v, %t : i32
     %r = llvm.select %p, %a, %v : i1, i32
     macro.yield %r : i32
-  };
+  } };
 }
 
 // The sum of x over this lane and the lanes above it in the warp (shfl.sync.down); all 32 lanes must
@@ -96,7 +96,7 @@ ensures writes_only()
 fn shfl_up_add(v: i32, o: i32) on Topology::Device -> i32
 ensures writes_only()
 {
-  return mlir!( inputs : (%v = v : i32, %o = o : i32), returns : i32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {
+  return unsafe { mlir!( inputs : (%v = v : i32, %o = o : i32), returns : i32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {
     %m = llvm.mlir.constant(-1 : i32) : i32
     %c = llvm.mlir.constant(0 : i32) : i32
     %s = nvvm.shfl.sync up %m, %v, %o, %c {return_value_and_is_valid} : i32 -> !llvm.struct<(i32, i1)>
@@ -105,7 +105,7 @@ ensures writes_only()
     %a = llvm.add %v, %t : i32
     %r = llvm.select %p, %a, %v : i1, i32
     macro.yield %r : i32
-  };
+  } };
 }
 
 // The sum of x over this lane and the lanes below it in the warp (shfl.sync.up); all 32 lanes must

@@ -16,21 +16,21 @@
 fn address1i(t: &Tensor<i32, [?], Memory::HBM>) on Topology::Device -> i64
 ensures reads_only(t)
 {
-  return mlir!( inputs : (%t = t : memref<?xi32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+  return unsafe { mlir!( inputs : (%t = t : memref<?xi32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
     %p = memref.extract_aligned_pointer_as_index %t : memref<?xi32> -> index
     %r = arith.index_cast %p : index to i64
     macro.yield %r : i64
-  };
+  } };
 }
 
 fn slot_of_rank_warp(ids: i64, k: i32, rank: i32) on Topology::Device -> i32
 ensures writes_only()
 {
-  return mlir!( inputs : (%i = ids : i64, %k = k : i32, %r = rank : i32), returns : i32, dialects : ["llvm"],
+  return unsafe { mlir!( inputs : (%i = ids : i64, %k = k : i32, %r = rank : i32), returns : i32, dialects : ["llvm"],
                 ensures : [writes_only()]) {
     %s = llvm.inline_asm has_side_effects "{ .reg .b32 l, id, other, r, ball; .reg .b64 addr; .reg .pred inr, lt, hit; mov.u32 l, %laneid; mov.u32 id, 2147483647; setp.lt.s32 inr, l, $2; mul.wide.u32 addr, l, 4; add.s64 addr, addr, $1; @inr ld.global.nc.u32 id, [addr]; mov.u32 r, 0; shfl.sync.idx.b32 other, id, 0, 31, -1; setp.lt.s32 lt, other, id; @lt add.u32 r, r, 1; shfl.sync.idx.b32 other, id, 1, 31, -1; setp.lt.s32 lt, other, id; @lt add.u32 r, r, 1; shfl.sync.idx.b32 other, id, 2, 31, -1; setp.lt.s32 lt, other, id; @lt add.u32 r, r, 1; shfl.sync.idx.b32 other, id, 3, 31, -1; setp.lt.s32 lt, other, id; @lt add.u32 r, r, 1; shfl.sync.idx.b32 other, id, 4, 31, -1; setp.lt.s32 lt, other, id; @lt add.u32 r, r, 1; shfl.sync.idx.b32 other, id, 5, 31, -1; setp.lt.s32 lt, other, id; @lt add.u32 r, r, 1; shfl.sync.idx.b32 other, id, 6, 31, -1; setp.lt.s32 lt, other, id; @lt add.u32 r, r, 1; shfl.sync.idx.b32 other, id, 7, 31, -1; setp.lt.s32 lt, other, id; @lt add.u32 r, r, 1; shfl.sync.idx.b32 other, id, 8, 31, -1; setp.lt.s32 lt, other, id; @lt add.u32 r, r, 1; setp.eq.u32 hit, r, $3; and.pred hit, hit, inr; vote.sync.ballot.b32 ball, hit, -1; bfind.u32 $0, ball; }", "=r,l,r,r" %i, %k, %r : (i64, i32, i32) -> i32
     macro.yield %s : i32
-  };
+  } };
 }
 
 pub fn glm_vx_spawn_fp8_moe_vxmm16_down_at(out: &mut Tensor<f32, [?], Memory::HBM>, down: &Tensor<f8e4m3, [?, 16, 256], Memory::HBM>,

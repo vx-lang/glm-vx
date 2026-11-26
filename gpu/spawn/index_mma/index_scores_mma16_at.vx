@@ -7,31 +7,31 @@
 fn address1(t: &Tensor<f32, [?], Memory::HBM>) on Topology::Device -> i64
 ensures reads_only(t)
 {
-  return mlir!( inputs : (%t = t : memref<?xf32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+  return unsafe { mlir!( inputs : (%t = t : memref<?xf32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
     %p = memref.extract_aligned_pointer_as_index %t : memref<?xf32> -> index
     %r = arith.index_cast %p : index to i64
     macro.yield %r : i64
-  };
+  } };
 }
 
 fn address2i(t: &Tensor<i32, [?, ?], Memory::HBM>) on Topology::Device -> i64
 ensures reads_only(t)
 {
-  return mlir!( inputs : (%t = t : memref<?x?xi32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+  return unsafe { mlir!( inputs : (%t = t : memref<?x?xi32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
     %p = memref.extract_aligned_pointer_as_index %t : memref<?x?xi32> -> index
     %r = arith.index_cast %p : index to i64
     macro.yield %r : i64
-  };
+  } };
 }
 
 fn address2(t: &Tensor<f32, [?, ?], Memory::HBM>) on Topology::Device -> i64
 ensures reads_only(t)
 {
-  return mlir!( inputs : (%t = t : memref<?x?xf32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+  return unsafe { mlir!( inputs : (%t = t : memref<?x?xf32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
     %p = memref.extract_aligned_pointer_as_index %t : memref<?x?xf32> -> index
     %r = arith.index_cast %p : index to i64
     macro.yield %r : i64
-  };
+  } };
 }
 
 // One lane's part of a warp's 32 scores (gen_index_mma.py's warp_mlir): the score of token first + lane.
@@ -41,7 +41,7 @@ ensures writes_only()
 {
   // ld.global.nc loads of the keys, q and weights, cvt.rn.bf16x2.f32 by fptrunc, mma.sync.m16n8k16 bf16,
   // and shfl.sync to add the four lanes of a token and give lane l the score of token first + l.
-  return mlir!( inputs : (%k0 = k0 : i64, %k1 = k1 : i64, %k2 = k2 : i64, %k3 = k3 : i64, %q = q : i64, %w = w : i64,
+  return unsafe { mlir!( inputs : (%k0 = k0 : i64, %k1 = k1 : i64, %k2 = k2 : i64, %k3 = k3 : i64, %q = q : i64, %w = w : i64,
                           %s = scale : f32), returns : f32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {
     %zero = llvm.mlir.constant(0.0 : f32) : f32
     %all = llvm.mlir.constant(-1 : i32) : i32
@@ -876,7 +876,7 @@ ensures writes_only()
     %q3 = llvm.icmp "eq" %row, %i3 : i32
     %r = llvm.select %q3, %sh3, %r2 : i1, f32
     macro.yield %r : f32
-  };
+  } };
 }
 
 pub fn glm_vx_spawn_index_scores_mma16_at(out: &mut Tensor<f32, [?], Memory::HBM>, q: &Tensor<f32, [?, ?], Memory::HBM>,

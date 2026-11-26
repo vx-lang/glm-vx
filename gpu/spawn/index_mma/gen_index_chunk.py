@@ -141,21 +141,21 @@ def copy_mlir():
 ADDRESS_HELPERS = """fn address2(t: &Tensor<f32, [?, ?], Memory::HBM>) on Topology::Device -> i64
 ensures reads_only(t)
 {
-  return mlir!( inputs : (%t = t : memref<?x?xf32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+  return unsafe { mlir!( inputs : (%t = t : memref<?x?xf32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
     %p = memref.extract_aligned_pointer_as_index %t : memref<?x?xf32> -> index
     %r = arith.index_cast %p : index to i64
     macro.yield %r : i64
-  };
+  } };
 }
 
 fn address2i(t: &Tensor<i32, [?, ?], Memory::HBM>) on Topology::Device -> i64
 ensures reads_only(t)
 {
-  return mlir!( inputs : (%t = t : memref<?x?xi32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+  return unsafe { mlir!( inputs : (%t = t : memref<?x?xi32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
     %p = memref.extract_aligned_pointer_as_index %t : memref<?x?xi32> -> index
     %r = arith.index_cast %p : index to i64
     macro.yield %r : i64
-  };
+  } };
 }
 """
 
@@ -172,13 +172,13 @@ ensures writes_only()
 {{
   // 4 dims of q at the byte address x: ld.global.nc.v4.f32, then two cvt.rn.bf16x2.f32 (the low half of
   // each word is the lower dim). The result is word0 | word1 << 32.
-  return mlir!( inputs : (%x = x : i64), returns : i64, dialects : ["llvm"], ensures : [writes_only()]) {{
+  return unsafe {{ mlir!( inputs : (%x = x : i64), returns : i64, dialects : ["llvm"], ensures : [writes_only()]) {{
     %p = llvm.inttoptr %x : i64 to !llvm.ptr<1>
     %v = llvm.load %p {{alignment = 16 : i64, invariant}} : !llvm.ptr<1> -> vector<4xf32>
     %h = llvm.fptrunc %v : vector<4xf32> to vector<4xbf16>
     %r = llvm.bitcast %h : vector<4xbf16> to i64
     macro.yield %r : i64
-  }};
+  }} }};
 }}
 
 pub fn glm_vx_spawn_index_q_bf16_at(words: &mut Tensor<i32, [?], Memory::HBM>, q: &Tensor<f32, [?, ?], Memory::HBM>,
@@ -232,11 +232,11 @@ def scores_source(hist=False):
 fn address_shared(t: &Tensor<i32, [{2 * BUFFER}], Memory::SMEM>) on Topology::Device -> i64
 ensures reads_only(t)
 {{
-  return mlir!( inputs : (%t = t : memref<{2 * BUFFER}xi32, 3>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {{
+  return unsafe {{ mlir!( inputs : (%t = t : memref<{2 * BUFFER}xi32, 3>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {{
     %p = memref.extract_aligned_pointer_as_index %t : memref<{2 * BUFFER}xi32, 3> -> index
     %r = arith.index_cast %p : index to i64
     macro.yield %r : i64
-  }};
+  }} }};
 }}
 {helpers}
 // Two words of a key row (an 8-byte load); the first in the low half.
@@ -245,13 +245,13 @@ ensures writes_only()
 {{
   // An invariant 8-byte load from a global pointer: ld.global.nc.v2.b32. The freeze keeps LLVM from
   // making it one 64-bit load.
-  return mlir!( inputs : (%x = at : i64), returns : i64, dialects : ["llvm"], ensures : [writes_only()]) {{
+  return unsafe {{ mlir!( inputs : (%x = at : i64), returns : i64, dialects : ["llvm"], ensures : [writes_only()]) {{
     %p = llvm.inttoptr %x : i64 to !llvm.ptr<1>
     %v = llvm.load %p {{alignment = 8 : i64, invariant}} : !llvm.ptr<1> -> vector<2xi32>
     %f = llvm.freeze %v : vector<2xi32>
     %r = llvm.bitcast %f : vector<2xi32> to i64
     macro.yield %r : i64
-  }};
+  }} }};
 }}
 
 // One lane's score for one query (gen_index_chunk.py's query_mlir), from the A fragments in `$a` and the
@@ -279,24 +279,24 @@ macro_rules! index_chunk_query {{
 fn index_chunk_copy(shared: i64, global: i64) on Topology::Device -> i32
 ensures writes_only()
 {{
-  return mlir!( inputs : (%s = shared : i64, %g = global : i64), returns : i32, dialects : ["llvm", "nvvm", "arith"], ensures : [writes_only()]) {{
+  return unsafe {{ mlir!( inputs : (%s = shared : i64, %g = global : i64), returns : i32, dialects : ["llvm", "nvvm", "arith"], ensures : [writes_only()]) {{
 {copy_mlir()}
     %z = arith.constant 0 : i32
     macro.yield %z : i32
-  }};
+  }} }};
 }}
 
 // Waits for this thread's copies, then for the block (named barrier 1, all {THREADS} threads).
 fn index_chunk_wait(x: i32) on Topology::Device -> i32
 ensures writes_only()
 {{
-  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {{
+  return unsafe {{ mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {{
     %id = llvm.mlir.constant(1 : i32) : i32
     %n = llvm.mlir.constant({THREADS} : i32) : i32
     nvvm.cp.async.wait.group 0
     nvvm.barrier id = %id number_of_threads = %n
     macro.yield %x : i32
-  }};
+  }} }};
 }}
 
 pub fn glm_vx_spawn_{name}(out: &mut Tensor<f32, [?, ?], Memory::HBM>,{hist_param}
@@ -383,20 +383,20 @@ macro_rules! topk_key32 {
 fn match_any(x: i32) on Topology::Device -> i32
 ensures writes_only()
 {
-  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {
+  return unsafe { mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {
     %all = llvm.mlir.constant(-1 : i32) : i32
     %r = nvvm.match.sync any %all, %x : i32 -> i32
     macro.yield %r : i32
-  };
+  } };
 }
 
 fn popc(x: i32) on Topology::Device -> i32
 ensures writes_only()
 {
-  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
+  return unsafe { mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
     %r = llvm.intr.ctpop(%x) : (i32) -> i32
     macro.yield %r : i32
-  };
+  } };
 }
 """
 

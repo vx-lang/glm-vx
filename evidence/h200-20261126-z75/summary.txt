@@ -1,0 +1,8 @@
+gpu/build.sh rc=0
+spawn kernels that failed: none
+fp8_gemm rc=0 
+ptx: 150, W1037 0
+ptx-diff: same 131, only assert messages 18, code changed 1, new only 0
+code changed: spawn/moe_mma/fp8_moe_vxmm16_down_at.ptx
+gpu: 04:11:06
+glm-tests: rc=0 04:17:00: 502 passed, 7 skipped, 1 xfailed in 354.15s (0:05:54)

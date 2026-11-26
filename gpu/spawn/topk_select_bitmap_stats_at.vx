@@ -42,19 +42,19 @@ macro_rules! topk_key32 {
 fn ones(x: u32) on Topology::Device -> u32
 ensures writes_only()
 {
-  return mlir!( inputs : (%x = x : i32), returns : u32, dialects : ["math"], ensures : [writes_only()]) {
+  return unsafe { mlir!( inputs : (%x = x : i32), returns : u32, dialects : ["math"], ensures : [writes_only()]) {
     %r = math.ctpop %x : i32
     macro.yield %r : i32
-  };
+  } };
 }
 
 fn low_zeros(x: u32) on Topology::Device -> u32
 ensures writes_only()
 {
-  return mlir!( inputs : (%x = x : i32), returns : u32, dialects : ["math"], ensures : [writes_only()]) {
+  return unsafe { mlir!( inputs : (%x = x : i32), returns : u32, dialects : ["math"], ensures : [writes_only()]) {
     %r = math.cttz %x : i32
     macro.yield %r : i32
-  };
+  } };
 }
 
 // Sets position p's bit in a bitmap of 2048 u32 words (p < 65536, so the mask changes nothing but lets the
@@ -71,10 +71,10 @@ macro_rules! set_bit {
 fn stop_kernel(x: i32) on Topology::Device -> i32
 ensures writes_only()
 {
-  return mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
+  return unsafe { mlir!( inputs : (%x = x : i32), returns : i32, dialects : ["llvm"], ensures : [writes_only()]) {
     llvm.intr.trap
     macro.yield %x : i32
-  };
+  } };
 }
 
 // Sums of 32 counts a[$base + j], over j > $t or j < $t, with every load before the adds: the 32 loads
