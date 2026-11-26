@@ -1,0 +1,2 @@
+bench-glmvx-r2-glmvx-W1-vllm ok 104s
+bench-glmvx-r2-glmvx-W3-vllm ok 527s

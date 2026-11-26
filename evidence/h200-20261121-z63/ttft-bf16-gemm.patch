@@ -1,0 +1,480 @@
+diff --git a/gpu/cublaslt.py b/gpu/cublaslt.py
+index 2cdb5ba..29573da 100644
+--- a/gpu/cublaslt.py
++++ b/gpu/cublaslt.py
+@@ -18,6 +18,10 @@ Either way ``out`` holds, for each token, its n outputs contiguously when m == 1
+ library accepts, and how fast, is a GPU question: gpu/test_cublaslt_hardware.py and
+ ``validation/matvec_profile.py --cublaslt-orientation`` answer it. Not a performance claim.
+ 
++``Bf16Matmul`` is the plain bfloat16 one for the checkpoint's BF16 Linears over prefill_chunk's rows (the router's
++gate and the indexer's weights_proj): bfloat16 x and W on the tensor cores, float32 sums and out, SGLang's
++linear_bf16_fp32 / ``torch.mm(x, W.t(), out_dtype=torch.float32)`` for the same two.
++
+ Hopper's block scales need cuBLASLt 12.9 or later; load_library skips older ones (CUDA 12.8 images
+ ship 12.8). Where the system's is older, the pip wheel works: ``pip install nvidia-cublas`` (CUDA 13,
+ driver 580+) or ``nvidia-cublas-cu12`` (12.9), found under the ``nvidia`` package as torch keeps it.
+@@ -144,7 +148,66 @@ class CublasLt:
+             self.handle = _P()
+ 
+ 
+-class Fp8BlockMatmul:
++class _LtMatmul:
++    """What a cuBLASLt matmul owns: its descriptor and layouts (destroyed by close), a workspace and one algorithm."""
++    def _workspace(self, workspace, workspace_bytes):
++        # workspace: a uint8 tensor to use instead of one of workspace_bytes of its own, shared by matmuls
++        # that run one after another on one stream (ResidentGLM.prefill_chunk's many shapes).
++        if workspace is not None:
++            self.workspace, self.workspace_bytes = workspace, int(np.prod(workspace.shape))
++        else:
++            self.workspace_bytes = workspace_bytes
++            self.workspace = self.lt.context.tensor((max(workspace_bytes, 1),), 'uint8')
++
++    def _pick(self, what):
++        lib, check = self.lt.lib, self.lt._check
++        pref = self._make(lib.cublasLtMatmulPreferenceCreate, 'cublasLtMatmulPreferenceCreate',
++                          lib.cublasLtMatmulPreferenceDestroy)
++        size = _U64(self.workspace_bytes)
++        check(lib.cublasLtMatmulPreferenceSetAttribute(pref, PREF_MAX_WORKSPACE_BYTES, C.byref(size), C.sizeof(size)),
++              'cublasLtMatmulPreferenceSetAttribute')
++        self.heuristic, found = _Heuristic(), C.c_int(0)
++        with self.lt.context._activate():
++            check(lib.cublasLtMatmulAlgoGetHeuristic(self.lt.handle, self.desc, self.a, self.b, self.c, self.c, pref, 1,
++                                                     C.byref(self.heuristic), C.byref(found)),
++                  f'cublasLtMatmulAlgoGetHeuristic ({what})')
++        if found.value < 1:
++            raise CublasLtUnavailable(f'no cuBLASLt algorithm for {what}')
++        self._alpha, self._beta = C.c_float(1.0), C.c_float(0.0)
++
++    def _layout(self, dtype, rows, cols, ld):
++        lib = self.lt.lib
++        return self._make(lib.cublasLtMatrixLayoutCreate, 'cublasLtMatrixLayoutCreate', lib.cublasLtMatrixLayoutDestroy,
++                          dtype, rows, cols, ld)
++
++    def _matmul(self, a, b, out, stream):
++        lib = self.lt.lib
++        with self.lt.context._activate():
++            self.lt._check(lib.cublasLtMatmul(self.lt.handle, self.desc, C.byref(self._alpha), _P(a.pointer), self.a,
++                                              _P(b.pointer), self.b, C.byref(self._beta), _P(out.pointer), self.c,
++                                              _P(out.pointer), self.c, C.byref(self.heuristic.algo),
++                                              _P(self.workspace.pointer), self.workspace_bytes,
++                                              _P(stream.handle.value if stream is not None else None)),
++                           'cublasLtMatmul')
++        return out
++
++    def _make(self, create, what, destroy, *args):
++        handle = _P()
++        self.lt._check(create(C.byref(handle), *args), what)
++        self._handles.append((destroy, handle))
++        return handle
++
++    def _set(self, attribute, value):
++        self.lt._check(self.lt.lib.cublasLtMatmulDescSetAttribute(self.desc, attribute, C.byref(value), C.sizeof(value)),
++                       f'cublasLtMatmulDescSetAttribute({attribute})')
++
++    def close(self):
++        while self._handles:
++            destroy, handle = self._handles.pop()
++            destroy(handle)
++
++
++class Fp8BlockMatmul(_LtMatmul):
+     """out = dequant(x) @ dequant(W)^T for m tokens: x [mp, k] e4m3 codes with VEC128 scales
+     [k/128, mp] (gpu/fp8_quant.vx's layout, scale_rows mp), W [n, k] e4m3 codes with
+     pack_weight_scales' 128x128 block scales. float32 accumulation; out float32, or bfloat16 bits in a
+@@ -168,7 +231,7 @@ class Fp8BlockMatmul:
+         self.lt, self.m, self.n, self.k = lt, m, n, k
+         self.padded_m = mp = -(-m // 4) * 4
+         self.out_dtype, self.orientation = out_dtype, orientation
+-        lib, check = lt.lib, lt._check
++        lib = lt.lib
+         self._handles = []
+         self.desc = self._make(lib.cublasLtMatmulDescCreate, 'cublasLtMatmulDescCreate', lib.cublasLtMatmulDescDestroy,
+                                CUBLAS_COMPUTE_32F, CUDA_R_32F)
+@@ -177,8 +240,7 @@ class Fp8BlockMatmul:
+         self._set(DESC_TRANSB, C.c_int(CUBLAS_OP_N))
+         self._set(DESC_A_SCALE_MODE, C.c_int(SCALE_BLK128x128_32F if weights_a else SCALE_VEC128_32F))
+         self._set(DESC_B_SCALE_MODE, C.c_int(SCALE_VEC128_32F if weights_a else SCALE_BLK128x128_32F))
+-        layout = lambda dtype, rows, cols, ld: self._make(lib.cublasLtMatrixLayoutCreate, 'cublasLtMatrixLayoutCreate',
+-                                                          lib.cublasLtMatrixLayoutDestroy, dtype, rows, cols, ld)
++        layout = self._layout
+         out_type = _OUT_TYPES[out_dtype]
+         if weights_a:  # D[n, m] = W^T(k x n)^T x(k x m)
+             self.a = layout(CUDA_R_8F_E4M3, k, n, k)
+@@ -188,40 +250,12 @@ class Fp8BlockMatmul:
+             self.a = layout(CUDA_R_8F_E4M3, k, mp, k)
+             self.b = layout(CUDA_R_8F_E4M3, k, n, k)
+             self.c = layout(out_type, mp, n, mp)
+-        # workspace: a uint8 tensor to use instead of one of workspace_bytes of its own, shared by matmuls
+-        # that run one after another on one stream (ResidentGLM.prefill_chunk's many shapes).
+-        if workspace is not None:
+-            self.workspace, self.workspace_bytes = workspace, int(np.prod(workspace.shape))
+-        else:
+-            self.workspace_bytes = workspace_bytes
+-            self.workspace = lt.context.tensor((max(workspace_bytes, 1),), 'uint8')
++        self._workspace(workspace, workspace_bytes)
+         # The heuristic refuses VEC128 / BLK128x128 modes without scale pointers ("requires a custom
+         # pointer"); any device address stands in until __call__ sets the real ones.
+         self._set(DESC_A_SCALE_POINTER, _P(self.workspace.pointer))
+         self._set(DESC_B_SCALE_POINTER, _P(self.workspace.pointer))
+-        pref =self._make(lib.cublasLtMatmulPreferenceCreate, 'cublasLtMatmulPreferenceCreate',
+-                          lib.cublasLtMatmulPreferenceDestroy)
+-        size = _U64(workspace_bytes)
+-        check(lib.cublasLtMatmulPreferenceSetAttribute(pref, PREF_MAX_WORKSPACE_BYTES, C.byref(size), C.sizeof(size)),
+-              'cublasLtMatmulPreferenceSetAttribute')
+-        self.heuristic, found = _Heuristic(), C.c_int(0)
+-        with lt.context._activate():
+-            check(lib.cublasLtMatmulAlgoGetHeuristic(lt.handle, self.desc, self.a, self.b, self.c, self.c, pref, 1,
+-                                                     C.byref(self.heuristic), C.byref(found)),
+-                  f'cublasLtMatmulAlgoGetHeuristic (m={m}, n={n}, k={k}, {orientation}, {out_dtype})')
+-        if found.value < 1:
+-            raise CublasLtUnavailable(f'no cuBLASLt algorithm for m={m}, n={n}, k={k}, {orientation}, {out_dtype}')
+-        self._alpha, self._beta = C.c_float(1.0), C.c_float(0.0)
+-
+-    def _make(self, create, what, destroy, *args):
+-        handle = _P()
+-        self.lt._check(create(C.byref(handle), *args), what)
+-        self._handles.append((destroy, handle))
+-        return handle
+-
+-    def _set(self, attribute, value):
+-        self.lt._check(self.lt.lib.cublasLtMatmulDescSetAttribute(self.desc, attribute, C.byref(value), C.sizeof(value)),
+-                       f'cublasLtMatmulDescSetAttribute({attribute})')
++        self._pick(f'm={m}, n={n}, k={k}, {orientation}, {out_dtype}')
+ 
+     def __call__(self, out, x_codes, x_scales, w_codes, w_scales, stream=None):
+         m, n, k = self.padded_m, self.n, self.k
+@@ -237,17 +271,35 @@ class Fp8BlockMatmul:
+         a_scale, b_scale = (w_scales, x_scales) if weights_a else (x_scales, w_scales)
+         self._set(DESC_A_SCALE_POINTER, _P(a_scale.pointer))
+         self._set(DESC_B_SCALE_POINTER, _P(b_scale.pointer))
+-        lib = self.lt.lib
+-        with self.lt.context._activate():
+-            self.lt._check(lib.cublasLtMatmul(self.lt.handle, self.desc, C.byref(self._alpha), _P(a.pointer), self.a,
+-                                              _P(b.pointer), self.b, C.byref(self._beta), _P(out.pointer), self.c,
+-                                              _P(out.pointer), self.c, C.byref(self.heuristic.algo),
+-                                              _P(self.workspace.pointer), self.workspace_bytes,
+-                                              _P(stream.handle.value if stream is not None else None)),
+-                           'cublasLtMatmul')
+-        return out
++        return self._matmul(a, b, out, stream)
+ 
+-    def close(self):
+-        while self._handles:
+-            destroy, handle = self._handles.pop()
+-            destroy(handle)
++
++class Bf16Matmul(_LtMatmul):
++    """out = x @ W^T for m tokens: x [mp, k] and W [n, k] bfloat16 bits (uint16 tensors), float32 sums, out float32
++    [mp, n] (D column major [n, mp], ld n: token i's n outputs are out[i*n:(i+1)*n], Fp8BlockMatmul's 'weights_a').
++    mp (``padded_m``) is m rounded up to a multiple of 4, as Fp8BlockMatmul's: rows m..mp-1 of x are multiplied
++    too and their outputs are not used. k must be a multiple of 8 (16-byte rows)."""
++    def __init__(self, lt, m, n, k, *, workspace_bytes=32 << 20, workspace=None):
++        if k % 8:
++            raise ValueError('k must be a multiple of 8')
++        self.lt, self.m, self.n, self.k = lt, m, n, k
++        self.padded_m = mp = -(-m // 4) * 4
++        lib = lt.lib
++        self._handles = []
++        self.desc = self._make(lib.cublasLtMatmulDescCreate, 'cublasLtMatmulDescCreate', lib.cublasLtMatmulDescDestroy,
++                               CUBLAS_COMPUTE_32F, CUDA_R_32F)
++        self._set(DESC_TRANSA, C.c_int(CUBLAS_OP_T))
++        self._set(DESC_TRANSB, C.c_int(CUBLAS_OP_N))
++        self.a = self._layout(CUDA_R_16BF, k, n, k)  # D[n, mp] = W^T(k x n)^T x(k x mp)
++        self.b = self._layout(CUDA_R_16BF, k, mp, k)
++        self.c = self._layout(CUDA_R_32F, n, mp, n)
++        self._workspace(workspace, workspace_bytes)
++        self._pick(f'm={m}, n={n}, k={k}, bf16')
++
++    def __call__(self, out, x, w, stream=None):
++        m, n, k = self.padded_m, self.n, self.k
++        expect = {'out': (out, m * n, 'float32'), 'x': (x, m * k, 'uint16'), 'w': (w, n * k, 'uint16')}
++        for name, (tensor, size, dtype) in expect.items():
++            if tensor.dtype != dtype or int(np.prod(tensor.shape)) != size:
++                raise ValueError(f'{name}: want {size} {dtype}, got {tensor.shape} {tensor.dtype}')
++        return self._matmul(w, x, out, stream)
+diff --git a/gpu/resident.py b/gpu/resident.py
+index 9190b19..5466175 100644
+--- a/gpu/resident.py
++++ b/gpu/resident.py
+@@ -2374,8 +2374,8 @@ class ResidentGLM:
+         forward() returns for the last one (logits False, True or 'greedy').
+ 
+         Each row-wise step runs once over the chunk's rows: the RMSNorms, the residual adds, SwiGLU, and
+-        the Linears (_prefill_linear: with prefill_gemm='cublaslt' cuBLASLt's block-FP8 matmul, each row's
+-        _linear otherwise). Each token's attention (its cache rows, the indexer, MLA) and routed experts
++        the Linears (_prefill_linear: with prefill_gemm='cublaslt' cuBLASLt's block-FP8 matmul, or its bfloat16
++        one for the BF16 Linears, each row's _linear otherwise). Each token's attention (its cache rows, the indexer, MLA) and routed experts
+         still run one token at a time, in order, with forward()'s kernels, so token i sees the cache rows
+         of the tokens before it. Under tensor parallelism the sums after o_proj and the FFN run over the
+         rows: one NCCL all-reduce (prefill_sum='nccl', the same bits on every rank) or each row's _tp_sum
+@@ -2384,7 +2384,8 @@ class ResidentGLM:
+         With prefill_gemm='rows' and prefill_sum='rows', and forward() on its plain kernels (no fuse_glue,
+         fp8_kernels='hand'), the caches and logits are forward()'s bit for bit
+         (gpu/test_resident_prefill.py). cuBLASLt quantizes the Linears' inputs to e4m3 per 128 columns, as
+-        SGLang's block-FP8 prefill does: close to forward(), not equal."""
++        SGLang's block-FP8 prefill does, and rounds the BF16 Linears' inputs (the router's gate, the indexer's
++        weights_proj) to bfloat16, as SGLang's bfloat16 rows do: close to forward(), not equal."""
+         m, c = self.model, self.config
+         if self._closed:
+             raise RuntimeError('ResidentGLM is closed')
+@@ -2523,7 +2524,8 @@ class ResidentGLM:
+ 
+     def _prefill_linear(self, prefix, x, out, count):
+         """out[i] = W x[i] for the first count rows (no bias): cuBLASLt with prefill_gemm='cublaslt' for an
+-        FP8 Linear whose input width is a multiple of 128, else _linear a row."""
++        FP8 Linear whose input width is a multiple of 128 or a BF16 one whose width is a multiple of 8 (the
++        indexer's weights_proj), else _linear a row."""
+         if bool(self.config.get('attention_bias', False)) and prefix.endswith(('q_a_proj', 'kv_a_proj_with_mqa', 'o_proj')):
+             raise NotImplementedError('prefill_chunk does not add attention biases yet')
+         rows, cols = out.shape[1], x.shape[1]
+@@ -2532,6 +2534,11 @@ class ResidentGLM:
+             if tuple(shape) != (rows, cols):
+                 raise ValueError(f'{prefix}: FP8 weight is {shape[0]}x{shape[1]}, got x [{cols}] -> out [{rows}]')
+             return self._prefill_cublaslt(prefix, codes, rows, cols, x, out, count)
++        if self.prefill_gemm == 'cublaslt' and self._format(prefix) == 'bf16' and cols % 8 == 0:
++            bits, shape = self._bf16_weight(prefix)
++            if tuple(shape) != (rows, cols):
++                raise ValueError(f'{prefix}: BF16 weight is {shape[0]}x{shape[1]}, got x [{cols}] -> out [{rows}]')
++            return self._prefill_cublaslt_bf16(bits, rows, cols, x, out, count)
+         for i in range(count):
+             self._linear(prefix, self._prefill_row(x, i), self._prefill_row(out, i))
+         return out
+@@ -2573,6 +2580,34 @@ class ResidentGLM:
+         self.launches['cublaslt_fp8_rows'] = self.launches.get('cublaslt_fp8_rows', 0) + 1
+         return out
+ 
++    def _prefill_cublaslt_bf16(self, bits, rows, cols, x, out, count):
++        """out[:count] = x[:count] W^T through cuBLASLt's bfloat16 matmul for a BF16 Linear W (bits [rows, cols]):
++        the rows rounded to bfloat16 (gpu/spawn/bf16_rows), float32 sums and out, as SGLang's linear_bf16_fp32 for
++        the router's gate and torch.mm(out_dtype=float32) for the indexer's weights_proj; padded to
++        _prefill_bucket(count) tokens, out's rows past count get the padding's outputs (of stale rows) and are not
++        used."""
++        padded = self._prefill_bucket(count)
++        x_bits = self._prefill_rows('lt_bf16', cols, 'uint16')
++        self._spawn('bf16_rows', out=x_bits, x=x, count=count, cols=cols)
++        key = ('bf16', padded, rows, cols)
++        matmul = self._lt_matmuls.get(key)
++        if matmul is None:
++            factory = getattr(self.ctx, 'bf16_matmul', None)
++            if factory is not None:
++                matmul = factory(padded, rows, cols)
++            else:
++                from .cublaslt import Bf16Matmul, CublasLt
++                if self._lt is None:
++                    self._lt = CublasLt(self.ctx)
++                if getattr(self, '_prefill_workspace', None) is None:  # one for every prefill matmul: one stream
++                    self._prefill_workspace = self._tensor((32 << 20,), 'uint8')
++                matmul = Bf16Matmul(self._lt, padded, rows, cols, workspace=self._prefill_workspace)
++            self._lt_matmuls[key] = matmul
++        matmul(out.view((padded * rows,)), x_bits.view((padded * cols,), 'uint16'), bits.view((rows * cols,), 'uint16'),
++               stream=self.stream)
++        self.launches['cublaslt_bf16_rows'] = self.launches.get('cublaslt_bf16_rows', 0) + 1
++        return out
++
+     def _prefill_attention(self, layer, x, start, count, shared_ok, counts):
+         """The attention of prefill_chunk's tokens: the projections over the rows, then each token's
+         _attention_core in order (or _prefill_mha); returns o_proj's outputs, one row a token (this rank's part
+@@ -2792,8 +2827,10 @@ class ResidentGLM:
+     def _prefill_route(self, prefix, x, count, k, kk):
+         """Each of the first count rows' experts and weights on the device, [rows, kk] int32 and f32 (columns k and up,
+         fold_shared's shared expert, hold n_routed_experts and 1.0 from their allocation): router_logits_rows and
+-        router_topk_rows for a BF16 gate of at most 256 experts (router_bf16's bits); otherwise _route a row and an
+-        upload (a host round trip a token: tests' float32 routers only)."""
++        router_topk_rows for a BF16 gate of at most 256 experts (router_bf16's bits), the logits from cuBLASLt's
++        bfloat16 matmul instead with prefill_gemm='cublaslt' (_prefill_cublaslt_bf16; router_logits_rows, on the CUDA
++        cores, took 4.1 ms for 1000 rows of GLM-5.3 at one rank of TP8); otherwise _route a row and an upload (a host round trip a token:
++        tests' float32 routers only)."""
+         c = self.config
+         experts = int(c['n_routed_experts'])
+         key = ('route', kk)
+@@ -2808,8 +2845,11 @@ class ResidentGLM:
+             if rows == experts and cols % 8 == 0 and cols <= 8192:
+                 logits = self._prefill_rows('router_logits', experts)
+                 scale = _f32(float(c.get('routed_scaling_factor', 1.0)), 'router scale')
+-                self._spawn('router_logits_rows', logits=logits, gate=bits.view((rows * cols // 2,), 'uint32'), x=x,
+-                            tokens=count, experts=experts, cols=cols)
++                if self.prefill_gemm == 'cublaslt':  # SGLang's linear_bf16_fp32: the rows in bfloat16, tensor cores
++                    self._prefill_cublaslt_bf16(bits, rows, cols, x, logits, count)
++                else:
++                    self._spawn('router_logits_rows', logits=logits, gate=bits.view((rows * cols // 2,), 'uint32'), x=x,
++                                tokens=count, experts=experts, cols=cols)
+                 self._spawn('router_topk_rows', indices=ids, weights=weights, logits=logits,
+                             bias=self._weight(prefix + '.gate.e_score_correction_bias'), tokens=count, experts=experts,
+                             k=k, scale=scale)
+diff --git a/gpu/spawn/bf16_rows.vx b/gpu/spawn/bf16_rows.vx
+new file mode 100644
+index 0000000..a0d3535
+--- /dev/null
++++ b/gpu/spawn/bf16_rows.vx
+@@ -0,0 +1,16 @@
++// glm_vx_spawn_bf16_rows (#63, TTFT): out[t][c] = x[t][c] as bf16 (nearest even) for the first `count` rows of x, one
++// block of 256 lanes a row: prefill_chunk's rows for cuBLASLt's bfloat16 matmul (gpu/cublaslt.Bf16Matmul) of the
++// checkpoint's BF16 Linears over the rows, the router's gate and the indexer's weights_proj (SGLang's bfloat16 rows
++// for the same two).
++// spawn-include: device.vx
++
++pub fn glm_vx_spawn_bf16_rows(out: &mut Tensor<bf16, [?, ?], Memory::HBM>, x: &Tensor<f32, [?, ?], Memory::HBM>, count: i32,
++                              cols: i32) -> void {
++  spawn on(Topology::Device) {
++    for t in 0..count across blocks {
++      for c in 0..cols across lanes(256) {
++        out[t][c] = x[t][c] as bf16;
++      }
++    }
++  }
++}
+diff --git a/gpu/test_cublaslt.py b/gpu/test_cublaslt.py
+index c4cf0f1..20a7710 100644
+--- a/gpu/test_cublaslt.py
++++ b/gpu/test_cublaslt.py
+@@ -42,13 +42,14 @@ class FakeLib:
+             self.attrs[args[1]] = pointer.value
+         elif name == 'cublasLtMatmulAlgoGetHeuristic':
+             # cuBLASLt 13.10 refuses VEC128 / BLK128x128 scale modes without scale pointers (INVALID_VALUE).
+-            assert self.attrs.get(L.DESC_A_SCALE_POINTER) and self.attrs.get(L.DESC_B_SCALE_POINTER)
++            if self.attrs.get(L.DESC_A_SCALE_MODE):
++                assert self.attrs.get(L.DESC_A_SCALE_POINTER) and self.attrs.get(L.DESC_B_SCALE_POINTER)
+             C.cast(args[9], C.POINTER(C.c_int))[0] = self.algos
+         elif name == 'cublasLtMatmul':
+             self.matmuls.append(dict(a=args[3].value, a_layout=self.layouts[args[4].value], b=args[5].value,
+                                      b_layout=self.layouts[args[6].value], d=args[10].value,
+-                                     d_layout=self.layouts[args[11].value], scales=(self.attrs[L.DESC_A_SCALE_POINTER],
+-                                                                              self.attrs[L.DESC_B_SCALE_POINTER])))
++                                     d_layout=self.layouts[args[11].value], scales=(self.attrs.get(L.DESC_A_SCALE_POINTER),
++                                                                              self.attrs.get(L.DESC_B_SCALE_POINTER))))
+         elif name.endswith('Destroy'):
+             self.destroyed.append(name)
+         return 0
+@@ -123,6 +124,32 @@ def test_refuses_wrong_sizes_and_a_missing_algorithm():
+         L.Fp8BlockMatmul(L.CublasLt(ctx, lib=FakeLib(algos=0)), 1, 256, 384)
+ 
+ 
++def test_bf16_matmul_is_weights_a_with_bf16_operands_and_no_scales():
++    # The router's gate over 1000 prefill rows: A = W (op T), B = x (op N), D [n, mp] float32, ld n.
++    lib, ctx = FakeLib(), FakeContext()
++    lt = L.CublasLt(ctx, lib=lib)
++    m, n, k = 1000, 256, 6144
++    mm = L.Bf16Matmul(lt, m, n, k)
++    assert mm.padded_m == 1000
++    out, x, w = ctx.tensor((m, n)), ctx.tensor((m, k), 'uint16'), ctx.tensor((n, k), 'uint16')
++    mm(out, x, w)
++    call, = lib.matmuls
++    assert lib.attrs[L.DESC_TRANSA] == L.CUBLAS_OP_T and lib.attrs[L.DESC_TRANSB] == L.CUBLAS_OP_N
++    assert L.DESC_A_SCALE_MODE not in lib.attrs and call['scales'] == (None, None)
++    assert (call['a'], call['b'], call['d']) == (w.pointer, x.pointer, out.pointer)
++    bf16 = L.CUDA_R_16BF
++    assert (call['a_layout'], call['b_layout'], call['d_layout']) == ((bf16, k, n, k), (bf16, k, m, k), (L.CUDA_R_32F, n, m, n))
++    assert L.Bf16Matmul(lt, 3, 32, 64).padded_m == 4
++    with pytest.raises(ValueError, match='x: want'):
++        mm(out, ctx.tensor((m, k), 'float32'), w)
++    with pytest.raises(ValueError, match='multiple of 8'):
++        L.Bf16Matmul(lt, 4, 32, 60)
++    with pytest.raises(L.CublasLtUnavailable, match='no cuBLASLt algorithm'):
++        L.Bf16Matmul(L.CublasLt(ctx, lib=FakeLib(algos=0)), 4, 32, 64)
++    mm.close()
++    assert lib.destroyed.count('cublasLtMatrixLayoutDestroy') == 3
++
++
+ def test_pack_weight_scales_pads_each_row_block_to_four():
+     packed = L.pack_weight_scales(np.arange(6, dtype='f4').reshape(2, 3))
+     np.testing.assert_array_equal(packed, [[0, 1, 2, 0], [3, 4, 5, 0]])
+diff --git a/gpu/test_cublaslt_hardware.py b/gpu/test_cublaslt_hardware.py
+index 02c0b51..6606f87 100644
+--- a/gpu/test_cublaslt_hardware.py
++++ b/gpu/test_cublaslt_hardware.py
+@@ -111,3 +111,31 @@ def test_fp8_block_matmul(context, lt, orientation, out_dtype, m, n, k):
+     tolerance = 1e-3 if out_dtype == 'float32' else 1e-2
+     np.testing.assert_allclose(got, want, rtol=tolerance, atol=tolerance * float(np.abs(want).max()))
+     mm.close()
++
++
++def _bf16(rng, shape, scale=1.0):
++    """Random values that are bfloat16: (their bits uint16, the values float64)."""
++    bits = (((rng.standard_normal(shape) * scale).astype('f4').view(np.uint32) + 0x8000) >> 16).astype(np.uint16)
++    return bits, (bits.astype(np.uint32) << 16).view('f4').astype(np.float64)
++
++
++@pytest.mark.parametrize('m,n,k', [(1000, 256, 6144), (2048, 32, 6144), (1, 256, 6144), (3, 40, 136)])
++def test_bf16_matmul(context, lt, m, n, k):
++    # The router's gate (256 experts) and the indexer's weights_proj (32 heads) over prefill rows: bfloat16
++    # products are exact in float32, so only the float32 sums' order separates cuBLASLt from float64.
++    from gpu.cublaslt import Bf16Matmul, CublasLtUnavailable
++    rng = np.random.default_rng(m + n + k)
++    try:
++        mm = Bf16Matmul(lt, m, n, k)
++    except CublasLtUnavailable as error:
++        pytest.skip(str(error))
++    mp = mm.padded_m
++    x_bits, x = _bf16(rng, (mp, k))
++    w_bits, w = _bf16(rng, (n, k), 0.02)
++    out = context.tensor((mp * n,), 'float32')
++    mm(out, _up(context, x_bits), _up(context, w_bits))
++    context.synchronize()
++    got = np.frombuffer(out.download(), 'f4').reshape(mp, n)
++    want = x @ w.T
++    np.testing.assert_allclose(got, want, rtol=1e-4, atol=1e-5 * float(np.abs(want).max()))
++    mm.close()
+diff --git a/gpu/test_spawn_rows_host.py b/gpu/test_spawn_rows_host.py
+index 658fe71..63cf0a9 100644
+--- a/gpu/test_spawn_rows_host.py
++++ b/gpu/test_spawn_rows_host.py
+@@ -1,6 +1,7 @@
+ """The prefill rows kernels (#63, item 5b) on the CPU through Vx's own runtime (gpu/spawn/host.py), against NumPy
+ and against the decode kernels they repeat a row at a time: fp8_quant_rows (fp8_quant_groups' codes and scales),
+-router_logits_rows + router_topk_rows (router_bf16's bits a token), moe_combine_rows.
++router_logits_rows + router_topk_rows (router_bf16's bits a token), moe_combine_rows, bf16_rows (the rows for cuBLASLt's
++bfloat16 matmul).
+ 
+ Skipped unless gpu/spawn/build.sh made the libraries (VX_DISPATCH_LIB set)."""
+ import numpy as np
+@@ -30,6 +31,18 @@ def test_fp8_quant_rows_is_quant_groups_row_major(run, rows, cols, gather):
+     bits_equal(got['scales'], scales.T)
+ 
+ 
++def test_bf16_rows_round_each_value_to_nearest_even(run):
++    rng = np.random.default_rng(11)
++    count, cols, rows = 5, 6144, 8  # rows past count keep their old bits (cuBLASLt's padding, not read back)
++    x = (rng.normal(size=(rows, cols)) * rng.choice([1e-30, 1e-3, 1.0, 1e37], size=(rows, 1))).astype(F)
++    x[0, :4] = [0.0, -0.0, np.inf, -np.inf]
++    x[1, :3] = (np.array([0x3F808000, 0x3F818000, 0x3F80FFFF], np.uint32)).view(F)  # ties to even, and below a tie
++    got = run('bf16_rows', out=np.full((rows, cols), 0xABCD, np.uint16), x=x, count=count, cols=cols)['out']
++    np.testing.assert_array_equal(got[:count], bf16_bits(x[:count]))
++    assert got[1, 0] == 0x3F80 and got[1, 1] == 0x3F82 and got[1, 2] == 0x3F81
++    assert (got[count:] == 0xABCD).all()
++
++
+ def test_moe_combine_rows_sums_in_the_given_order(run):
+     rng = np.random.default_rng(7)
+     tokens, cols, kk, rows = 6, 300, 9, 60
+diff --git a/gpu/testing/context.py b/gpu/testing/context.py
+index 85dbce8..b1ae5dc 100644
+--- a/gpu/testing/context.py
++++ b/gpu/testing/context.py
+@@ -143,6 +143,19 @@ class Fp8BlockMatmul:
+             out.data[...]=(x@w.T).astype(np.float32).reshape(out.data.shape)
+         _run(stream,work)
+     def close(self):pass
++class Bf16Matmul:
++    """gpu/cublaslt.Bf16Matmul's contract (x and out padded to padded_m tokens, token i's outputs at
++    out[i*n:(i+1)*n]) as float64 NumPy on the bfloat16 bits, rounded to float32 once: cuBLASLt's own sum order is
++    the GPU tests' to check."""
++    def __init__(self,ctx,m,n,k):self.ctx,self.m,self.n,self.k,self.padded_m=ctx,m,n,k,-(-m//4)*4
++    def __call__(self,out,x,w,stream=None):
++        mp,n,k=self.padded_m,self.n,self.k
++        assert out.data.size==mp*n and x.data.size==mp*k and w.data.size==n*k
++        def work():
++            value=lambda bits:(bits.astype(np.uint32)<<16).view(np.float32).astype(np.float64)
++            out.data[...]=(value(x.data.reshape(mp,k))@value(w.data.reshape(n,k)).T).astype(np.float32).reshape(out.data.shape)
++        _run(stream,work)
++    def close(self):pass
+ class Fp8GroupedGemm:
+     """gpu/fp8_gemm.FP8GroupedGEMM's contract (ResidentGLM._grouped_gemm): for each expert e, the grouped rows
+     offsets[e] <= r < offsets[e + 1] of a (e4m3 codes, row-major per-128 scales) times expert e's codes with their
+@@ -169,6 +182,7 @@ class Fp8GroupedGemm:
+ class Context:
+     name='cpu-simt-test-only'
+     def fp8_block_matmul(self,m,n,k):return Fp8BlockMatmul(self,m,n,k)
++    def bf16_matmul(self,m,n,k):return Bf16Matmul(self,m,n,k)
+     def fp8_grouped_gemm(self):return Fp8GroupedGemm()
+     def __init__(self,*args,**kwargs):self.simt=Simt();self.tensors=[];self._host=None;self.capturing=0
+     def host(self):
