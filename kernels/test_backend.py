@@ -97,4 +97,17 @@ class BackendTests(unittest.TestCase):
     def test_missing_library_is_failure(self):
         with self.assertRaises(RuntimeError):VxBackend('/nonexistent/libglm_vx.so')
 
+
+def test_rope_rows_are_each_positions_coefficients_bitwise():
+    # prefill_chunk's rows at once: each row the bits of _make_rope_coefficients at its position (GLM-5.3's rope
+    # dim 64 and theta, other thetas and odd widths), across a 32K prompt and past it. No compiled kernels needed.
+    from kernels.backend import _make_rope_coefficients,_rope_coefficient_rows
+    for d,theta in ((64,1000000.0),(64,10000.0),(6,10000.0),(130,8000000.0)):
+        positions=np.concatenate([np.arange(0,70),np.arange(30700,30740),[65535,131071,(1<<24)-1]])
+        cosines,sines=_rope_coefficient_rows(d,positions,theta)
+        for row,position in enumerate(positions):
+            cosine,sine=_make_rope_coefficients(d,float(position),theta)
+            np.testing.assert_array_equal(cosines[row].view(np.uint32),cosine.view(np.uint32),err_msg=f'cos d={d} at {position}')
+            np.testing.assert_array_equal(sines[row].view(np.uint32),sine.view(np.uint32),err_msg=f'sin d={d} at {position}')
+
 if __name__=='__main__':unittest.main()

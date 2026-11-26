@@ -367,6 +367,34 @@ after kv_b_proj over every cached key.
   down 547 us (bf16 C), gate_up as one n=512 GEMM 312 us; prefill_chunk runs gate and up as two GEMMs. The attention's
   split needs an nsys profile of a chunk.
 
+**Status (2026-11-26, one H200: evidence/h200-20261126-z68).**
+- **The 'mla_tc' kernel is right on the GPU.** `test_mla_prefill_sparse_tc_matches_float64_on_bf16_values` passes on
+  the H200 (both cases). The hardware suite on this branch passes (509).
+- **Logits with one layer.** A dense layer with a full indexer, at a 2048-token chunk at 30720: 'mla_tc' differs from
+  'mha_tc' by 6.3% of the largest logit, and the argmax agrees. With 4 layers (z66) the gap is 17-25%, and the CPU test
+  is within 1%. So the kernel is not the cause. Whether the gap matters is for the real model's passkey and W3 (z67).
+- **Where a 30720 chunk's GPU time goes** (nsys, 4 layers): 23 ms of kernels.
+  - `mla_prefill_sparse_tc`: 2.3 ms a layer.
+  - `index_scores_chunk_at`: 1.9 ms a full-indexer layer.
+  - `topk_select_rows`: 0.8 ms.
+  - `fp8_quant_groups`: 1.3 ms in 31 launches.
+- **The host's fixed cost of a chunk, about 55 us a token, is fixed.** It was most of the chunk's wall time: 128 of
+  152 ms at 4 layers.
+  - **Cause:** each upload copied the chunk's embeddings three times on the host (`memoryview.tobytes` twice, then
+    `create_string_buffer`), and the RoPE and step rows and the embeddings were built a token at a time.
+  - **Fix:** uploads go straight from the array's buffer (`gpu/runtime._host_buffer`). The chunk's rows are array
+    ops that give the same bits (`kernels/backend._rope_coefficient_rows`, `GLMModel._embeddings`).
+  - **Result:** z71, 4 layers, 2 alternating rounds, logits identical:
+
+    | | before | after |
+    |---|---|---|
+    | W1, 1000 tokens | 68-70 ms | 14.3-14.5 ms |
+    | chunk of 2048 at 30720 | 149-155 ms | 44 ms |
+
+    The GPU estimates are unchanged. The saving does not depend on the layer count: about 55 ms on W1's TTFT and
+    about 1.6 s on W3's.
+  - **Not covered:** the server reads embeddings through the safetensors reader, which still decodes a row at a time.
+
 ### 6. Long context: the indexer on every rank
 
 **Why.** Our step grows 1.35 ms from 1000 to 32768 tokens of context; SGLang's served TPOT grows 0.25 ms.

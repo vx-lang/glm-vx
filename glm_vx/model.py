@@ -140,6 +140,14 @@ class GlmMoeDsaModel:
             row = self._weight(name)[token_id]
         return np.asarray(row, dtype=np.float32).copy()
 
+    def _embeddings(self, token_ids):
+        """_embedding of each of token_ids, as the rows of one [tokens, hidden] float32 array: one gather from an
+        in-memory table, else a row at a time."""
+        table = None if callable(getattr(self.weights, 'tensor', None)) else self._weight('model.embed_tokens.weight')
+        if isinstance(table, np.ndarray):
+            return np.asarray(table[np.asarray(token_ids, dtype=np.int64)], dtype=np.float32)
+        return np.stack([self._embedding(int(t)) for t in token_ids])
+
     def _linear(self, prefix, x, bias=False):
         if self.packed_weights:
             y = self.weights.linear(prefix + '.weight', x, self.backend)

@@ -155,7 +155,7 @@ from pathlib import Path
 
 import numpy as np
 
-from kernels.backend import _cached_rope_coefficients
+from kernels.backend import _cached_rope_coefficients, _rope_coefficient_rows
 from .runtime import CUDAContext
 
 I = C.c_int32
@@ -2410,10 +2410,7 @@ class ResidentGLM:
         self._device_position = None
         hidden = self.hidden
         x = self._prefill_rows('x', hidden)
-        embeddings = np.zeros((count, hidden), np.float32)
-        for i, token in enumerate(tokens):
-            embeddings[i] = m._embedding(token)
-        x.view((count * hidden,)).upload(embeddings.ravel())
+        x.view((count * hidden,)).upload(np.ascontiguousarray(m._embeddings(tokens), dtype=np.float32))
         self._prefill_upload_steps(start, count)
         x_next, norm = self._prefill_rows('x_next', hidden), self._prefill_rows('norm', hidden)
         selected, counts = self.selected, [0] * count
@@ -2495,13 +2492,15 @@ class ResidentGLM:
         if getattr(self, '_prefill_inputs', None) is None:
             self._prefill_inputs = self._tensor((capacity * block,))
             self._prefill_views = {}
+        # The chunk's rows at once (one array op each, not a loop of _rope_inputs and _step_buffer a token): the
+        # same bits as theirs.
+        positions = np.arange(start, start + count, dtype=np.int64)
+        selects = np.minimum(self.index_topk, positions + 1)
         steps = np.zeros((count, block), np.float32)
-        for i in range(count):
-            cosine, sine = self._rope_inputs(start + i)
-            position = start + i
-            steps[i, :2 * half + 4] = np.concatenate(
-                [cosine, sine, self._step_buffer(position, min(self.index_topk, position + 1))])
-        self._prefill_inputs.view((count * block,)).upload(steps.ravel())
+        steps[:, :half], steps[:, half:2 * half] = _rope_coefficient_rows(self.rot, positions, float(self.model.theta))
+        steps[:, 2 * half:2 * half + 4] = np.stack(
+            [positions, positions + 1, selects, [self._splits(int(n)) for n in selects]], axis=1).astype(np.int32).view(np.float32)
+        self._prefill_inputs.view((count * block,)).upload(steps)
         self._prefill_block = block
 
     def _prefill_steps(self, i):

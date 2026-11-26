@@ -39,6 +39,14 @@ def _make_rope_coefficients(d, position, theta):
     return cosine, sine
 
 
+def _rope_coefficient_rows(d, positions, theta):
+    """_make_rope_coefficients for each of positions (integers below 2**24), a row each: the same float32
+    arithmetic, elementwise, so each row has the same bits as that position's."""
+    inverse = np.power(theta, -np.arange(0, d, 2, dtype=np.float32) / d)
+    angles = np.asarray(positions, dtype=np.float32)[:, None] * inverse[None, :]
+    return np.cos(angles), np.sin(angles)
+
+
 @lru_cache(maxsize=128)
 def _cached_rope_coefficients(d, position, theta):
     # Callers cache only d<=4096: <=2 MiB of coefficient payload, globally.
