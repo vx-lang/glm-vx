@@ -1,0 +1,48 @@
+         68807 function calls (68771 primitive calls) in 0.088 seconds
+
+   Ordered by: cumulative time
+   List reduced from 152 to 40 due to restriction <40>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.005    0.005    0.087    0.087 /home/aditya/glm-h200/repo-z66/gpu/resident.py:2379(prefill_chunk)
+        2    0.000    0.000    0.040    0.020 /home/aditya/glm-h200/repo-z66/gpu/runtime.py:662(upload)
+        2    0.000    0.000    0.029    0.014 /home/aditya/glm-h200/repo-z66/gpu/runtime.py:494(upload)
+        4    0.000    0.000    0.024    0.006 /home/aditya/glm-h200/repo-z66/gpu/runtime.py:247(_host_bytes)
+        4    0.024    0.006    0.024    0.006 {method 'tobytes' of 'memoryview' objects}
+        1    0.002    0.002    0.015    0.015 /home/aditya/glm-h200/repo-z66/gpu/resident.py:2489(_prefill_upload_steps)
+        2    0.014    0.007    0.014    0.007 /usr/lib/python3.12/ctypes/__init__.py:49(create_string_buffer)
+        4    0.000    0.000    0.011    0.003 /home/aditya/glm-h200/repo-z66/gpu/resident.py:2674(_prefill_attention)
+        4    0.000    0.000    0.011    0.003 /home/aditya/glm-h200/repo-z66/gpu/resident.py:2714(_prefill_mha)
+       91    0.000    0.000    0.010    0.000 /home/aditya/glm-h200/repo-z66/../rank_profile.py:79(logged_launch)
+       91    0.002    0.000    0.009    0.000 /home/aditya/glm-h200/repo-z66/gpu/runtime.py:800(launch)
+     1000    0.002    0.000    0.008    0.000 /home/aditya/glm-h200/repo-z66/gpu/resident.py:1918(_rope_inputs)
+       32    0.000    0.000    0.008    0.000 /home/aditya/glm-h200/repo-z66/gpu/resident.py:2533(_prefill_linear)
+       38    0.000    0.000    0.007    0.000 /home/aditya/glm-h200/repo-z66/gpu/spawn/launch.py:116(launch)
+       32    0.000    0.000    0.007    0.000 /home/aditya/glm-h200/repo-z66/gpu/resident.py:2554(_prefill_cublaslt)
+     1000    0.001    0.000    0.007    0.000 /home/aditya/glm-h200/repo-z66/glm_vx/model.py:133(_embedding)
+       32    0.000    0.000    0.006    0.000 /home/aditya/glm-h200/repo-z66/gpu/resident.py:511(_spawn)
+        4    0.000    0.000    0.006    0.002 /home/aditya/glm-h200/repo-z66/gpu/resident.py:2857(_prefill_feed_forward)
+     1000    0.000    0.000    0.006    0.000 /home/aditya/glm-h200/repo-z66/kernels/backend.py:42(_cached_rope_coefficients)
+     1000    0.005    0.000    0.006    0.000 /home/aditya/glm-h200/repo-z66/kernels/backend.py:32(_make_rope_coefficients)
+       53    0.000    0.000    0.004    0.000 /home/aditya/glm-h200/repo-z66/gpu/resident.py:505(_launch)
+        1    0.000    0.000    0.004    0.004 /home/aditya/glm-h200/repo-z66/gpu/resident.py:2944(_prefill_moe_grouped)
+      352    0.000    0.000    0.004    0.000 /home/aditya/glm-h200/repo-z66/../rank_profile.py:99(logged)
+      352    0.003    0.000    0.003    0.000 /home/aditya/glm-h200/repo-z66/gpu/runtime.py:180(call)
+       33    0.000    0.000    0.003    0.000 /home/aditya/glm-h200/repo-z66/../rank_profile.py:90(logged_matmul)
+     1000    0.000    0.000    0.003    0.000 /home/aditya/glm-h200/repo-z66/glm_vx/model.py:130(_weight)
+     1000    0.001    0.000    0.003    0.000 /home/aditya/glm-h200/repo-z66/gpu/resident.py:1913(_step_buffer)
+       32    0.000    0.000    0.003    0.000 /home/aditya/glm-h200/repo-z66/gpu/cublaslt.py:262(__call__)
+     1000    0.003    0.000    0.003    0.000 {method 'copy' of 'numpy.ndarray' objects}
+      213    0.000    0.000    0.003    0.000 /home/aditya/glm-h200/repo-z66/gpu/runtime.py:655(view)
+     1480    0.001    0.000    0.003    0.000 /home/aditya/glm-h200/repo-z66/gpu/runtime.py:824(<genexpr>)
+        3    0.000    0.000    0.002    0.001 /home/aditya/glm-h200/repo-z66/gpu/resident.py:3017(_prefill_mlp)
+     1000    0.001    0.000    0.002    0.000 /home/aditya/glm-h200/repo-z66/glm_vx/quant.py:246(__call__)
+        2    0.002    0.001    0.002    0.001 {built-in method numpy.zeros}
+        3    0.000    0.000    0.002    0.001 /home/aditya/glm-h200/repo-z66/gpu/resident.py:2993(_grouped_gemm)
+      213    0.000    0.000    0.001    0.000 /home/aditya/glm-h200/repo-z66/gpu/runtime.py:628(__init__)
+     1389    0.001    0.000    0.001    0.000 /usr/lib/python3.12/ctypes/__init__.py:517(cast)
+       33    0.001    0.000    0.001    0.000 /home/aditya/glm-h200/repo-z66/gpu/cublaslt.py:185(_matmul)
+      426    0.001    0.000    0.001    0.000 /home/aditya/glm-h200/repo-z66/gpu/runtime.py:613(_layout)
+     1000    0.001    0.000    0.001    0.000 /home/aditya/glm-h200/repo-z66/gpu/resident.py:1907(_splits)
+
+

@@ -1,0 +1,1911 @@
+{
+ "layers": 4,
+ "options": {
+  "device_experts": true,
+  "graph": true,
+  "fused_attention": true,
+  "mla_kernel": "tc",
+  "fp8_kernels": "cvt",
+  "matvec_kernels": "x4",
+  "norm_block": 1024,
+  "long_topk": "ilp_hist",
+  "fuse_glue": true,
+  "index_kernel": "mma",
+  "fold_shared": true,
+  "moe_down2": true,
+  "fuse_router": true,
+  "device_decode": true,
+  "moe_mma": true,
+  "fuse_mla_q": true,
+  "prefill_rows": 2048,
+  "prefill_gemm": "cublaslt",
+  "prefill_sum": "nccl",
+  "prefill_moe": "grouped",
+  "prefill_attention": "mha_tc",
+  "topk_bitmap": true
+ },
+ "rank": "0 of 8 (ShardedModel); sums are no-ops",
+ "w1": {
+  "tokens": 1000,
+  "start": 0,
+  "wall_ms": [
+   68.55530400002863,
+   70.04556300000786,
+   69.24899099999493,
+   67.9491109999617,
+   64.70546900004592
+  ],
+  "wall_median_ms": 68.55530400002863,
+  "collective_calls": [
+   [
+    "all_reduce_sum",
+    6144000,
+    "float32"
+   ],
+   [
+    "all_reduce_sum",
+    6144000,
+    "float32"
+   ],
+   [
+    "all_reduce_sum",
+    6144000,
+    "float32"
+   ],
+   [
+    "all_reduce_sum",
+    6144000,
+    "float32"
+   ],
+   [
+    "all_reduce_sum",
+    6144000,
+    "float32"
+   ],
+   [
+    "all_reduce_sum",
+    6144000,
+    "float32"
+   ],
+   [
+    "all_reduce_sum",
+    6144000,
+    "float32"
+   ],
+   [
+    "all_reduce_sum",
+    6144000,
+    "float32"
+   ]
+  ],
+  "layered": {
+   "wall_ms": 64.92306300003747,
+   "host_enqueue_ms": 64.61450500000865,
+   "gpu_span_ms": 64.90089416503906,
+   "launches": 126,
+   "launch_kinds": {
+    "op": 2,
+    "kernel": 91,
+    "cublaslt": 33
+   },
+   "parts": [
+    {
+     "part": "attention",
+     "layer": 0,
+     "host_ms": 1.558537999926557,
+     "gpu_ms": 1.7263360023498535,
+     "kernels": 13,
+     "cublaslt": 6,
+     "ops": 0,
+     "by_name": [
+      [
+       "glm_vx_gpu_fp8_quant_groups",
+       6
+      ],
+      [
+       "glm_vx_spawn_rows_bf16_f32",
+       2
+      ],
+      [
+       "Fp8BlockMatmul 1024x2048x6144",
+       1
+      ],
+      [
+       "glm_vx_gpu_rmsnorm_rows",
+       1
+      ],
+      [
+       "Fp8BlockMatmul 1024x2048x2048",
+       1
+      ],
+      [
+       "Fp8BlockMatmul 1024x576x6144",
+       1
+      ],
+      [
+       "glm_vx_spawn_kv_rows_prefill_bf16",
+       1
+      ],
+      [
+       "Fp8BlockMatmul 1024x128x6144",
+       1
+      ],
+      [
+       "glm_vx_spawn_index_key_rows",
+       1
+      ],
+      [
+       "glm_vx_spawn_q_rows_prefill",
+       1
+      ],
+      [
+       "Fp8BlockMatmul 1024x3584x512",
+       1
+      ],
+      [
+       "glm_vx_spawn_mha_prefill_tc",
+       1
+      ],
+      [
+       "Fp8BlockMatmul 1024x6144x2048",
+       1
+      ]
+     ]
+    },
+    {
+     "part": "ffn",
+     "layer": 0,
+     "host_ms": 0.366443999951116,
+     "gpu_ms": 0.28044798970222473,
+     "kernels": 4,
+     "cublaslt": 3,
+     "ops": 0,
+     "by_name": [
+      [
+       "glm_vx_gpu_fp8_quant_groups",
+       3
+      ],
+      [
+       "Fp8BlockMatmul 1024x1536x6144",
+       2
+      ],
+      [
+       "glm_vx_gpu_swiglu",
+       1
+      ],
+      [
+       "Fp8BlockMatmul 1024x6144x1536",
+       1
+      ]
+     ]
+    },
+    {
+     "part": "attention",
+     "layer": 1,
+     "host_ms": 1.2763799999220282,
+     "gpu_ms": 1.437343955039978,
+     "kernels": 13,
+     "cublaslt": 6,
+     "ops": 0,
+     "by_name": [
+      [
+       "glm_vx_gpu_fp8_quant_groups",
+       6
+      ],
+      [
+       "glm_vx_spawn_rows_bf16_f32",
+       2
+      ],
+      [
+       "Fp8BlockMatmul 1024x2048x6144",
+       1
+      ],
+      [
+       "glm_vx_gpu_rmsnorm_rows",
+       1
+      ],
+      [
+       "Fp8BlockMatmul 1024x2048x2048",
+       1
+      ],
+      [
+       "Fp8BlockMatmul 1024x576x6144",
+       1
+      ],
+      [
+       "glm_vx_spawn_kv_rows_prefill_bf16",
+       1
+      ],
+      [
+       "Fp8BlockMatmul 1024x128x6144",
+       1
+      ],
+      [
+       "glm_vx_spawn_index_key_rows",
+       1
+      ],
+      [
+       "glm_vx_spawn_q_rows_prefill",
+       1
+      ],
+      [
+       "Fp8BlockMatmul 1024x3584x512",
+       1
+      ],
+      [
+       "glm_vx_spawn_mha_prefill_tc",
+       1
+      ],
+      [
+       "Fp8BlockMatmul 1024x6144x2048",
+       1
+      ]
+     ]
+    },
+    {
+     "part": "ffn",
+     "layer": 1,
+     "host_ms": 0.3506240000206162,
+     "gpu_ms": 0.2598400115966797,
+     "kernels": 4,
+     "cublaslt": 3,
+     "ops": 0,
+     "by_name": [
+      [
+       "glm_vx_gpu_fp8_quant_groups",
+       3
+      ],
+      [
+       "Fp8BlockMatmul 1024x1536x6144",
+       2
+      ],
+      [
+       "glm_vx_gpu_swiglu",
+       1
+      ],
+      [
+       "Fp8BlockMatmul 1024x6144x1536",
+       1
+      ]
+     ]
+    },
+    {
+     "part": "attention",
+     "layer": 2,
+     "host_ms": 1.2518390000195723,
+     "gpu_ms": 1.418720006942749,
+     "kernels": 13,
+     "cublaslt": 6,
+     "ops": 0,
+     "by_name": [
+      [
+       "glm_vx_gpu_fp8_quant_groups",
+       6
+      ],
+      [
+       "glm_vx_spawn_rows_bf16_f32",
+       2
+      ],
+      [
+       "Fp8BlockMatmul 1024x2048x6144",
+       1
+      ],
+      [
+       "glm_vx_gpu_rmsnorm_rows",
+       1
+      ],
+      [
+       "Fp8BlockMatmul 1024x2048x2048",
+       1
+      ],
+      [
+       "Fp8BlockMatmul 1024x576x6144",
+       1
+      ],
+      [
+       "glm_vx_spawn_kv_rows_prefill_bf16",
+       1
+      ],
+      [
+       "Fp8BlockMatmul 1024x128x6144",
+       1
+      ],
+      [
+       "glm_vx_spawn_index_key_rows",
+       1
+      ],
+      [
+       "glm_vx_spawn_q_rows_prefill",
+       1
+      ],
+      [
+       "Fp8BlockMatmul 1024x3584x512",
+       1
+      ],
+      [
+       "glm_vx_spawn_mha_prefill_tc",
+       1
+      ],
+      [
+       "Fp8BlockMatmul 1024x6144x2048",
+       1
+      ]
+     ]
+    },
+    {
+     "part": "ffn",
+     "layer": 2,
+     "host_ms": 0.3228040000067267,
+     "gpu_ms": 0.21321600675582886,
+     "kernels": 4,
+     "cublaslt": 3,
+     "ops": 0,
+     "by_name": [
+      [
+       "glm_vx_gpu_fp8_quant_groups",
+       3
+      ],
+      [
+       "Fp8BlockMatmul 1024x1536x6144",
+       2
+      ],
+      [
+       "glm_vx_gpu_swiglu",
+       1
+      ],
+      [
+       "Fp8BlockMatmul 1024x6144x1536",
+       1
+      ]
+     ]
+    },
+    {
+     "part": "attention",
+     "layer": 3,
+     "host_ms": 1.0383110000020679,
+     "gpu_ms": 1.2029759883880615,
+     "kernels": 11,
+     "cublaslt": 5,
+     "ops": 0,
+     "by_name": [
+      [
+       "glm_vx_gpu_fp8_quant_groups",
+       5
+      ],
+      [
+       "glm_vx_spawn_rows_bf16_f32",
+       2
+      ],
+      [
+       "Fp8BlockMatmul 1024x2048x6144",
+       1
+      ],
+      [
+       "glm_vx_gpu_rmsnorm_rows",
+       1
+      ],
+      [
+       "Fp8BlockMatmul 1024x2048x2048",
+       1
+      ],
+      [
+       "Fp8BlockMatmul 1024x576x6144",
+       1
+      ],
+      [
+       "glm_vx_spawn_kv_rows_prefill_bf16",
+       1
+      ],
+      [
+       "glm_vx_spawn_q_rows_prefill",
+       1
+      ],
+      [
+       "Fp8BlockMatmul 1024x3584x512",
+       1
+      ],
+      [
+       "glm_vx_spawn_mha_prefill_tc",
+       1
+      ],
+      [
+       "Fp8BlockMatmul 1024x6144x2048",
+       1
+      ]
+     ]
+    },
+    {
+     "part": "ffn",
+     "layer": 3,
+     "host_ms": 1.7768269999578479,
+     "gpu_ms": 2.0670080184936523,
+     "kernels": 16,
+     "cublaslt": 1,
+     "ops": 0,
+     "by_name": [
+      [
+       "glm_vx_fp8_gemm_grouped_plan",
+       3
+      ],
+      [
+       "glm_vx_fp8_gemm_grouped_m64",
+       3
+      ],
+      [
+       "glm_vx_spawn_fp8_quant_rows",
+       2
+      ],
+      [
+       "glm_vx_spawn_bf16_rows",
+       1
+      ],
+      [
+       "Bf16Matmul 1024x256x6144",
+       1
+      ],
+      [
+       "glm_vx_spawn_router_topk_rows",
+       1
+      ],
+      [
+       "glm_vx_spawn_moe_group_count",
+       1
+      ],
+      [
+       "glm_vx_spawn_moe_group_offsets",
+       1
+      ],
+      [
+       "glm_vx_spawn_moe_group_place",
+       1
+      ],
+      [
+       "glm_vx_spawn_moe_group_finish",
+       1
+      ],
+      [
+       "glm_vx_gpu_swiglu",
+       1
+      ],
+      [
+       "glm_vx_spawn_moe_combine_rows_bf16",
+       1
+      ]
+     ]
+    }
+   ],
+   "by_name": [
+    [
+     "glm_vx_gpu_fp8_quant_groups",
+     32
+    ],
+    [
+     "glm_vx_gpu_rmsnorm_rows",
+     8
+    ],
+    [
+     "glm_vx_spawn_rows_bf16_f32",
+     8
+    ],
+    [
+     "Fp8BlockMatmul 1024x1536x6144",
+     6
+    ],
+    [
+     "Fp8BlockMatmul 1024x2048x6144",
+     4
+    ],
+    [
+     "Fp8BlockMatmul 1024x2048x2048",
+     4
+    ],
+    [
+     "Fp8BlockMatmul 1024x576x6144",
+     4
+    ],
+    [
+     "glm_vx_spawn_kv_rows_prefill_bf16",
+     4
+    ],
+    [
+     "glm_vx_spawn_q_rows_prefill",
+     4
+    ],
+    [
+     "Fp8BlockMatmul 1024x3584x512",
+     4
+    ],
+    [
+     "glm_vx_spawn_mha_prefill_tc",
+     4
+    ],
+    [
+     "Fp8BlockMatmul 1024x6144x2048",
+     4
+    ],
+    [
+     "glm_vx_gpu_residual_rmsnorm",
+     4
+    ],
+    [
+     "glm_vx_gpu_swiglu",
+     4
+    ],
+    [
+     "glm_vx_gpu_add",
+     4
+    ],
+    [
+     "Fp8BlockMatmul 1024x128x6144",
+     3
+    ],
+    [
+     "glm_vx_spawn_index_key_rows",
+     3
+    ],
+    [
+     "Fp8BlockMatmul 1024x6144x1536",
+     3
+    ],
+    [
+     "glm_vx_fp8_gemm_grouped_plan",
+     3
+    ],
+    [
+     "glm_vx_fp8_gemm_grouped_m64",
+     3
+    ],
+    [
+     "cuMemcpyHtoD_v2",
+     2
+    ],
+    [
+     "glm_vx_spawn_fp8_quant_rows",
+     2
+    ],
+    [
+     "glm_vx_spawn_bf16_rows",
+     1
+    ],
+    [
+     "Bf16Matmul 1024x256x6144",
+     1
+    ],
+    [
+     "glm_vx_spawn_router_topk_rows",
+     1
+    ],
+    [
+     "glm_vx_spawn_moe_group_count",
+     1
+    ],
+    [
+     "glm_vx_spawn_moe_group_offsets",
+     1
+    ],
+    [
+     "glm_vx_spawn_moe_group_place",
+     1
+    ],
+    [
+     "glm_vx_spawn_moe_group_finish",
+     1
+    ],
+    [
+     "glm_vx_spawn_moe_combine_rows_bf16",
+     1
+    ],
+    [
+     "glm_vx_gpu_copy",
+     1
+    ]
+   ]
+  }
+ },
+ "long": [
+  {
+   "tokens": 2048,
+   "start": 2048,
+   "wall_ms": 291.339612999991,
+   "layered": {
+    "wall_ms": 284.9964709999995,
+    "host_enqueue_ms": 128.22944300000927,
+    "gpu_span_ms": 284.9608459472656,
+    "launches": 156,
+    "launch_kinds": {
+     "op": 2,
+     "kernel": 115,
+     "cublaslt": 39
+    },
+    "parts": [
+     {
+      "part": "attention",
+      "layer": 0,
+      "host_ms": 2.3750730000529074,
+      "gpu_ms": 42.23686218261719,
+      "kernels": 21,
+      "cublaslt": 8,
+      "ops": 0,
+      "by_name": [
+       [
+        "glm_vx_gpu_fp8_quant_groups",
+        7
+       ],
+       [
+        "glm_vx_spawn_index_q_bf16_at",
+        2
+       ],
+       [
+        "glm_vx_spawn_rows_bf16_f32",
+        2
+       ],
+       [
+        "Fp8BlockMatmul 2048x2048x6144",
+        1
+       ],
+       [
+        "glm_vx_gpu_rmsnorm_rows",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x2048x2048",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x576x6144",
+        1
+       ],
+       [
+        "glm_vx_spawn_kv_rows_prefill_bf16",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x128x6144",
+        1
+       ],
+       [
+        "glm_vx_spawn_index_key_rows",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x4096x2048",
+        1
+       ],
+       [
+        "glm_vx_spawn_bf16_rows",
+        1
+       ],
+       [
+        "Bf16Matmul 2048x32x6144",
+        1
+       ],
+       [
+        "glm_vx_gpu_scale",
+        1
+       ],
+       [
+        "glm_vx_spawn_iq_rows_prefill",
+        1
+       ],
+       [
+        "glm_vx_spawn_index_scores_chunk_at",
+        1
+       ],
+       [
+        "glm_vx_spawn_topk_select_rows",
+        1
+       ],
+       [
+        "glm_vx_spawn_q_rows_prefill",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 4096x3584x512",
+        1
+       ],
+       [
+        "glm_vx_spawn_mha_prefill_sparse",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x6144x2048",
+        1
+       ]
+      ]
+     },
+     {
+      "part": "ffn",
+      "layer": 0,
+      "host_ms": 0.369685999999092,
+      "gpu_ms": 0.27641600370407104,
+      "kernels": 4,
+      "cublaslt": 3,
+      "ops": 0,
+      "by_name": [
+       [
+        "glm_vx_gpu_fp8_quant_groups",
+        3
+       ],
+       [
+        "Fp8BlockMatmul 2048x1536x6144",
+        2
+       ],
+       [
+        "glm_vx_gpu_swiglu",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x6144x1536",
+        1
+       ]
+      ]
+     },
+     {
+      "part": "attention",
+      "layer": 1,
+      "host_ms": 2.003673000103845,
+      "gpu_ms": 40.97785568237305,
+      "kernels": 21,
+      "cublaslt": 8,
+      "ops": 0,
+      "by_name": [
+       [
+        "glm_vx_gpu_fp8_quant_groups",
+        7
+       ],
+       [
+        "glm_vx_spawn_index_q_bf16_at",
+        2
+       ],
+       [
+        "glm_vx_spawn_rows_bf16_f32",
+        2
+       ],
+       [
+        "Fp8BlockMatmul 2048x2048x6144",
+        1
+       ],
+       [
+        "glm_vx_gpu_rmsnorm_rows",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x2048x2048",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x576x6144",
+        1
+       ],
+       [
+        "glm_vx_spawn_kv_rows_prefill_bf16",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x128x6144",
+        1
+       ],
+       [
+        "glm_vx_spawn_index_key_rows",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x4096x2048",
+        1
+       ],
+       [
+        "glm_vx_spawn_bf16_rows",
+        1
+       ],
+       [
+        "Bf16Matmul 2048x32x6144",
+        1
+       ],
+       [
+        "glm_vx_gpu_scale",
+        1
+       ],
+       [
+        "glm_vx_spawn_iq_rows_prefill",
+        1
+       ],
+       [
+        "glm_vx_spawn_index_scores_chunk_at",
+        1
+       ],
+       [
+        "glm_vx_spawn_topk_select_rows",
+        1
+       ],
+       [
+        "glm_vx_spawn_q_rows_prefill",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 4096x3584x512",
+        1
+       ],
+       [
+        "glm_vx_spawn_mha_prefill_sparse",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x6144x2048",
+        1
+       ]
+      ]
+     },
+     {
+      "part": "ffn",
+      "layer": 1,
+      "host_ms": 0.32936499997049395,
+      "gpu_ms": 0.2791999876499176,
+      "kernels": 4,
+      "cublaslt": 3,
+      "ops": 0,
+      "by_name": [
+       [
+        "glm_vx_gpu_fp8_quant_groups",
+        3
+       ],
+       [
+        "Fp8BlockMatmul 2048x1536x6144",
+        2
+       ],
+       [
+        "glm_vx_gpu_swiglu",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x6144x1536",
+        1
+       ]
+      ]
+     },
+     {
+      "part": "attention",
+      "layer": 2,
+      "host_ms": 1.9921420000628132,
+      "gpu_ms": 40.96944046020508,
+      "kernels": 21,
+      "cublaslt": 8,
+      "ops": 0,
+      "by_name": [
+       [
+        "glm_vx_gpu_fp8_quant_groups",
+        7
+       ],
+       [
+        "glm_vx_spawn_index_q_bf16_at",
+        2
+       ],
+       [
+        "glm_vx_spawn_rows_bf16_f32",
+        2
+       ],
+       [
+        "Fp8BlockMatmul 2048x2048x6144",
+        1
+       ],
+       [
+        "glm_vx_gpu_rmsnorm_rows",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x2048x2048",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x576x6144",
+        1
+       ],
+       [
+        "glm_vx_spawn_kv_rows_prefill_bf16",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x128x6144",
+        1
+       ],
+       [
+        "glm_vx_spawn_index_key_rows",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x4096x2048",
+        1
+       ],
+       [
+        "glm_vx_spawn_bf16_rows",
+        1
+       ],
+       [
+        "Bf16Matmul 2048x32x6144",
+        1
+       ],
+       [
+        "glm_vx_gpu_scale",
+        1
+       ],
+       [
+        "glm_vx_spawn_iq_rows_prefill",
+        1
+       ],
+       [
+        "glm_vx_spawn_index_scores_chunk_at",
+        1
+       ],
+       [
+        "glm_vx_spawn_topk_select_rows",
+        1
+       ],
+       [
+        "glm_vx_spawn_q_rows_prefill",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 4096x3584x512",
+        1
+       ],
+       [
+        "glm_vx_spawn_mha_prefill_sparse",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x6144x2048",
+        1
+       ]
+      ]
+     },
+     {
+      "part": "ffn",
+      "layer": 2,
+      "host_ms": 0.34758999993300677,
+      "gpu_ms": 0.27823999524116516,
+      "kernels": 4,
+      "cublaslt": 3,
+      "ops": 0,
+      "by_name": [
+       [
+        "glm_vx_gpu_fp8_quant_groups",
+        3
+       ],
+       [
+        "Fp8BlockMatmul 2048x1536x6144",
+        2
+       ],
+       [
+        "glm_vx_gpu_swiglu",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x6144x1536",
+        1
+       ]
+      ]
+     },
+     {
+      "part": "attention",
+      "layer": 3,
+      "host_ms": 0.9725979999757328,
+      "gpu_ms": 40.14595031738281,
+      "kernels": 11,
+      "cublaslt": 5,
+      "ops": 0,
+      "by_name": [
+       [
+        "glm_vx_gpu_fp8_quant_groups",
+        5
+       ],
+       [
+        "glm_vx_spawn_rows_bf16_f32",
+        2
+       ],
+       [
+        "Fp8BlockMatmul 2048x2048x6144",
+        1
+       ],
+       [
+        "glm_vx_gpu_rmsnorm_rows",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x2048x2048",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x576x6144",
+        1
+       ],
+       [
+        "glm_vx_spawn_kv_rows_prefill_bf16",
+        1
+       ],
+       [
+        "glm_vx_spawn_q_rows_prefill",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 4096x3584x512",
+        1
+       ],
+       [
+        "glm_vx_spawn_mha_prefill_sparse",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x6144x2048",
+        1
+       ]
+      ]
+     },
+     {
+      "part": "ffn",
+      "layer": 3,
+      "host_ms": 1.6771379999909186,
+      "gpu_ms": 1.910591959953308,
+      "kernels": 16,
+      "cublaslt": 1,
+      "ops": 0,
+      "by_name": [
+       [
+        "glm_vx_fp8_gemm_grouped_plan",
+        3
+       ],
+       [
+        "glm_vx_fp8_gemm_grouped_m64",
+        3
+       ],
+       [
+        "glm_vx_spawn_fp8_quant_rows",
+        2
+       ],
+       [
+        "glm_vx_spawn_bf16_rows",
+        1
+       ],
+       [
+        "Bf16Matmul 2048x256x6144",
+        1
+       ],
+       [
+        "glm_vx_spawn_router_topk_rows",
+        1
+       ],
+       [
+        "glm_vx_spawn_moe_group_count",
+        1
+       ],
+       [
+        "glm_vx_spawn_moe_group_offsets",
+        1
+       ],
+       [
+        "glm_vx_spawn_moe_group_place",
+        1
+       ],
+       [
+        "glm_vx_spawn_moe_group_finish",
+        1
+       ],
+       [
+        "glm_vx_gpu_swiglu",
+        1
+       ],
+       [
+        "glm_vx_spawn_moe_combine_rows_bf16",
+        1
+       ]
+      ]
+     }
+    ],
+    "by_name": [
+     [
+      "glm_vx_gpu_fp8_quant_groups",
+      35
+     ],
+     [
+      "glm_vx_gpu_rmsnorm_rows",
+      8
+     ],
+     [
+      "glm_vx_spawn_rows_bf16_f32",
+      8
+     ],
+     [
+      "glm_vx_spawn_index_q_bf16_at",
+      6
+     ],
+     [
+      "Fp8BlockMatmul 2048x1536x6144",
+      6
+     ],
+     [
+      "Fp8BlockMatmul 2048x2048x6144",
+      4
+     ],
+     [
+      "Fp8BlockMatmul 2048x2048x2048",
+      4
+     ],
+     [
+      "Fp8BlockMatmul 2048x576x6144",
+      4
+     ],
+     [
+      "glm_vx_spawn_kv_rows_prefill_bf16",
+      4
+     ],
+     [
+      "glm_vx_spawn_bf16_rows",
+      4
+     ],
+     [
+      "glm_vx_spawn_q_rows_prefill",
+      4
+     ],
+     [
+      "Fp8BlockMatmul 4096x3584x512",
+      4
+     ],
+     [
+      "glm_vx_spawn_mha_prefill_sparse",
+      4
+     ],
+     [
+      "Fp8BlockMatmul 2048x6144x2048",
+      4
+     ],
+     [
+      "glm_vx_gpu_residual_rmsnorm",
+      4
+     ],
+     [
+      "glm_vx_gpu_swiglu",
+      4
+     ],
+     [
+      "glm_vx_gpu_add",
+      4
+     ],
+     [
+      "Fp8BlockMatmul 2048x128x6144",
+      3
+     ],
+     [
+      "glm_vx_spawn_index_key_rows",
+      3
+     ],
+     [
+      "Fp8BlockMatmul 2048x4096x2048",
+      3
+     ],
+     [
+      "Bf16Matmul 2048x32x6144",
+      3
+     ],
+     [
+      "glm_vx_gpu_scale",
+      3
+     ],
+     [
+      "glm_vx_spawn_iq_rows_prefill",
+      3
+     ],
+     [
+      "glm_vx_spawn_index_scores_chunk_at",
+      3
+     ],
+     [
+      "glm_vx_spawn_topk_select_rows",
+      3
+     ],
+     [
+      "Fp8BlockMatmul 2048x6144x1536",
+      3
+     ],
+     [
+      "glm_vx_fp8_gemm_grouped_plan",
+      3
+     ],
+     [
+      "glm_vx_fp8_gemm_grouped_m64",
+      3
+     ],
+     [
+      "cuMemcpyHtoD_v2",
+      2
+     ],
+     [
+      "glm_vx_spawn_fp8_quant_rows",
+      2
+     ],
+     [
+      "Bf16Matmul 2048x256x6144",
+      1
+     ],
+     [
+      "glm_vx_spawn_router_topk_rows",
+      1
+     ],
+     [
+      "glm_vx_spawn_moe_group_count",
+      1
+     ],
+     [
+      "glm_vx_spawn_moe_group_offsets",
+      1
+     ],
+     [
+      "glm_vx_spawn_moe_group_place",
+      1
+     ],
+     [
+      "glm_vx_spawn_moe_group_finish",
+      1
+     ],
+     [
+      "glm_vx_spawn_moe_combine_rows_bf16",
+      1
+     ],
+     [
+      "glm_vx_gpu_copy",
+      1
+     ]
+    ]
+   }
+  },
+  {
+   "tokens": 2048,
+   "start": 30720,
+   "wall_ms": 310.3492110000161,
+   "layered": {
+    "wall_ms": 319.91335599991544,
+    "host_enqueue_ms": 138.97420099999636,
+    "gpu_span_ms": 319.8766174316406,
+    "launches": 156,
+    "launch_kinds": {
+     "op": 2,
+     "kernel": 115,
+     "cublaslt": 39
+    },
+    "parts": [
+     {
+      "part": "attention",
+      "layer": 0,
+      "host_ms": 2.530165999928613,
+      "gpu_ms": 48.89231872558594,
+      "kernels": 21,
+      "cublaslt": 8,
+      "ops": 0,
+      "by_name": [
+       [
+        "glm_vx_gpu_fp8_quant_groups",
+        7
+       ],
+       [
+        "glm_vx_spawn_index_q_bf16_at",
+        2
+       ],
+       [
+        "glm_vx_spawn_rows_bf16_f32",
+        2
+       ],
+       [
+        "Fp8BlockMatmul 2048x2048x6144",
+        1
+       ],
+       [
+        "glm_vx_gpu_rmsnorm_rows",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x2048x2048",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x576x6144",
+        1
+       ],
+       [
+        "glm_vx_spawn_kv_rows_prefill_bf16",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x128x6144",
+        1
+       ],
+       [
+        "glm_vx_spawn_index_key_rows",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x4096x2048",
+        1
+       ],
+       [
+        "glm_vx_spawn_bf16_rows",
+        1
+       ],
+       [
+        "Bf16Matmul 2048x32x6144",
+        1
+       ],
+       [
+        "glm_vx_gpu_scale",
+        1
+       ],
+       [
+        "glm_vx_spawn_iq_rows_prefill",
+        1
+       ],
+       [
+        "glm_vx_spawn_index_scores_chunk_at",
+        1
+       ],
+       [
+        "glm_vx_spawn_topk_select_rows",
+        1
+       ],
+       [
+        "glm_vx_spawn_q_rows_prefill",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 32768x3584x512",
+        1
+       ],
+       [
+        "glm_vx_spawn_mha_prefill_sparse",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x6144x2048",
+        1
+       ]
+      ]
+     },
+     {
+      "part": "ffn",
+      "layer": 0,
+      "host_ms": 0.42144199994709197,
+      "gpu_ms": 0.2759360074996948,
+      "kernels": 4,
+      "cublaslt": 3,
+      "ops": 0,
+      "by_name": [
+       [
+        "glm_vx_gpu_fp8_quant_groups",
+        3
+       ],
+       [
+        "Fp8BlockMatmul 2048x1536x6144",
+        2
+       ],
+       [
+        "glm_vx_gpu_swiglu",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x6144x1536",
+        1
+       ]
+      ]
+     },
+     {
+      "part": "attention",
+      "layer": 1,
+      "host_ms": 2.0569099999647733,
+      "gpu_ms": 47.681217193603516,
+      "kernels": 21,
+      "cublaslt": 8,
+      "ops": 0,
+      "by_name": [
+       [
+        "glm_vx_gpu_fp8_quant_groups",
+        7
+       ],
+       [
+        "glm_vx_spawn_index_q_bf16_at",
+        2
+       ],
+       [
+        "glm_vx_spawn_rows_bf16_f32",
+        2
+       ],
+       [
+        "Fp8BlockMatmul 2048x2048x6144",
+        1
+       ],
+       [
+        "glm_vx_gpu_rmsnorm_rows",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x2048x2048",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x576x6144",
+        1
+       ],
+       [
+        "glm_vx_spawn_kv_rows_prefill_bf16",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x128x6144",
+        1
+       ],
+       [
+        "glm_vx_spawn_index_key_rows",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x4096x2048",
+        1
+       ],
+       [
+        "glm_vx_spawn_bf16_rows",
+        1
+       ],
+       [
+        "Bf16Matmul 2048x32x6144",
+        1
+       ],
+       [
+        "glm_vx_gpu_scale",
+        1
+       ],
+       [
+        "glm_vx_spawn_iq_rows_prefill",
+        1
+       ],
+       [
+        "glm_vx_spawn_index_scores_chunk_at",
+        1
+       ],
+       [
+        "glm_vx_spawn_topk_select_rows",
+        1
+       ],
+       [
+        "glm_vx_spawn_q_rows_prefill",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 32768x3584x512",
+        1
+       ],
+       [
+        "glm_vx_spawn_mha_prefill_sparse",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x6144x2048",
+        1
+       ]
+      ]
+     },
+     {
+      "part": "ffn",
+      "layer": 1,
+      "host_ms": 0.3318340000078024,
+      "gpu_ms": 0.2756800055503845,
+      "kernels": 4,
+      "cublaslt": 3,
+      "ops": 0,
+      "by_name": [
+       [
+        "glm_vx_gpu_fp8_quant_groups",
+        3
+       ],
+       [
+        "Fp8BlockMatmul 2048x1536x6144",
+        2
+       ],
+       [
+        "glm_vx_gpu_swiglu",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x6144x1536",
+        1
+       ]
+      ]
+     },
+     {
+      "part": "attention",
+      "layer": 2,
+      "host_ms": 2.0558720000281028,
+      "gpu_ms": 47.7597770690918,
+      "kernels": 21,
+      "cublaslt": 8,
+      "ops": 0,
+      "by_name": [
+       [
+        "glm_vx_gpu_fp8_quant_groups",
+        7
+       ],
+       [
+        "glm_vx_spawn_index_q_bf16_at",
+        2
+       ],
+       [
+        "glm_vx_spawn_rows_bf16_f32",
+        2
+       ],
+       [
+        "Fp8BlockMatmul 2048x2048x6144",
+        1
+       ],
+       [
+        "glm_vx_gpu_rmsnorm_rows",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x2048x2048",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x576x6144",
+        1
+       ],
+       [
+        "glm_vx_spawn_kv_rows_prefill_bf16",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x128x6144",
+        1
+       ],
+       [
+        "glm_vx_spawn_index_key_rows",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x4096x2048",
+        1
+       ],
+       [
+        "glm_vx_spawn_bf16_rows",
+        1
+       ],
+       [
+        "Bf16Matmul 2048x32x6144",
+        1
+       ],
+       [
+        "glm_vx_gpu_scale",
+        1
+       ],
+       [
+        "glm_vx_spawn_iq_rows_prefill",
+        1
+       ],
+       [
+        "glm_vx_spawn_index_scores_chunk_at",
+        1
+       ],
+       [
+        "glm_vx_spawn_topk_select_rows",
+        1
+       ],
+       [
+        "glm_vx_spawn_q_rows_prefill",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 32768x3584x512",
+        1
+       ],
+       [
+        "glm_vx_spawn_mha_prefill_sparse",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x6144x2048",
+        1
+       ]
+      ]
+     },
+     {
+      "part": "ffn",
+      "layer": 2,
+      "host_ms": 0.3557899999577785,
+      "gpu_ms": 0.27747198939323425,
+      "kernels": 4,
+      "cublaslt": 3,
+      "ops": 0,
+      "by_name": [
+       [
+        "glm_vx_gpu_fp8_quant_groups",
+        3
+       ],
+       [
+        "Fp8BlockMatmul 2048x1536x6144",
+        2
+       ],
+       [
+        "glm_vx_gpu_swiglu",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x6144x1536",
+        1
+       ]
+      ]
+     },
+     {
+      "part": "attention",
+      "layer": 3,
+      "host_ms": 1.0474470000190195,
+      "gpu_ms": 44.785438537597656,
+      "kernels": 11,
+      "cublaslt": 5,
+      "ops": 0,
+      "by_name": [
+       [
+        "glm_vx_gpu_fp8_quant_groups",
+        5
+       ],
+       [
+        "glm_vx_spawn_rows_bf16_f32",
+        2
+       ],
+       [
+        "Fp8BlockMatmul 2048x2048x6144",
+        1
+       ],
+       [
+        "glm_vx_gpu_rmsnorm_rows",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x2048x2048",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x576x6144",
+        1
+       ],
+       [
+        "glm_vx_spawn_kv_rows_prefill_bf16",
+        1
+       ],
+       [
+        "glm_vx_spawn_q_rows_prefill",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 32768x3584x512",
+        1
+       ],
+       [
+        "glm_vx_spawn_mha_prefill_sparse",
+        1
+       ],
+       [
+        "Fp8BlockMatmul 2048x6144x2048",
+        1
+       ]
+      ]
+     },
+     {
+      "part": "ffn",
+      "layer": 3,
+      "host_ms": 1.8035440000403469,
+      "gpu_ms": 1.9348479509353638,
+      "kernels": 16,
+      "cublaslt": 1,
+      "ops": 0,
+      "by_name": [
+       [
+        "glm_vx_fp8_gemm_grouped_plan",
+        3
+       ],
+       [
+        "glm_vx_fp8_gemm_grouped_m64",
+        3
+       ],
+       [
+        "glm_vx_spawn_fp8_quant_rows",
+        2
+       ],
+       [
+        "glm_vx_spawn_bf16_rows",
+        1
+       ],
+       [
+        "Bf16Matmul 2048x256x6144",
+        1
+       ],
+       [
+        "glm_vx_spawn_router_topk_rows",
+        1
+       ],
+       [
+        "glm_vx_spawn_moe_group_count",
+        1
+       ],
+       [
+        "glm_vx_spawn_moe_group_offsets",
+        1
+       ],
+       [
+        "glm_vx_spawn_moe_group_place",
+        1
+       ],
+       [
+        "glm_vx_spawn_moe_group_finish",
+        1
+       ],
+       [
+        "glm_vx_gpu_swiglu",
+        1
+       ],
+       [
+        "glm_vx_spawn_moe_combine_rows_bf16",
+        1
+       ]
+      ]
+     }
+    ],
+    "by_name": [
+     [
+      "glm_vx_gpu_fp8_quant_groups",
+      35
+     ],
+     [
+      "glm_vx_gpu_rmsnorm_rows",
+      8
+     ],
+     [
+      "glm_vx_spawn_rows_bf16_f32",
+      8
+     ],
+     [
+      "glm_vx_spawn_index_q_bf16_at",
+      6
+     ],
+     [
+      "Fp8BlockMatmul 2048x1536x6144",
+      6
+     ],
+     [
+      "Fp8BlockMatmul 2048x2048x6144",
+      4
+     ],
+     [
+      "Fp8BlockMatmul 2048x2048x2048",
+      4
+     ],
+     [
+      "Fp8BlockMatmul 2048x576x6144",
+      4
+     ],
+     [
+      "glm_vx_spawn_kv_rows_prefill_bf16",
+      4
+     ],
+     [
+      "glm_vx_spawn_bf16_rows",
+      4
+     ],
+     [
+      "glm_vx_spawn_q_rows_prefill",
+      4
+     ],
+     [
+      "Fp8BlockMatmul 32768x3584x512",
+      4
+     ],
+     [
+      "glm_vx_spawn_mha_prefill_sparse",
+      4
+     ],
+     [
+      "Fp8BlockMatmul 2048x6144x2048",
+      4
+     ],
+     [
+      "glm_vx_gpu_residual_rmsnorm",
+      4
+     ],
+     [
+      "glm_vx_gpu_swiglu",
+      4
+     ],
+     [
+      "glm_vx_gpu_add",
+      4
+     ],
+     [
+      "Fp8BlockMatmul 2048x128x6144",
+      3
+     ],
+     [
+      "glm_vx_spawn_index_key_rows",
+      3
+     ],
+     [
+      "Fp8BlockMatmul 2048x4096x2048",
+      3
+     ],
+     [
+      "Bf16Matmul 2048x32x6144",
+      3
+     ],
+     [
+      "glm_vx_gpu_scale",
+      3
+     ],
+     [
+      "glm_vx_spawn_iq_rows_prefill",
+      3
+     ],
+     [
+      "glm_vx_spawn_index_scores_chunk_at",
+      3
+     ],
+     [
+      "glm_vx_spawn_topk_select_rows",
+      3
+     ],
+     [
+      "Fp8BlockMatmul 2048x6144x1536",
+      3
+     ],
+     [
+      "glm_vx_fp8_gemm_grouped_plan",
+      3
+     ],
+     [
+      "glm_vx_fp8_gemm_grouped_m64",
+      3
+     ],
+     [
+      "cuMemcpyHtoD_v2",
+      2
+     ],
+     [
+      "glm_vx_spawn_fp8_quant_rows",
+      2
+     ],
+     [
+      "Bf16Matmul 2048x256x6144",
+      1
+     ],
+     [
+      "glm_vx_spawn_router_topk_rows",
+      1
+     ],
+     [
+      "glm_vx_spawn_moe_group_count",
+      1
+     ],
+     [
+      "glm_vx_spawn_moe_group_offsets",
+      1
+     ],
+     [
+      "glm_vx_spawn_moe_group_place",
+      1
+     ],
+     [
+      "glm_vx_spawn_moe_group_finish",
+      1
+     ],
+     [
+      "glm_vx_spawn_moe_combine_rows_bf16",
+      1
+     ],
+     [
+      "glm_vx_gpu_copy",
+      1
+     ]
+    ]
+   }
+  }
+ ]
+}
