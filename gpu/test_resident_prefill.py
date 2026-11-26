@@ -393,6 +393,55 @@ def test_two_ranks_mha_prompt_past_index_topk():
     assert launches.get('mha_prefill_sparse', 0) == model.n_layers
 
 
+def checkpoint_formats_model(seed, **overrides):
+    """build()'s model in GLM-5.3's checkpoint formats: block-FP8 Linears, and lm_head, each MoE router's gate and each
+    indexer's weights_proj in bfloat16 (docs/model.md), so prefill_chunk takes the paths the served model takes (a
+    float32 weights_proj would run a row at a time)."""
+    from glm_vx.backend import NumpyBackend
+    from glm_vx.model import GlmMoeDsaModel
+    from glm_vx.quant import BF16Weights, BlockFP8Weights
+    from validation.write_checkpoint import UNQUANTIZED, fp8_quantize, to_bf16_bits
+    base = build(seed=seed, **overrides)
+    linears = {name[:-len('.weight')]: fp8_quantize(w) for name, w in base.weights.items()
+               if w.ndim == 2 and name.endswith('.weight') and not any(u in name for u in UNQUANTIZED)}
+    rest = {n: w for n, w in base.weights.items() if n[:-len('.weight')] not in linears}
+    halves = {name[:-len('.weight')]: to_bf16_bits(rest.pop(name)) for name in list(rest)
+              if rest[name].ndim == 2 and (name == 'lm_head.weight' or name.endswith(('.mlp.gate.weight',
+                                                                                     '.indexer.weights_proj.weight')))}
+    assert any(n.endswith('.indexer.weights_proj') for n in halves) and any(n.endswith('.mlp.gate') for n in halves)
+    return GlmMoeDsaModel(base.config, BlockFP8Weights(BF16Weights(rest, halves), linears), NumpyBackend())
+
+
+@pytest.mark.parametrize('topk', [16, 4], ids=['dense', 'past_index_topk'])
+def test_a_chunks_launches_do_not_grow_with_its_rows(topk):
+    # z63's lesson: a Linear that _prefill_linear has no rows path for runs a row at a time, which cost W3 59 s. With the
+    # served prefill options on the checkpoint's formats, a chunk's launches by name are the same for 2 rows and for 6,
+    # after the same first chunk (both dense with index_topk 16, both past it with 4). Every Linear's input width is a
+    # multiple of 128, as GLM-5.3's are at one TP8 rank (q_lora 2048, kv_lora 512, heads x value 2048, the dense MLP's
+    # 1536): cuBLASLt's block-FP8 rows need it, and a narrower one still runs a row at a time.
+    model = checkpoint_formats_model(43, hidden_size=128, q_lora_rank=128, kv_lora_rank=128, v_head_dim=64,
+                                     intermediate_size=128, moe_intermediate_size=128, index_topk=topk)
+    options = dict(prefill_gemm='cublaslt', prefill_sum='nccl', prefill_moe='grouped', prefill_attention='mha',
+                   device_experts=True, fuse_router=True)
+
+    def chunk_launches(rows):
+        resident = ResidentGLM(model, ctx=Context(), max_tokens=32, **options)
+        try:
+            assert resident.prefill_chunk(PROMPT[:3]) is None
+            before = dict(resident.launches)
+            assert resident.prefill_chunk(PROMPT[3:3 + rows]) is None
+            return {name: n - before.get(name, 0) for name, n in resident.launches.items() if n != before.get(name, 0)}
+        finally:
+            resident.close()
+
+    two, six = chunk_launches(2), chunk_launches(6)
+    assert two == six, {name: (two.get(name, 0), six.get(name, 0)) for name in set(two) | set(six)
+                        if two.get(name, 0) != six.get(name, 0)}
+    assert two.get('cublaslt_bf16_rows', 0) > 0 and two.get('grouped_moe', 0) > 0
+    if topk == 4:
+        assert two.get('mha_prefill_sparse', 0) > 0 and two.get('topk_select_rows', 0) > 0
+
+
 @pytest.mark.parametrize('topk', [16, 4])
 def test_every_prefill_option_together(topk):
     # z32's configuration: cuBLASLt rows (the BF16 router's too), the routed experts grouped, MHA attention. Dense
