@@ -1,0 +1,29 @@
+A = /home/ubuntu/glm-h200/z71-out/A-r1
+B = /home/ubuntu/glm-h200/z71-out/B-r1
+options that differ (A, B): none
+W1 wall median ms: A 70.0  B 14.3
+
+W1: wall ms A 69.5  B 15.5; per part GPU ms (A -> B)
+  layer 0 attention     1.72 ->     1.58   launches 19 -> 19
+  layer 0 ffn           0.27 ->     0.21   launches 7 -> 7
+  layer 1 attention     1.43 ->     1.41   launches 19 -> 19
+  layer 1 ffn           0.25 ->     0.23   launches 7 -> 7
+  layer 2 attention     1.46 ->     1.44   launches 19 -> 19
+  layer 2 ffn           0.24 ->     0.23   launches 7 -> 7
+  layer 3 attention     1.22 ->     1.20   launches 16 -> 16
+  layer 3 ffn           2.02 ->     2.06   launches 17 -> 17
+  78-layer GPU estimate: A 254 ms  B 255 ms
+
+chunk at 30720: wall ms A 155.4  B 43.5; per part GPU ms (A -> B)
+  layer 0 attention     6.87 ->     6.92   launches 29 -> 29
+  layer 0 ffn           0.28 ->     0.28   launches 7 -> 7
+  layer 1 attention     5.68 ->     5.68   launches 29 -> 29
+  layer 1 ffn           0.28 ->     0.28   launches 7 -> 7
+  layer 2 attention     5.68 ->     5.67   launches 29 -> 29
+  layer 2 ffn           0.27 ->     0.28   launches 7 -> 7
+  layer 3 attention     2.77 ->     2.77   launches 16 -> 16
+  layer 3 ffn           1.93 ->     1.92   launches 17 -> 17
+  78-layer GPU estimate: A 431 ms  B 431 ms
+
+long-30720-logits.npy: max |B - A| / max |A| = 0.000e+00; argmax A 2399 B 2399; B finite True
+w1-logits.npy: max |B - A| / max |A| = 0.000e+00; argmax A 6398 B 6398; B finite True

@@ -1,0 +1,28 @@
+W1: 1000 tokens at 0, rank 0 of 8, 4 layers. wall median 67.9 ms [67.9, 68.0, 67.7]
+  instrumented call: wall 69.2 ms, host enqueue 68.9 ms, GPU span 69.2 ms, launches 126 {'op': 2, 'kernel': 91, 'cublaslt': 33}
+  collective calls a chunk: [(('all_reduce_sum', 6144000, 'float32'), 8)]
+
+chunk of 1000 at 0: per part, GPU ms (events) / host enqueue ms / launches (kernels, cuBLASLt, copies)
+  layer 0 attention GPU     1.72  host     1.57  launches    13   6    0  top: glm_vx_gpu_fp8_quant_groups 6, glm_vx_spawn_rows_bf16_f32 2, Fp8BlockMatmul 1024x2048x6144 1, glm_vx_gpu_rmsnorm_rows 1
+  layer 0 ffn       GPU     0.28  host     0.35  launches     4   3    0  top: glm_vx_gpu_fp8_quant_groups 3, Fp8BlockMatmul 1024x1536x6144 2, glm_vx_gpu_swiglu 1, Fp8BlockMatmul 1024x6144x1536 1
+  layer 1 attention GPU     1.43  host     1.25  launches    13   6    0  top: glm_vx_gpu_fp8_quant_groups 6, glm_vx_spawn_rows_bf16_f32 2, Fp8BlockMatmul 1024x2048x6144 1, glm_vx_gpu_rmsnorm_rows 1
+  layer 1 ffn       GPU     0.21  host     0.32  launches     4   3    0  top: glm_vx_gpu_fp8_quant_groups 3, Fp8BlockMatmul 1024x1536x6144 2, glm_vx_gpu_swiglu 1, Fp8BlockMatmul 1024x6144x1536 1
+  layer 2 attention GPU     1.44  host     1.28  launches    13   6    0  top: glm_vx_gpu_fp8_quant_groups 6, glm_vx_spawn_rows_bf16_f32 2, Fp8BlockMatmul 1024x2048x6144 1, glm_vx_gpu_rmsnorm_rows 1
+  layer 2 ffn       GPU     0.22  host     0.33  launches     4   3    0  top: glm_vx_gpu_fp8_quant_groups 3, Fp8BlockMatmul 1024x1536x6144 2, glm_vx_gpu_swiglu 1, Fp8BlockMatmul 1024x6144x1536 1
+  layer 3 attention GPU     1.21  host     1.05  launches    11   5    0  top: glm_vx_gpu_fp8_quant_groups 5, glm_vx_spawn_rows_bf16_f32 2, Fp8BlockMatmul 1024x2048x6144 1, glm_vx_gpu_rmsnorm_rows 1
+  layer 3 ffn       GPU     2.03  host     1.76  launches    16   1    0  top: glm_vx_fp8_gemm_grouped_plan 3, glm_vx_fp8_gemm_grouped_m64 3, glm_vx_spawn_fp8_quant_rows 2, glm_vx_spawn_bf16_rows 1
+  estimate for 78 layers (3 dense, 18 MoE full indexer, 57 MoE shared): GPU 254 ms, host enqueue 222 ms
+
+chunk of 2048 at 30720: per part, GPU ms (events) / host enqueue ms / launches (kernels, cuBLASLt, copies)
+  layer 0 attention GPU     6.87  host     2.55  launches    20   9    0  top: glm_vx_gpu_fp8_quant_groups 6, glm_vx_spawn_bf16_rows 3, glm_vx_spawn_index_q_bf16_at 2, Fp8BlockMatmul 2048x2048x6144 1
+  layer 0 ffn       GPU     0.28  host     0.38  launches     4   3    0  top: glm_vx_gpu_fp8_quant_groups 3, Fp8BlockMatmul 2048x1536x6144 2, glm_vx_gpu_swiglu 1, Fp8BlockMatmul 2048x6144x1536 1
+  layer 1 attention GPU     5.68  host     2.19  launches    20   9    0  top: glm_vx_gpu_fp8_quant_groups 6, glm_vx_spawn_bf16_rows 3, glm_vx_spawn_index_q_bf16_at 2, Fp8BlockMatmul 2048x2048x6144 1
+  layer 1 ffn       GPU     0.28  host     0.40  launches     4   3    0  top: glm_vx_gpu_fp8_quant_groups 3, Fp8BlockMatmul 2048x1536x6144 2, glm_vx_gpu_swiglu 1, Fp8BlockMatmul 2048x6144x1536 1
+  layer 2 attention GPU     5.67  host     2.14  launches    20   9    0  top: glm_vx_gpu_fp8_quant_groups 6, glm_vx_spawn_bf16_rows 3, glm_vx_spawn_index_q_bf16_at 2, Fp8BlockMatmul 2048x2048x6144 1
+  layer 2 ffn       GPU     0.28  host     0.37  launches     4   3    0  top: glm_vx_gpu_fp8_quant_groups 3, Fp8BlockMatmul 2048x1536x6144 2, glm_vx_gpu_swiglu 1, Fp8BlockMatmul 2048x6144x1536 1
+  layer 3 attention GPU     2.77  host     1.13  launches    10   6    0  top: glm_vx_gpu_fp8_quant_groups 4, glm_vx_spawn_bf16_rows 2, Fp8BlockMatmul 2048x2048x6144 1, glm_vx_gpu_rmsnorm_rows 1
+  layer 3 ffn       GPU     1.93  host     1.84  launches    16   1    0  top: glm_vx_fp8_gemm_grouped_plan 3, glm_vx_fp8_gemm_grouped_m64 3, glm_vx_spawn_fp8_quant_rows 2, glm_vx_spawn_bf16_rows 1
+  wall 148.5 ms; instrumented: host enqueue 138.6, GPU span 151.0, launches 156
+  estimate for 78 layers (3 dense, 18 MoE full indexer, 57 MoE shared): GPU 431 ms, host enqueue 252 ms
+
+NCCL, assumed: 2 all-reduces a layer of 24.6 MB (W1) at 350 GB/s bus bandwidth: 0.123 ms each, 19 ms for 78 layers

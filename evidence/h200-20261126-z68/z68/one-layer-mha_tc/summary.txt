@@ -1,0 +1,14 @@
+W1: 1000 tokens at 0, rank 0 of 8, 1 layers. wall median 61.3 ms [60.5, 61.3, 61.6]
+  instrumented call: wall 61.7 ms, host enqueue 61.7 ms, GPU span 61.7 ms, launches 32 {'op': 2, 'kernel': 21, 'cublaslt': 9}
+  collective calls a chunk: [(('all_reduce_sum', 6144000, 'float32'), 2)]
+
+chunk of 1000 at 0: per part, GPU ms (events) / host enqueue ms / launches (kernels, cuBLASLt, copies)
+  layer 0 attention GPU     1.66  host     1.50  launches    13   6    0  top: glm_vx_gpu_fp8_quant_groups 6, glm_vx_spawn_rows_bf16_f32 2, Fp8BlockMatmul 1024x2048x6144 1, glm_vx_gpu_rmsnorm_rows 1
+  layer 0 ffn       GPU     0.25  host     0.34  launches     4   3    0  top: glm_vx_gpu_fp8_quant_groups 3, Fp8BlockMatmul 1024x1536x6144 2, glm_vx_gpu_swiglu 1, Fp8BlockMatmul 1024x6144x1536 1
+
+chunk of 2048 at 30720: per part, GPU ms (events) / host enqueue ms / launches (kernels, cuBLASLt, copies)
+  layer 0 attention GPU    48.92  host     2.43  launches    21   8    0  top: glm_vx_gpu_fp8_quant_groups 7, glm_vx_spawn_index_q_bf16_at 2, glm_vx_spawn_rows_bf16_f32 2, Fp8BlockMatmul 2048x2048x6144 1
+  layer 0 ffn       GPU     0.28  host     0.36  launches     4   3    0  top: glm_vx_gpu_fp8_quant_groups 3, Fp8BlockMatmul 2048x1536x6144 2, glm_vx_gpu_swiglu 1, Fp8BlockMatmul 2048x6144x1536 1
+  wall 174.5 ms; instrumented: host enqueue 128.0, GPU span 174.1, launches 42
+
+NCCL, assumed: 2 all-reduces a layer of 24.6 MB (W1) at 350 GB/s bus bandwidth: 0.123 ms each, 19 ms for 78 layers
