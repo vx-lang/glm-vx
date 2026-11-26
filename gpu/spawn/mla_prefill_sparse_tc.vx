@@ -1,0 +1,195 @@
+// glm_vx_spawn_mla_prefill_sparse_tc (#63, TTFT): prefill attention past index_topk in the absorbed MLA form, on the
+// tensor cores, one block a query, so each selected cache row is read once for all of the rank's heads.
+//
+// Query i (position start + i) attends to the keys selected[i][0 .. topk) (topk_select_rows' set), or, while
+// start + i + 1 <= topk, to every key 0 .. start + i. Head h's score of key j is
+// (q_latent[i][h] . latent_j + q_rope[i][h] . rope_j) * scale over the bf16 cache rows, and
+// out[16 * i + h] = sum_j p_j latent_j / sum_j p_j with p_j = exp(score_j - max). The rank's heads are padded to 16
+// with zero queries (their rows of out are written too, and not used).
+//
+// For each chunk of 32 keys, gathered by id with lanes::copy_rows_async (an id of -1 gathers a zero row), the block
+// computes mla_tc_at's scores and products: s = latent rows x queries with mma.sync (bf16 products, f32 sums), each
+// head's P = exp(score - its running max) in bf16, and O += P latent rows with the sums in registers. Across chunks it
+// keeps each head's running max and sum and rescales O by exp(old max - new max), as mha_prefill_tc does. At the end it
+// divides each head's row by its sum. The products are of bf16 values with f32 sums, as SGLang's flashmla_sparse, so
+// out agrees with float64 attention to bf16 rounding.
+//
+// q_latent is [queries, heads, rank] (the absorbed queries, W_UK^T q_nope), q is q_rows_prefill's [queries, heads,
+// nope + rope_dim] with the rope query at nope .., out is [queries * 16, rank]. Needs 0 < heads <= 16, rank == 512 and
+// rope_dim == 64; otherwise it writes nothing.
+// spawn-maxnreg: 128 (build.py: two blocks of 256 lanes an SM)
+// spawn-include: device.vx
+
+pub fn glm_vx_spawn_mla_prefill_sparse_tc(out: &mut Tensor<f32, [?, ?], Memory::HBM>, q_latent: &Tensor<f32, [?, ?, ?], Memory::HBM>,
+                                          q: &Tensor<f32, [?, ?, ?], Memory::HBM>, cache_latent: &Tensor<bf16, [?, ?], Memory::HBM>,
+                                          cache_rope: &Tensor<bf16, [?, ?], Memory::HBM>, selected: &Tensor<i32, [?, ?], Memory::HBM>,
+                                          start: i32, queries: i32, heads: i32, nope: i32, rank: i32, rope_dim: i32, topk: i32,
+                                          scale: f32) -> void {
+  spawn on(Topology::Device) {
+    for i in 0..queries across blocks {
+      let tokens: i32 = start + i + 1;
+      let keys: i32 = if tokens <= topk { tokens } else { topk };
+      let chunks: i32 = (keys + 31) / 32;
+      let ok: bool = heads > 0 && heads <= 16 && rank == 512 && rope_dim == 64 && nope >= 0 && start >= 0 && topk > 0;
+      // sl[th][c][t][k]: latent element 64 * c + k of key 16 * th + t of the chunk; sr[th] the rope.
+      let mut sl = unsafe { Tensor<bf16, [2, 8, 16, 64], Memory::SMEM>::uninit() };
+      let mut sr = unsafe { Tensor<bf16, [2, 16, 64], Memory::SMEM>::uninit() };
+      // qt[c][hh][k][h]: head 8 * hh + h's latent query at 64 * c + k; qrt[hh][k][h] its rope query at k.
+      let mut qt = unsafe { Tensor<bf16, [8, 2, 64, 8], Memory::SMEM>::uninit() };
+      let mut qrt = unsafe { Tensor<bf16, [2, 64, 8], Memory::SMEM>::uninit() };
+      // s[w]: subgroup w's part of the scores (mla_tc_at's: keys 16 * ((w / 2) % 2) .., heads 8 * (w % 2) .., latent
+      // columns 256 * (w / 4) .. and, for w < 4, the rope).
+      let mut s = unsafe { Tensor<f32, [8, 16, 8], Memory::SMEM>::uninit() };
+      // p[th][h][t]: P of head h and key 16 * th + t, for the product with the latent rows.
+      let mut p = unsafe { Tensor<bf16, [2, 16, 16], Memory::SMEM>::uninit() };
+      let mut xs = unsafe { Tensor<f32, [8, 2, 32], Memory::SMEM>::uninit() };
+      let mut pf = unsafe { Tensor<f32, [8, 2, 32], Memory::SMEM>::uninit() };
+      // o[w]: the sums of the 16 heads over latent columns 64 * w .. + 63 (in registers).
+      let mut o = unsafe { Tensor<f32, [8, 16, 64], Memory::SMEM>::uninit() };
+      let mut ids = unsafe { Tensor<i32, [8, 32], Memory::SMEM>::uninit() };
+      // run_max[w][hq], run_sum[w][hq], fac[w][hq]: head 2 * w + hq's running max and sum of P, and the factor its
+      // row of O is scaled by, each written by subgroup w only; factor[w][h]: subgroup w's copy of all 16 factors,
+      // for its lanes::scale_rows (each subgroup writes its own row, so no two subgroups write one element).
+      let mut run_max = unsafe { Tensor<f32, [8, 2], Memory::SMEM>::uninit() };
+      let mut run_sum = unsafe { Tensor<f32, [8, 2], Memory::SMEM>::uninit() };
+      let mut fac = unsafe { Tensor<f32, [8, 2], Memory::SMEM>::uninit() };
+      let mut factor = unsafe { Tensor<f32, [8, 16], Memory::SMEM>::uninit() };
+      if ok {
+        // Lane t of subgroup w: latent columns 64 * w + t and + 32 of the 16 heads (and, for w < 2, rope columns).
+        for w in 0..8 across subgroups {
+          for t in 0..32 across lanes {
+            for kk in 0..2 {
+              let k: i32 = t + 32 * kk;
+              for hh in 0..2 {
+                for h in 0..8 {
+                  let head: i32 = 8 * hh + h;
+                  let mut v: f32 = 0.0;
+                  if head < heads { v = q_latent[i][head][64 * w + k]; }
+                  qt[w][hh][k][h] = v as bf16;
+                }
+              }
+              if w < 2 {
+                for h in 0..8 {
+                  let head: i32 = 8 * w + h;
+                  let mut v: f32 = 0.0;
+                  if head < heads { v = q[i][head][nope + k]; }
+                  qrt[w][k][h] = v as bf16;
+                }
+              }
+            }
+            if t < 2 {
+              run_max[w][t] = -3.0e38;
+              run_sum[w][t] = 0.0;
+            }
+          }
+          lanes::fill(&mut o[w], 0.0);
+        }
+        for ch in 0..chunks {
+          for w in 0..8 across subgroups {
+            // The chunk's ids, lane t key t's (-1 past the selection, which gathers a zero row).
+            for t in 0..32 across lanes {
+              let j: i32 = ch * 32 + t;
+              let jc: i32 = if j < keys { j } else { 0 };
+              let id: i32 = if tokens <= topk { jc } else { selected[i][jc] };
+              let none: i32 = -1;
+              ids[w][t] = if j < keys && id >= 0 && id < tokens { id } else { none };
+            }
+            let g0 = lanes::copy_rows_async(&mut sl[0][w], cache_latent, &ids[w], [0, 64 * w]);
+            let g1 = lanes::copy_rows_async(&mut sl[1][w], cache_latent, &ids[w], [16, 64 * w]);
+            if w < 2 {
+              let g2 = lanes::copy_rows_async(&mut sr[w], cache_rope, &ids[w], [16 * w, 0]);
+              g2.wait();
+            }
+            g0.wait();
+            g1.wait();
+          }
+          for w in 0..8 across subgroups {
+            let th: i32 = (w / 2) % 2;
+            let hh: i32 = w % 2;
+            let c0: i32 = (w / 4) * 4;
+            s[w] = (sl[th][c0] as f32) @ (qt[c0][hh] as f32);
+            s[w] = s[w] + (sl[th][c0 + 1] as f32) @ (qt[c0 + 1][hh] as f32);
+            s[w] = s[w] + (sl[th][c0 + 2] as f32) @ (qt[c0 + 2][hh] as f32);
+            s[w] = s[w] + (sl[th][c0 + 3] as f32) @ (qt[c0 + 3][hh] as f32);
+            if w < 4 {
+              s[w] = s[w] + (sr[th] as f32) @ (qrt[hh] as f32);
+            }
+          }
+          for w in 0..8 across subgroups {
+            // Heads 2 * w and 2 * w + 1; lane t is key t of the chunk.
+            for t in 0..32 across lanes {
+              let valid: bool = ids[w][t] >= 0;
+              for hq in 0..2 {
+                let h: i32 = w * 2 + hq;
+                let r: i32 = (t / 16) * 2 + h / 8;
+                let x: f32 = (s[r][t % 16][h % 8] + s[r + 4][t % 16][h % 8]) * scale;
+                xs[w][hq][t] = if valid { x } else { -3.0e38 };
+              }
+            }
+            let m0: f32 = lanes::max(&xs[w][0], 32);
+            let m1: f32 = lanes::max(&xs[w][1], 32);
+            let old0: f32 = run_max[w][0];
+            let old1: f32 = run_max[w][1];
+            let new0: f32 = if m0 > old0 { m0 } else { old0 };
+            let new1: f32 = if m1 > old1 { m1 } else { old1 };
+            for t in 0..32 across lanes {
+              for hq in 0..2 {
+                let m: f32 = if hq == 0 { new0 } else { new1 };
+                let x: f32 = xs[w][hq][t];
+                let e: f32 = (x - m).fast_exp();
+                pf[w][hq][t] = if x > -1.0e38 { e } else { 0.0 };
+              }
+            }
+            for t in 0..32 across lanes {
+              if t < 16 {
+                for th in 0..2 {
+                  for hq in 0..2 {
+                    p[th][w * 2 + hq][t] = pf[w][hq][th * 16 + t] as bf16;
+                  }
+                }
+              }
+            }
+            let l0: f32 = lanes::sum(&pf[w][0], 32);
+            let l1: f32 = lanes::sum(&pf[w][1], 32);
+            for t in 0..32 across lanes {
+              if t == 0 {
+                let f0: f32 = (old0 - new0).fast_exp();
+                let f1: f32 = (old1 - new1).fast_exp();
+                fac[w][0] = f0;
+                fac[w][1] = f1;
+                run_max[w][0] = new0;
+                run_max[w][1] = new1;
+                run_sum[w][0] = run_sum[w][0] * f0 + l0;
+                run_sum[w][1] = run_sum[w][1] * f1 + l1;
+              }
+            }
+          }
+          for w in 0..8 across subgroups {
+            for t in 0..32 across lanes {
+              if t < 16 { factor[w][t] = fac[t / 2][t % 2]; }
+            }
+            lanes::scale_rows(&mut o[w], &factor[w]);
+            o[w] = o[w] + (p[0] as f32) @ (sl[0][w] as f32);
+            o[w] = o[w] + (p[1] as f32) @ (sl[1][w] as f32);
+          }
+        }
+        for w in 0..8 across subgroups {
+          for t in 0..32 across lanes {
+            if t < 2 {
+              let total: f32 = run_sum[w][t];
+              fac[w][t] = if total > 0.0 { 1.0 / total } else { 0.0 };
+            }
+          }
+        }
+        for w in 0..8 across subgroups {
+          for t in 0..32 across lanes {
+            if t < 16 { factor[w][t] = fac[t / 2][t % 2]; }
+          }
+          lanes::scale_rows(&mut o[w], &factor[w]);
+          lanes::copy(out, &o[w], [i * 16, 64 * w]);
+        }
+      }
+    }
+  }
+  return;
+}

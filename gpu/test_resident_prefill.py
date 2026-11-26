@@ -218,6 +218,44 @@ def test_grouped_experts_are_the_quantized_experts_of_each_token(fold):
     np.testing.assert_allclose(got, want, rtol=2e-4, atol=2e-4 * np.abs(want).max())
 
 
+def test_cublaslt_router_is_the_bf16_rows_times_the_gate():
+    # prefill_gemm='cublaslt': the router's logits over the rows from cuBLASLt's bfloat16 matmul (the test context's
+    # float64 stand-in), x rounded to bfloat16 times the BF16 gate as SGLang's linear_bf16_fp32; router_topk_rows
+    # then picks each token's experts, here the ones the token-at-a-time router (float32 x) picks. _prefill_linear
+    # takes the same path for any BF16 Linear (the indexer's weights_proj in the checkpoint).
+    from gpu.test_resident import fp8_bf16_router_model
+    model = fp8_bf16_router_model(37, hidden_size=128, moe_intermediate_size=128)
+    layer = next(i for i in range(model.n_layers) if model.mlp_type(i) != 'dense')
+    prefix = f'model.layers.{layer}.mlp'
+    resident = ResidentGLM(model, ctx=Context(), max_tokens=32, prefill_gemm='cublaslt', prefill_moe='grouped',
+                           device_experts=True, fuse_router=True)
+    try:
+        count, hidden = 6, resident.hidden
+        k, experts = int(model.config['num_experts_per_tok']), int(model.config['n_routed_experts'])
+        x = np.random.default_rng(3).normal(size=(count, hidden)).astype(np.float32)
+        rows = resident._prefill_rows('norm', hidden)
+        rows.view((count * hidden,)).upload(x.tobytes())
+        ids, _ = resident._prefill_route(prefix, rows, count, k, k)
+        logits = np.frombuffer(resident._prefill_rows('router_logits', experts).download(), np.float32)
+        got_ids = np.frombuffer(ids.download(), np.int32).reshape(-1, k)[:count]
+        out = resident._prefill_rows('gate_out', experts)
+        resident._prefill_linear(prefix + '.gate', rows, out, count)
+        linear = np.frombuffer(out.download(), np.float32).reshape(-1, experts)[:count]
+        routes = []
+        for i in range(count):
+            resident._route(prefix, resident._prefill_row(rows, i))
+            routes.append(np.sort(np.frombuffer(resident.route_ids.download(), np.int32)[:k]))
+        assert resident.launches['cublaslt_bf16_rows'] == 2 and 'router_logits_rows' not in resident.launches
+    finally:
+        resident.close()
+    bits, _ = model.weights.bf16(prefix + '.gate')
+    want = bf16_values(x).astype(np.float64) @ (bits.astype(np.uint32) << 16).view(np.float32).astype(np.float64).T
+    np.testing.assert_allclose(logits.reshape(-1, experts)[:count], want, rtol=1e-6, atol=1e-6 * np.abs(want).max())
+    np.testing.assert_array_equal(linear, logits.reshape(-1, experts)[:count])
+    for i in range(count):
+        np.testing.assert_array_equal(np.sort(got_ids[i]), routes[i])
+
+
 def test_grouped_experts_in_the_chunk_stay_near_the_token_at_a_time_logits():
     # prefill_chunk with prefill_moe='grouped' end to end (the shared expert added after, not folded): e4m3 activations
     # in every routed expert move this tiny model's logits by up to ~9% of the largest (the layer itself is pinned
@@ -277,6 +315,31 @@ def test_mha_tc_attention_is_the_mha_attention_to_bf16_rounding():
     with pytest.raises(ValueError, match="prefill_attention='mha_tc' needs nope 192"):
         ResidentGLM(build(seed=3), ctx=Context(), max_tokens=32, prefill_attention='mha_tc')
 
+def test_mla_tc_past_index_topk_is_the_mha_tc_attention_to_bf16_rounding():
+    # prefill_attention='mla_tc': past index_topk (4) each query attends to its selection in the absorbed form
+    # (_prefill_mla_sparse: W_UK^T q_nope and W_UV latent as batched cuBLASLt bfloat16 matmuls, the test context's
+    # float64 stand-in; mla_prefill_sparse_tc on the bf16 cache) instead of kv_b_proj over every key and
+    # mha_prefill_sparse. The prompt's last logits and the next token's agree with 'mha_tc' to bf16 rounding.
+    model = build(seed=5, num_hidden_layers=2, mlp_layer_types=['dense', 'sparse'], indexer_types=['full', 'shared'],
+                  num_attention_heads=16, num_key_value_heads=16, kv_lora_rank=512, index_topk=4, **TC_HEADS)
+    options = dict(graph=True, fused_attention=True, device_experts=True, mla_kernel='tc')
+    got = {}
+    for attention in ('mha_tc', 'mla_tc'):
+        resident = ResidentGLM(model, ctx=Context(), max_tokens=32, prefill_attention=attention, **options)
+        try:
+            assert resident.prefill_chunk(PROMPT[:3]) is None
+            last = resident.prefill_chunk(PROMPT[3:], logits=True)
+            got[attention] = last, resident.forward(NEXT), dict(resident.launches)
+        finally:
+            resident.close()
+    (last, after, launches), (mla_last, mla_after, mla_launches) = got['mha_tc'], got['mla_tc']
+    np.testing.assert_allclose(mla_last, last, rtol=0, atol=1e-2 * float(np.abs(last).max()))
+    np.testing.assert_allclose(mla_after, after, rtol=0, atol=1e-2 * float(np.abs(after).max()))
+    assert launches.get('mha_prefill_sparse', 0) == model.n_layers and 'mla_prefill_sparse_tc' not in launches
+    assert mla_launches.get('mla_prefill_sparse_tc', 0) == model.n_layers and 'mha_prefill_sparse' not in mla_launches
+    assert mla_launches.get('mha_prefill_tc', 0) == model.n_layers  # the first chunk, dense
+
+
 @pytest.mark.parametrize('graph', [False, True])
 def test_mha_attention_past_index_topk_selects_per_query(graph):
     # index_topk 4, a 10-token prompt in chunks of 3 and 7: the second chunk's queries at positions 3.. score the keys
@@ -332,7 +395,7 @@ def test_two_ranks_mha_prompt_past_index_topk():
 
 @pytest.mark.parametrize('topk', [16, 4])
 def test_every_prefill_option_together(topk):
-    # z32's configuration: cuBLASLt rows, the routed experts grouped, MHA attention, the router over the rows. Dense
+    # z32's configuration: cuBLASLt rows (the BF16 router's too), the routed experts grouped, MHA attention. Dense
     # (index_topk 16): within a few % of the largest logit. Past index_topk 4, e4m3 activations move the indexer's
     # scores enough to change which 4 of a few keys a query takes, so the prompt's last logits move by ~30% here
     # (cuBLASLt rows alone do it too); the decode step after the prompt stays within a few %.
@@ -345,6 +408,6 @@ def test_every_prefill_option_together(topk):
     if topk == 16:
         np.testing.assert_allclose(chunk_last, last, atol=0.05 * scale)
     np.testing.assert_allclose(chunk_after, after, atol=0.05 * scale)
-    names = ('cublaslt_fp8_rows', 'grouped_moe', 'mha_prefill') + (('mha_prefill_sparse', 'topk_select_rows') if topk == 4 else ())
+    names = ('cublaslt_fp8_rows', 'cublaslt_bf16_rows', 'grouped_moe', 'mha_prefill') + (('mha_prefill_sparse', 'topk_select_rows') if topk == 4 else ())
     for name in names:
         assert launches.get(name, 0) > 0, name

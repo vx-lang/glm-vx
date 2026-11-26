@@ -42,13 +42,14 @@ class FakeLib:
             self.attrs[args[1]] = pointer.value
         elif name == 'cublasLtMatmulAlgoGetHeuristic':
             # cuBLASLt 13.10 refuses VEC128 / BLK128x128 scale modes without scale pointers (INVALID_VALUE).
-            assert self.attrs.get(L.DESC_A_SCALE_POINTER) and self.attrs.get(L.DESC_B_SCALE_POINTER)
+            if self.attrs.get(L.DESC_A_SCALE_MODE):
+                assert self.attrs.get(L.DESC_A_SCALE_POINTER) and self.attrs.get(L.DESC_B_SCALE_POINTER)
             C.cast(args[9], C.POINTER(C.c_int))[0] = self.algos
         elif name == 'cublasLtMatmul':
             self.matmuls.append(dict(a=args[3].value, a_layout=self.layouts[args[4].value], b=args[5].value,
                                      b_layout=self.layouts[args[6].value], d=args[10].value,
-                                     d_layout=self.layouts[args[11].value], scales=(self.attrs[L.DESC_A_SCALE_POINTER],
-                                                                              self.attrs[L.DESC_B_SCALE_POINTER])))
+                                     d_layout=self.layouts[args[11].value], scales=(self.attrs.get(L.DESC_A_SCALE_POINTER),
+                                                                              self.attrs.get(L.DESC_B_SCALE_POINTER))))
         elif name.endswith('Destroy'):
             self.destroyed.append(name)
         return 0
@@ -121,6 +122,32 @@ def test_refuses_wrong_sizes_and_a_missing_algorithm():
         L.Fp8BlockMatmul(lt, 1, 256, 200)
     with pytest.raises(L.CublasLtUnavailable, match='no cuBLASLt algorithm'):
         L.Fp8BlockMatmul(L.CublasLt(ctx, lib=FakeLib(algos=0)), 1, 256, 384)
+
+
+def test_bf16_matmul_is_weights_a_with_bf16_operands_and_no_scales():
+    # The router's gate over 1000 prefill rows: A = W (op T), B = x (op N), D [n, mp] float32, ld n.
+    lib, ctx = FakeLib(), FakeContext()
+    lt = L.CublasLt(ctx, lib=lib)
+    m, n, k = 1000, 256, 6144
+    mm = L.Bf16Matmul(lt, m, n, k)
+    assert mm.padded_m == 1000
+    out, x, w = ctx.tensor((m, n)), ctx.tensor((m, k), 'uint16'), ctx.tensor((n, k), 'uint16')
+    mm(out, x, w)
+    call, = lib.matmuls
+    assert lib.attrs[L.DESC_TRANSA] == L.CUBLAS_OP_T and lib.attrs[L.DESC_TRANSB] == L.CUBLAS_OP_N
+    assert L.DESC_A_SCALE_MODE not in lib.attrs and call['scales'] == (None, None)
+    assert (call['a'], call['b'], call['d']) == (w.pointer, x.pointer, out.pointer)
+    bf16 = L.CUDA_R_16BF
+    assert (call['a_layout'], call['b_layout'], call['d_layout']) == ((bf16, k, n, k), (bf16, k, m, k), (L.CUDA_R_32F, n, m, n))
+    assert L.Bf16Matmul(lt, 3, 32, 64).padded_m == 4
+    with pytest.raises(ValueError, match='x: want'):
+        mm(out, ctx.tensor((m, k), 'float32'), w)
+    with pytest.raises(ValueError, match='multiple of 8'):
+        L.Bf16Matmul(lt, 4, 32, 60)
+    with pytest.raises(L.CublasLtUnavailable, match='no cuBLASLt algorithm'):
+        L.Bf16Matmul(L.CublasLt(ctx, lib=FakeLib(algos=0)), 4, 32, 64)
+    mm.close()
+    assert lib.destroyed.count('cublasLtMatrixLayoutDestroy') == 3
 
 
 def test_pack_weight_scales_pads_each_row_block_to_four():
