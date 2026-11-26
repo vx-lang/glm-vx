@@ -1,0 +1,36 @@
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+40.1,9278548,4,2319637.0,2316829.0,2314541,2330349,7288.5,glm_vx_spawn_mla_prefill_sparse_tc
+24.1,5583231,3,1861077.0,1859851.0,1859722,1863658,2236.1,glm_vx_spawn_index_scores_chunk_at
+10.0,2317901,3,772633.7,772612.0,772388,772901,257.2,glm_vx_spawn_topk_select_rows
+5.5,1264805,31,40800.2,57984.0,15616,59264,19655.7,glm_vx_gpu_fp8_quant_groups
+3.3,768387,3,256129.0,164769.0,162720,440898,160017.9,glm_vx_fp8_gemm_grouped_m64
+3.0,696291,2,348145.5,348145.5,148448,547843,282414.9,glm_vx_spawn_fp8_quant_rows
+2.8,649380,18,36076.7,39520.0,18049,48321,10952.0,nvjet_sm90_qqsss_128x128_128x6_2x1_v_bz_coopA_algo2_Ablk128_Bvec128_TNN
+1.5,350241,8,43780.1,43568.5,34688,52992,9344.6,glm_vx_gpu_rmsnorm_rows
+1.5,335874,12,27989.5,32352.5,6816,45280,16384.7,glm_vx_spawn_bf16_rows
+1.2,284610,4,71152.5,71152.5,71073,71232,66.3,glm_vx_gpu_residual_rmsnorm
+1.0,240032,6,40005.3,40048.0,39136,40672,524.8,nvjet_sm90_qqsss_128x128_128x6_4x2_h_bz_coopA_algo2_Ablk128_Bvec128_TNN
+1.0,235937,1,235937.0,235937.0,235937,235937,0.0,glm_vx_spawn_moe_combine_rows_bf16
+1.0,229506,4,57376.5,57840.5,55297,58528,1450.0,glm_vx_gpu_add
+0.5,124992,3,41664.0,41664.0,41472,41856,192.0,glm_vx_spawn_iq_rows_prefill
+0.5,106626,3,35542.0,35616.0,35329,35681,187.3,glm_vx_fp8_gemm_grouped_plan
+0.4,85697,4,21424.3,21440.0,21248,21569,153.8,nvjet_sm90_qqsss_128x128_128x6_2x4_h_bz_coopA_algo2_Ablk128_Bvec128_TNN
+0.4,81472,4,20368.0,20352.0,20256,20512,118.3,glm_vx_spawn_q_rows_prefill
+0.3,78050,4,19512.5,16800.5,16768,27681,5445.7,glm_vx_gpu_swiglu
+0.3,76865,4,19216.3,19168.0,19137,19392,118.1,glm_vx_spawn_kv_rows_prefill_bf16
+0.3,66273,6,11045.5,10912.0,8192,14433,3062.8,glm_vx_spawn_index_q_bf16_at
+0.3,62145,3,20715.0,20640.0,20609,20896,157.5,glm_vx_spawn_index_key_rows
+0.2,54433,4,13608.3,13632.5,13408,13760,155.6,nvjet_sm90_tss_256x128_64x4_1x2_h_bz_coopA_TNT
+0.2,49504,4,12376.0,12288.0,12128,12800,293.7,nvjet_sm90_tss_128x256_64x4_2x1_v_bz_coopA_TNN
+0.2,38046,3,12682.0,12831.0,12287,12928,345.5,nvjet_sm90_qqsss_128x128_128x6_1x4_h_bz_coopA_algo2_Ablk128_Bvec128_splitK_TNN
+0.1,24416,3,8138.7,8160.0,7904,8352,224.8,nvjet_sm90_tss_32x64_64x16_1x4_h_bz_splitK_TNN
+0.1,16256,1,16256.0,16256.0,16256,16256,0.0,glm_vx_spawn_moe_group_offsets
+0.1,14656,1,14656.0,14656.0,14656,14656,0.0,glm_vx_spawn_router_topk_rows
+0.1,14400,1,14400.0,14400.0,14400,14400,0.0,nvjet_sm90_tss_64x64_64x13_2x1_v_bz_TNT
+0.0,8640,3,2880.0,2912.0,2816,2912,55.4,"void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, float, float, float, (bool)1, float, float, __nv_bfloat16, (bool)1, (bool)0, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+0.0,5344,3,1781.3,1792.0,1760,1792,18.5,"void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, float, float, float, (bool)0, float, float, float, (bool)1, (bool)0, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+0.0,4960,3,1653.3,1472.0,1472,2016,314.1,glm_vx_gpu_scale
+0.0,4576,1,4576.0,4576.0,4576,4576,0.0,glm_vx_spawn_moe_group_count
+0.0,3104,1,3104.0,3104.0,3104,3104,0.0,glm_vx_spawn_moe_group_place
+0.0,2752,1,2752.0,2752.0,2752,2752,0.0,glm_vx_spawn_moe_group_finish
+0.0,1408,1,1408.0,1408.0,1408,1408,0.0,glm_vx_gpu_copy

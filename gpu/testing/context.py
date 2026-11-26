@@ -143,6 +143,26 @@ class Fp8BlockMatmul:
             out.data[...]=(x@w.T).astype(np.float32).reshape(out.data.shape)
         _run(stream,work)
     def close(self):pass
+class Bf16Matmul:
+    """gpu/cublaslt.Bf16Matmul's contract (x and out padded to padded_m tokens, token i's outputs at
+    out[i*out_ld:...+n]; batch matmuls at x_stride, w_stride and out_stride elements) as float64 NumPy on the
+    bfloat16 bits, rounded to float32 once: cuBLASLt's own sum order is the GPU tests' to check."""
+    def __init__(self,ctx,m,n,k,*,batch=1,x_ld=None,w_ld=None,out_ld=None,x_stride=0,w_stride=0,out_stride=0):
+        self.ctx,self.m,self.n,self.k,self.padded_m=ctx,m,n,k,-(-m//4)*4
+        self.batch,self.lds,self.strides=batch,(x_ld or k,w_ld or k,out_ld or n),(x_stride,w_stride,out_stride)
+    def __call__(self,out,x,w,stream=None):
+        mp,n,k,b=self.padded_m,self.n,self.k,self.batch
+        (xl,wl,ol),(xs,ws,os_)=self.lds,self.strides
+        assert out.data.size>=(b-1)*os_+(mp-1)*ol+n and x.data.size>=(b-1)*xs+(mp-1)*xl+k and w.data.size>=(b-1)*ws+(n-1)*wl+k
+        def work():
+            value=lambda bits:(bits.astype(np.uint32)<<16).view(np.float32).astype(np.float64)
+            xf,wf,of=x.data.reshape(-1),w.data.reshape(-1),out.data.reshape(-1)
+            rows=lambda flat,base,count,ld,width:np.stack([flat[base+r*ld:base+r*ld+width] for r in range(count)])
+            for j in range(b):
+                got=value(rows(xf,j*xs,mp,xl,k))@value(rows(wf,j*ws,n,wl,k)).T
+                for r in range(mp):of[j*os_+r*ol:j*os_+r*ol+n]=got[r].astype(np.float32)
+        _run(stream,work)
+    def close(self):pass
 class Fp8GroupedGemm:
     """gpu/fp8_gemm.FP8GroupedGEMM's contract (ResidentGLM._grouped_gemm): for each expert e, the grouped rows
     offsets[e] <= r < offsets[e + 1] of a (e4m3 codes, row-major per-128 scales) times expert e's codes with their
@@ -169,6 +189,7 @@ class Fp8GroupedGemm:
 class Context:
     name='cpu-simt-test-only'
     def fp8_block_matmul(self,m,n,k):return Fp8BlockMatmul(self,m,n,k)
+    def bf16_matmul(self,m,n,k,**layout):return Bf16Matmul(self,m,n,k,**layout)
     def fp8_grouped_gemm(self):return Fp8GroupedGemm()
     def __init__(self,*args,**kwargs):self.simt=Simt();self.tensors=[];self._host=None;self.capturing=0
     def host(self):

@@ -1727,6 +1727,44 @@ def test_mla_tc_at_matches_float64_on_bf16_values(run, heads, tokens, splits_max
         np.testing.assert_allclose(out, want, rtol=0, atol=1e-2 * max(1.0, np.abs(want).max()))
 
 
+# mla_prefill_sparse_tc (#63, TTFT): prefill past index_topk in the absorbed form, one block a query over its selected
+# keys in chunks of 32, mla_tc_at's products with an online softmax across chunks; the rank's heads padded to 16.
+@pytest.mark.parametrize('heads,start,queries,topk', [(8, 70, 6, 64), (16, 30, 5, 40), (8, 0, 3, 64)])
+def test_mla_prefill_sparse_tc_matches_float64_on_bf16_values(run, heads, start, queries, topk):
+    rank, rope, nope = 512, 64, 192
+    rng = np.random.default_rng(heads + start + queries)
+    tokens = start + queries
+    q_latent = rng.normal(size=(queries, heads, rank)).astype(F)
+    q = rng.normal(size=(queries, heads, nope + rope)).astype(F)
+    kv, kr = to_bf16(rng.normal(size=(tokens, rank))), to_bf16(rng.normal(size=(tokens, rope)))
+    selected = np.full((queries, topk), -9, np.int32)
+    for i in range(queries):
+        if start + i + 1 > topk:  # topk_select_rows' set: topk of the query's keys, in position order
+            selected[i] = np.sort(rng.choice(start + i + 1, size=topk, replace=False))
+    scale = (nope + rope) ** -0.5
+    got = run('mla_prefill_sparse_tc', out=np.full((queries * 16, rank), 7, F), q_latent=q_latent, q=q, cache_latent=kv,
+              cache_rope=kr, selected=selected, start=start, queries=queries, heads=heads, nope=nope, rank=rank,
+              rope_dim=rope, topk=topk, scale=scale)['out'].reshape(queries, 16, rank)
+    for i in range(queries):
+        n = start + i + 1
+        ids = np.arange(n, dtype=np.int32) if n <= topk else selected[i]
+        want = mla_float64(bf16(to_bf16(q_latent[i])), bf16(to_bf16(q[i, :, nope:])), bf16(kv), bf16(kr), ids, 0,
+                           len(ids), tokens, scale)
+        np.testing.assert_allclose(got[i, :heads], want, rtol=0, atol=1e-2 * max(1.0, np.abs(want).max()), err_msg=f'query {i}')
+        assert np.isfinite(got[i]).all()
+
+
+def test_mla_prefill_sparse_tc_writes_nothing_off_its_shape(run):
+    rng = np.random.default_rng(5)
+    for heads, rank, rope in ((17, 512, 64), (8, 256, 64), (8, 512, 32)):
+        got = run('mla_prefill_sparse_tc', out=np.full((2 * 16, rank), 7, F),
+                  q_latent=rng.normal(size=(2, heads, rank)).astype(F), q=rng.normal(size=(2, heads, 192 + rope)).astype(F),
+                  cache_latent=to_bf16(rng.normal(size=(9, rank))), cache_rope=to_bf16(rng.normal(size=(9, rope))),
+                  selected=np.zeros((2, 4), np.int32), start=7, queries=2, heads=heads, nope=192, rank=rank,
+                  rope_dim=rope, topk=4, scale=0.1)
+        assert (got['out'] == 7).all(), (heads, rank, rope)
+
+
 @pytest.mark.parametrize('heads,rank,rope,stride', [(16, 256, 64, 0), (16, 512, 32, 0), (16, 512, 64, 10), (8, 512, 64, 0)])
 def test_mla_flash_at_writes_nothing_off_its_shape(run, heads, rank, rope, stride):
     rng = np.random.default_rng(rank + rope + stride)

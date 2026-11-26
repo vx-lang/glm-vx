@@ -1,6 +1,7 @@
 """The prefill rows kernels (#63, item 5b) on the CPU through Vx's own runtime (gpu/spawn/host.py), against NumPy
 and against the decode kernels they repeat a row at a time: fp8_quant_rows (fp8_quant_groups' codes and scales),
-router_logits_rows + router_topk_rows (router_bf16's bits a token), moe_combine_rows.
+router_logits_rows + router_topk_rows (router_bf16's bits a token), moe_combine_rows, bf16_rows (the rows for cuBLASLt's
+bfloat16 matmul).
 
 Skipped unless gpu/spawn/build.sh made the libraries (VX_DISPATCH_LIB set)."""
 import numpy as np
@@ -28,6 +29,18 @@ def test_fp8_quant_rows_is_quant_groups_row_major(run, rows, cols, gather):
     codes[np.isnan(picked)] = 127
     np.testing.assert_array_equal(got['codes'], codes)
     bits_equal(got['scales'], scales.T)
+
+
+def test_bf16_rows_round_each_value_to_nearest_even(run):
+    rng = np.random.default_rng(11)
+    count, cols, rows = 5, 6144, 8  # rows past count keep their old bits (cuBLASLt's padding, not read back)
+    x = (rng.normal(size=(rows, cols)) * rng.choice([1e-30, 1e-3, 1.0, 1e37], size=(rows, 1))).astype(F)
+    x[0, :4] = [0.0, -0.0, np.inf, -np.inf]
+    x[1, :3] = (np.array([0x3F808000, 0x3F818000, 0x3F80FFFF], np.uint32)).view(F)  # ties to even, and below a tie
+    got = run('bf16_rows', out=np.full((rows, cols), 0xABCD, np.uint16), x=x, count=count, cols=cols)['out']
+    np.testing.assert_array_equal(got[:count], bf16_bits(x[:count]))
+    assert got[1, 0] == 0x3F80 and got[1, 1] == 0x3F82 and got[1, 2] == 0x3F81
+    assert (got[count:] == 0xABCD).all()
 
 
 def test_moe_combine_rows_sums_in_the_given_order(run):

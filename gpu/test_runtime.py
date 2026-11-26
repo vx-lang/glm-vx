@@ -255,6 +255,21 @@ class RuntimeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             tensor.upload(memoryview(bytearray(32))[::2])
 
+    def test_upload_takes_any_contiguous_buffer_without_changing_it(self):
+        # bytes, a bytearray, a 2-D float32 array, a read-only array and a ctypes array: the bytes land as given, and
+        # a writable source (copied from in place, not through a copy) is left as it was.
+        import numpy as np
+        values = np.arange(4, dtype=np.float32).reshape(2, 2) + 1
+        frozen = values.copy()
+        frozen.flags.writeable = False
+        sources = [values.tobytes(), bytearray(values.tobytes()), values, frozen, (C.c_char * 16).from_buffer_copy(values.tobytes())]
+        for source in sources:
+            tensor = self.context.tensor((2, 2))
+            tensor.upload(source)
+            self.assertEqual(tensor.download(), values.tobytes(), type(source).__name__)
+            tensor.close()
+        np.testing.assert_array_equal(values, frozen)
+
     def test_empty_tensor_has_owned_dummy_storage_and_no_copy(self):
         tensor = self.context.tensor((2, 0), data=b"")
         self.assertEqual(tensor.nbytes, 0)

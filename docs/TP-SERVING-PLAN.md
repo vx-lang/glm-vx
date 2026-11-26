@@ -334,9 +334,66 @@ Peers (2026-11-19): vx-94 the grouped block-FP8 GEMM; vx-7e item 6's top-k.
 | dense attention in one launch (kv_b expansion + causal `mha_prefill`) | `prefill_attention='mha'` | fd855f1 | logits within 1e-4; layer 0's caches bit for bit |
 | scheduler and TP lockstep | `prefill_tokens`, Lockstep `C` | e7fd339 | scheduler test; emulated ranks |
 
-Still a token at a time: the indexer's key rows (a launch or two each), and every token past index_topk (attention,
-indexer scores and top-k): W3's 32K prompt gains little until the indexer and sparse attention run over the chunk.
-`mha_prefill` is float32 on the CUDA cores until vx-7e's tensor-core version lands.
+Since then (main): the indexer's scores for a whole chunk in one launch on the tensor cores (`index_scores_chunk_at`), a
+top-k a query in one launch (`topk_select_rows`), the dense attention on the tensor cores (`mha_prefill_tc`,
+prefill_attention='mha_tc', z35). Past index_topk the attention is still `mha_prefill_sparse`, float32 on the CUDA cores,
+after kv_b_proj over every cached key.
+
+**Status (2026-11-25, branch ttft-bf16-gemm): TTFT's next two steps.**
+- **The BF16 Linears over the rows.** The router's gate and the indexer's `weights_proj` are the checkpoint's BF16
+  Linears, and `_prefill_linear` ran them a row at a time (and router_logits_rows on the CUDA cores: 4.1 ms for 1000
+  rows at one TP8 rank). Now cuBLASLt's bfloat16 matmul over the rows, the rows rounded to bfloat16 first
+  (`bf16_rows`), as SGLang's `linear_bf16_fp32` and `torch.mm(out_dtype=float32)` do. z63, two rounds on the 8x H200
+  with z61's options: TTFT 626 -> 365 ms on W1, 114 -> 55 s on W3, TPOT unchanged, GSM8K 0.940 (one run), z5's greedy
+  check now `tp_real`'s 32 tokens; z64: 30K passkey 5 of 5.
+- **prefill_attention='mla_tc'.** Past index_topk, the attention in the absorbed form on the tensor cores, as SGLang's
+  flashmla_sparse: q_latent = W_UK^T q_nope (one batched bf16 cuBLASLt matmul over the heads), `mla_prefill_sparse_tc`
+  over each query's selected rows of the bf16 cache (one block a query for the rank's heads padded to 16; mla_tc_at's
+  chunks of 32 rows), then W_UV (another batched matmul). No kv_b_proj over the cached keys. Within index_topk it is
+  'mha_tc'. z66, one H200, one TP8 rank's shapes, 4 layers (diagnosis, one run each), a 2048-token chunk:
+
+  | 78-layer GPU estimate | 'mha_tc' | 'mla_tc' |
+  |---|---|---|
+  | chunk at 2048 | 3302 ms | 376 ms |
+  | chunk at 30720 | 3709 ms | 430 ms |
+  | W1 (dense, 1000 tokens) | 256 ms | 262 ms, logits identical |
+
+  Expected W3 TTFT: under 10 s from 55 s (SGLang 2.5 s). Not served yet. On z66's random weights the long chunks'
+  logits differ from 'mha_tc''s by 17-25% of the largest (the CPU test with one full-indexer layer: within 1%), so the
+  next GPU job runs the kernel's own GPU test against float64 first
+  (`test_mla_prefill_sparse_tc_matches_float64_on_bf16_values`), then the 30K passkey and W3 on the real model (z67).
+- **What a 2048-token chunk still costs with 'mla_tc'** (z66, per layer at 30720): a shared-indexer layer's attention
+  2.8 ms, a full indexer's 5.7-6.8 ms, an MoE layer's FFN 1.9 ms. In the FFN, z33 timed the grouped GEMMs at 18432 rows:
+  down 547 us (bf16 C), gate_up as one n=512 GEMM 312 us; prefill_chunk runs gate and up as two GEMMs. The attention's
+  split needs an nsys profile of a chunk.
+
+**Status (2026-11-26, one H200: evidence/h200-20261126-z68).**
+- **The 'mla_tc' kernel is right on the GPU.** `test_mla_prefill_sparse_tc_matches_float64_on_bf16_values` passes on
+  the H200 (both cases). The hardware suite on this branch passes (509).
+- **Logits with one layer.** A dense layer with a full indexer, at a 2048-token chunk at 30720: 'mla_tc' differs from
+  'mha_tc' by 6.3% of the largest logit, and the argmax agrees. With 4 layers (z66) the gap is 17-25%, and the CPU test
+  is within 1%. So the kernel is not the cause. Whether the gap matters is for the real model's passkey and W3 (z67).
+- **Where a 30720 chunk's GPU time goes** (nsys, 4 layers): 23 ms of kernels.
+  - `mla_prefill_sparse_tc`: 2.3 ms a layer.
+  - `index_scores_chunk_at`: 1.9 ms a full-indexer layer.
+  - `topk_select_rows`: 0.8 ms.
+  - `fp8_quant_groups`: 1.3 ms in 31 launches.
+- **The host's fixed cost of a chunk, about 55 us a token, is fixed.** It was most of the chunk's wall time: 128 of
+  152 ms at 4 layers.
+  - **Cause:** each upload copied the chunk's embeddings three times on the host (`memoryview.tobytes` twice, then
+    `create_string_buffer`), and the RoPE and step rows and the embeddings were built a token at a time.
+  - **Fix:** uploads go straight from the array's buffer (`gpu/runtime._host_buffer`). The chunk's rows are array
+    ops that give the same bits (`kernels/backend._rope_coefficient_rows`, `GLMModel._embeddings`).
+  - **Result:** z71, 4 layers, 2 alternating rounds, logits identical:
+
+    | | before | after |
+    |---|---|---|
+    | W1, 1000 tokens | 68-70 ms | 14.3-14.5 ms |
+    | chunk of 2048 at 30720 | 149-155 ms | 44 ms |
+
+    The GPU estimates are unchanged. The saving does not depend on the layer count: about 55 ms on W1's TTFT and
+    about 1.6 s on W3's.
+  - **Not covered:** the server reads embeddings through the safetensors reader, which still decodes a row at a time.
 
 ### 6. Long context: the indexer on every rank
 

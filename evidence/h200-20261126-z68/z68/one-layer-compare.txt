@@ -1,0 +1,15 @@
+A = /home/ubuntu/glm-h200/z68-out/one-layer-mha_tc
+B = /home/ubuntu/glm-h200/z68-out/one-layer-mla_tc
+options that differ (A, B): {'prefill_attention': ('mha_tc', 'mla_tc')}
+W1 wall median ms: A 61.3  B 59.7
+
+W1: wall ms A 61.7  B 60.9; per part GPU ms (A -> B)
+  layer 0 attention     1.66 ->     1.75   launches 19 -> 19
+  layer 0 ffn           0.25 ->     0.26   launches 7 -> 7
+
+chunk at 30720: wall ms A 174.2  B 134.9; per part GPU ms (A -> B)
+  layer 0 attention    48.92 ->     6.92   launches 29 -> 29
+  layer 0 ffn           0.28 ->     0.28   launches 7 -> 7
+
+long-30720-logits.npy: max |B - A| / max |A| = 6.295e-02; argmax A 7056 B 7056; B finite True
+w1-logits.npy: max |B - A| / max |A| = 0.000e+00; argmax A 2458 B 2458; B finite True

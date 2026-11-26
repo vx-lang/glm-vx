@@ -1381,3 +1381,36 @@ def test_spawn_mha_prefill_tc_is_mha_prefill_to_bf16_rounding(context, start, qu
     tol = 5e-3 * max(1.0, float(np.abs(want).max()))
     np.testing.assert_allclose(download(tc).reshape(queries, heads, 256), want, rtol=0, atol=tol)
     np.testing.assert_allclose(download(tc).reshape(queries, heads, 256), download(cores), rtol=0, atol=3 * tol)
+
+
+@pytest.mark.skipif(not (BUILD / 'spawn/mla_prefill_sparse_tc.ptx').exists(), reason='mla_prefill_sparse_tc not built')
+@pytest.mark.parametrize('start,queries', [(4096, 64), (0, 40)])
+def test_mla_prefill_sparse_tc_matches_float64_on_bf16_values(context, start, queries):
+    # The absorbed prefill attention on the tensor cores at GLM-5.3's shape and index_topk (one TP8 rank: 8 heads, padded
+    # to 16): 2048 selected keys a query in 64 chunks of 32 (start 4096), or every key while the context is under
+    # index_topk (start 0). Against float64 attention over the same bf16 values, as the host test (to bf16 rounding).
+    from gpu.test_spawn_vx_host import bf16, mla_float64, to_bf16
+    heads, rank, rope, nope, topk = 8, 512, 64, 192, 2048
+    rng = np.random.default_rng(start + queries)
+    tokens = start + queries
+    q_latent = rng.normal(size=(queries, heads, rank)).astype('f4')
+    q = rng.normal(size=(queries, heads, nope + rope)).astype('f4')
+    kv, kr = to_bf16(rng.normal(size=(tokens, rank))), to_bf16(rng.normal(size=(tokens, rope)))
+    selected = np.zeros((queries, topk), np.int32)
+    for i in range(queries):
+        if start + i + 1 > topk:
+            selected[i] = np.sort(rng.choice(start + i + 1, size=topk, replace=False))
+    scale = (nope + rope) ** -0.5
+    out = context.tensor((queries * 16, rank))
+    SpawnKernel(context, BUILD / 'spawn/mla_prefill_sparse_tc.ptx').launch(
+        out=out, q_latent=upload(context, q_latent), q=upload(context, q), cache_latent=upload(context, kv),
+        cache_rope=upload(context, kr), selected=upload(context, selected), start=start, queries=queries, heads=heads,
+        nope=nope, rank=rank, rope_dim=rope, topk=topk, scale=scale)
+    context.synchronize()
+    got = download(out).reshape(queries, 16, rank)
+    for i in range(queries):
+        n = start + i + 1
+        ids = np.arange(n, dtype=np.int32) if n <= topk else selected[i]
+        want = mla_float64(bf16(to_bf16(q_latent[i])), bf16(to_bf16(q[i, :, nope:])), bf16(kv), bf16(kr), ids, 0,
+                           len(ids), tokens, scale)
+        np.testing.assert_allclose(got[i, :heads], want, rtol=0, atol=1e-2 * max(1.0, np.abs(want).max()), err_msg=f'query {i}')

@@ -1,0 +1,41 @@
+A = /home/aditya/glm-h200/z66-out/mha_tc
+B = /home/aditya/glm-h200/z66-out/mla_tc
+options that differ (A, B): {'prefill_attention': ('mha_tc', 'mla_tc')}
+W1 wall median ms: A 68.6  B 63.9
+
+W1: wall ms A 64.9  B 64.6; per part GPU ms (A -> B)
+  layer 0 attention     1.73 ->     1.80   launches 19 -> 19
+  layer 0 ffn           0.28 ->     0.29   launches 7 -> 7
+  layer 1 attention     1.44 ->     1.46   launches 19 -> 19
+  layer 1 ffn           0.26 ->     0.27   launches 7 -> 7
+  layer 2 attention     1.42 ->     1.46   launches 19 -> 19
+  layer 2 ffn           0.21 ->     0.23   launches 7 -> 7
+  layer 3 attention     1.20 ->     1.21   launches 16 -> 16
+  layer 3 ffn           2.07 ->     2.11   launches 17 -> 17
+  78-layer GPU estimate: A 256 ms  B 262 ms
+
+chunk at 2048: wall ms A 285.0  B 140.5; per part GPU ms (A -> B)
+  layer 0 attention    42.24 ->     4.55   launches 29 -> 29
+  layer 0 ffn           0.28 ->     0.28   launches 7 -> 7
+  layer 1 attention    40.98 ->     3.35   launches 29 -> 29
+  layer 1 ffn           0.28 ->     0.28   launches 7 -> 7
+  layer 2 attention    40.97 ->     3.35   launches 29 -> 29
+  layer 2 ffn           0.28 ->     0.28   launches 7 -> 7
+  layer 3 attention    40.15 ->     2.71   launches 16 -> 16
+  layer 3 ffn           1.91 ->     1.90   launches 17 -> 17
+  78-layer GPU estimate: A 3302 ms  B 376 ms
+
+chunk at 30720: wall ms A 319.9  B 145.0; per part GPU ms (A -> B)
+  layer 0 attention    48.89 ->     6.84   launches 29 -> 29
+  layer 0 ffn           0.28 ->     0.28   launches 7 -> 7
+  layer 1 attention    47.68 ->     5.68   launches 29 -> 29
+  layer 1 ffn           0.28 ->     0.28   launches 7 -> 7
+  layer 2 attention    47.76 ->     5.67   launches 29 -> 29
+  layer 2 ffn           0.28 ->     0.28   launches 7 -> 7
+  layer 3 attention    44.79 ->     2.77   launches 16 -> 16
+  layer 3 ffn           1.93 ->     1.92   launches 17 -> 17
+  78-layer GPU estimate: A 3709 ms  B 430 ms
+
+long-2048-logits.npy: max |B - A| / max |A| = 2.553e-01; argmax A 4029 B 4029; B finite True
+long-30720-logits.npy: max |B - A| / max |A| = 1.730e-01; argmax A 5909 B 2399; B finite True
+w1-logits.npy: max |B - A| / max |A| = 0.000e+00; argmax A 6398 B 6398; B finite True

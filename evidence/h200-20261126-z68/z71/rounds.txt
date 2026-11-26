@@ -1,0 +1,4 @@
+A-r1: W1: 1000 tokens at 0, rank 0 of 8, 4 layers. wall median 70.0 ms [70.7, 70.0, 67.3]   wall 154.6 ms; instrumented: host enqueue 142.7, GPU span 155.4, launches 156 
+A-r2: W1: 1000 tokens at 0, rank 0 of 8, 4 layers. wall median 67.9 ms [67.9, 68.0, 67.7]   wall 148.5 ms; instrumented: host enqueue 138.6, GPU span 151.0, launches 156 
+B-r1: W1: 1000 tokens at 0, rank 0 of 8, 4 layers. wall median 14.3 ms [14.1, 14.3, 14.3]   wall 43.9 ms; instrumented: host enqueue 31.0, GPU span 43.5, launches 156 
+B-r2: W1: 1000 tokens at 0, rank 0 of 8, 4 layers. wall median 14.5 ms [14.7, 14.5, 14.3]   wall 44.3 ms; instrumented: host enqueue 30.5, GPU span 43.7, launches 156 

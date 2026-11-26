@@ -1,0 +1,52 @@
+{
+ "url": "http://127.0.0.1:8000",
+ "model": "glm-5.3-vx-experimental",
+ "prefix": [],
+ "results": [
+  {
+   "tokens": 30000,
+   "depth": 0.1,
+   "key": "72411",
+   "text": " 72411. Remember it.",
+   "ok": true,
+   "seconds": 50.09
+  },
+  {
+   "tokens": 30000,
+   "depth": 0.3,
+   "key": "26364",
+   "text": " 26364. Remember it.",
+   "ok": true,
+   "seconds": 50.03
+  },
+  {
+   "tokens": 30000,
+   "depth": 0.5,
+   "key": "92604",
+   "text": " 92604. Remember it.",
+   "ok": true,
+   "seconds": 50.02
+  },
+  {
+   "tokens": 30000,
+   "depth": 0.7,
+   "key": "90345",
+   "text": " 90345. Remember it.",
+   "ok": true,
+   "seconds": 49.99
+  },
+  {
+   "tokens": 30000,
+   "depth": 0.9,
+   "key": "62947",
+   "text": " 62947. Remember it.",
+   "ok": true,
+   "seconds": 50.02
+  }
+ ],
+ "correct": 5,
+ "total": 5,
+ "by_length": {
+  "30000": "5/5"
+ }
+}

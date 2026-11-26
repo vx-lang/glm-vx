@@ -254,6 +254,26 @@ def _host_bytes(data):
     return view.tobytes()
 
 
+def _host_buffer(data):
+    """(argument, nbytes) for a copy from C-contiguous host data, with no host copy where it can be avoided:
+    bytes as itself, a writable buffer (a numpy array, a bytearray) through ctypes.from_buffer. Only another
+    read-only buffer is copied, once. The argument keeps the data alive for the call."""
+    if isinstance(data, bytes):
+        return data, len(data)
+    try:
+        view = memoryview(data)
+    except TypeError as exc:
+        raise TypeError("host data must support the Python buffer protocol") from exc
+    if not view.c_contiguous:
+        raise ValueError("host data must be C-contiguous")
+    if view.readonly:
+        raw = view.tobytes()
+        return raw, len(raw)
+    if view.nbytes == 0:
+        return None, 0
+    return (C.c_char * view.nbytes).from_buffer(view.cast("B")), view.nbytes
+
+
 class CUDAContext:
     """Own one CUDA context and its resources; use ``with CUDAContext() as ctx``.
 
@@ -493,14 +513,13 @@ class DeviceBuffer(_Resource):
 
     def upload(self, data, *, offset=0):
         """Blocking byte upload. Synchronizes all context work before copying."""
-        raw = _host_bytes(data)
-        self._range(offset, len(raw))
+        host, nbytes = _host_buffer(data)
+        self._range(offset, nbytes)
         with self.context._activate():
             self._ensure_open()
             self.context._synchronize_current()
-            if raw:
-                host = C.create_string_buffer(raw, len(raw))
-                self.context.driver.call("cuMemcpyHtoD_v2", self._pointer.value + offset, host, len(raw))
+            if nbytes:
+                self.context.driver.call("cuMemcpyHtoD_v2", self._pointer.value + offset, host, nbytes)
                 # A pageable HtoD copy may return before its DMA lands, and it is
                 # ordered on the legacy default stream, not against kernels on our
                 # non-blocking streams. Without this, kernels launched right after
@@ -660,10 +679,10 @@ class DeviceTensor:
         return DeviceTensor(self.allocation, shape, dtype, offset=self.offset + offset)
 
     def upload(self, data):
-        raw = _host_bytes(data)
-        if len(raw) != self.nbytes:
-            raise ValueError(f"tensor upload needs exactly {self.nbytes} bytes, received {len(raw)}")
-        self.allocation.upload(raw, offset=self.offset)
+        host, nbytes = _host_buffer(data)
+        if nbytes != self.nbytes:
+            raise ValueError(f"tensor upload needs exactly {self.nbytes} bytes, received {nbytes}")
+        self.allocation.upload(data if host is None else host, offset=self.offset)
         return self
 
     def download(self):

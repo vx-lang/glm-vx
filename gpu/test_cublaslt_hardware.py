@@ -111,3 +111,53 @@ def test_fp8_block_matmul(context, lt, orientation, out_dtype, m, n, k):
     tolerance = 1e-3 if out_dtype == 'float32' else 1e-2
     np.testing.assert_allclose(got, want, rtol=tolerance, atol=tolerance * float(np.abs(want).max()))
     mm.close()
+
+
+def _bf16(rng, shape, scale=1.0):
+    """Random values that are bfloat16: (their bits uint16, the values float64)."""
+    bits = (((rng.standard_normal(shape) * scale).astype('f4').view(np.uint32) + 0x8000) >> 16).astype(np.uint16)
+    return bits, (bits.astype(np.uint32) << 16).view('f4').astype(np.float64)
+
+
+@pytest.mark.parametrize('m,n,k', [(1000, 256, 6144), (2048, 32, 6144), (1, 256, 6144), (3, 40, 136)])
+def test_bf16_matmul(context, lt, m, n, k):
+    # The router's gate (256 experts) and the indexer's weights_proj (32 heads) over prefill rows: bfloat16
+    # products are exact in float32, so only the float32 sums' order separates cuBLASLt from float64.
+    from gpu.cublaslt import Bf16Matmul, CublasLtUnavailable
+    rng = np.random.default_rng(m + n + k)
+    try:
+        mm = Bf16Matmul(lt, m, n, k)
+    except CublasLtUnavailable as error:
+        pytest.skip(str(error))
+    mp = mm.padded_m
+    x_bits, x = _bf16(rng, (mp, k))
+    w_bits, w = _bf16(rng, (n, k), 0.02)
+    out = context.tensor((mp * n,), 'float32')
+    mm(out, _up(context, x_bits), _up(context, w_bits))
+    context.synchronize()
+    got = np.frombuffer(out.download(), 'f4').reshape(mp, n)
+    want = x @ w.T
+    np.testing.assert_allclose(got, want, rtol=1e-4, atol=1e-5 * float(np.abs(want).max()))
+    mm.close()
+
+
+def test_bf16_matmul_batched_over_heads(context, lt):
+    # _prefill_mla_sparse's absorb: 8 heads, each head's 192 columns of q [rows, heads, 256] times W_UK^T [512, 192],
+    # into q_latent [rows, heads, 512]; one strided-batch cuBLASLt call.
+    from gpu.cublaslt import Bf16Matmul, CublasLtUnavailable
+    rng = np.random.default_rng(8)
+    m, heads, width, n, k = 64, 8, 256, 512, 192
+    try:
+        mm = Bf16Matmul(lt, m, n, k, batch=heads, x_ld=heads * width, x_stride=width, w_stride=n * k,
+                        out_ld=heads * n, out_stride=n)
+    except CublasLtUnavailable as error:
+        pytest.skip(str(error))
+    x_bits, x = _bf16(rng, (m, heads, width))
+    w_bits, w = _bf16(rng, (heads, n, k), 0.05)
+    out = context.tensor((m * heads * n,), 'float32')
+    mm(out, _up(context, x_bits.reshape(-1)), _up(context, w_bits.reshape(-1)))
+    context.synchronize()
+    got = np.frombuffer(out.download(), 'f4').reshape(m, heads, n)
+    want = np.einsum('mhk,hnk->mhn', x[:, :, :k], w)
+    np.testing.assert_allclose(got, want, rtol=1e-4, atol=1e-5 * float(np.abs(want).max()))
+    mm.close()

@@ -155,7 +155,7 @@ from pathlib import Path
 
 import numpy as np
 
-from kernels.backend import _cached_rope_coefficients
+from kernels.backend import _cached_rope_coefficients, _rope_coefficient_rows
 from .runtime import CUDAContext
 
 I = C.c_int32
@@ -190,6 +190,12 @@ def _planned(entry):
 def _flat(tensor):
     """The tensor as one dimension, for gpu/spawn kernels that take [?] weights."""
     return tensor.view((int(np.prod(tensor.shape)),))
+
+
+def _bf16_bits(x):
+    """float32 values as bfloat16 bits, nearest even (finite values), as Vx's `as bf16`."""
+    b = np.asarray(x, np.float32).view(np.uint32).astype(np.uint64)
+    return ((b + 0x7FFF + ((b >> 16) & 1)) >> 16).astype(np.uint16)
 
 
 def _f32(value, name, positive=False):
@@ -289,8 +295,10 @@ class ResidentGLM:
         # and values, then one causal mha_prefill launch for the chunk; past index_topk, the indexer's scores and a
         # top-k a query over the chunk, then mha_prefill_sparse over each query's selection). 'mha_tc' is 'mha' with
         # the dense launch on the tensor cores (mha_prefill_tc: bf16 products, f32 sums; nope 192, rope 64, value 256).
-        if prefill_attention not in ('tokens', 'mha', 'mha_tc'):
-            raise ValueError("prefill_attention must be 'tokens', 'mha' or 'mha_tc'")
+        # 'mla_tc' is 'mha_tc' with the attention past index_topk in the absorbed form on the tensor cores, as SGLang's
+        # flashmla_sparse (_prefill_mla_sparse: no kv_b_proj over the cached keys; a bf16 cache, rank 512, rope 64).
+        if prefill_attention not in ('tokens', 'mha', 'mha_tc', 'mla_tc'):
+            raise ValueError("prefill_attention must be 'tokens', 'mha', 'mha_tc' or 'mla_tc'")
         self.prefill_attention = prefill_attention
         if topk not in ('auto', 'sort', 'radix'):
             raise ValueError("topk must be 'auto', 'sort' or 'radix'")
@@ -652,8 +660,8 @@ class ResidentGLM:
         if self.mla_kernel == 'tc' and m.index_topk > 2048:
             raise ValueError(f"mla_kernel='tc' needs index_topk <= 2048 (64 splits of 32), the model has {m.index_topk}")
         self.rank, self.nope, self.rot, self.value_dim = m.rank, m.nope, m.rot, m.value_dim
-        if self.prefill_attention == 'mha_tc' and (m.nope, m.rot, m.value_dim) != (192, 64, 256):
-            raise ValueError(f"prefill_attention='mha_tc' needs nope 192, rope 64 and value 256 (GLM-5.3's); the model has "
+        if self.prefill_attention in ('mha_tc', 'mla_tc') and (m.nope, m.rot, m.value_dim) != (192, 64, 256):
+            raise ValueError(f"prefill_attention='{self.prefill_attention}' needs nope 192, rope 64 and value 256 (GLM-5.3's); the model has "
                              f"nope {m.nope}, rope {m.rot}, value {m.value_dim}")
         self.index_heads, self.index_dim, self.index_topk = m.index_heads, m.index_dim, m.index_topk
         qk = self.nope + self.rot
@@ -2374,8 +2382,8 @@ class ResidentGLM:
         forward() returns for the last one (logits False, True or 'greedy').
 
         Each row-wise step runs once over the chunk's rows: the RMSNorms, the residual adds, SwiGLU, and
-        the Linears (_prefill_linear: with prefill_gemm='cublaslt' cuBLASLt's block-FP8 matmul, each row's
-        _linear otherwise). Each token's attention (its cache rows, the indexer, MLA) and routed experts
+        the Linears (_prefill_linear: with prefill_gemm='cublaslt' cuBLASLt's block-FP8 matmul, or its bfloat16
+        one for the BF16 Linears, each row's _linear otherwise). Each token's attention (its cache rows, the indexer, MLA) and routed experts
         still run one token at a time, in order, with forward()'s kernels, so token i sees the cache rows
         of the tokens before it. Under tensor parallelism the sums after o_proj and the FFN run over the
         rows: one NCCL all-reduce (prefill_sum='nccl', the same bits on every rank) or each row's _tp_sum
@@ -2384,7 +2392,8 @@ class ResidentGLM:
         With prefill_gemm='rows' and prefill_sum='rows', and forward() on its plain kernels (no fuse_glue,
         fp8_kernels='hand'), the caches and logits are forward()'s bit for bit
         (gpu/test_resident_prefill.py). cuBLASLt quantizes the Linears' inputs to e4m3 per 128 columns, as
-        SGLang's block-FP8 prefill does: close to forward(), not equal."""
+        SGLang's block-FP8 prefill does, and rounds the BF16 Linears' inputs (the router's gate, the indexer's
+        weights_proj) to bfloat16, as SGLang's bfloat16 rows do: close to forward(), not equal."""
         m, c = self.model, self.config
         if self._closed:
             raise RuntimeError('ResidentGLM is closed')
@@ -2401,10 +2410,7 @@ class ResidentGLM:
         self._device_position = None
         hidden = self.hidden
         x = self._prefill_rows('x', hidden)
-        embeddings = np.zeros((count, hidden), np.float32)
-        for i, token in enumerate(tokens):
-            embeddings[i] = m._embedding(token)
-        x.view((count * hidden,)).upload(embeddings.ravel())
+        x.view((count * hidden,)).upload(np.ascontiguousarray(m._embeddings(tokens), dtype=np.float32))
         self._prefill_upload_steps(start, count)
         x_next, norm = self._prefill_rows('x_next', hidden), self._prefill_rows('norm', hidden)
         selected, counts = self.selected, [0] * count
@@ -2452,7 +2458,7 @@ class ResidentGLM:
         """prefill_chunk's scratch rows: its tokens, or with prefill_attention='mha' every key of a dense prefill (up to
         index_topk), in cuBLASLt's bucket so a matmul's padding rows are in it."""
         rows = self._prefill_capacity()
-        if self.prefill_attention in ('mha', 'mha_tc'):
+        if self.prefill_attention in ('mha', 'mha_tc', 'mla_tc'):
             rows = max(rows, min(self.index_topk, self.max_tokens))
         return self._prefill_bucket(rows)
 
@@ -2486,13 +2492,15 @@ class ResidentGLM:
         if getattr(self, '_prefill_inputs', None) is None:
             self._prefill_inputs = self._tensor((capacity * block,))
             self._prefill_views = {}
+        # The chunk's rows at once (one array op each, not a loop of _rope_inputs and _step_buffer a token): the
+        # same bits as theirs.
+        positions = np.arange(start, start + count, dtype=np.int64)
+        selects = np.minimum(self.index_topk, positions + 1)
         steps = np.zeros((count, block), np.float32)
-        for i in range(count):
-            cosine, sine = self._rope_inputs(start + i)
-            position = start + i
-            steps[i, :2 * half + 4] = np.concatenate(
-                [cosine, sine, self._step_buffer(position, min(self.index_topk, position + 1))])
-        self._prefill_inputs.view((count * block,)).upload(steps.ravel())
+        steps[:, :half], steps[:, half:2 * half] = _rope_coefficient_rows(self.rot, positions, float(self.model.theta))
+        steps[:, 2 * half:2 * half + 4] = np.stack(
+            [positions, positions + 1, selects, [self._splits(int(n)) for n in selects]], axis=1).astype(np.int32).view(np.float32)
+        self._prefill_inputs.view((count * block,)).upload(steps)
         self._prefill_block = block
 
     def _prefill_steps(self, i):
@@ -2523,7 +2531,8 @@ class ResidentGLM:
 
     def _prefill_linear(self, prefix, x, out, count):
         """out[i] = W x[i] for the first count rows (no bias): cuBLASLt with prefill_gemm='cublaslt' for an
-        FP8 Linear whose input width is a multiple of 128, else _linear a row."""
+        FP8 Linear whose input width is a multiple of 128 or a BF16 one whose width is a multiple of 8 (the
+        indexer's weights_proj), else _linear a row."""
         if bool(self.config.get('attention_bias', False)) and prefix.endswith(('q_a_proj', 'kv_a_proj_with_mqa', 'o_proj')):
             raise NotImplementedError('prefill_chunk does not add attention biases yet')
         rows, cols = out.shape[1], x.shape[1]
@@ -2532,6 +2541,11 @@ class ResidentGLM:
             if tuple(shape) != (rows, cols):
                 raise ValueError(f'{prefix}: FP8 weight is {shape[0]}x{shape[1]}, got x [{cols}] -> out [{rows}]')
             return self._prefill_cublaslt(prefix, codes, rows, cols, x, out, count)
+        if self.prefill_gemm == 'cublaslt' and self._format(prefix) == 'bf16' and cols % 8 == 0:
+            bits, shape = self._bf16_weight(prefix)
+            if tuple(shape) != (rows, cols):
+                raise ValueError(f'{prefix}: BF16 weight is {shape[0]}x{shape[1]}, got x [{cols}] -> out [{rows}]')
+            return self._prefill_cublaslt_bf16(bits, rows, cols, x, out, count)
         for i in range(count):
             self._linear(prefix, self._prefill_row(x, i), self._prefill_row(out, i))
         return out
@@ -2573,11 +2587,94 @@ class ResidentGLM:
         self.launches['cublaslt_fp8_rows'] = self.launches.get('cublaslt_fp8_rows', 0) + 1
         return out
 
+    def _prefill_cublaslt_bf16(self, bits, rows, cols, x, out, count):
+        """out[:count] = x[:count] W^T through cuBLASLt's bfloat16 matmul for a BF16 Linear W (bits [rows, cols]):
+        the rows rounded to bfloat16 (gpu/spawn/bf16_rows), float32 sums and out, as SGLang's linear_bf16_fp32 for
+        the router's gate and torch.mm(out_dtype=float32) for the indexer's weights_proj; padded to
+        _prefill_bucket(count) tokens, out's rows past count get the padding's outputs (of stale rows) and are not
+        used."""
+        padded = self._prefill_bucket(count)
+        x_bits = self._prefill_rows('lt_bf16', cols, 'uint16')
+        self._spawn('bf16_rows', out=x_bits, x=x, count=count, cols=cols)
+        matmul = self._bf16_matmul(padded, rows, cols)
+        matmul(out.view((padded * rows,)), x_bits.view((padded * cols,), 'uint16'), bits.view((rows * cols,), 'uint16'),
+               stream=self.stream)
+        self.launches['cublaslt_bf16_rows'] = self.launches.get('cublaslt_bf16_rows', 0) + 1
+        return out
+
+    def _bf16_matmul(self, m, n, k, **layout):
+        """gpu/cublaslt.Bf16Matmul for m rows (the test context's stand-in when it has one), made once for each shape
+        and layout (batch and strides: Bf16Matmul's keywords), on prefill_chunk's shared workspace."""
+        key = ('bf16', m, n, k, tuple(sorted(layout.items())))
+        matmul = self._lt_matmuls.get(key)
+        if matmul is None:
+            factory = getattr(self.ctx, 'bf16_matmul', None)
+            if factory is not None:
+                matmul = factory(m, n, k, **layout)
+            else:
+                from .cublaslt import Bf16Matmul, CublasLt
+                if self._lt is None:
+                    self._lt = CublasLt(self.ctx)
+                if getattr(self, '_prefill_workspace', None) is None:  # one for every prefill matmul: one stream
+                    self._prefill_workspace = self._tensor((32 << 20,), 'uint8')
+                matmul = Bf16Matmul(self._lt, m, n, k, workspace=self._prefill_workspace, **layout)
+            self._lt_matmuls[key] = matmul
+        return matmul
+
+    def _bf16_absorb(self, prefix):
+        """kv_b_proj's two MLA absorbs in bfloat16, as SGLang keeps w_kc and w_vc for its absorbed attention: W_UK^T a head
+        [heads, rank, nope] (q_latent = W_UK^T q_nope) and W_UV a head [heads, value, rank] (o = W_UV latent), uploaded
+        once. kv_b_proj's rows are nope + value a head."""
+        key = prefix + '.kv_b_proj:bf16_absorb'
+        entry = self._weights.get(key)
+        if entry is None:
+            kv = np.asarray(self.model._weight(prefix + '.kv_b_proj.weight'), np.float32).reshape(
+                self.heads, self.nope + self.value_dim, self.rank)
+            parts = ((':uk_t', kv[:, :self.nope, :].transpose(0, 2, 1)), (':uv', kv[:, self.nope:, :]))
+            entry = tuple(self._upload_weight(key + name, _bf16_bits(np.ascontiguousarray(a)), 'uint16') for name, a in parts)
+            self._weights[key] = entry
+        return entry
+
+    def _prefill_mla_sparse(self, prefix, layer, q, out, start, count):
+        """prefill_attention='mla_tc' past index_topk: each query's attention over its DSA selection in the absorbed
+        form, as SGLang's flashmla_sparse. q_latent = W_UK^T q_nope a head (one batched cuBLASLt bfloat16 matmul over
+        the rows, the queries rounded to bfloat16 by bf16_rows), mla_prefill_sparse_tc over each query's selected rows
+        of the bf16 cache (one block a query for all heads: bf16 products, f32 sums), then out = W_UV latent a head
+        (another batched matmul): no kv_b_proj over the cached keys, whose cost grows with the position."""
+        heads, nope, rank, value = self.heads, self.nope, self.rank, self.value_dim
+        qk = nope + self.rot
+        w_uk_t, w_uv = self._bf16_absorb(prefix)
+        padded = self._prefill_bucket(count)
+        buffer = self._prefill_buffer_rows()
+        q_bits = self._prefill_rows('q_bf16', heads * qk, 'uint16')
+        self._spawn('bf16_rows', out=q_bits, x=q, count=count, cols=heads * qk)
+        q_latent = self._prefill_rows('q_latent', heads * rank)
+        self._bf16_matmul(padded, rank, nope, batch=heads, x_ld=heads * qk, x_stride=qk, w_stride=rank * nope,
+                          out_ld=heads * rank, out_stride=rank)(
+            q_latent.view((buffer * heads * rank,)), q_bits.view((buffer * heads * qk,), 'uint16'),
+            w_uk_t.view((heads * rank * nope,), 'uint16'), stream=self.stream)
+        latent = self._prefill_rows('mla_latent', 16 * rank)  # [rows * 16, rank]: 16 heads a query (the rank's, padded)
+        self._spawn('mla_prefill_sparse_tc', out=latent.view((buffer * 16, rank)),
+                    q_latent=q_latent.view((buffer, heads, rank)), q=q.view((q.shape[0], heads, qk)),
+                    cache_latent=self.latents[layer], cache_rope=self.rope_keys[layer],
+                    selected=self._prefill_rows('selected_rows', self.index_topk, 'int32'), start=start, queries=count,
+                    heads=heads, nope=nope, rank=rank, rope_dim=self.rot, topk=self.index_topk,
+                    scale=_f32(qk ** -0.5, 'MLA scale', True))
+        latent_bits = self._prefill_rows('mla_latent_bf16', 16 * rank, 'uint16')
+        self._spawn('bf16_rows', out=latent_bits.view((buffer * 16, rank), 'uint16'), x=latent.view((buffer * 16, rank)),
+                    count=count * 16, cols=rank)
+        self._bf16_matmul(padded, value, rank, batch=heads, x_ld=16 * rank, x_stride=rank, w_stride=value * rank,
+                          out_ld=heads * value, out_stride=value)(
+            out.view((out.shape[0] * heads * value,)), latent_bits.view((buffer * 16 * rank,), 'uint16'),
+            w_uv.view((heads * value * rank,), 'uint16'), stream=self.stream)
+        self.launches['cublaslt_bf16_rows'] = self.launches.get('cublaslt_bf16_rows', 0) + 2
+        return out
+
     def _prefill_attention(self, layer, x, start, count, shared_ok, counts):
         """The attention of prefill_chunk's tokens: the projections over the rows, then each token's
         _attention_core in order (or _prefill_mha); returns o_proj's outputs, one row a token (this rank's part
         under TP)."""
-        if self.prefill_attention in ('mha', 'mha_tc'):
+        if self.prefill_attention in ('mha', 'mha_tc', 'mla_tc'):
             return self._prefill_mha(layer, x, start, count)
         prefix = f'model.layers.{layer}.self_attn'
         q_rank, qk = int(self.config['q_lora_rank']), self.nope + self.rot
@@ -2665,6 +2762,12 @@ class ResidentGLM:
         q = rows('q_heads', self.heads * qk)
         self._spawn('q_rows_prefill', q_out=q.view((q.shape[0], self.heads, qk)), query=query, steps=steps, rows=count,
                     heads=self.heads, nope=self.nope, rot=self.rot)
+        if long and self.prefill_attention == 'mla_tc' and bf16 and self.rank == 512 and self.rot == 64 and self.heads <= 16:
+            out = rows('heads_out', self.heads * self.value_dim)
+            self._prefill_mla_sparse(prefix, layer, q, out, start, count)
+            attended = rows('attn_out', self.hidden)
+            self._prefill_linear(prefix + '.o_proj', out, attended, count)
+            return attended
         keys = start + count
         if bf16:
             latent, rope = self._prefill_key_rows('latent_f32', self.rank), self._prefill_key_rows('rope_f32', self.rot)
@@ -2683,7 +2786,7 @@ class ResidentGLM:
         if long:  # each query past index_topk attends to its DSA selection
             self._spawn('mha_prefill_sparse', selected=self._prefill_rows('selected_rows', self.index_topk, 'int32'),
                         topk=self.index_topk, **common)
-        elif self.prefill_attention == 'mha_tc':  # o as [rows, heads * value]; it may write rows count .. count + 63
+        elif self.prefill_attention in ('mha_tc', 'mla_tc'):  # o as [rows, heads * value]; it may write rows count .. count + 63
             self._spawn('mha_prefill_tc', **dict(common, o=out))
         else:
             self._spawn('mha_prefill', **common)
@@ -2792,8 +2895,10 @@ class ResidentGLM:
     def _prefill_route(self, prefix, x, count, k, kk):
         """Each of the first count rows' experts and weights on the device, [rows, kk] int32 and f32 (columns k and up,
         fold_shared's shared expert, hold n_routed_experts and 1.0 from their allocation): router_logits_rows and
-        router_topk_rows for a BF16 gate of at most 256 experts (router_bf16's bits); otherwise _route a row and an
-        upload (a host round trip a token: tests' float32 routers only)."""
+        router_topk_rows for a BF16 gate of at most 256 experts (router_bf16's bits), the logits from cuBLASLt's
+        bfloat16 matmul instead with prefill_gemm='cublaslt' (_prefill_cublaslt_bf16; router_logits_rows, on the CUDA
+        cores, took 4.1 ms for 1000 rows of GLM-5.3 at one rank of TP8); otherwise _route a row and an upload (a host round trip a token:
+        tests' float32 routers only)."""
         c = self.config
         experts = int(c['n_routed_experts'])
         key = ('route', kk)
@@ -2808,8 +2913,11 @@ class ResidentGLM:
             if rows == experts and cols % 8 == 0 and cols <= 8192:
                 logits = self._prefill_rows('router_logits', experts)
                 scale = _f32(float(c.get('routed_scaling_factor', 1.0)), 'router scale')
-                self._spawn('router_logits_rows', logits=logits, gate=bits.view((rows * cols // 2,), 'uint32'), x=x,
-                            tokens=count, experts=experts, cols=cols)
+                if self.prefill_gemm == 'cublaslt':  # SGLang's linear_bf16_fp32: the rows in bfloat16, tensor cores
+                    self._prefill_cublaslt_bf16(bits, rows, cols, x, logits, count)
+                else:
+                    self._spawn('router_logits_rows', logits=logits, gate=bits.view((rows * cols // 2,), 'uint32'), x=x,
+                                tokens=count, experts=experts, cols=cols)
                 self._spawn('router_topk_rows', indices=ids, weights=weights, logits=logits,
                             bias=self._weight(prefix + '.gate.e_score_correction_bias'), tokens=count, experts=experts,
                             k=k, scale=scale)
