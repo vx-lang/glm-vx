@@ -7,31 +7,31 @@
 fn address1(t: &Tensor<f32, [?], Memory::HBM>) on Topology::Device -> i64
 ensures reads_only(t)
 {
-  return mlir!( inputs : (%t = t : memref<?xf32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+  return unsafe { mlir!( inputs : (%t = t : memref<?xf32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
     %p = memref.extract_aligned_pointer_as_index %t : memref<?xf32> -> index
     %r = arith.index_cast %p : index to i64
     macro.yield %r : i64
-  };
+  } };
 }
 
 fn address2(t: &Tensor<f32, [?, ?], Memory::HBM>) on Topology::Device -> i64
 ensures reads_only(t)
 {
-  return mlir!( inputs : (%t = t : memref<?x?xf32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+  return unsafe { mlir!( inputs : (%t = t : memref<?x?xf32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
     %p = memref.extract_aligned_pointer_as_index %t : memref<?x?xf32> -> index
     %r = arith.index_cast %p : index to i64
     macro.yield %r : i64
-  };
+  } };
 }
 
 fn address2i(t: &Tensor<i32, [?, ?], Memory::HBM>) on Topology::Device -> i64
 ensures reads_only(t)
 {
-  return mlir!( inputs : (%t = t : memref<?x?xi32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+  return unsafe { mlir!( inputs : (%t = t : memref<?x?xi32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
     %p = memref.extract_aligned_pointer_as_index %t : memref<?x?xi32> -> index
     %r = arith.index_cast %p : index to i64
     macro.yield %r : i64
-  };
+  } };
 }
 
 fn index_key_bf16_lane(k: i64) on Topology::Device -> i64
@@ -39,13 +39,13 @@ ensures writes_only()
 {
   // One lane's 4 dims at the byte address k: ld.global.nc.v4.f32, then two cvt.rn.bf16x2.f32 (the low
   // half of each word is the lower dim). The result is word0 | word1 << 32.
-  return mlir!( inputs : (%k = k : i64), returns : i64, dialects : ["llvm"], ensures : [writes_only()]) {
+  return unsafe { mlir!( inputs : (%k = k : i64), returns : i64, dialects : ["llvm"], ensures : [writes_only()]) {
     %p = llvm.inttoptr %k : i64 to !llvm.ptr<1>
     %x = llvm.load %p {alignment = 16 : i64, invariant} : !llvm.ptr<1> -> vector<4xf32>
     %h = llvm.fptrunc %x : vector<4xf32> to vector<4xbf16>
     %r = llvm.bitcast %h : vector<4xbf16> to i64
     macro.yield %r : i64
-  };
+  } };
 }
 
 pub fn glm_vx_spawn_index_key_bf16_at(words: &mut Tensor<i32, [?, ?], Memory::HBM>, keys: &Tensor<f32, [?, ?], Memory::HBM>,

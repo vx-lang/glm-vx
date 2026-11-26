@@ -8,31 +8,31 @@
 fn address1(t: &Tensor<f32, [?], Memory::HBM>) on Topology::Device -> i64
 ensures reads_only(t)
 {
-  return mlir!( inputs : (%t = t : memref<?xf32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+  return unsafe { mlir!( inputs : (%t = t : memref<?xf32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
     %p = memref.extract_aligned_pointer_as_index %t : memref<?xf32> -> index
     %r = arith.index_cast %p : index to i64
     macro.yield %r : i64
-  };
+  } };
 }
 
 fn address2(t: &Tensor<f32, [?, ?], Memory::HBM>) on Topology::Device -> i64
 ensures reads_only(t)
 {
-  return mlir!( inputs : (%t = t : memref<?x?xf32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+  return unsafe { mlir!( inputs : (%t = t : memref<?x?xf32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
     %p = memref.extract_aligned_pointer_as_index %t : memref<?x?xf32> -> index
     %r = arith.index_cast %p : index to i64
     macro.yield %r : i64
-  };
+  } };
 }
 
 fn address2i(t: &Tensor<i32, [?, ?], Memory::HBM>) on Topology::Device -> i64
 ensures reads_only(t)
 {
-  return mlir!( inputs : (%t = t : memref<?x?xi32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
+  return unsafe { mlir!( inputs : (%t = t : memref<?x?xi32>), returns : i64, dialects : ["memref", "arith"], ensures : [reads_only(t)]) {
     %p = memref.extract_aligned_pointer_as_index %t : memref<?x?xi32> -> index
     %r = arith.index_cast %p : index to i64
     macro.yield %r : i64
-  };
+  } };
 }
 
 fn index_key_fp8_lane(k: i64) on Topology::Device -> i64
@@ -40,7 +40,7 @@ ensures writes_only()
 {
   // One lane's 4 dims at the byte address k to e4m3 codes, with the warp's amax by shfl.sync.bfly.
   // The result is the 4 codes (lower dim in the lower byte) | the scale's bits << 32.
-  return mlir!( inputs : (%k = k : i64), returns : i64, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {
+  return unsafe { mlir!( inputs : (%k = k : i64), returns : i64, dialects : ["llvm", "nvvm"], ensures : [writes_only()]) {
     %p = llvm.inttoptr %k : i64 to !llvm.ptr<1>
     %x = llvm.load %p {alignment = 16 : i64} : !llvm.ptr<1> -> vector<4xf32>
     %all = llvm.mlir.constant(-1 : i32) : i32
@@ -105,7 +105,7 @@ ensures writes_only()
     %v2 = llvm.insertelement %sb, %v1[%i1 : i32] : vector<2xi32>
     %r = llvm.bitcast %v2 : vector<2xi32> to i64
     macro.yield %r : i64
-  };
+  } };
 }
 
 pub fn glm_vx_spawn_index_key_fp8_at(codes: &mut Tensor<i32, [?, ?], Memory::HBM>, scales: &mut Tensor<f32, [?], Memory::HBM>,

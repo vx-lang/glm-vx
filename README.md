@@ -88,8 +88,10 @@ kernel served now (0.874x), GLM-5.3 in block FP8 at one rank of 8, on one H200
 ## Run
 
 **GPU (8x H200).** Linux, an NVIDIA driver and CUDA's `ptxas` (tested with CUDA 13.0, driver 580), Python 3.10+,
-LLVM 22 with MLIR, and Vx main from 2026-11-19 on (the grouped FP8 GEMM needs Vx #3664 and #3670); tested with
-Vx 10c6f478f.
+LLVM 22 with MLIR, and Vx main from 2026-11-23 on: Vx #3803 wants each `mlir!` block with `ensures` clauses inside
+`unsafe { }`, and the grouped FP8 GEMM needs Vx #3664 and #3670. Tested with Vx 5d313543e
+([evidence/h200-20261126-z75](evidence/h200-20261126-z75/)). An older vxc (10c6f478f) builds `fp8_gemm_m64` with no
+shared memory, so it stops the build.
 
 ```sh
 python3 -m venv .venv && .venv/bin/pip install -e '.[test]'
