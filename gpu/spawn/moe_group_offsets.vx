@@ -4,7 +4,7 @@
 // spawn-vxc: -fweak-relaxed-atomics
 import core::sync::atomic;
 
-pub fn glm_vx_spawn_moe_group_offsets(base : &mut Tensor<i32, [?, ?], Memory::HBM>, starts : &mut Tensor<i32, [?], Memory::HBM>, tile_expert : &mut Tensor<i32, [?], Memory::HBM>, order : &mut Tensor<i32, [?], Memory::HBM>, counts : &Tensor<i32, [?, ?], Memory::HBM>, n : i32, experts : i32, align : i32) -> void {
+pub extern fn glm_vx_spawn_moe_group_offsets(base : &mut Tensor<i32, [?, ?], Memory::HBM>, starts : &mut Tensor<i32, [?], Memory::HBM>, tile_expert : &mut Tensor<i32, [?], Memory::HBM>, order : &mut Tensor<i32, [?], Memory::HBM>, counts : &Tensor<i32, [?, ?], Memory::HBM>, n : i32, experts : i32, align : i32) -> void {
   spawn on(Topology::Device) {
     for one in 0..1 across blocks {
       let room = order.len();

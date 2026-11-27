@@ -5,9 +5,9 @@
 // then lanes::sum (Vx #260). out is [rows, dim].
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_rmsnorm_rows(out: &mut Tensor<f32, [?, ?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
-                                 weight: &Tensor<f32, [?], Memory::HBM>, rows: i32, dim: i32, eps: f32,
-                                 threads: i32) -> void {
+pub extern fn glm_vx_spawn_rmsnorm_rows(out: &mut Tensor<f32, [?, ?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                                        weight: &Tensor<f32, [?], Memory::HBM>, rows: i32, dim: i32, eps: f32,
+                                        threads: i32) -> void {
   spawn on(Topology::Device) {
     for row in 0..rows across blocks {
       if dim > 0 && eps > 0.0 && threads >= 32 && threads <= 1024 && threads % 32 == 0 {

@@ -13,10 +13,10 @@
 // + j * 128 + 4l .. + 3. An id outside 0..experts, or cols % 16 != 0, gives zeros. Needs k <= 32.
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_fp8_moe_fma_gate_up(act: &mut Tensor<f32, [?], Memory::HBM>, gate: &Tensor<u32, [?], Memory::HBM>, gate_scales: &Tensor<f32, [?], Memory::HBM>,
-                                        up: &Tensor<u32, [?], Memory::HBM>, up_scales: &Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
-                                        ids: &Tensor<i32, [?], Memory::HBM>, k: i32, experts: i32, inter: i32,
-                                        up_row: i32, stride: i32, cols: i32) -> void {
+pub extern fn glm_vx_spawn_fp8_moe_fma_gate_up(act: &mut Tensor<f32, [?], Memory::HBM>, gate: &Tensor<u32, [?], Memory::HBM>, gate_scales: &Tensor<f32, [?], Memory::HBM>,
+                                               up: &Tensor<u32, [?], Memory::HBM>, up_scales: &Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                                               ids: &Tensor<i32, [?], Memory::HBM>, k: i32, experts: i32, inter: i32,
+                                               up_row: i32, stride: i32, cols: i32) -> void {
   spawn on(Topology::Device) {
     for rb in 0..(k * inter - 1) / 4 + 1 across blocks {
       let mut ranks = unsafe { Tensor<i32, [4, 32], Memory::SMEM>::uninit() };

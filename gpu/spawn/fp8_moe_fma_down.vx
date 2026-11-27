@@ -13,9 +13,9 @@
 // every term zero. Needs k <= 32.
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_fp8_moe_fma_down(out: &mut Tensor<f32, [?], Memory::HBM>, down: &Tensor<u32, [?], Memory::HBM>, scales: &Tensor<f32, [?], Memory::HBM>,
-                                     act: &Tensor<f32, [?], Memory::HBM>, weights: &Tensor<f32, [?], Memory::HBM>,
-                                     ids: &Tensor<i32, [?], Memory::HBM>, k: i32, experts: i32, rows: i32, cols: i32) -> void {
+pub extern fn glm_vx_spawn_fp8_moe_fma_down(out: &mut Tensor<f32, [?], Memory::HBM>, down: &Tensor<u32, [?], Memory::HBM>, scales: &Tensor<f32, [?], Memory::HBM>,
+                                            act: &Tensor<f32, [?], Memory::HBM>, weights: &Tensor<f32, [?], Memory::HBM>,
+                                            ids: &Tensor<i32, [?], Memory::HBM>, k: i32, experts: i32, rows: i32, cols: i32) -> void {
   spawn on(Topology::Device) {
     for rp in 0..(rows - 1) / 2 + 1 across blocks {
       let mut ranks = unsafe { Tensor<i32, [8, 32], Memory::SMEM>::uninit() };

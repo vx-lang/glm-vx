@@ -34,9 +34,9 @@ macro_rules! fp8_encode {
     };
 }
 
-pub fn glm_vx_spawn_fp8_quant_rows(codes: &mut Tensor<u8, [?, ?], Memory::HBM>, scales: &mut Tensor<f32, [?, ?], Memory::HBM>,
-                                   x: &Tensor<f32, [?, ?], Memory::HBM>, src: &Tensor<i32, [?], Memory::HBM>,
-                                   rows: i32, cols: i32, gather: i32) -> void {
+pub extern fn glm_vx_spawn_fp8_quant_rows(codes: &mut Tensor<u8, [?, ?], Memory::HBM>, scales: &mut Tensor<f32, [?, ?], Memory::HBM>,
+                                          x: &Tensor<f32, [?, ?], Memory::HBM>, src: &Tensor<i32, [?], Memory::HBM>,
+                                          rows: i32, cols: i32, gather: i32) -> void {
   spawn on(Topology::Device) {
     for row in 0..rows across blocks {
       let mut part = unsafe { Tensor<f32, [32, 32], Memory::SMEM>::uninit() };

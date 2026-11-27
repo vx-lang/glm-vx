@@ -65,7 +65,7 @@ declared writes (Vx #2076).
 Two launches use the same PTX:
 
 - **Vx launches it.** `build.py --library` also builds `lib<kernel>.so` from the same file, and
-  `vx_launch.py` calls its `pub fn`: Vx's CUDA runtime launches the kernel with that shape, on
+  `vx_launch.py` calls its `pub extern fn`: Vx's CUDA runtime launches the kernel with that shape, on
   the legacy default stream, without waiting for the GPU. The tensors must come from
   `CUDAContext(primary=True)`, the context Vx's runtime uses; they are passed with no copy.
   `VxKernel(...)(..., stream=s)` launches on our stream `s` instead (Vx's `vx_cuda_set_stream`,
@@ -201,10 +201,12 @@ VX_DISPATCH_LIB=/path/to/libvx_cuda_dispatch.so VXC=... gpu/spawn/build.sh
 
 A launch size is a number, a parameter, or computed from parameters with `+ - * / %`
 (truncating, in i32), and the manifest records which. `launch.py` evaluates a computed size as
-Vx does. The library's `pub fn` takes every parameter of the function, so each must be one the
+Vx does. The library's `pub extern fn` takes every parameter of the function, so each must be one the
 kernel uses, and `build.py` refuses a library whose embedded kernel is not the PTX it checked.
 
-Each file holds one `pub fn glm_vx_spawn_NAME` with one `spawn on` region, and may start with
+Each file holds one `pub extern fn glm_vx_spawn_NAME` with one `spawn on` region (since Vx #3896 only an
+`extern fn` gets the C symbol that `lib<kernel>.so` and the CPU tests call; `build.py --library` refuses a plain
+`pub fn`), and may start with
 `// spawn-include: device.vx` to paste the helpers in front, and `// spawn-vxc: -fFEATURE` for a
 vxc feature flag on that kernel only. topk_radix takes `-fweak-relaxed-atomics`: Vx makes each
 relaxed atomic an acquire, so no relaxed read is reordered with a later write (no load

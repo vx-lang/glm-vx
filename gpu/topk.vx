@@ -5,7 +5,7 @@
 // after -inf, tying with other NaNs by position, which is what numpy does with -scores.
 // Keep this CPU-reference prefix self-contained.
 // Order-preserving map from float32 bits to [0, 2^32): bigger key == bigger score.
-pub fn glm_vx_topk_key(bits: i32) -> i64 {
+pub extern fn glm_vx_topk_key(bits: i32) -> i64 {
   let b: i64 = (bits as i64) & 4294967295;
   let man: i64 = b & 8388607;
   if ((b >> 23) & 255) == 255 { if man != 0 { return 0; } }
@@ -157,14 +157,14 @@ fn vxk_topk_stable(out_ids: *mut i32, scores: *const i32, scratch: *mut i32, tok
   }
 }
 
-pub fn glm_vx_gpu_topk_stable(out_ids: *mut i32, scores: *const i32, scratch: *mut i32, tokens: i32, k: i32) -> void {
+pub extern fn glm_vx_gpu_topk_stable(out_ids: *mut i32, scores: *const i32, scratch: *mut i32, tokens: i32, k: i32) -> void {
   vxk_topk_stable(out_ids, scores, scratch, tokens, k);
   return;
 }
 
 // topk_stable with tokens = step[1], for a graph-captured decode step (gpu/kernels.vx's
 // index_scores_at); scratch for the most tokens.
-pub fn glm_vx_gpu_topk_stable_at(out_ids: *mut i32, scores: *const i32, scratch: *mut i32, step: *const i32, k: i32) -> void {
+pub extern fn glm_vx_gpu_topk_stable_at(out_ids: *mut i32, scores: *const i32, scratch: *mut i32, step: *const i32, k: i32) -> void {
   unsafe {
     let tokens: i32 = step[1];
     vxk_topk_stable(out_ids, scores, scratch, tokens, k);
@@ -174,8 +174,8 @@ pub fn glm_vx_gpu_topk_stable_at(out_ids: *mut i32, scores: *const i32, scratch:
 
 // topk_stable_at for the contexts topk_sort_at (gpu/spawn) leaves to it: selects only when
 // step[1] > short_tokens, so a captured step holds both and each replay runs one (#32).
-pub fn glm_vx_gpu_topk_stable_long_at(out_ids: *mut i32, scores: *const i32, scratch: *mut i32, step: *const i32, k: i32,
-                                      short_tokens: i32) -> void {
+pub extern fn glm_vx_gpu_topk_stable_long_at(out_ids: *mut i32, scores: *const i32, scratch: *mut i32, step: *const i32, k: i32,
+                                             short_tokens: i32) -> void {
   unsafe {
     let tokens: i32 = step[1];
     if tokens > short_tokens { vxk_topk_stable(out_ids, scores, scratch, tokens, k); }

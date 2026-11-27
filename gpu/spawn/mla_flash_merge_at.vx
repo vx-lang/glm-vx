@@ -12,9 +12,9 @@
 // heads % 16 == 0, rank == 512 and 0 < splits <= min(splits_max, 64); otherwise it writes nothing.
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_mla_flash_merge_at(out: &mut Tensor<f32, [?, ?], Memory::HBM>, numerator: &Tensor<f32, [?, ?, ?], Memory::HBM>,
-                                       stats: &Tensor<f32, [?, ?, ?], Memory::HBM>, step: &Tensor<i32, [?], Memory::HBM>,
-                                       heads: i32, rank: i32, splits_max: i32) -> void {
+pub extern fn glm_vx_spawn_mla_flash_merge_at(out: &mut Tensor<f32, [?, ?], Memory::HBM>, numerator: &Tensor<f32, [?, ?, ?], Memory::HBM>,
+                                              stats: &Tensor<f32, [?, ?, ?], Memory::HBM>, step: &Tensor<i32, [?], Memory::HBM>,
+                                              heads: i32, rank: i32, splits_max: i32) -> void {
   spawn on(Topology::Device) {
     for h in 0..heads across blocks {
       for c in 0..4 across blocks {

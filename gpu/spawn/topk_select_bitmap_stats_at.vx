@@ -220,11 +220,11 @@ macro_rules! write_word {
     };
 }
 
-pub fn glm_vx_spawn_topk_select_bitmap_stats_at(out_ids: &mut Tensor<i32, [?], Memory::HBM>,
-                                                scores: &Tensor<i32, [?], Memory::HBM>,
-                                                hist: &mut Tensor<u32, [?], Memory::HBM>,
-                                                stats: &mut Tensor<u32, [?], Memory::HBM>,
-                                                step: &Tensor<i32, [?], Memory::HBM>, k: i32) -> void {
+pub extern fn glm_vx_spawn_topk_select_bitmap_stats_at(out_ids: &mut Tensor<i32, [?], Memory::HBM>,
+                                                       scores: &Tensor<i32, [?], Memory::HBM>,
+                                                       hist: &mut Tensor<u32, [?], Memory::HBM>,
+                                                       stats: &mut Tensor<u32, [?], Memory::HBM>,
+                                                       step: &Tensor<i32, [?], Memory::HBM>, k: i32) -> void {
   spawn on(Topology::Device) {
     for blk in 0..1 across blocks {
       let tokens: i32 = step[1];

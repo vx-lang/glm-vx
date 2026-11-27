@@ -222,7 +222,7 @@ def test_check_catches_a_manifest_out_of_place(tmp_path, kernel, first, second, 
 @needs_vxc
 def test_refuses_two_kernels_in_one_file(tmp_path):
     source = (HERE / 'copy.vx').read_text()
-    second = source[source.index('pub fn'):].replace('glm_vx_spawn_copy', 'glm_vx_spawn_copy_again')
+    second = source[source.index('pub extern fn'):].replace('glm_vx_spawn_copy', 'glm_vx_spawn_copy_again')
     (tmp_path / 'copy.vx').write_text(source + '\n' + second)
     shutil.copy(HERE / 'device.vx', tmp_path)
     result = run_build(tmp_path / 'copy.vx', tmp_path / 'k.ptx')
@@ -235,7 +235,7 @@ def test_every_kernel_has_a_launch_shape_that_launch_reads(tmp_path):
     from gpu.spawn.build import VARIANT
     for source in sorted(HERE.glob('*.vx')):
         text = source.read_text()
-        if not re.search(r'^pub fn glm_vx_spawn_', text, re.M):
+        if not re.search(r'^pub extern fn glm_vx_spawn_', text, re.M):
             continue  # machine*.vx, device.vx and the variant includes, as build.sh skips them
         for variant in [v[1] for v in VARIANT.finditer(text)] or [None]:
             out = tmp_path / f'{source.stem}{variant or ""}.ptx'
@@ -310,7 +310,7 @@ def test_spawn_vxc_passes_a_feature_flag(tmp_path):
         assert json.loads((tmp_path / f'{name}.json').read_text())['vxc_flags'] == (['-fweak-relaxed-atomics'] if name == 'weak' else [])
     shared = (tmp_path / 'weak.ptx').read_text().split('atom.shared.add.u32')[1].split('\n')[1]
     assert 'fence' not in shared
-    assert fenced['weak'] == 4 and fenced['default'] > fenced['weak'], fenced
+    assert fenced['weak'] == 2 and fenced['default'] > fenced['weak'], fenced
 
 
 DISPATCH = os.environ.get('VX_DISPATCH_LIB')

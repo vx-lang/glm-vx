@@ -17,10 +17,10 @@
 // Needs 1 <= heads <= 32 and dim 64 or 128; otherwise it writes nothing.
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_index_scores_tc_at(out: &mut Tensor<f32, [?], Memory::HBM>, q: &Tensor<f32, [?, ?], Memory::HBM>,
-                                       keys: &Tensor<f32, [?, ?], Memory::HBM>, weights: &Tensor<f32, [?], Memory::HBM>,
-                                       step: &Tensor<i32, [?], Memory::HBM>, max_tokens: i32, heads: i32, dim: i32,
-                                       scale: f32) -> void {
+pub extern fn glm_vx_spawn_index_scores_tc_at(out: &mut Tensor<f32, [?], Memory::HBM>, q: &Tensor<f32, [?, ?], Memory::HBM>,
+                                              keys: &Tensor<f32, [?, ?], Memory::HBM>, weights: &Tensor<f32, [?], Memory::HBM>,
+                                              step: &Tensor<i32, [?], Memory::HBM>, max_tokens: i32, heads: i32, dim: i32,
+                                              scale: f32) -> void {
   spawn on(Topology::Device) {
     for b in 0..(max_tokens + 127) / 128 across blocks {
       let tokens: i32 = step[1];

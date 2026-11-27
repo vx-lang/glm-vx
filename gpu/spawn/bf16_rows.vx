@@ -4,8 +4,8 @@
 // for the same two).
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_bf16_rows(out: &mut Tensor<bf16, [?, ?], Memory::HBM>, x: &Tensor<f32, [?, ?], Memory::HBM>, count: i32,
-                              cols: i32) -> void {
+pub extern fn glm_vx_spawn_bf16_rows(out: &mut Tensor<bf16, [?, ?], Memory::HBM>, x: &Tensor<f32, [?, ?], Memory::HBM>, count: i32,
+                                     cols: i32) -> void {
   spawn on(Topology::Device) {
     for t in 0..count across blocks {
       for c in 0..cols across lanes(256) {

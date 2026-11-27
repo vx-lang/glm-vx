@@ -35,7 +35,7 @@ macro_rules! topk_key32 {
     };
 }
 
-pub fn glm_vx_spawn_topk_select_at(out_ids: &mut Tensor<i32, [?], Memory::HBM>, scores: &Tensor<i32, [?], Memory::HBM>,
+pub extern fn glm_vx_spawn_topk_select_at(out_ids: &mut Tensor<i32, [?], Memory::HBM>, scores: &Tensor<i32, [?], Memory::HBM>,
                                     step: &Tensor<i32, [?], Memory::HBM>, k: i32) -> void {
   spawn on(Topology::Device) {
     for blk in 0..1 across blocks {

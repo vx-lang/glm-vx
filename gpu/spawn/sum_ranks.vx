@@ -4,8 +4,8 @@
 // the rank's own partial: a separate buffer from gathered.
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_sum_ranks(out: &mut Tensor<f32, [?], Memory::HBM>, gathered: &Tensor<f32, [?], Memory::HBM>,
-                              ranks: i32, n: i32) -> void {
+pub extern fn glm_vx_spawn_sum_ranks(out: &mut Tensor<f32, [?], Memory::HBM>, gathered: &Tensor<f32, [?], Memory::HBM>,
+                                     ranks: i32, n: i32) -> void {
   spawn on(Topology::Device) {
     for blk in 0..(n - 1) / 256 + 1 across blocks {
       for t in 0..256 across lanes {

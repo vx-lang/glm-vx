@@ -20,11 +20,11 @@
 // spawn-maxnreg: 128 (build.py: two blocks of 256 lanes an SM)
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_mla_prefill_sparse_tc(out: &mut Tensor<f32, [?, ?], Memory::HBM>, q_latent: &Tensor<f32, [?, ?, ?], Memory::HBM>,
-                                          q: &Tensor<f32, [?, ?, ?], Memory::HBM>, cache_latent: &Tensor<bf16, [?, ?], Memory::HBM>,
-                                          cache_rope: &Tensor<bf16, [?, ?], Memory::HBM>, selected: &Tensor<i32, [?, ?], Memory::HBM>,
-                                          start: i32, queries: i32, heads: i32, nope: i32, rank: i32, rope_dim: i32, topk: i32,
-                                          scale: f32) -> void {
+pub extern fn glm_vx_spawn_mla_prefill_sparse_tc(out: &mut Tensor<f32, [?, ?], Memory::HBM>, q_latent: &Tensor<f32, [?, ?, ?], Memory::HBM>,
+                                                 q: &Tensor<f32, [?, ?, ?], Memory::HBM>, cache_latent: &Tensor<bf16, [?, ?], Memory::HBM>,
+                                                 cache_rope: &Tensor<bf16, [?, ?], Memory::HBM>, selected: &Tensor<i32, [?, ?], Memory::HBM>,
+                                                 start: i32, queries: i32, heads: i32, nope: i32, rank: i32, rope_dim: i32, topk: i32,
+                                                 scale: f32) -> void {
   spawn on(Topology::Device) {
     for i in 0..queries across blocks {
       let tokens: i32 = start + i + 1;

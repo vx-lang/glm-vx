@@ -24,7 +24,7 @@
 // makes the row NaN. Other widths (cols % 16 != 0) write zeros, as fp8_matvec4 does.
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_fp8_matvec_fma_tiles(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<u32, [?], Memory::HBM>,
+pub extern fn glm_vx_spawn_fp8_matvec_fma_tiles(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<u32, [?], Memory::HBM>,
                                      scales: &Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
                                      rows: i32, cols: i32) -> void {
   spawn on(Topology::Device) {

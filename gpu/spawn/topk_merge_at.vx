@@ -33,9 +33,9 @@ macro_rules! merge_stage {
     };
 }
 
-pub fn glm_vx_spawn_topk_merge_at(dst: &mut Tensor<i64, [?, ?], Memory::HBM>, src: &Tensor<i64, [?, ?], Memory::HBM>,
-                                  out_ids: &mut Tensor<i32, [?, ?], Memory::HBM>, step: &Tensor<i32, [?], Memory::HBM>,
-                                  max_tokens: i32, round: i32, k: i32) -> void {
+pub extern fn glm_vx_spawn_topk_merge_at(dst: &mut Tensor<i64, [?, ?], Memory::HBM>, src: &Tensor<i64, [?, ?], Memory::HBM>,
+                                         out_ids: &mut Tensor<i32, [?, ?], Memory::HBM>, step: &Tensor<i32, [?], Memory::HBM>,
+                                         max_tokens: i32, round: i32, k: i32) -> void {
   spawn on(Topology::Device) {
     for b in 0..(max_tokens + 4095) / 4096 across blocks {
       let tokens: i32 = step[1];

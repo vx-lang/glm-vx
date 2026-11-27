@@ -10,10 +10,10 @@
 // load leaves its tensor.
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_decode_inputs(inputs: &mut Tensor<f32, [?], Memory::HBM>, embed16: &Tensor<u16, [?], Memory::HBM>,
-                                  embed32: &Tensor<i32, [?], Memory::HBM>, table: &Tensor<i32, [?], Memory::HBM>,
-                                  state: &Tensor<i32, [?], Memory::HBM>, hidden: i32, width: i32, vocab: i32,
-                                  positions: i32, wide: i32) -> void {
+pub extern fn glm_vx_spawn_decode_inputs(inputs: &mut Tensor<f32, [?], Memory::HBM>, embed16: &Tensor<u16, [?], Memory::HBM>,
+                                         embed32: &Tensor<i32, [?], Memory::HBM>, table: &Tensor<i32, [?], Memory::HBM>,
+                                         state: &Tensor<i32, [?], Memory::HBM>, hidden: i32, width: i32, vocab: i32,
+                                         positions: i32, wide: i32) -> void {
   spawn on(Topology::Device) {
     for blk in 0..(hidden + width - 1) / 256 + 1 across blocks {
       for t in 0..256 across lanes {

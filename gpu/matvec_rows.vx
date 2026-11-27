@@ -34,7 +34,7 @@ fn vxk_rows_warp_sum(value: f32) -> f32 {
 // One block per row (grid = rows), block a multiple of 32 in [32, 1024]; cols <= 8192, the shared
 // floats this unit is built with. Launch 1024 threads: a 6144-column row is then one batch of
 // loads per thread.
-pub fn glm_vx_gpu_matvec_rows(out: *mut f32, weight: *const f32, x: *const f32, rows: i32, cols: i32) -> void {
+pub extern fn glm_vx_gpu_matvec_rows(out: *mut f32, weight: *const f32, x: *const f32, rows: i32, cols: i32) -> void {
   if rows <= 0 { return; }
   if cols < 0 { return; }
   if cols > 8192 { return; }

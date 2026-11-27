@@ -3,8 +3,8 @@
 // GEMM and mha_prefill.
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_rows_bf16_f32(out: &mut Tensor<f32, [?, ?], Memory::HBM>, x: &Tensor<bf16, [?, ?], Memory::HBM>,
-                                  rows: i32, cols: i32) -> void {
+pub extern fn glm_vx_spawn_rows_bf16_f32(out: &mut Tensor<f32, [?, ?], Memory::HBM>, x: &Tensor<bf16, [?, ?], Memory::HBM>,
+                                         rows: i32, cols: i32) -> void {
   spawn on(Topology::Device) {
     for r in 0..rows across blocks {
       for c in 0..cols across lanes(256) {

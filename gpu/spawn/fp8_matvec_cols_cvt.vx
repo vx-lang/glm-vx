@@ -32,9 +32,9 @@ macro_rules! cols_row4 {
     };
 }
 
-pub fn glm_vx_spawn_fp8_matvec_cols_cvt(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<u32, [?], Memory::HBM>,
-                                        scales: &Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
-                                        groups: i32, cols: i32, depth: i32, period: i32, offset: i32, x_stride: i32) -> void {
+pub extern fn glm_vx_spawn_fp8_matvec_cols_cvt(out: &mut Tensor<f32, [?], Memory::HBM>, weight: &Tensor<u32, [?], Memory::HBM>,
+                                               scales: &Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                                               groups: i32, cols: i32, depth: i32, period: i32, offset: i32, x_stride: i32) -> void {
   spawn on(Topology::Device) {
     for b in 0..groups * (cols / 128) across blocks {
       let mut part = unsafe { Tensor<f32, [16, 4, 32], Memory::SMEM>::uninit() };

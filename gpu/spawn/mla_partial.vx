@@ -8,12 +8,12 @@
 // stats [heads * splits, 2] (m, l).
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_mla_partial(numerator: &mut Tensor<f32, [?, ?], Memory::HBM>, stats: &mut Tensor<f32, [?, ?], Memory::HBM>,
-                                q_latent: &Tensor<f32, [?], Memory::HBM>, q_rope: &Tensor<f32, [?], Memory::HBM>,
-                                cache_latent: &Tensor<f32, [?], Memory::HBM>, cache_rope: &Tensor<f32, [?], Memory::HBM>,
-                                selected: &Tensor<i32, [?], Memory::HBM>, heads: i32, rank: i32, rope_dim: i32,
-                                tokens: i32, count: i32, selection_stride: i32, splits: i32, scale: f32,
-                                threads: i32) -> void {
+pub extern fn glm_vx_spawn_mla_partial(numerator: &mut Tensor<f32, [?, ?], Memory::HBM>, stats: &mut Tensor<f32, [?, ?], Memory::HBM>,
+                                       q_latent: &Tensor<f32, [?], Memory::HBM>, q_rope: &Tensor<f32, [?], Memory::HBM>,
+                                       cache_latent: &Tensor<f32, [?], Memory::HBM>, cache_rope: &Tensor<f32, [?], Memory::HBM>,
+                                       selected: &Tensor<i32, [?], Memory::HBM>, heads: i32, rank: i32, rope_dim: i32,
+                                       tokens: i32, count: i32, selection_stride: i32, splits: i32, scale: f32,
+                                       threads: i32) -> void {
   spawn on(Topology::Device) {
     for task in 0..heads * splits across blocks {
       if heads > 0 && rank > 0 && rope_dim >= 0 && tokens >= 0 && count >= 0 && selection_stride >= 0 && splits > 0

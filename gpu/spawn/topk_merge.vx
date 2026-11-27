@@ -26,8 +26,8 @@ macro_rules! merge_stage {
     };
 }
 
-pub fn glm_vx_spawn_topk_merge(dst: &mut Tensor<i64, [?, ?], Memory::HBM>, src: &Tensor<i64, [?, ?], Memory::HBM>,
-                               out_ids: &mut Tensor<i32, [?, ?], Memory::HBM>, lists: i32, tokens: i32, k: i32) -> void {
+pub extern fn glm_vx_spawn_topk_merge(dst: &mut Tensor<i64, [?, ?], Memory::HBM>, src: &Tensor<i64, [?, ?], Memory::HBM>,
+                                      out_ids: &mut Tensor<i32, [?, ?], Memory::HBM>, lists: i32, tokens: i32, k: i32) -> void {
   spawn on(Topology::Device) {
     for b in 0..(lists + 1) / 2 across blocks {
       if lists > 0 && tokens > 0 && k > 0 && k <= 2048 {

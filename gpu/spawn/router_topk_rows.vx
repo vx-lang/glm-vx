@@ -17,9 +17,9 @@ macro_rules! beats {
     };
 }
 
-pub fn glm_vx_spawn_router_topk_rows(indices: &mut Tensor<i32, [?, ?], Memory::HBM>, weights: &mut Tensor<f32, [?, ?], Memory::HBM>,
-                                     logits: &Tensor<f32, [?, ?], Memory::HBM>, bias: &Tensor<f32, [?], Memory::HBM>,
-                                     tokens: i32, experts: i32, k: i32, scale: f32) -> void {
+pub extern fn glm_vx_spawn_router_topk_rows(indices: &mut Tensor<i32, [?, ?], Memory::HBM>, weights: &mut Tensor<f32, [?, ?], Memory::HBM>,
+                                            logits: &Tensor<f32, [?, ?], Memory::HBM>, bias: &Tensor<f32, [?], Memory::HBM>,
+                                            tokens: i32, experts: i32, k: i32, scale: f32) -> void {
   spawn on(Topology::Device) {
     for t in 0..tokens across blocks {
       let mut sg = unsafe { Tensor<f32, [256], Memory::SMEM>::uninit() };

@@ -19,7 +19,7 @@ library=${VX_DISPATCH_LIB:+yes}
 for source in gpu/spawn/*.vx; do
   name=$(basename "$source" .vx)
   # Only files with a kernel entry: not machine*.vx, device.vx or the variant includes (fp8_cvt_*.vx).
-  grep -q "^pub fn glm_vx_spawn_" "$source" || continue
+  grep -qE "^pub (extern )?fn glm_vx_spawn_" "$source" || continue
   [[ -n ${KERNELS:-} && " $KERNELS " != *" $name "* ]] && continue
   # `// spawn-variant: SUFFIX INCLUDE [MACHINE]` lines (build.py): one build each, <name><SUFFIX>.
   variants=$(sed -n 's|^//[[:space:]]*spawn-variant:[[:space:]]*\([^[:space:]]*\).*|\1|p' "$source")

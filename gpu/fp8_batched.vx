@@ -1,7 +1,7 @@
 // Batched and grouped FP8 e4m3fn block-scaled projections (M5). Same weight/scale layout and
 // decode as fp8.vx (scales are float32 multipliers, one per 128x128 block). See FP8.md.
 // Keep this CPU-reference prefix self-contained: test_fp8_batched.py compiles it unchanged.
-pub fn glm_vx_fp8m_decode(byte: u8) -> f32 {
+pub extern fn glm_vx_fp8m_decode(byte: u8) -> f32 {
   let bits: i32 = byte as i32;
   let exponent: i32 = (bits >> 3) & 15;
   let mantissa: i32 = bits & 7;
@@ -33,7 +33,7 @@ extern "C" {
 // adjacent warps; block size is a multiple of 32 and grid.x = ceil(N*M / (block/32)).
 // Each 128-column tile's raw-value dot product is summed before its scale is applied, the order
 // quant.py's fp8_matvec_blocked uses. NaN codes propagate to every output they touch.
-pub fn glm_vx_gpu_fp8_matmul(out: *mut f32, weight: *const u8, scales: *const f32, x: *const f32, expert_ids: *const i32, rows_m: i32, rows_n: i32, cols: i32, experts: i32) -> void {
+pub extern fn glm_vx_gpu_fp8_matmul(out: *mut f32, weight: *const u8, scales: *const f32, x: *const f32, expert_ids: *const i32, rows_m: i32, rows_n: i32, cols: i32, experts: i32) -> void {
   if rows_m <= 0 { return; }
   if rows_n <= 0 { return; }
   if cols < 0 { return; }

@@ -7,11 +7,11 @@
 // spawn-variant: _ref fp8_cvt_ref.vx
 // spawn-maxnreg: 104 (build.py: ptxas issues all of a tile's loads first; H200 sweep, #38)
 
-pub fn glm_vx_spawn_fp8_matvec_cvt_tiles3(out: &mut Tensor<f32, [?], Memory::HBM>,
-                                          weight_a: &Tensor<u32, [?], Memory::HBM>, scales_a: &Tensor<f32, [?], Memory::HBM>, rows_a: i32,
-                                          weight_b: &Tensor<u32, [?], Memory::HBM>, scales_b: &Tensor<f32, [?], Memory::HBM>, rows_b: i32,
-                                          weight_c: &Tensor<u32, [?], Memory::HBM>, scales_c: &Tensor<f32, [?], Memory::HBM>, rows_c: i32,
-                                          x: &Tensor<f32, [?], Memory::HBM>, cols: i32) -> void {
+pub extern fn glm_vx_spawn_fp8_matvec_cvt_tiles3(out: &mut Tensor<f32, [?], Memory::HBM>,
+                                                 weight_a: &Tensor<u32, [?], Memory::HBM>, scales_a: &Tensor<f32, [?], Memory::HBM>, rows_a: i32,
+                                                 weight_b: &Tensor<u32, [?], Memory::HBM>, scales_b: &Tensor<f32, [?], Memory::HBM>, rows_b: i32,
+                                                 weight_c: &Tensor<u32, [?], Memory::HBM>, scales_c: &Tensor<f32, [?], Memory::HBM>, rows_c: i32,
+                                                 x: &Tensor<f32, [?], Memory::HBM>, cols: i32) -> void {
   spawn on(Topology::Device) {
     for rb in 0..(rows_a + 7) / 8 + (rows_b + 7) / 8 + (rows_c + 7) / 8 across blocks {
       let mut a = unsafe { Tensor<f32, [8, 32], Memory::SMEM>::uninit() };

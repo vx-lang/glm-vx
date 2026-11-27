@@ -23,11 +23,11 @@
 // spawn-maxnreg: 128 (build.py)
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_mla_flash_at(numerator: &mut Tensor<f32, [?, ?, ?], Memory::HBM>, stats: &mut Tensor<f32, [?, ?, ?], Memory::HBM>,
-                                 q_latent: &Tensor<f32, [?], Memory::HBM>, q_rope: &Tensor<f32, [?], Memory::HBM>,
-                                 cache_latent: &Tensor<f32, [?], Memory::HBM>, cache_rope: &Tensor<f32, [?], Memory::HBM>,
-                                 selected: &Tensor<i32, [?], Memory::HBM>, step: &Tensor<i32, [?], Memory::HBM>,
-                                 heads: i32, rank: i32, rope_dim: i32, selection_stride: i32, splits_max: i32, scale: f32) -> void {
+pub extern fn glm_vx_spawn_mla_flash_at(numerator: &mut Tensor<f32, [?, ?, ?], Memory::HBM>, stats: &mut Tensor<f32, [?, ?, ?], Memory::HBM>,
+                                        q_latent: &Tensor<f32, [?], Memory::HBM>, q_rope: &Tensor<f32, [?], Memory::HBM>,
+                                        cache_latent: &Tensor<f32, [?], Memory::HBM>, cache_rope: &Tensor<f32, [?], Memory::HBM>,
+                                        selected: &Tensor<i32, [?], Memory::HBM>, step: &Tensor<i32, [?], Memory::HBM>,
+                                        heads: i32, rank: i32, rope_dim: i32, selection_stride: i32, splits_max: i32, scale: f32) -> void {
   spawn on(Topology::Device) {
     for hg in 0..heads / 16 across blocks {
       for split in 0..splits_max across blocks {

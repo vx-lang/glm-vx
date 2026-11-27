@@ -6,9 +6,9 @@
 // scores keys l, l + 256, ..; keys <= 4096.
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_mha_prefill(o: &mut Tensor<f32, [?, ?, ?], Memory::HBM>, q: &Tensor<f32, [?, ?, ?], Memory::HBM>,
-                                kv: &Tensor<f32, [?, ?, ?], Memory::HBM>, k_rope: &Tensor<f32, [?, ?], Memory::HBM>,
-                                start: i32, queries: i32, heads: i32, nope: i32, rot: i32, value: i32, scale: f32) -> void {
+pub extern fn glm_vx_spawn_mha_prefill(o: &mut Tensor<f32, [?, ?, ?], Memory::HBM>, q: &Tensor<f32, [?, ?, ?], Memory::HBM>,
+                                       kv: &Tensor<f32, [?, ?, ?], Memory::HBM>, k_rope: &Tensor<f32, [?, ?], Memory::HBM>,
+                                       start: i32, queries: i32, heads: i32, nope: i32, rot: i32, value: i32, scale: f32) -> void {
   spawn on(Topology::Device) {
     for i in 0..queries across blocks {
       for h in 0..heads across blocks {
