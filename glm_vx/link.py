@@ -299,8 +299,9 @@ class FrontEnd:
 
     The front end listens; the engine has no listener. Its standard input and output are the
     link, so it needs no right to reach the engine. With `tokenizer_path` (a tokenizer.json) the
-    front end tokenizes text prompts itself, and the engine gets only token ids; `tokenizer`, the
-    engine's copy, then only detokenizes.
+    front end tokenizes text prompts and decodes the generated ids itself: the engine gets and sends
+    token ids only, and `tokenizer` is not used. Without it, `tokenizer` (HF `tokenizers`)
+    tokenizes SUBMIT_TEXT's prompts and decodes the replies.
 
     A front end that stops when close() did not ask it to (a panic, a signal, a malformed frame)
     loses its connections, and the engine cancels the requests it carried. A new one then binds the
@@ -318,7 +319,8 @@ class FrontEnd:
             self.argv.append(str(max(1, round((10.0 if heartbeat_seconds is None else heartbeat_seconds) * 1000))))
         if tokenizer_path is not None:
             self.argv.append(str(tokenizer_path))
-        self.scheduler, self.tokenizer, self.env = scheduler, tokenizer, env
+        self.scheduler, self.env = scheduler, env
+        self.tokenizer = None if tokenizer_path is not None else tokenizer
         self.max_restarts, self.window = max_restarts, window
         self.restarts, self.error, self.code = [], None, None
         self.lock, self.closing, self.done = threading.Lock(), threading.Event(), threading.Event()

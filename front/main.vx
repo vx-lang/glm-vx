@@ -8,7 +8,8 @@
 // - the listener gets `root.network`, once, to bind;
 // - the router gets `root.stdout`, and the engine reader `root.stdin`;
 // - a connection's handler gets its `TcpStream`, a `Sender` to the router, the model's name and
-//   the tokenizer, which is data.
+//   the tokenizer, which is data. With it the handler encodes prompts and decodes the engine's
+//   token ids, so no text crosses the link.
 // `root.files` goes no further, and `root.env` to nobody. The package `front` is built with
 // `--no-trusted-code front`.
 import front::bytes;
@@ -118,7 +119,8 @@ fn main(root : Root, args : Vec<String>) -> i32 {
       }
     }
   }
-  // Without a tokenizer, text prompts go to the engine as text (SUBMIT_TEXT).
+  // Without a tokenizer, text prompts go to the engine as text (SUBMIT_TEXT), and the engine's
+  // replies carry the text.
   let mut tok = empty();
   if args.len() == 5 {
     match read_tokenizer(&root.files, &args[4]) {

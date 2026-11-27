@@ -51,7 +51,7 @@ Each link goes to the GHSA advisory; the number is its CVSS 3.1 score.
 
 ## What this does not cover
 
-- **Trusted code.** That includes `std`'s `unsafe` blocks, the Vx compiler and runtime, CPython, numpy, HF `tokenizers` (detokenizing only) and the CUDA driver.
+- **Trusted code.** That includes `std`'s `unsafe` blocks, the Vx compiler and runtime, CPython, numpy and the CUDA driver. With `--front` and `--tokenizer`, the server does not load HF `tokenizers`: the front end tokenizes and decodes.
   - A memory bug there is not excluded.
   - The front end's tests and fuzzing also run under AddressSanitizer (`FRONT_PRELOAD`).
   - Vx issues found this way, both fixed in the Vx the front end needs (6322eb757): vx-lang/Vx#4142, a double free (fixed by vx-lang/Vx#4149), and vx-lang/Vx#4144, `--no-trusted-code` let an exported `extern fn` through (fixed by vx-lang/Vx#4151).

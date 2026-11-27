@@ -40,6 +40,9 @@ From the engine to the front end:
 
 - **ACCEPTED** comes before any TOKEN of the request, as soon as the scheduler takes it. The front end then sends a stream's headers, as `server.py` does after `Scheduler.submit`. The name (`cmpl-...`) and `created` are the reply's `id` and `created`.
 
+- **Who decodes.** A front end started with a tokenizer.json also decodes the ids that TOKEN carries, so the engine has no
+  tokenizer and sends no text: every TOKEN's text and DONE's tail and text are empty. The front end's `Detok`
+  (`front/src/tokenizer.vx`) gives the same texts as below. Without a tokenizer.json, the engine sends them.
 - **TOKEN's text** is what `IncrementalText.push` gives: the newly stable text, often empty.
 - **DONE:**
   - The reason is 1 `length`, 2 `stop` or 3 `cancelled`.

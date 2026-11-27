@@ -22,5 +22,6 @@ link main.vx glm-vx-front
 link tests/json_echo.vx json_echo
 link tests/request_check.vx request_check
 link tests/tokenize_check.vx tokenize_check
+link tests/detok_check.vx detok_check
 "$VXC" main.vx --package front="$PWD/src" --no-trusted-code front --audit > build/audit.txt 2>&1
 echo "built: $(ls build | grep -v '\.o$' | tr '\n' ' ')"

@@ -1,6 +1,6 @@
-// GLM's tokenizer (#68, step 3): what HF `tokenizers` encodes for zai-org/GLM-5.3's tokenizer.json,
-// so that a text prompt reaches the engine as token ids. No capability: main reads the file and
-// gives its bytes to `load`.
+// GLM's tokenizer (#68, step 3): what HF `tokenizers` encodes and decodes for zai-org/GLM-5.3's
+// tokenizer.json, so that the engine gets and gives token ids and never text. No capability: main
+// reads the file and gives its bytes to `load`.
 //
 // The steps, as that tokenizer.json sets them:
 // 1. The added tokens are found first, leftmost first. None is a prefix of another, and each
@@ -13,6 +13,10 @@
 // 3. A piece the vocabulary has is one token (`ignore_merges`). Otherwise its bytes merge, the
 //    lowest rank first and then the leftmost, as BPE's `merge_all` does, in O(n log n).
 // The byte-level mapping is undone when the vocabulary is loaded, so the tables hold raw bytes.
+//
+// Decoding, as HF's `decode(ids)` with skip_special_tokens: each id's bytes (a special added token
+// has none, nor has an id that is no token), then UTF-8 with each invalid run as one U+FFFD, as
+// Rust's `from_utf8_lossy` does. `Detok` is glm_vx/detok.py's IncrementalText, for a stream.
 import front::bytes;
 import front::json;
 import std::string;
@@ -32,15 +36,16 @@ struct Tokenizer {
   merge_keys : Vec<u64>,
   merge_ranks : Vec<i32>,
   merge_ids : Vec<i32>,
-  // The added tokens' UTF-8 and ids, in tokenizer.json's order.
+  // The added tokens' UTF-8, ids and `special`, in tokenizer.json's order.
   added : Vec<Vec<u8>>,
   added_ids : Vec<i32>,
+  added_special : Vec<bool>,
 }
 
 pub fn empty() -> Tokenizer {
   return Tokenizer { loaded: false, tokens: Vec<Vec<u8>>::new(), slots: Vec<i32>::new(), byte_ids: Vec<i32>::new(),
                      merge_keys: Vec<u64>::new(), merge_ranks: Vec<i32>::new(), merge_ids: Vec<i32>::new(),
-                     added: Vec<Vec<u8>>::new(), added_ids: Vec<i32>::new() };
+                     added: Vec<Vec<u8>>::new(), added_ids: Vec<i32>::new(), added_special: Vec<bool>::new() };
 }
 
 pub fn is_loaded(t : &Tokenizer) -> bool {
@@ -184,6 +189,11 @@ fn member_is_text(members : &Vec<Member>, key : &Vec<u8>, want : &Vec<u8>) -> bo
 fn member_is_bool(members : &Vec<Member>, key : &Vec<u8>, want : bool) -> bool {
   let at = find(members, key);
   return at >= 0 && is_bool(&members[at].value, want);
+}
+
+// Member `key` is true or false.
+fn member_is_a_bool(members : &Vec<Member>, key : &Vec<u8>) -> bool {
+  return member_is_bool(members, key, true) || member_is_bool(members, key, false);
 }
 
 // A JSON integer in 0..2147483647, or -1.
@@ -454,7 +464,7 @@ fn add_merges(t : &mut Tokenizer, v : &Value, back : &Vec<i32>) -> bool {
 }
 
 // The first byte must be ASCII, so that a match never starts inside a character.
-fn add_content(t : &mut Tokenizer, v : &Value, id : i32) -> bool {
+fn add_content(t : &mut Tokenizer, v : &Value, id : i32, special : bool) -> bool {
   match v {
     Value::Text(content) => {
       if id < 0 || content.len() == 0 || content[0] >= 128u8 {
@@ -466,6 +476,7 @@ fn add_content(t : &mut Tokenizer, v : &Value, id : i32) -> bool {
       }
       t.added.push(copy);
       t.added_ids.push(id);
+      t.added_special.push(special);
       return true;
     }
     _ => { return false; }
@@ -477,7 +488,9 @@ fn add_token(t : &mut Tokenizer, v : &Value, input : &Vec<u8>) -> bool {
     Value::Object(token) => {
       let c = find(token, &lit("content" as *const u8, 7));
       let at = find(token, &lit("id" as *const u8, 2));
-      return c >= 0 && at >= 0 && check_added(token) && add_content(t, &token[c].value, small_int(&token[at].value, input));
+      let special = lit("special" as *const u8, 7);
+      return c >= 0 && at >= 0 && check_added(token) && member_is_a_bool(token, &special)
+             && add_content(t, &token[c].value, small_int(&token[at].value, input), member_is_bool(token, &special, true));
     }
     _ => { return false; }
   }
@@ -875,4 +888,179 @@ pub fn encode(t : &Tokenizer, text : &Vec<u8>) -> Vec<u32> {
   }
   split_and_merge(t, text, start, text.len(), &mut out);
   return out;
+}
+
+// ---- Decoding ----
+
+// The added token whose id is `id`, or -1.
+fn added_index(t : &Tokenizer, id : u32) -> i32 {
+  for k in 0..t.added_ids.len() {
+    if (t.added_ids[k] as u32) == id {
+      return k;
+    }
+  }
+  return -1;
+}
+
+// The bytes of token `id`, onto `out`: a vocabulary token's raw bytes, a non-special added token's
+// text, and nothing for a special one or for an id that is no token.
+fn put_token(t : &Tokenizer, id : u32, out : &mut Vec<u8>) -> void {
+  if id < (t.tokens.len() as u32) {
+    let i = id as i32;
+    for k in 0..t.tokens[i].len() {
+      out.push(t.tokens[i][k]);
+    }
+    return;
+  }
+  let a = added_index(t, id);
+  if a >= 0 && !t.added_special[a] {
+    for k in 0..t.added[a].len() {
+      out.push(t.added[a][k]);
+    }
+  }
+}
+
+fn byte_in(b : &Vec<u8>, i : i32, lo : u8, hi : u8) -> bool {
+  return i < b.len() && b[i] >= lo && b[i] <= hi;
+}
+
+// The length of the UTF-8 character at byte `i`, or, when there is none, minus the length of the
+// longest start of one there (at least 1), which Rust's `from_utf8_lossy` turns into one U+FFFD.
+fn char_at(b : &Vec<u8>, i : i32) -> i32 {
+  let c = b[i];
+  if c < 128u8 {
+    return 1;
+  }
+  if c >= 194u8 && c <= 223u8 {
+    if byte_in(b, i + 1, 128u8, 191u8) {
+      return 2;
+    }
+    return -1;
+  }
+  if c >= 224u8 && c <= 239u8 {
+    // E0 needs A0..BF next, ED 80..9F: no overlong form and no surrogate.
+    let lo = if c == 224u8 { 160u8 } else { 128u8 };
+    let hi = if c == 237u8 { 159u8 } else { 191u8 };
+    if !byte_in(b, i + 1, lo, hi) {
+      return -1;
+    }
+    if !byte_in(b, i + 2, 128u8, 191u8) {
+      return -2;
+    }
+    return 3;
+  }
+  if c >= 240u8 && c <= 244u8 {
+    // F0 needs 90..BF next, F4 80..8F: no overlong form and nothing past U+10FFFF.
+    let lo = if c == 240u8 { 144u8 } else { 128u8 };
+    let hi = if c == 244u8 { 143u8 } else { 191u8 };
+    if !byte_in(b, i + 1, lo, hi) {
+      return -1;
+    }
+    if !byte_in(b, i + 2, 128u8, 191u8) {
+      return -2;
+    }
+    if !byte_in(b, i + 3, 128u8, 191u8) {
+      return -3;
+    }
+    return 4;
+  }
+  return -1;
+}
+
+// `b` as UTF-8 text, with one U+FFFD for each invalid run.
+fn lossy(b : &Vec<u8>) -> Vec<u8> {
+  let mut out = Vec<u8>::with_capacity(b.len());
+  let mut i = 0;
+  while i < b.len() {
+    let n = char_at(b, i);
+    if n > 0 {
+      for k in 0..n {
+        out.push(b[i + k]);
+      }
+      i = i + n;
+    } else {
+      out.push(239u8);
+      out.push(191u8);
+      out.push(189u8);
+      i = i - n;
+    }
+  }
+  return out;
+}
+
+fn decode_range(t : &Tokenizer, ids : &Vec<u32>, from : i32, to : i32) -> Vec<u8> {
+  let mut raw = Vec<u8>::new();
+  for i in from..to {
+    put_token(t, ids[i], &mut raw);
+  }
+  return lossy(&raw);
+}
+
+// The text of `ids`, as HF's `Tokenizer.decode(ids)`.
+pub fn decode_ids(t : &Tokenizer, ids : &Vec<u32>) -> Vec<u8> {
+  return decode_range(t, ids, 0, ids.len());
+}
+
+// A stream's text, token by token: IncrementalText of glm_vx/detok.py. The text of a token is sent
+// once the decoded window is stable: it grew, it still starts with what was decoded before, and it
+// does not end in U+FFFD (a character cut short). `prefix` starts the window, and the tokens
+// before `read` have had their text sent.
+struct Detok {
+  ids : Vec<u32>,
+  prefix : i32,
+  read : i32,
+}
+
+pub fn new_detok() -> Detok {
+  return Detok { ids: Vec<u32>::new(), prefix: 0, read: 0 };
+}
+
+fn starts_with(a : &Vec<u8>, b : &Vec<u8>) -> bool {
+  return a.len() >= b.len() && same_range(b, a, 0, b.len());
+}
+
+fn ends_in_replacement(a : &Vec<u8>) -> bool {
+  let n = a.len();
+  return n >= 3 && a[n - 3] == 239u8 && a[n - 2] == 191u8 && a[n - 1] == 189u8;
+}
+
+fn from_byte(a : &Vec<u8>, from : i32) -> Vec<u8> {
+  let mut out = Vec<u8>::new();
+  for i in from..a.len() {
+    out.push(a[i]);
+  }
+  return out;
+}
+
+// Add one token; the newly stable text, often none.
+pub fn detok_push(d : &mut Detok, t : &Tokenizer, token : u32) -> Vec<u8> {
+  d.ids.push(token);
+  let before = decode_range(t, &d.ids, d.prefix, d.read);
+  let after = decode_range(t, &d.ids, d.prefix, d.ids.len());
+  if after.len() > before.len() && starts_with(&after, &before) && !ends_in_replacement(&after) {
+    d.prefix = d.read;
+    d.read = d.ids.len();
+    return from_byte(&after, before.len());
+  }
+  return Vec<u8>::new();
+}
+
+// The text still held back at the end of the stream.
+pub fn detok_flush(d : &mut Detok, t : &Tokenizer) -> Vec<u8> {
+  if d.read == d.ids.len() {
+    return Vec<u8>::new();
+  }
+  let before = decode_range(t, &d.ids, d.prefix, d.read);
+  let after = decode_range(t, &d.ids, d.prefix, d.ids.len());
+  d.prefix = d.ids.len();
+  d.read = d.ids.len();
+  // After the common prefix, as Python's os.path.commonprefix of the two texts: whole characters.
+  let mut k = 0;
+  while k < before.len() && k < after.len() && before[k] == after[k] {
+    k = k + 1;
+  }
+  while k > 0 && k < after.len() && after[k] >= 128u8 && after[k] < 192u8 {
+    k = k - 1;
+  }
+  return from_byte(&after, k);
 }

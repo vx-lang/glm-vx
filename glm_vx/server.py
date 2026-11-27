@@ -292,7 +292,7 @@ def main(argv=None):
     args=parse_args(argv)
     model,backend,weights,name=build_model(args)
     tokenizer=None
-    if args.tokenizer:
+    if args.tokenizer and not args.front:  # with --front, the front end tokenizes and decodes (docs/ENGINE-LINK.md)
         from tokenizers import Tokenizer
         tokenizer=Tokenizer.from_file(args.tokenizer)
     scheduler=Scheduler(model,max_sequences=args.max_sequences,token_budget=args.token_budget,prefill_chunk=args.prefill_chunk,decode_prefill_tokens=args.decode_prefill_tokens,prefix_cache_bytes=args.prefix_cache_mib*1024**2,max_pending_events=args.max_pending_events,batched_prefill=args.batched_prefill,max_waiting=args.max_waiting)

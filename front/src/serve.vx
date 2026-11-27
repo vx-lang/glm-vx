@@ -220,6 +220,8 @@ fn complete(s : &mut TcpStream, body : &Vec<u8>, asks : &Sender<Ask>, model : &V
   let mut ids = Vec<u32>::new();
   let mut streaming = false;
   let mut head = Vec<u8>::new();
+  // With the tokenizer the engine sends no text: the front end decodes the ids.
+  let mut detok = new_detok();
   while true {
     let reply = match next_reply(s, &rx, pending, streaming, openai, beat_ms) {
       Option<Reply>::Some(r) => { r }
@@ -247,8 +249,12 @@ fn complete(s : &mut TcpStream, body : &Vec<u8>, asks : &Sender<Ask>, model : &V
           streaming = true;
         }
       }
-      Reply::Token(token, text) => {
+      Reply::Token(token, engine_text) => {
         ids.push(token);
+        let mut text = engine_text;
+        if is_loaded(tok) {
+          text = detok_push(&mut detok, tok, token);
+        }
         if streaming {
           let mut one = Vec<u32>::new();
           one.push(token);
@@ -265,13 +271,22 @@ fn complete(s : &mut TcpStream, body : &Vec<u8>, asks : &Sender<Ask>, model : &V
       }
       Reply::Done(f) => {
         let finish = quoted(reason_name(f.reason));
+        let mut tail = Vec<u8>::new();
+        let mut text = Vec<u8>::new();
+        if is_loaded(tok) {
+          tail = detok_flush(&mut detok, tok);
+          text = decode_ids(tok, &ids);
+        } else {
+          put_bytes(&mut tail, &f.tail);
+          put_bytes(&mut text, &f.text);
+        }
         if streaming && openai {
           // The terminal chunk carries only the held-back text tail, so the deltas add up to the
           // completion and no client counts the text twice.
           let mut event = Vec<u8>::new();
           put_bytes(&mut event, &head);
           key(&mut event, lit("choices" as *const u8, 7), false);
-          put_bytes(&mut event, &choice(&f.tail, &ids, false, finish));
+          put_bytes(&mut event, &choice(&tail, &ids, false, finish));
           key(&mut event, lit("usage" as *const u8, 5), false);
           put_bytes(&mut event, &usage(&f));
           key(&mut event, lit("timings" as *const u8, 7), false);
@@ -294,7 +309,7 @@ fn complete(s : &mut TcpStream, body : &Vec<u8>, asks : &Sender<Ask>, model : &V
         let mut result = Vec<u8>::new();
         put_bytes(&mut result, &head);
         key(&mut result, lit("choices" as *const u8, 7), false);
-        put_bytes(&mut result, &choice(&f.text, &ids, true, finish));
+        put_bytes(&mut result, &choice(&text, &ids, true, finish));
         key(&mut result, lit("usage" as *const u8, 5), false);
         put_bytes(&mut result, &usage(&f));
         key(&mut result, lit("timings" as *const u8, 7), false);

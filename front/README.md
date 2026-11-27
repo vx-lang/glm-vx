@@ -26,16 +26,21 @@ python -m glm_vx.server ... --front front/build/glm-vx-front --tokenizer /models
 ## The tokenizer
 
 With `--tokenizer`, `server.py` gives the front end the path of the model's tokenizer.json. `main` reads it with `root.files`
-before it listens, and `src/tokenizer.vx` turns each text prompt into token ids, so the engine never sees a client's text.
-It implements zai-org/GLM-5.3's tokenizer and refuses a tokenizer.json with other settings:
+before it listens. `src/tokenizer.vx` turns each text prompt into token ids, and the generated ids back into text, so no
+text crosses the link and the engine needs no tokenizer. It implements zai-org/GLM-5.3's tokenizer and refuses a
+tokenizer.json with other settings:
 
 - the added tokens first, then the GPT-4-style split as Oniguruma matches it, then byte-level BPE with `ignore_merges`;
 - the merges in O(n log n), lowest rank first and then leftmost, as HF's `merge_all`;
-- `std::unicode`'s letters, numbers and white space, which agree with Oniguruma's `\p{L}`, `\p{N}` and `\s` on every code point.
+- `std::unicode`'s letters, numbers and white space, which agree with Oniguruma's `\p{L}`, `\p{N}` and `\s` on every code point;
+- decoding as HF's `decode(ids)`: each token's bytes, none for a special token, then UTF-8 with one U+FFFD for each invalid
+  run, as Rust's `from_utf8_lossy`. A stream sends each token's text once it is stable, as `glm_vx/detok.py`'s
+  `IncrementalText`.
 
 Loading takes about 0.8 s and 200 MB at its peak. `tests/test_front_tokenizer.py` compares the ids with HF `tokenizers` on
 edge cases, every code point in seven contexts, random text and GSM8K, and checks that the engine gets SUBMIT with those ids
-and no text. It needs `GLM_TOKENIZER`, the path of the 20 MB tokenizer.json, which is not in the repository.
+and no text. It compares the decoded text and each stream step with HF `tokenizers` and `IncrementalText` on every token,
+on every byte pair and on random ids, and checks that the engine sends no text. It needs `GLM_TOKENIZER`, the path of the 20 MB tokenizer.json, which is not in the repository.
 
 ## What the compiler checks
 
@@ -84,4 +89,3 @@ Like `server.py`, the front end takes a client that half closes before its reply
   - the engine then starts a new front end on the same address and shows the count as `front_end_restarts` in `/health`;
   - after 5 restarts within 60 s it stops, and so does `server.py`, with the error.
   `tests/test_front_restart.py` checks these.
-- **Detokenizing.** The engine still turns the ids it generates into text with HF `tokenizers` (`glm_vx/detok.py`). That is the model's output, not a client's bytes.
