@@ -1,0 +1,43 @@
+// Reads JSON on standard input and writes it back, or `error at N` (tests/test_front_json.py).
+import front::json;
+import front::jsonw;
+import std::io;
+import std::string;
+import std::vec;
+
+fn main(root : Root) -> i32 {
+  let mut input = root.stdin;
+  let mut out = root.stdout;
+  let mut all = Vec<u8>::new();
+  let mut chunk = Vec<u8>::new();
+  for _i in 0..65536 {
+    chunk.push(0u8);
+  }
+  let mut more = true;
+  while more {
+    match input.read(&mut chunk) {
+      Result<u64, StdioError>::Ok(n) => {
+        if n == 0u64 {
+          more = false;
+        }
+        for i in 0..(n as i32) {
+          all.push(chunk[i]);
+        }
+      }
+      Result<u64, StdioError>::Err(_e) => { return 2; }
+    }
+  }
+  let mut reply = Vec<u8>::new();
+  match parse(&all) {
+    Result<Value, JsonError>::Ok(v) => { put_value(&mut reply, &v, &all); }
+    Result<Value, JsonError>::Err(e) => {
+      put_text(&mut reply, &e.at.to_string());
+      reply.push(33u8);  // "N!": the error offset
+    }
+  }
+  match out.write_all(&reply) {
+    Result<u64, StdioError>::Ok(_n) => {}
+    Result<u64, StdioError>::Err(_e) => { return 3; }
+  }
+  return 0;
+}

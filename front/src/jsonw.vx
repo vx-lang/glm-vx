@@ -1,0 +1,109 @@
+// Writing JSON (#68, step 2): strings with their escapes, numbers, and the tree of json.vx.
+import front::json;
+import front::bytes;
+import std::string;
+import std::vec;
+
+pub fn put_bytes(out : &mut Vec<u8>, bytes : &Vec<u8>) -> void {
+  for i in 0..bytes.len() {
+    out.push(bytes[i]);
+  }
+}
+
+pub fn put_text(out : &mut Vec<u8>, s : &String) -> void {
+  put_bytes(out, &s.to_bytes());
+}
+
+fn hex(d : i32) -> u8 {
+  if d < 10 {
+    return (48 + d) as u8;
+  }
+  return (87 + d) as u8;
+}
+
+// `bytes`, which are UTF-8, as a JSON string: `"` and `\` escaped, and each control byte as \u00XX.
+pub fn put_string(out : &mut Vec<u8>, bytes : &Vec<u8>) -> void {
+  out.push(34u8);
+  for i in 0..bytes.len() {
+    let b = bytes[i];
+    if b == 34u8 || b == 92u8 {
+      out.push(92u8);
+      out.push(b);
+    } else if b == 10u8 {
+      out.push(92u8);
+      out.push(110u8);
+    } else if b < 32u8 || b == 127u8 {
+      out.push(92u8);
+      out.push(117u8);
+      out.push(48u8);
+      out.push(48u8);
+      out.push(hex((b / 16u8) as i32));
+      out.push(hex((b % 16u8) as i32));
+    } else {
+      out.push(b);
+    }
+  }
+  out.push(34u8);
+}
+
+pub fn put_int(out : &mut Vec<u8>, v : u64) -> void {
+  put_text(out, &v.to_string());
+}
+
+pub fn put_float(out : &mut Vec<u8>, v : f64) -> void {
+  put_text(out, &v.to_string());
+}
+
+// The tree as JSON, with each number's own text from `input`.
+pub fn put_value(out : &mut Vec<u8>, v : &Value, input : &Vec<u8>) -> void {
+  match v {
+    Value::Null => { put_bytes(out, &lit_null()); }
+    Value::Bool(b) => {
+      if *b {
+        put_bytes(out, &lit_true());
+      } else {
+        put_bytes(out, &lit_false());
+      }
+    }
+    Value::Number(from, to) => {
+      for i in *from..*to {
+        out.push(input[i]);
+      }
+    }
+    Value::Text(t) => { put_string(out, t); }
+    Value::Array(items) => {
+      out.push(91u8);
+      for i in 0..items.len() {
+        if i > 0 {
+          out.push(44u8);
+        }
+        put_value(out, &items[i], input);
+      }
+      out.push(93u8);
+    }
+    Value::Object(members) => {
+      out.push(123u8);
+      for i in 0..members.len() {
+        if i > 0 {
+          out.push(44u8);
+        }
+        put_string(out, &members[i].key);
+        out.push(58u8);
+        put_value(out, &members[i].value, input);
+      }
+      out.push(125u8);
+    }
+  }
+}
+
+fn lit_null() -> Vec<u8> {
+  return lit("null" as *const u8, 4);
+}
+
+fn lit_true() -> Vec<u8> {
+  return lit("true" as *const u8, 4);
+}
+
+fn lit_false() -> Vec<u8> {
+  return lit("false" as *const u8, 5);
+}

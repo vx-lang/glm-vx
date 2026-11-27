@@ -182,8 +182,8 @@ class PagedRows:
         return out.copy() if copy else out
 
     def __reduce__(self):
-        # Snapshots (prefix cache, handoff) are pool-independent: they restore as a
-        # contiguous RowBuffer holding the used rows.
+        # A copy that pickle or copy.deepcopy makes is pool-independent: it restores as a
+        # contiguous RowBuffer holding the used rows. Nothing on the serving path pickles it.
         return (_restore_rows, (self.array.copy() if self._n else None,))
 
     def __copy__(self):

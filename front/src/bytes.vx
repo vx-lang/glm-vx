@@ -1,0 +1,15 @@
+// Bytes from string literals, with no trusted code (#68, step 2).
+import std::string;
+import std::vec;
+
+// The `n` bytes of the literal `p`, as `lit("text" as *const u8, 4)`. The prover checks at each
+// call that the literal has `n` bytes. A shorter `n` gives the first `n`.
+pub fn lit(p : *const u8, n : i32) -> Vec<u8>
+requires valid(p, n)
+requires initialized(p, n)
+{
+  match String::from_bytes(p, n) {
+    Result<String, Utf8Error>::Ok(s) => { return s.to_bytes(); }
+    Result<String, Utf8Error>::Err(_e) => { return Vec<u8>::new(); }
+  }
+}

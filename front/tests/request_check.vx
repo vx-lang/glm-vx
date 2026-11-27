@@ -1,0 +1,98 @@
+// Reads a /v1/completions body on standard input, writes the submission or `400 message`
+// (tests/test_front_request.py). The served model is `glm-test`.
+import front::bytes;
+import front::json;
+import front::jsonw;
+import front::request;
+import std::io;
+import std::string;
+import std::vec;
+
+fn main(root : Root) -> i32 {
+  let mut input = root.stdin;
+  let mut out = root.stdout;
+  let mut all = Vec<u8>::new();
+  let mut chunk = Vec<u8>::new();
+  for _i in 0..65536 {
+    chunk.push(0u8);
+  }
+  let mut more = true;
+  while more {
+    match input.read(&mut chunk) {
+      Result<u64, StdioError>::Ok(n) => {
+        if n == 0u64 {
+          more = false;
+        }
+        for i in 0..(n as i32) {
+          all.push(chunk[i]);
+        }
+      }
+      Result<u64, StdioError>::Err(_e) => { return 2; }
+    }
+  }
+  let model = lit("glm-test" as *const u8, 8);
+  let mut reply = Vec<u8>::new();
+  match parse(&all) {
+    Result<Value, JsonError>::Ok(v) => {
+      match submission(&v, &all, &model) {
+        Result<Submission, Vec<u8>>::Ok(s) => {
+          // {"ids":[..],"text":"..","is_text":b,"max_tokens":n,"temperature":t,"seed":s,...}
+          reply.push(123u8);
+          put_string(&mut reply, &lit("ids" as *const u8, 3));
+          reply.push(58u8);
+          reply.push(91u8);
+          for i in 0..s.ids.len() {
+            if i > 0 {
+              reply.push(44u8);
+            }
+            put_int(&mut reply, s.ids[i] as u64);
+          }
+          reply.push(93u8);
+          field(&mut reply, lit("text" as *const u8, 4));
+          put_string(&mut reply, &s.text);
+          field(&mut reply, lit("is_text" as *const u8, 7));
+          boolean(&mut reply, s.is_text);
+          field(&mut reply, lit("max_tokens" as *const u8, 10));
+          put_int(&mut reply, s.max_tokens as u64);
+          field(&mut reply, lit("temperature" as *const u8, 11));
+          put_float(&mut reply, s.temperature);
+          field(&mut reply, lit("seed" as *const u8, 4));
+          put_int(&mut reply, s.seed);
+          field(&mut reply, lit("ignore_eos" as *const u8, 10));
+          boolean(&mut reply, s.ignore_eos);
+          field(&mut reply, lit("stream" as *const u8, 6));
+          boolean(&mut reply, s.stream);
+          field(&mut reply, lit("openai" as *const u8, 6));
+          boolean(&mut reply, s.openai);
+          field(&mut reply, lit("include_usage" as *const u8, 13));
+          boolean(&mut reply, s.include_usage);
+          reply.push(125u8);
+        }
+        Result<Submission, Vec<u8>>::Err(message) => {
+          put_bytes(&mut reply, &lit("400 " as *const u8, 4));
+          put_bytes(&mut reply, &message);
+        }
+      }
+    }
+    Result<Value, JsonError>::Err(_e) => { put_bytes(&mut reply, &lit("400 not JSON" as *const u8, 12)); }
+  }
+  match out.write_all(&reply) {
+    Result<u64, StdioError>::Ok(_n) => {}
+    Result<u64, StdioError>::Err(_e) => { return 3; }
+  }
+  return 0;
+}
+
+fn field(out : &mut Vec<u8>, name : Vec<u8>) -> void {
+  out.push(44u8);
+  put_string(out, &name);
+  out.push(58u8);
+}
+
+fn boolean(out : &mut Vec<u8>, b : bool) -> void {
+  if b {
+    put_bytes(out, &lit("true" as *const u8, 4));
+  } else {
+    put_bytes(out, &lit("false" as *const u8, 5));
+  }
+}

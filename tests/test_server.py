@@ -5,6 +5,13 @@ import pytest
 from glm_vx.server import Server
 from glm_vx.scheduler import Scheduler
 from test_scheduler import Model
+import front_server
+
+
+@pytest.fixture(autouse=True, params=['python', 'front'])
+def server_kind(request, monkeypatch):
+    """Each test runs against glm_vx/server.py and against the Vx front end (#68, step 2)."""
+    return front_server.use(request, monkeypatch, __name__)
 
 @pytest.fixture
 def endpoint():

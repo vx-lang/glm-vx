@@ -18,6 +18,13 @@ from glm_vx.detok import IncrementalText
 from glm_vx.scheduler import Scheduler
 from glm_vx.server import Handler, Server
 from test_scheduler import Model as ToyModel
+import front_server
+
+
+@pytest.fixture(autouse=True, params=['python', 'front'])
+def server_kind(request, monkeypatch):
+    """Each test runs against glm_vx/server.py and against the Vx front end (#68, step 2)."""
+    return front_server.use(request, monkeypatch, __name__)
 
 
 def word_tokenizer(vocab):
