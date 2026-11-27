@@ -310,7 +310,7 @@ def test_spawn_vxc_passes_a_feature_flag(tmp_path):
         assert json.loads((tmp_path / f'{name}.json').read_text())['vxc_flags'] == (['-fweak-relaxed-atomics'] if name == 'weak' else [])
     shared = (tmp_path / 'weak.ptx').read_text().split('atom.shared.add.u32')[1].split('\n')[1]
     assert 'fence' not in shared
-    assert fenced['weak'] == 4 and fenced['default'] > fenced['weak'], fenced
+    assert fenced['weak'] == 2 and fenced['default'] > fenced['weak'], fenced
 
 
 DISPATCH = os.environ.get('VX_DISPATCH_LIB')
