@@ -55,6 +55,10 @@ python -m glm_vx.server --tiny --front front/build/glm-vx-front --port 8000
 
 The replies are `server.py`'s: the same JSON fields, SSE framing and heartbeats, 400, 404, 429 and 500 cases, and error messages. `tests/test_server.py` and `tests/test_openai_compat.py` run each case against both servers. `tests/test_front_request.py` and `tests/test_front_json.py` compare the request checks and the parser with `server.py` and `json.loads`, also on random input.
 
+`tests/test_front_fuzz.py` sends mutated HTTP requests, eight connections at a time (`FRONT_HTTP_FUZZ` cases, 300 by default).
+Each must get well-formed replies or a close, and the front end must not stop.
+Like `server.py`, the front end takes a client that half closes before its reply for one that has gone.
+
 ## What this does not cover
 
 - **Memory bugs in trusted code.** That includes `std`'s `unsafe` blocks, the Vx compiler, the Python engine and the CUDA driver. Vx main 973d80f9b frees a value twice when it is moved into a call whose `Err` is returned by `?` from inside a block (Vx #4142). `src/request.vx` avoids that pattern. `FRONT_PRELOAD=$(clang -print-file-name=libclang_rt.asan-x86_64.so)` runs the test programs and the front end under AddressSanitizer.
