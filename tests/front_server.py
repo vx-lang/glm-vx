@@ -20,6 +20,27 @@ def free_port(host):
     return port
 
 
+def listening(port):
+    """Whether a socket listens on `port`, read from /proc/net/tcp and tcp6; None without them.
+
+    The start-up check reads this, not a connection: the front end counts a connection against its
+    32 until it has seen the close, and on a busy host that can be after a test's own connections
+    have arrived (test_at_most_32_connections).
+    """
+    found = None
+    for name in ('/proc/net/tcp', '/proc/net/tcp6'):
+        try:
+            lines = Path(name).read_text().splitlines()[1:]
+        except OSError:
+            continue
+        found = found or False
+        for line in lines:
+            fields = line.split()
+            if fields[3] == '0A' and int(fields[1].rsplit(':', 1)[1], 16) == port:  # 0A: LISTEN
+                return True
+    return found
+
+
 class FrontServer:
     """server_port, server_address, model_name, serve_forever(), shutdown() and server_close()."""
 
@@ -37,13 +58,18 @@ class FrontServer:
         self._stop = threading.Event()
         deadline = time.monotonic() + 60  # loading a tokenizer takes about a second, more under ASan
         while True:
-            try:
-                socket.create_connection(self.server_address, 0.2).close()
+            up = listening(port)
+            if up is None:  # no /proc: connect once
+                try:
+                    socket.create_connection(self.server_address, 0.2).close()
+                    up = True
+                except OSError:
+                    pass
+            if up:
                 return
-            except OSError:
-                if self.front.process.poll() is not None or time.monotonic() > deadline:
-                    raise RuntimeError(f'the front end did not start: {self.front.process.poll()}')
-                time.sleep(0.02)
+            if self.front.process.poll() is not None or time.monotonic() > deadline:
+                raise RuntimeError(f'the front end did not start: {self.front.process.poll()}')
+            time.sleep(0.02)
 
     def serve_forever(self):
         self._stop.wait()

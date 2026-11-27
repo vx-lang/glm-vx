@@ -106,11 +106,15 @@ def test_at_most_32_connections(front):
     idle = [socket.create_connection(('127.0.0.1', p), 5) for _ in range(32)]
     try:
         time.sleep(0.3)
-        assert raw(p, post_bytes(BODY), timeout=2) == b''  # the 33rd is closed at once
+        # The front end accepts in arrival order, so it reaches the 33rd after the 32 and closes it.
+        assert raw(p, post_bytes(BODY), timeout=2) == b''
         for s in idle[:4]:
             s.close()
-        time.sleep(0.3)
-        assert status(raw(p, post_bytes(BODY, b'Connection: close\r\n'))) == 200
+        # A slot is free once the front end has seen a close; on a busy host that can take a while.
+        deadline = time.monotonic() + 30
+        while (got := raw(p, post_bytes(BODY, b'Connection: close\r\n'))) == b'' and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert status(got) == 200
     finally:
         for s in idle:
             s.close()
