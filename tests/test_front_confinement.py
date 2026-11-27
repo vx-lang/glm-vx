@@ -4,7 +4,8 @@ Each case adds one module to a copy of the package `front` (front/src), imports 
 builds with `--no-trusted-code front`, as front/build.sh does. The build must fail with the given
 error. With Vx #4136, vxc checks every function of the package, so nothing has to call the module.
 
-- E5003: trusted code (`unsafe`, `unsafe fn`, an `extern` block, `unsafe impl`) in the package.
+- E5003: trusted code in the package: `unsafe`, also from a macro, `unsafe fn`, an `extern` block,
+  `unsafe impl`, `extern impl`, and an `mlir!` block that the compiler cannot verify.
 - E8014: a capability built outside std (`Files {}`, `Network {}`, `Environment {}`, `Stdout {}`).
 - A handler that opens a file or a connection without the right does not type-check: `File::open`
   takes `&Files` and `TcpStream::connect` takes `&Network`, and nothing in `front` can make one.
@@ -26,6 +27,15 @@ CASES = {
     'unsafe_fn': ('E5003', 'pub unsafe fn f() -> i32 {\n  return 1;\n}\n'),
     'extern_block': ('E5003', 'extern "C" {\n  pub fn getpid() -> i32;\n}\n'),
     'unsafe_impl': ('E5003', 'struct Raw {\n  p : *mut i8,\n}\n\nunsafe impl Send for Raw {}\n'),
+    'extern_impl': ('E5003', 'trait Size {\n  fn size(self : &Self) -> i64;\n}\n\n'
+                    'extern impl Size for i64 {\n  fn size(self : &i64) -> i64 {\n    return 8i64;\n  }\n}\n'),
+    'unsafe_from_a_macro': ('E5003', 'macro_rules one {\n  () => {\n    unsafe { 1 }\n  };\n}\n\n'
+                            'pub fn f() -> i32 {\n  return one!();\n}\n'),
+    # The compiler cannot verify an integer division, so the block is trusted code.
+    'unverified_mlir': ('an `mlir!` block', 'pub fn f(x : i32) -> i32 {\n  return unsafe {\n'
+                        '    mlir!(inputs : (%a = x : i32), returns : i32, dialects : ["arith"]) {\n'
+                        '      %two = arith.constant 2 : i32\n      %r = arith.divsi %a, %two : i32\n'
+                        '      macro.yield %r : i32\n    }\n  };\n}\n'),
     'forged_files': ('E8014', 'import std::fs;\n\npub fn f() -> Files {\n  return Files {};\n}\n'),
     'forged_network': ('E8014', 'import std::net;\n\npub fn f() -> Network {\n  return Network {};\n}\n'),
     'forged_environment': ('E8014', 'import std::env;\n\npub fn f() -> Environment {\n  return Environment {};\n}\n'),

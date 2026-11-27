@@ -23,7 +23,12 @@ python -m glm_vx.server --tiny --front front/build/glm-vx-front --port 8000
 
 ## What the compiler checks
 
-- **No trusted code in `front`.** The package is built with `--no-trusted-code front`. An `unsafe` block, an `unsafe fn`, an `extern` block or an `unsafe impl` in it is an error (E5003). `tests/test_front_confinement.py` adds each one to a copy of the package and expects the error.
+- **No trusted code in `front`.** The package is built with `--no-trusted-code front`. Each of these in it is an error (E5003):
+  - an `unsafe` block, also one that a macro writes;
+  - an `unsafe fn`, an `extern` block, an `unsafe impl` or an `extern impl`;
+  - an `mlir!` block that the compiler cannot verify.
+
+  `tests/test_front_confinement.py` adds each one to a copy of the package and expects the error.
 - **No capability made in `front`.** `Files {}`, `Network {}`, `Environment {}` and `Stdout {}` outside `std` are errors (E8014). They are tested the same way.
 - **A connection's handler holds no right.**
   - `serve` gets its `TcpStream`, a `Sender<Ask>` and the model's name.
@@ -31,6 +36,8 @@ python -m glm_vx.server --tiny --front front/build/glm-vx-front --port 8000
   - It cannot write to the engine except through the router.
 - **The audit.** `vxc --audit` of the whole program lists no trusted fact outside `core` and `std`, and `main.vx` has no `unsafe` either. `tests/test_front_confinement.py` checks this.
 - **Every function is checked.** With Vx #4136, a function that nothing calls is checked too.
+- **The engine loads no code from data.** `tests/test_serving_path.py` reads every module that `glm_vx.server` can import. None imports
+  `pickle`, `jinja2` or another deserializer, calls `eval` or `exec`, or calls `numpy.load` with `allow_pickle=True`.
 
 ## Limits
 
