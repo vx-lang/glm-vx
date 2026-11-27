@@ -207,12 +207,7 @@ pub fn submission(body : &Value, input : &Vec<u8>, model_name : &Vec<u8>) -> Res
             return err(bad);
           }
         }
-        // Not `flag(..)?`: a value moved into a call whose Err `?` returns from inside a block is
-        // freed twice by Vx main 973d80f9b (Vx #4142).
-        match flag(options, lit("include_usage" as *const u8, 13), bad) {
-          Result<bool, Vec<u8>>::Ok(v) => { include_usage = v; }
-          Result<bool, Vec<u8>>::Err(message) => { return err(message); }
-        }
+        include_usage = flag(options, lit("include_usage" as *const u8, 13), bad)?;
       }
       _ => { return err(bad); }
     }

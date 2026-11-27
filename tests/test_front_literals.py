@@ -1,8 +1,8 @@
 """Each `lit("...", n)` in the front end gives the literal's exact length (#68, step 2).
 
 `String::from_bytes(literal, n)` is safe code: the prover checks that the literal has room for `n`
-bytes. It allows n + 1, the literal's NUL, so a length one too long puts a 0 byte in the reply, and
-a length too short cuts the text. Neither is a memory bug, so this test checks the lengths.
+bytes, so a length too long is an error (E8006; since Vx #4152 also n + 1, the literal's NUL). A
+length too short builds and cuts the text. That is not a memory bug, so this test checks the lengths.
 """
 import re
 from pathlib import Path

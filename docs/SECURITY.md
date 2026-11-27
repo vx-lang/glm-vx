@@ -24,7 +24,7 @@ client --HTTP--> glm-vx-front (Vx)  --fixed frames on stdin/stdout-->  engine (P
   - a connection's handler gets its own `TcpStream`, a channel to the router, the model's name and the tokenizer;
   - nothing gets `root.env`.
 - **The compiler enforces that.** `front/` is built with `vxc --no-trusted-code front`:
-  - an `unsafe` block, an `unsafe fn`, an `extern` block or impl, `unsafe impl`, or an `mlir!` block the compiler cannot verify is an error (E5003);
+  - an `unsafe` block, an `unsafe fn`, an `extern` block or impl, `unsafe impl`, an `mlir!` block the compiler cannot verify, or a `requires` of a function that C can call is an error (E5003);
   - making a `Files`, `Network`, `Environment` or `Stdout` outside `std` is an error (E8014);
   - `File::open` takes a `&Files`, and `TcpStream::connect` a `&Network`, so a handler that tries either does not type-check.
 
@@ -54,7 +54,7 @@ Each link goes to the GHSA advisory; the number is its CVSS 3.1 score.
 - **Trusted code.** That includes `std`'s `unsafe` blocks, the Vx compiler and runtime, CPython, numpy, HF `tokenizers` (detokenizing only) and the CUDA driver.
   - A memory bug there is not excluded.
   - The front end's tests and fuzzing also run under AddressSanitizer (`FRONT_PRELOAD`).
-  - Vx issues found this way: vx-lang/Vx#4142 (a double free; `front/src/request.vx` avoids the pattern) and vx-lang/Vx#4144 (`--no-trusted-code` let an exported `extern fn` through; the audit test catches one in `front`).
+  - Vx issues found this way, both fixed in the Vx the front end needs (6322eb757): vx-lang/Vx#4142, a double free (fixed by vx-lang/Vx#4149), and vx-lang/Vx#4144, `--no-trusted-code` let an exported `extern fn` through (fixed by vx-lang/Vx#4151).
 - **Denial of service.**
   - A panic, such as an index out of range, ends the front end. The engine cancels its requests and starts a new one (`tests/test_front_restart.py`).
   - The front end's limits:

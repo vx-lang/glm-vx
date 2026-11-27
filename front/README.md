@@ -16,7 +16,7 @@ client --HTTP--> glm-vx-front (Vx)                 --frames on stdin/stdout--> e
 ## Build and run
 
 ```
-VXC=/path/to/vxc front/build.sh       # Vx main from 2026-11-26 on
+VXC=/path/to/vxc front/build.sh       # Vx main 6322eb757 or later
 python -m glm_vx.server --tiny --front front/build/glm-vx-front --port 8000
 python -m glm_vx.server ... --front front/build/glm-vx-front --tokenizer /models/GLM-5.3/tokenizer.json
 ```
@@ -42,7 +42,8 @@ and no text. It needs `GLM_TOKENIZER`, the path of the 20 MB tokenizer.json, whi
 - **No trusted code in `front`.** The package is built with `--no-trusted-code front`. Each of these in it is an error (E5003):
   - an `unsafe` block, also one that a macro writes;
   - an `unsafe fn`, an `extern` block, an `unsafe impl` or an `extern impl`;
-  - an `mlir!` block that the compiler cannot verify.
+  - an `mlir!` block that the compiler cannot verify;
+  - a `requires` of a `pub extern fn`, because a call from C does not prove it (Vx #4151).
 
   `tests/test_front_confinement.py` adds each one to a copy of the package and expects the error.
 - **No capability made in `front`.** `Files {}`, `Network {}`, `Environment {}` and `Stdout {}` outside `std` are errors (E8014). They are tested the same way.
@@ -77,11 +78,10 @@ Like `server.py`, the front end takes a client that half closes before its reply
 
 ## What this does not cover
 
-- **Memory bugs in trusted code.** That includes `std`'s `unsafe` blocks, the Vx compiler, the Python engine and the CUDA driver. Vx main 973d80f9b frees a value twice when it is moved into a call whose `Err` is returned by `?` from inside a block (Vx #4142). `src/request.vx` avoids that pattern. `FRONT_PRELOAD=$(clang -print-file-name=libclang_rt.asan-x86_64.so)` runs the test programs and the front end under AddressSanitizer.
+- **Memory bugs in trusted code.** That includes `std`'s `unsafe` blocks, the Vx compiler, the Python engine and the CUDA driver. `FRONT_PRELOAD=$(clang -print-file-name=libclang_rt.asan-x86_64.so)` runs the test programs and the front end under AddressSanitizer.
 - **A panic.** For example, an index out of range stops the front end. That is a denial of service, not code execution:
   - every open connection is lost, and the engine cancels the requests they carried;
   - the engine then starts a new front end on the same address and shows the count as `front_end_restarts` in `/health`;
   - after 5 restarts within 60 s it stops, and so does `server.py`, with the error.
   `tests/test_front_restart.py` checks these.
 - **Detokenizing.** The engine still turns the ids it generates into text with HF `tokenizers` (`glm_vx/detok.py`). That is the model's output, not a client's bytes.
-- **An exported `extern fn`.** Vx main 973d80f9b's `--no-trusted-code` lets an `extern fn` with pointer `requires` through, though `--audit` lists them (Vx #4144). The audit test catches one in `front`.

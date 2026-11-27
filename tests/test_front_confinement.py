@@ -5,7 +5,8 @@ builds with `--no-trusted-code front`, as front/build.sh does. The build must fa
 error. With Vx #4136, vxc checks every function of the package, so nothing has to call the module.
 
 - E5003: trusted code in the package: `unsafe`, also from a macro, `unsafe fn`, an `extern` block,
-  `unsafe impl`, `extern impl`, and an `mlir!` block that the compiler cannot verify.
+  `unsafe impl`, `extern impl`, an `mlir!` block that the compiler cannot verify, and a `requires` of
+  a `pub extern fn`, which a call from C does not prove (Vx #4151).
 - E8014: a capability built outside std (`Files {}`, `Network {}`, `Environment {}`, `Stdout {}`).
 - A handler that opens a file or a connection without the right does not type-check: `File::open`
   takes `&Files` and `TcpStream::connect` takes `&Network`, and nothing in `front` can make one.
@@ -36,6 +37,13 @@ CASES = {
                         '    mlir!(inputs : (%a = x : i32), returns : i32, dialects : ["arith"]) {\n'
                         '      %two = arith.constant 2 : i32\n      %r = arith.divsi %a, %two : i32\n'
                         '      macro.yield %r : i32\n    }\n  };\n}\n'),
+    # C does not prove a `requires` of a function it calls (Vx #4151).
+    'exported_fn_with_requires': ('E5003', 'import std::string;\n\n'
+                                  'pub extern fn glm_vx_front_g(p : *const u8, n : i32) -> i32\n'
+                                  'requires valid(p, n)\nrequires initialized(p, n)\n{\n'
+                                  '  match String::from_bytes(p, n) {\n'
+                                  '    Result<String, Utf8Error>::Ok(s) => { return s.len(); }\n'
+                                  '    Result<String, Utf8Error>::Err(_e) => { return -1; }\n  }\n}\n'),
     'forged_files': ('E8014', 'import std::fs;\n\npub fn f() -> Files {\n  return Files {};\n}\n'),
     'forged_network': ('E8014', 'import std::net;\n\npub fn f() -> Network {\n  return Network {};\n}\n'),
     'forged_environment': ('E8014', 'import std::env;\n\npub fn f() -> Environment {\n  return Environment {};\n}\n'),
@@ -76,19 +84,6 @@ def test_the_package_refuses(case, tmp_path):
     text = out.stdout + out.stderr
     assert out.returncode != 0, text
     assert code in text and f'evil_{case}.vx' in text, text
-
-
-EXPORTED = ('import std::string;\n\npub extern fn glm_vx_front_g(p : *const u8, n : i32) -> i32\n'
-            'requires valid(p, n)\nrequires initialized(p, n)\n{\n  match String::from_bytes(p, n) {\n'
-            '    Result<String, Utf8Error>::Ok(s) => { return s.len(); }\n'
-            '    Result<String, Utf8Error>::Err(_e) => { return -1; }\n  }\n}\n')
-
-
-@pytest.mark.xfail(strict=True, reason='Vx #4144: --no-trusted-code lets an exported fn with pointer requires through, '
-                   'though --audit lists them as trusted. The audit test below catches it in front/.')
-def test_the_package_refuses_an_exported_fn_whose_requires_c_does_not_prove(tmp_path):
-    out = build(tmp_path, 'evil_exported', EXPORTED)
-    assert out.returncode != 0 and 'evil_exported.vx' in out.stdout + out.stderr
 
 
 def test_the_audit_lists_no_trusted_code_outside_core_and_std():

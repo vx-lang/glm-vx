@@ -1,9 +1,9 @@
 #!/bin/bash
-# Build glm-vx-front and its test programs (#68, steps 2 and 3) into front/build/.
-# The package `front` (front/src) is compiled with `--no-trusted-code front`: no `unsafe`, `extern`,
-# `mlir!`, `extern impl` or `unsafe impl` in it. Needs Vx main from 2026-11-26 on (Vx #4122, #4130,
-# #4134, #4136, #4137). VXC names vxc; VX_RUNTIME_DIR the folder of libvx_std_core.so (vxc's target
-# folder); VX_SHIMS_DIR the folder of libvx_mlir_shims.so (vxc's build script output).
+# Build glm-vx-front and its test programs (#68, steps 2 and 3) into front/build/. The package
+# `front` (front/src) is compiled with `--no-trusted-code front`: no `unsafe`, `extern`, `mlir!`,
+# `extern impl` or `unsafe impl` in it. Needs Vx main 6322eb757 or later (Vx #4122, #4130, #4134,
+# #4136, #4137, #4149, #4151, #4152). VXC names vxc; VX_RUNTIME_DIR the folder of libvx_std_core.so
+# (vxc's target folder); VX_SHIMS_DIR the folder of libvx_mlir_shims.so (vxc's build script output).
 set -euo pipefail
 cd "$(dirname "$0")"
 : "${VXC:=vxc}"

@@ -273,7 +273,7 @@ fn split_pattern() -> Vec<u8> {
 }
 
 // The pre-tokenizer must be GLM's: the split above, isolated, then the byte-level mapping alone.
-// Each `match` is on a parameter. Vx main 973d80f9b declines `match &v` on a local whose initializer is a `match`
+// Each `match` is on a parameter. Vx main 6322eb757 declines `match &v` on a local whose initializer is a `match`
 // or an `if` (Vx #4153), and its fallback then overflows its stack on `Value` (Vx #4146).
 fn check_pattern(v : &Value) -> bool {
   match v {

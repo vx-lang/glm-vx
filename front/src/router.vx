@@ -50,7 +50,7 @@ fn is_open(to : &Option<Sender<Incoming>>) -> bool {
 
 // The open requests: `ids[i]` and the channel `tos[i]` of its connection, None once it ended.
 // Compacting keeps the table as small as the requests that are open. Two vectors, not one of
-// structs, because Vx main 973d80f9b cannot write a field of a Vec element (Vx #4145).
+// structs, because Vx main cannot yet write a field of a Vec element (Vx #4145).
 fn compact(ids : &mut Vec<u64>, tos : &mut Vec<Option<Sender<Incoming>>>) -> void {
   let mut kept_ids = Vec<u64>::new();
   let mut kept_tos = Vec<Option<Sender<Incoming>>>::new();
