@@ -298,7 +298,7 @@ def main(argv=None):
     scheduler=Scheduler(model,max_sequences=args.max_sequences,token_budget=args.token_budget,prefill_chunk=args.prefill_chunk,decode_prefill_tokens=args.decode_prefill_tokens,prefix_cache_bytes=args.prefix_cache_mib*1024**2,max_pending_events=args.max_pending_events,batched_prefill=args.batched_prefill,max_waiting=args.max_waiting)
     if args.front:
         from .link import FrontEnd
-        front=FrontEnd(args.front,args.host,args.port,scheduler,tokenizer,name)
+        front=FrontEnd(args.front,args.host,args.port,scheduler,tokenizer,name,tokenizer_path=args.tokenizer)
         print(json.dumps({'listening':f'http://{args.host}:{args.port}','model':name,'backend':backend.name,
                           'front':args.front}),flush=True)
         try:code=front.wait()

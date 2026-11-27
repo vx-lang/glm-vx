@@ -23,7 +23,7 @@ def free_port(host):
 class FrontServer:
     """server_port, server_address, model_name, serve_forever(), shutdown() and server_close()."""
 
-    def __init__(self, address, scheduler, tokenizer=None, model_name='glm-vx-tiny-random'):
+    def __init__(self, address, scheduler, tokenizer=None, model_name='glm-vx-tiny-random', tokenizer_path=None):
         from glm_vx.link import FrontEnd
         from glm_vx.server import Handler
         host, port = address
@@ -32,10 +32,10 @@ class FrontServer:
         env = ({**os.environ, 'LD_PRELOAD': os.environ['FRONT_PRELOAD'], 'ASAN_OPTIONS': 'detect_leaks=0'}
                if os.environ.get('FRONT_PRELOAD') else None)
         self.front = FrontEnd(FRONT, host, port, scheduler, tokenizer, model_name,
-                              heartbeat_seconds=Handler.heartbeat_seconds, env=env)
+                              heartbeat_seconds=Handler.heartbeat_seconds, env=env, tokenizer_path=tokenizer_path)
         self.server_port, self.server_address, self.model_name = port, (host, port), model_name
         self._stop = threading.Event()
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 60  # loading a tokenizer takes about a second, more under ASan
         while True:
             try:
                 socket.create_connection(self.server_address, 0.2).close()

@@ -298,7 +298,9 @@ class FrontEnd:
     """Run the Vx front end (front/build/glm-vx-front) on `address` and serve its link.
 
     The front end listens; the engine has no listener. Its standard input and output are the
-    link, so it needs no right to reach the engine.
+    link, so it needs no right to reach the engine. With `tokenizer_path` (a tokenizer.json) the
+    front end tokenizes text prompts itself, and the engine gets only token ids; `tokenizer`, the
+    engine's copy, then only detokenizes.
 
     A front end that stops when close() did not ask it to (a panic, a signal, a malformed frame)
     loses its connections, and the engine cancels the requests it carried. A new one then binds the
@@ -307,13 +309,15 @@ class FrontEnd:
     """
 
     def __init__(self, binary, host, port, scheduler, tokenizer=None, model_name='glm-vx-tiny-random',
-                 heartbeat_seconds=None, env=None, max_restarts=5, window=60.0):
+                 heartbeat_seconds=None, env=None, max_restarts=5, window=60.0, tokenizer_path=None):
         self.health = lambda: {'status': 'ok', 'model': model_name,
                                'backend': getattr(getattr(scheduler.model, 'backend', None), 'name', None),
                                'front_end_restarts': len(self.restarts), **scheduler.status()}
         self.argv = [str(binary), f'{host}:{port}', model_name]
-        if heartbeat_seconds is not None:
-            self.argv.append(str(max(1, round(heartbeat_seconds * 1000))))
+        if heartbeat_seconds is not None or tokenizer_path is not None:
+            self.argv.append(str(max(1, round((10.0 if heartbeat_seconds is None else heartbeat_seconds) * 1000))))
+        if tokenizer_path is not None:
+            self.argv.append(str(tokenizer_path))
         self.scheduler, self.tokenizer, self.env = scheduler, tokenizer, env
         self.max_restarts, self.window = max_restarts, window
         self.restarts, self.error, self.code = [], None, None

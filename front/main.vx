@@ -1,19 +1,23 @@
-// glm-vx-front (#68, step 2): the HTTP front end. The engine (glm_vx/server.py --front) starts it
-// with the address to listen on, the served model's name and, for tests, the heartbeat interval of
-// streams in milliseconds. The engine holds the other end of the front end's standard input and
-// output (docs/ENGINE-LINK.md).
+// glm-vx-front (#68, steps 2 and 3): the HTTP front end. The engine (glm_vx/server.py --front)
+// starts it with the address to listen on, the served model's name, the heartbeat interval of
+// streams in milliseconds and the path of the model's tokenizer.json, when it has one. The engine
+// holds the other end of the front end's standard input and output (docs/ENGINE-LINK.md).
 //
 // `main` holds the program's rights and gives each part only what it needs:
+// - `main` reads tokenizer.json with `root.files`, before it listens;
 // - the listener gets `root.network`, once, to bind;
 // - the router gets `root.stdout`, and the engine reader `root.stdin`;
-// - a connection's handler gets its `TcpStream`, a `Sender` to the router and the model's name.
-// `root.files` and `root.env` go to nobody. The package `front` is built with
+// - a connection's handler gets its `TcpStream`, a `Sender` to the router, the model's name and
+//   the tokenizer, which is data.
+// `root.files` goes no further, and `root.env` to nobody. The package `front` is built with
 // `--no-trusted-code front`.
 import front::bytes;
 import front::http;
 import front::link;
 import front::router;
 import front::serve;
+import front::tokenizer;
+import std::fs;
 import std::io;
 import std::net;
 import std::string;
@@ -49,10 +53,44 @@ fn route_then_tell(stdout : Stdout, asks : Receiver<Ask>, replies : Receiver<Inc
 }
 
 // One connection, then a word on `done` so the accept loop counts it closed.
-fn serve_then_tell(stream : TcpStream, asks : Sender<Ask>, model : Vec<u8>, beat_ms : u64, done : Sender<i32>)
--> void {
-  serve(stream, asks, model, beat_ms);
+fn serve_then_tell(stream : TcpStream, asks : Sender<Ask>, model : Vec<u8>, beat_ms : u64, tok : &Tokenizer,
+                   done : Sender<i32>) -> void {
+  serve(stream, asks, model, beat_ms, tok);
   let _d = done.send(1);
+}
+
+fn read_file(f : &mut File) -> Result<Vec<u8>, FileError> {
+  let mut all = Vec<u8>::new();
+  let mut chunk = Vec<u8>::new();
+  for _i in 0..1048576 {
+    chunk.push(0u8);
+  }
+  while true {
+    let n = f.read(&mut chunk)?;
+    if n == 0u64 {
+      return Result<Vec<u8>, FileError>::Ok(all);
+    }
+    for i in 0..(n as i32) {
+      all.push(chunk[i]);
+    }
+  }
+  return Result<Vec<u8>, FileError>::Ok(all);
+}
+
+// The tokenizer in the file `path`, or a line for standard error.
+fn read_tokenizer(files : &Files, path : &String) -> Result<Tokenizer, Vec<u8>> {
+  let mut f = match File::open(files, path, OpenMode::Read) {
+    Result<File, FileError>::Ok(f) => { f }
+    Result<File, FileError>::Err(_e) => {
+      return Result<Tokenizer, Vec<u8>>::Err(lit("glm-vx-front: cannot open TOKENIZER_JSON" as *const u8, 40));
+    }
+  };
+  match read_file(&mut f) {
+    Result<Vec<u8>, FileError>::Ok(bytes) => { return load(&bytes); }
+    Result<Vec<u8>, FileError>::Err(_e) => {
+      return Result<Tokenizer, Vec<u8>>::Err(lit("glm-vx-front: cannot read TOKENIZER_JSON" as *const u8, 40));
+    }
+  }
 }
 
 // At most this many connections at once, as server.py's BoundedSemaphore(32). One past it is
@@ -63,19 +101,30 @@ fn max_connections() -> i32 {
 
 fn main(root : Root, args : Vec<String>) -> i32 {
   let mut err = root.stderr;
-  if args.len() != 3 && args.len() != 4 {
-    say(&mut err, lit("usage: glm-vx-front HOST:PORT MODEL [HEARTBEAT_MS]" as *const u8, 50));
+  if args.len() < 3 || args.len() > 5 {
+    say(&mut err, lit("usage: glm-vx-front HOST:PORT MODEL [HEARTBEAT_MS [TOKENIZER_JSON]]" as *const u8, 67));
     return 2;
   }
   let model = args[2].to_bytes();
   // server.py's Handler.heartbeat_seconds: 10 seconds.
   let mut beat_ms = 10000u64;
-  if args.len() == 4 {
+  if args.len() >= 4 {
     let text = args[3].to_bytes();
     match u64::parse(&text, 0, text.len()) {
       Result<u64, ParseNumberError>::Ok(v) => { beat_ms = v; }
       Result<u64, ParseNumberError>::Err(_e) => {
         say(&mut err, lit("glm-vx-front: HEARTBEAT_MS is not a number" as *const u8, 42));
+        return 2;
+      }
+    }
+  }
+  // Without a tokenizer, text prompts go to the engine as text (SUBMIT_TEXT).
+  let mut tok = empty();
+  if args.len() == 5 {
+    match read_tokenizer(&root.files, &args[4]) {
+      Result<Tokenizer, Vec<u8>>::Ok(t) => { tok = t; }
+      Result<Tokenizer, Vec<u8>>::Err(message) => {
+        say(&mut err, message);
         return 2;
       }
     }
@@ -118,11 +167,16 @@ fn main(root : Root, args : Vec<String>) -> i32 {
               let name = copy(&model);
               let done = done_tx.clone();
               spawn {
-                serve_then_tell(stream, asks, name, beat_ms, done);
+                serve_then_tell(stream, asks, name, beat_ms, &tok, done);
               };
             }
           }
-          Result<TcpStream, NetError>::Err(_e) => {}
+          Result<TcpStream, NetError>::Err(e) => {
+            match e {
+              NetError::Cancelled => { serving = false; }
+              _ => {}
+            }
+          }
         }
       } else if ready == 1 {
         match done_rx.try_recv() {

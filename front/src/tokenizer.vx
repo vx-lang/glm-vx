@@ -1,0 +1,878 @@
+// GLM's tokenizer (#68, step 3): what HF `tokenizers` encodes for zai-org/GLM-5.3's tokenizer.json,
+// so that a text prompt reaches the engine as token ids. No capability: main reads the file and
+// gives its bytes to `load`.
+//
+// The steps, as that tokenizer.json sets them:
+// 1. The added tokens are found first, leftmost first. None is a prefix of another, and each
+//    starts with an ASCII byte, so at most one matches at a byte and never inside a character.
+// 2. Each run between them is split with the pattern
+//      (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
+//    as Oniguruma matches it: at each position the first alternative that matches wins, and
+//    every position matches one. `std::unicode`'s letters, numbers and white space agree with
+//    Oniguruma's \p{L}, \p{N} and \s on every code point; its (?i) adds only U+017F, a long s.
+// 3. A piece the vocabulary has is one token (`ignore_merges`). Otherwise its bytes merge, the
+//    lowest rank first and then the leftmost, as BPE's `merge_all` does, in O(n log n).
+// The byte-level mapping is undone when the vocabulary is loaded, so the tables hold raw bytes.
+import front::bytes;
+import front::json;
+import std::string;
+import std::unicode;
+import std::vec;
+
+struct Tokenizer {
+  // False for the empty tokenizer: text prompts then go to the engine as text.
+  loaded : bool,
+  // The bytes of each token, by id.
+  tokens : Vec<Vec<u8>>,
+  // Open addressing: the ids by the hash of their bytes, -1 for an empty slot.
+  slots : Vec<i32>,
+  // The id of each byte.
+  byte_ids : Vec<i32>,
+  // Open addressing: (left << 32 | right) of each merge, with its rank and its token.
+  merge_keys : Vec<u64>,
+  merge_ranks : Vec<i32>,
+  merge_ids : Vec<i32>,
+  // The added tokens' UTF-8 and ids, in tokenizer.json's order.
+  added : Vec<Vec<u8>>,
+  added_ids : Vec<i32>,
+}
+
+pub fn empty() -> Tokenizer {
+  return Tokenizer { loaded: false, tokens: Vec<Vec<u8>>::new(), slots: Vec<i32>::new(), byte_ids: Vec<i32>::new(),
+                     merge_keys: Vec<u64>::new(), merge_ranks: Vec<i32>::new(), merge_ids: Vec<i32>::new(),
+                     added: Vec<Vec<u8>>::new(), added_ids: Vec<i32>::new() };
+}
+
+pub fn is_loaded(t : &Tokenizer) -> bool {
+  return t.loaded;
+}
+
+// ---- Hash tables ----
+
+fn empty_key() -> u64 {
+  return 18446744073709551615u64;
+}
+
+// FNV-1a over bytes `from..to`.
+fn hash_bytes(b : &Vec<u8>, from : i32, to : i32) -> u64 {
+  let mut h : u64 = 14695981039346656037u64;
+  for i in from..to {
+    h = (h ^ (b[i] as u64)).wrapping_mul(1099511628211u64);
+  }
+  return h;
+}
+
+// Fibonacci hashing; `mask` is the table's size less one.
+fn hash_key(k : u64, mask : i32) -> i32 {
+  let h = k.wrapping_mul(11400714819323198485u64);
+  return ((h >> 32u64) as i32) & mask;
+}
+
+// A power of two at least twice `n`.
+fn table_size(n : i32) -> i32 {
+  let mut size = 16;
+  while size < 2 * n {
+    size = size * 2;
+  }
+  return size;
+}
+
+fn same_range(token : &Vec<u8>, b : &Vec<u8>, from : i32, to : i32) -> bool {
+  if token.len() != to - from {
+    return false;
+  }
+  for i in 0..token.len() {
+    if token[i] != b[from + i] {
+      return false;
+    }
+  }
+  return true;
+}
+
+// The id of the token whose bytes are `b[from..to]`, or -1.
+fn find_token(t : &Tokenizer, b : &Vec<u8>, from : i32, to : i32) -> i32 {
+  let mask = t.slots.len() - 1;
+  let mut i = (hash_bytes(b, from, to) & (mask as u64)) as i32;
+  while true {
+    let id = t.slots[i];
+    if id < 0 {
+      return -1;
+    }
+    if same_range(&t.tokens[id], b, from, to) {
+      return id;
+    }
+    i = (i + 1) & mask;
+  }
+  return -1;
+}
+
+// The slot of the merge of `left` and `right`, or -1.
+fn find_merge(t : &Tokenizer, left : i32, right : i32) -> i32 {
+  let key = ((left as u64) << 32u64) | (right as u64);
+  let mask = t.merge_keys.len() - 1;
+  let mut i = hash_key(key, mask);
+  while true {
+    let k = t.merge_keys[i];
+    if k == key {
+      return i;
+    }
+    if k == empty_key() {
+      return -1;
+    }
+    i = (i + 1) & mask;
+  }
+  return -1;
+}
+
+// ---- Loading tokenizer.json ----
+
+fn fail(what : Vec<u8>) -> Result<Tokenizer, Vec<u8>> {
+  let mut message = lit("tokenizer.json: " as *const u8, 16);
+  for i in 0..what.len() {
+    message.push(what[i]);
+  }
+  return Result<Tokenizer, Vec<u8>>::Err(message);
+}
+
+fn same(a : &Vec<u8>, b : &Vec<u8>) -> bool {
+  return same_range(a, b, 0, b.len());
+}
+
+// The last member named `key` (JSON's last one wins, as in Python), or -1.
+fn find(members : &Vec<Member>, key : &Vec<u8>) -> i32 {
+  let mut at = -1;
+  for i in 0..members.len() {
+    if same(&members[i].key, key) {
+      at = i;
+    }
+  }
+  return at;
+}
+
+fn is_text(v : &Value, want : &Vec<u8>) -> bool {
+  match v {
+    Value::Text(t) => { return same(t, want); }
+    _ => { return false; }
+  }
+}
+
+fn is_null(v : &Value) -> bool {
+  match v {
+    Value::Null => { return true; }
+    _ => { return false; }
+  }
+}
+
+fn is_bool(v : &Value, want : bool) -> bool {
+  match v {
+    Value::Bool(b) => { return *b == want; }
+    _ => { return false; }
+  }
+}
+
+// Member `key` of an object is null, or the object has no such member.
+fn null_or_missing(members : &Vec<Member>, key : &Vec<u8>) -> bool {
+  let at = find(members, key);
+  return at < 0 || is_null(&members[at].value);
+}
+
+fn member_is_text(members : &Vec<Member>, key : &Vec<u8>, want : &Vec<u8>) -> bool {
+  let at = find(members, key);
+  return at >= 0 && is_text(&members[at].value, want);
+}
+
+fn member_is_bool(members : &Vec<Member>, key : &Vec<u8>, want : bool) -> bool {
+  let at = find(members, key);
+  return at >= 0 && is_bool(&members[at].value, want);
+}
+
+// A JSON integer in 0..2147483647, or -1.
+fn small_int(v : &Value, input : &Vec<u8>) -> i32 {
+  match v {
+    Value::Number(from, to) => {
+      match i64::parse(input, *from, *to) {
+        Result<i64, ParseNumberError>::Ok(n) => {
+          if n >= 0i64 && n <= 2147483647i64 {
+            return n as i32;
+          }
+          return -1;
+        }
+        Result<i64, ParseNumberError>::Err(_e) => { return -1; }
+      }
+    }
+    _ => { return -1; }
+  }
+}
+
+// GPT-2's byte-level alphabet: the character of each byte, from the code point back to the byte.
+// The printable bytes stand for themselves; the other 68 are U+0100 on, in byte order.
+fn byte_of_char() -> Vec<i32> {
+  let mut back = Vec<i32>::new();
+  for _c in 0..324 {
+    back.push(-1);
+  }
+  let mut extra = 256;
+  for b in 0..256 {
+    let printable = (b >= 33 && b <= 126) || (b >= 161 && b <= 172) || (b >= 174 && b <= 255);
+    if printable {
+      back.set(b, b);
+    } else {
+      back.set(extra, b);
+      extra = extra + 1;
+    }
+  }
+  return back;
+}
+
+// The raw bytes of a byte-level token, or an empty vector when a character is not in the alphabet.
+fn raw_bytes(text : &Vec<u8>, back : &Vec<i32>) -> Vec<u8> {
+  let mut out = Vec<u8>::new();
+  let mut i = 0;
+  while i < text.len() {
+    match decode_at(text, i) {
+      Result<Decoded, Utf8Error>::Ok(d) => {
+        let c = d.code as i32;
+        if c >= back.len() || back[c] < 0 {
+          return Vec<u8>::new();
+        }
+        out.push(back[c] as u8);
+        i = i + d.len;
+      }
+      Result<Decoded, Utf8Error>::Err(_e) => { return Vec<u8>::new(); }
+    }
+  }
+  return out;
+}
+
+fn insert_token(t : &mut Tokenizer, id : i32) -> void {
+  let mask = t.slots.len() - 1;
+  let n = t.tokens[id].len();
+  let mut i = (hash_bytes(&t.tokens[id], 0, n) & (mask as u64)) as i32;
+  while t.slots[i] >= 0 {
+    i = (i + 1) & mask;
+  }
+  t.slots.set(i, id);
+}
+
+// HF's merges are a map from the pair: a later duplicate replaces the earlier one.
+fn insert_merge(t : &mut Tokenizer, left : i32, right : i32, rank : i32, id : i32) -> void {
+  let key = ((left as u64) << 32u64) | (right as u64);
+  let mask = t.merge_keys.len() - 1;
+  let mut i = hash_key(key, mask);
+  while t.merge_keys[i] != empty_key() && t.merge_keys[i] != key {
+    i = (i + 1) & mask;
+  }
+  t.merge_keys.set(i, key);
+  t.merge_ranks.set(i, rank);
+  t.merge_ids.set(i, id);
+}
+
+fn split_pattern() -> Vec<u8> {
+  return lit("(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+             as *const u8, 115);
+}
+
+// The pre-tokenizer must be GLM's: the split above, isolated, then the byte-level mapping alone.
+// Each `match` is on a parameter. Vx main 973d80f9b declines `match &v` on a local whose initializer is a `match`
+// or an `if` (Vx #4153), and its fallback then overflows its stack on `Value` (Vx #4146).
+fn check_pattern(v : &Value) -> bool {
+  match v {
+    Value::Object(pattern) => {
+      return pattern.len() == 1 && member_is_text(pattern, &lit("Regex" as *const u8, 5), &split_pattern());
+    }
+    _ => { return false; }
+  }
+}
+
+fn check_split(v : &Value) -> bool {
+  match v {
+    Value::Object(split) => {
+      let at = find(split, &lit("pattern" as *const u8, 7));
+      return at >= 0 && check_pattern(&split[at].value)
+             && member_is_text(split, &lit("type" as *const u8, 4), &lit("Split" as *const u8, 5))
+             && member_is_text(split, &lit("behavior" as *const u8, 8), &lit("Isolated" as *const u8, 8))
+             && member_is_bool(split, &lit("invert" as *const u8, 6), false);
+    }
+    _ => { return false; }
+  }
+}
+
+fn check_byte_level(v : &Value) -> bool {
+  match v {
+    Value::Object(level) => {
+      return member_is_text(level, &lit("type" as *const u8, 4), &lit("ByteLevel" as *const u8, 9))
+             && member_is_bool(level, &lit("add_prefix_space" as *const u8, 16), false)
+             && member_is_bool(level, &lit("use_regex" as *const u8, 9), false);
+    }
+    _ => { return false; }
+  }
+}
+
+fn check_parts(v : &Value) -> bool {
+  match v {
+    Value::Array(parts) => { return parts.len() == 2 && check_split(&parts[0]) && check_byte_level(&parts[1]); }
+    _ => { return false; }
+  }
+}
+
+fn check_pre_tokenizer(v : &Value) -> bool {
+  match v {
+    Value::Object(members) => {
+      let at = find(members, &lit("pretokenizers" as *const u8, 13));
+      return at >= 0 && member_is_text(members, &lit("type" as *const u8, 4), &lit("Sequence" as *const u8, 8))
+             && check_parts(&members[at].value);
+    }
+    _ => { return false; }
+  }
+}
+
+// The model must be byte-level BPE with GLM's settings.
+fn check_model(model : &Vec<Member>) -> bool {
+  return member_is_text(model, &lit("type" as *const u8, 4), &lit("BPE" as *const u8, 3))
+         && member_is_bool(model, &lit("ignore_merges" as *const u8, 13), true)
+         && member_is_bool(model, &lit("byte_fallback" as *const u8, 13), false)
+         && null_or_missing(model, &lit("dropout" as *const u8, 7))
+         && null_or_missing(model, &lit("continuing_subword_prefix" as *const u8, 25))
+         && null_or_missing(model, &lit("end_of_word_suffix" as *const u8, 18));
+}
+
+// An added token that is matched as it is written: not stripped, not a single word, not normalized.
+fn check_added(token : &Vec<Member>) -> bool {
+  return member_is_bool(token, &lit("single_word" as *const u8, 11), false)
+         && member_is_bool(token, &lit("lstrip" as *const u8, 6), false)
+         && member_is_bool(token, &lit("rstrip" as *const u8, 6), false)
+         && member_is_bool(token, &lit("normalized" as *const u8, 10), false);
+}
+
+fn add_vocabulary(t : &mut Tokenizer, v : &Value, input : &Vec<u8>, back : &Vec<i32>) -> bool {
+  match v {
+    Value::Object(vocab) => {
+      let n = vocab.len();
+      for _i in 0..n {
+        t.tokens.push(Vec<u8>::new());
+      }
+      let mut seen = Vec<bool>::new();
+      for _i in 0..n {
+        seen.push(false);
+      }
+      for i in 0..n {
+        let id = small_int(&vocab[i].value, input);
+        if id < 0 || id >= n || seen[id] {
+          return false;  // the ids must be 0..n, once each
+        }
+        seen.set(id, true);
+        let raw = raw_bytes(&vocab[i].key, back);
+        if raw.len() == 0 {
+          return false;
+        }
+        if raw.len() == 1 {
+          t.byte_ids.set(raw[0] as i32, id);
+        }
+        t.tokens.set(id, raw);
+      }
+      for _i in 0..table_size(n) {
+        t.slots.push(-1);
+      }
+      for id in 0..n {
+        let mut copy = Vec<u8>::new();
+        for k in 0..t.tokens[id].len() {
+          copy.push(t.tokens[id][k]);
+        }
+        if find_token(t, &copy, 0, copy.len()) >= 0 {
+          return false;  // two tokens with the same bytes
+        }
+        insert_token(t, id);
+      }
+      for b in 0..256 {
+        if t.byte_ids[b] < 0 {
+          return false;
+        }
+      }
+      return true;
+    }
+    _ => { return false; }
+  }
+}
+
+fn add_merge(t : &mut Tokenizer, a : &Value, b : &Value, rank : i32, back : &Vec<i32>) -> bool {
+  match a {
+    Value::Text(x) => {
+      match b {
+        Value::Text(y) => {
+          let left = raw_bytes(x, back);
+          let right = raw_bytes(y, back);
+          if left.len() == 0 || right.len() == 0 {
+            return false;
+          }
+          let mut both = Vec<u8>::new();
+          for i in 0..left.len() {
+            both.push(left[i]);
+          }
+          for i in 0..right.len() {
+            both.push(right[i]);
+          }
+          let l = find_token(t, &left, 0, left.len());
+          let r = find_token(t, &right, 0, right.len());
+          let m = find_token(t, &both, 0, both.len());
+          if l < 0 || r < 0 || m < 0 {
+            return false;
+          }
+          insert_merge(t, l, r, rank, m);
+          return true;
+        }
+        _ => { return false; }
+      }
+    }
+    _ => { return false; }
+  }
+}
+
+fn add_pair(t : &mut Tokenizer, v : &Value, rank : i32, back : &Vec<i32>) -> bool {
+  match v {
+    Value::Array(pair) => { return pair.len() == 2 && add_merge(t, &pair[0], &pair[1], rank, back); }
+    _ => { return false; }
+  }
+}
+
+fn add_merges(t : &mut Tokenizer, v : &Value, back : &Vec<i32>) -> bool {
+  match v {
+    Value::Array(merges) => {
+      for _i in 0..table_size(merges.len()) {
+        t.merge_keys.push(empty_key());
+        t.merge_ranks.push(0);
+        t.merge_ids.push(0);
+      }
+      for rank in 0..merges.len() {
+        if !add_pair(t, &merges[rank], rank, back) {
+          return false;
+        }
+      }
+      return true;
+    }
+    _ => { return false; }
+  }
+}
+
+// The first byte must be ASCII, so that a match never starts inside a character.
+fn add_content(t : &mut Tokenizer, v : &Value, id : i32) -> bool {
+  match v {
+    Value::Text(content) => {
+      if id < 0 || content.len() == 0 || content[0] >= 128u8 {
+        return false;
+      }
+      let mut copy = Vec<u8>::new();
+      for k in 0..content.len() {
+        copy.push(content[k]);
+      }
+      t.added.push(copy);
+      t.added_ids.push(id);
+      return true;
+    }
+    _ => { return false; }
+  }
+}
+
+fn add_token(t : &mut Tokenizer, v : &Value, input : &Vec<u8>) -> bool {
+  match v {
+    Value::Object(token) => {
+      let c = find(token, &lit("content" as *const u8, 7));
+      let at = find(token, &lit("id" as *const u8, 2));
+      return c >= 0 && at >= 0 && check_added(token) && add_content(t, &token[c].value, small_int(&token[at].value, input));
+    }
+    _ => { return false; }
+  }
+}
+
+// No added token may be a prefix of another, so that at most one matches at a byte.
+fn add_added(t : &mut Tokenizer, v : &Value, input : &Vec<u8>) -> bool {
+  match v {
+    Value::Array(tokens) => {
+      for i in 0..tokens.len() {
+        if !add_token(t, &tokens[i], input) {
+          return false;
+        }
+      }
+      for a in 0..t.added.len() {
+        for b in 0..t.added.len() {
+          if a != b && t.added[a].len() <= t.added[b].len() && same_range(&t.added[a], &t.added[b], 0, t.added[a].len()) {
+            return false;
+          }
+        }
+      }
+      return true;
+    }
+    _ => { return false; }
+  }
+}
+
+fn from_model(top : &Vec<Member>, v : &Value, input : &Vec<u8>) -> Result<Tokenizer, Vec<u8>> {
+  match v {
+    Value::Object(model) => {
+      if !check_model(model) {
+        return fail(lit("the model is not byte-level BPE with ignore_merges" as *const u8, 50));
+      }
+      let back = byte_of_char();
+      let mut t = empty();
+      for _b in 0..256 {
+        t.byte_ids.push(-1);
+      }
+      let vocab = find(model, &lit("vocab" as *const u8, 5));
+      if vocab < 0 || !add_vocabulary(&mut t, &model[vocab].value, input, &back) {
+        return fail(lit("the vocab is not byte-level tokens with ids 0..n" as *const u8, 48));
+      }
+      let merges = find(model, &lit("merges" as *const u8, 6));
+      if merges < 0 || !add_merges(&mut t, &model[merges].value, &back) {
+        return fail(lit("a merge is not two tokens whose join is a token" as *const u8, 47));
+      }
+      let added = find(top, &lit("added_tokens" as *const u8, 12));
+      if added < 0 || !add_added(&mut t, &top[added].value, input) {
+        return fail(lit("an added token is not one that GLM's tokenizer has" as *const u8, 50));
+      }
+      t.loaded = true;
+      return Result<Tokenizer, Vec<u8>>::Ok(t);
+    }
+    _ => { return fail(lit("no model" as *const u8, 8)); }
+  }
+}
+
+fn from_root(v : &Value, input : &Vec<u8>) -> Result<Tokenizer, Vec<u8>> {
+  match v {
+    Value::Object(top) => {
+      if !null_or_missing(top, &lit("normalizer" as *const u8, 10)) {
+        return fail(lit("has a normalizer" as *const u8, 16));
+      }
+      let pre = find(top, &lit("pre_tokenizer" as *const u8, 13));
+      if pre < 0 || !check_pre_tokenizer(&top[pre].value) {
+        return fail(lit("the pre_tokenizer is not GLM's" as *const u8, 30));
+      }
+      let m = find(top, &lit("model" as *const u8, 5));
+      if m < 0 {
+        return fail(lit("no model" as *const u8, 8));
+      }
+      return from_model(top, &top[m].value, input);
+    }
+    _ => { return fail(lit("not an object" as *const u8, 13)); }
+  }
+}
+
+// The tokenizer of `input`, the bytes of a tokenizer.json, or what is wrong with it.
+pub fn load(input : &Vec<u8>) -> Result<Tokenizer, Vec<u8>> {
+  match parse(input) {
+    Result<Value, JsonError>::Ok(root) => { return from_root(&root, input); }
+    Result<Value, JsonError>::Err(_e) => { return fail(lit("not JSON" as *const u8, 8)); }
+  }
+}
+
+// ---- The split ----
+
+// The code point at byte `i` (valid UTF-8 by then), or -1 at `to`.
+fn code_at(text : &Vec<u8>, i : i32, to : i32) -> i32 {
+  if i >= to {
+    return -1;
+  }
+  match decode_at(text, i) {
+    Result<Decoded, Utf8Error>::Ok(d) => { return d.code as i32; }
+    Result<Decoded, Utf8Error>::Err(_e) => { return -1; }
+  }
+}
+
+fn width(c : i32) -> i32 {
+  if c < 128 {
+    return 1;
+  }
+  if c < 2048 {
+    return 2;
+  }
+  if c < 65536 {
+    return 3;
+  }
+  return 4;
+}
+
+fn letter(c : i32) -> bool {
+  return c >= 0 && is_letter(c as u32);
+}
+
+fn number(c : i32) -> bool {
+  return c >= 0 && is_number(c as u32);
+}
+
+fn space(c : i32) -> bool {
+  return c >= 0 && is_white_space(c as u32);
+}
+
+fn line_end(c : i32) -> bool {
+  return c == 13 || c == 10;
+}
+
+// [^\s\p{L}\p{N}]
+fn other(c : i32) -> bool {
+  return c >= 0 && !space(c) && !letter(c) && !number(c);
+}
+
+fn letters_end(text : &Vec<u8>, i : i32, to : i32) -> i32 {
+  let mut j = i;
+  let mut c = code_at(text, j, to);
+  while letter(c) {
+    j = j + width(c);
+    c = code_at(text, j, to);
+  }
+  return j;
+}
+
+fn others_end(text : &Vec<u8>, i : i32, to : i32) -> i32 {
+  let mut j = i;
+  let mut c = code_at(text, j, to);
+  while other(c) {
+    j = j + width(c);
+    c = code_at(text, j, to);
+  }
+  // [\r\n]*
+  while j < to && (text[j] == 13u8 || text[j] == 10u8) {
+    j = j + 1;
+  }
+  return j;
+}
+
+fn folds_to(c : i32, lower : i32) -> bool {
+  return c == lower || c == lower - 32 || (lower == 115 && c == 383);
+}
+
+// The end of the contraction at `i`, a "'", or -1.
+fn contraction_end(text : &Vec<u8>, i : i32, to : i32) -> i32 {
+  let j = i + 1;
+  let c = code_at(text, j, to);
+  if folds_to(c, 115) || folds_to(c, 116) || folds_to(c, 109) || folds_to(c, 100) {  // s t m d
+    return j + width(c);
+  }
+  let d = code_at(text, j + 1, to);
+  if (folds_to(c, 114) || folds_to(c, 118)) && folds_to(d, 101) {  // re ve
+    return j + 2;
+  }
+  if folds_to(c, 108) && folds_to(d, 108) {  // ll
+    return j + 2;
+  }
+  return -1;
+}
+
+// The end of the piece that starts at byte `i` of `text[..to]`.
+fn piece_end(text : &Vec<u8>, i : i32, to : i32) -> i32 {
+  let c = code_at(text, i, to);
+  if c < 0 {
+    return i + 1;  // not UTF-8, which a parsed prompt never is: a byte, so that the split moves on
+  }
+  let next = i + width(c);
+  if c == 39 {
+    let end = contraction_end(text, i, to);
+    if end > 0 {
+      return end;
+    }
+  }
+  // [^\r\n\p{L}\p{N}]?\p{L}+
+  if letter(c) {
+    return letters_end(text, i, to);
+  }
+  if !line_end(c) && !number(c) && letter(code_at(text, next, to)) {
+    return letters_end(text, next, to);
+  }
+  // \p{N}{1,3}
+  if number(c) {
+    let mut j = next;
+    let mut k = 1;
+    let mut d = code_at(text, j, to);
+    while k < 3 && number(d) {
+      j = j + width(d);
+      k = k + 1;
+      d = code_at(text, j, to);
+    }
+    return j;
+  }
+  //  ?[^\s\p{L}\p{N}]+[\r\n]*
+  if c == 32 && other(code_at(text, next, to)) {
+    return others_end(text, next, to);
+  }
+  if other(c) {
+    return others_end(text, i, to);
+  }
+  // White space from here on: the run, and its last line end.
+  let mut end = i;
+  let mut last_line_end = -1;
+  let mut last = i;
+  let mut s = c;
+  while space(s) {
+    if line_end(s) {
+      last_line_end = end;
+    }
+    last = end;
+    end = end + width(s);
+    s = code_at(text, end, to);
+  }
+  // \s*[\r\n]+
+  if last_line_end >= 0 {
+    return last_line_end + 1;
+  }
+  // \s+(?!\S): the whole run at the end, else all of it but its last character
+  if end == to {
+    return end;
+  }
+  if last > i {
+    return last;
+  }
+  // \s+
+  return end;
+}
+
+// ---- BPE ----
+
+fn heap_push(keys : &mut Vec<u64>, ids : &mut Vec<i32>, key : u64, id : i32) -> void {
+  keys.push(key);
+  ids.push(id);
+  let mut k = keys.len() - 1;
+  while k > 0 {
+    let up = (k - 1) / 2;
+    if keys[up] <= keys[k] {
+      return;
+    }
+    let ku = keys[up];
+    keys.set(up, keys[k]);
+    keys.set(k, ku);
+    let iu = ids[up];
+    ids.set(up, ids[k]);
+    ids.set(k, iu);
+    k = up;
+  }
+}
+
+// Removes the smallest key; the caller reads keys[0] and ids[0] first.
+fn heap_pop(keys : &mut Vec<u64>, ids : &mut Vec<i32>) -> void {
+  let n = keys.len() - 1;
+  keys.set(0, keys[n]);
+  ids.set(0, ids[n]);
+  let _k = keys.pop();
+  let _i = ids.pop();
+  let mut k = 0;
+  while true {
+    let l = 2 * k + 1;
+    if l >= n {
+      return;
+    }
+    let mut c = l;
+    if l + 1 < n && keys[l + 1] < keys[l] {
+      c = l + 1;
+    }
+    if keys[k] <= keys[c] {
+      return;
+    }
+    let kc = keys[c];
+    keys.set(c, keys[k]);
+    keys.set(k, kc);
+    let ic = ids[c];
+    ids.set(c, ids[k]);
+    ids.set(k, ic);
+    k = c;
+  }
+}
+
+// Push the merge of symbols `pos` and its next, when there is one, ordered by (rank, pos).
+fn offer(t : &Tokenizer, c : &Vec<i32>, pos : i32, next : i32, keys : &mut Vec<u64>, ids : &mut Vec<i32>) -> void {
+  let slot = find_merge(t, c[pos], c[next]);
+  if slot >= 0 {
+    heap_push(keys, ids, ((t.merge_ranks[slot] as u64) << 32u64) | (pos as u64), t.merge_ids[slot]);
+  }
+}
+
+fn bpe(t : &Tokenizer, text : &Vec<u8>, from : i32, to : i32, out : &mut Vec<u32>) -> void {
+  let whole = find_token(t, text, from, to);
+  if whole >= 0 {
+    out.push(whole as u32);
+    return;
+  }
+  let n = to - from;
+  let mut c = Vec<i32>::new();
+  let mut prev = Vec<i32>::new();
+  let mut next = Vec<i32>::new();
+  let mut alive = Vec<bool>::new();
+  for k in 0..n {
+    c.push(t.byte_ids[text[from + k] as i32]);
+    prev.push(k - 1);
+    next.push(if k + 1 < n { k + 1 } else { -1 });
+    alive.push(true);
+  }
+  let mut keys = Vec<u64>::new();
+  let mut ids = Vec<i32>::new();
+  for k in 0..n - 1 {
+    offer(t, &c, k, k + 1, &mut keys, &mut ids);
+  }
+  while keys.len() > 0 {
+    let pos = (keys[0] & 4294967295u64) as i32;
+    let id = ids[0];
+    heap_pop(&mut keys, &mut ids);
+    if !alive[pos] || next[pos] < 0 {
+      continue;
+    }
+    let right = next[pos];
+    // An entry that no longer gives the same token is stale.
+    let slot = find_merge(t, c[pos], c[right]);
+    if slot < 0 || t.merge_ids[slot] != id {
+      continue;
+    }
+    c.set(pos, id);
+    alive.set(right, false);
+    let after = next[right];
+    next.set(pos, after);
+    if after >= 0 {
+      prev.set(after, pos);
+    }
+    if prev[pos] >= 0 {
+      offer(t, &c, prev[pos], pos, &mut keys, &mut ids);
+    }
+    if after >= 0 {
+      offer(t, &c, pos, after, &mut keys, &mut ids);
+    }
+  }
+  for k in 0..n {
+    if alive[k] {
+      out.push(c[k] as u32);
+    }
+  }
+}
+
+fn split_and_merge(t : &Tokenizer, text : &Vec<u8>, from : i32, to : i32, out : &mut Vec<u32>) -> void {
+  let mut i = from;
+  while i < to {
+    let end = piece_end(text, i, to);
+    bpe(t, text, i, end, out);
+    i = end;
+  }
+}
+
+// The added token that starts at byte `i`, or -1.
+fn added_at(t : &Tokenizer, text : &Vec<u8>, i : i32) -> i32 {
+  for k in 0..t.added.len() {
+    let n = t.added[k].len();
+    if i + n <= text.len() && same_range(&t.added[k], text, i, i + n) {
+      return k;
+    }
+  }
+  return -1;
+}
+
+// The token ids of `text`, which is UTF-8.
+pub fn encode(t : &Tokenizer, text : &Vec<u8>) -> Vec<u32> {
+  let mut out = Vec<u32>::new();
+  let mut start = 0;
+  let mut i = 0;
+  while i < text.len() {
+    let k = if text[i] < 128u8 { added_at(t, text, i) } else { -1 };
+    if k >= 0 {
+      split_and_merge(t, text, start, i, &mut out);
+      out.push(t.added_ids[k] as u32);
+      i = i + t.added[k].len();
+      start = i;
+    } else {
+      i = i + 1;
+    }
+  }
+  split_and_merge(t, text, start, text.len(), &mut out);
+  return out;
+}

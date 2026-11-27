@@ -5,11 +5,12 @@
 ```
 client --HTTP--> glm-vx-front (Vx)                 --frames on stdin/stdout--> engine (Python)
                   main(root : Root, args)                                       Scheduler, GPUs
+                  |- main: root.files, to read tokenizer.json before it listens
                   |- the listener: root.network, to bind once
                   |- the router: root.stdout        writes SUBMIT, CANCEL, STATUS
                   |- the reader: root.stdin         reads ACCEPTED, TOKEN, DONE, ERROR, STATUS_REPLY
-                  '- each connection: a task with its TcpStream, a Sender to the router, the model name
-                     package `front` (src/): HTTP, JSON, the request checks, the frames
+                  '- each connection: a task with its TcpStream, a Sender to the router, the model name, the tokenizer
+                     package `front` (src/): HTTP, JSON, the request checks, the tokenizer, the frames
 ```
 
 ## Build and run
@@ -17,9 +18,24 @@ client --HTTP--> glm-vx-front (Vx)                 --frames on stdin/stdout--> e
 ```
 VXC=/path/to/vxc front/build.sh       # Vx main from 2026-11-26 on
 python -m glm_vx.server --tiny --front front/build/glm-vx-front --port 8000
+python -m glm_vx.server ... --front front/build/glm-vx-front --tokenizer /models/GLM-5.3/tokenizer.json
 ```
 
-`build.sh` puts `glm-vx-front`, the test programs `json_echo` and `request_check`, and `audit.txt` (the output of `vxc --audit`) in `front/build/`. It needs `VX_RUNTIME_DIR`, the folder of `libvx_std_core.so`, and `VX_SHIMS_DIR`, the folder of `libvx_mlir_shims.so`, when they are not next to `vxc`.
+`build.sh` puts `glm-vx-front`, the test programs `json_echo`, `request_check` and `tokenize_check`, and `audit.txt` (the output of `vxc --audit`) in `front/build/`. It needs `VX_RUNTIME_DIR`, the folder of `libvx_std_core.so`, and `VX_SHIMS_DIR`, the folder of `libvx_mlir_shims.so`, when they are not next to `vxc`.
+
+## The tokenizer
+
+With `--tokenizer`, `server.py` gives the front end the path of the model's tokenizer.json. `main` reads it with `root.files`
+before it listens, and `src/tokenizer.vx` turns each text prompt into token ids, so the engine never sees a client's text.
+It implements zai-org/GLM-5.3's tokenizer and refuses a tokenizer.json with other settings:
+
+- the added tokens first, then the GPT-4-style split as Oniguruma matches it, then byte-level BPE with `ignore_merges`;
+- the merges in O(n log n), lowest rank first and then leftmost, as HF's `merge_all`;
+- `std::unicode`'s letters, numbers and white space, which agree with Oniguruma's `\p{L}`, `\p{N}` and `\s` on every code point.
+
+Loading takes about 0.8 s and 200 MB at its peak. `tests/test_front_tokenizer.py` compares the ids with HF `tokenizers` on
+edge cases, every code point in seven contexts, random text and GSM8K, and checks that the engine gets SUBMIT with those ids
+and no text. It needs `GLM_TOKENIZER`, the path of the 20 MB tokenizer.json, which is not in the repository.
 
 ## What the compiler checks
 
@@ -67,5 +83,5 @@ Like `server.py`, the front end takes a client that half closes before its reply
   - the engine then starts a new front end on the same address and shows the count as `front_end_restarts` in `/health`;
   - after 5 restarts within 60 s it stops, and so does `server.py`, with the error.
   `tests/test_front_restart.py` checks these.
-- **Text prompts are still tokenized by the engine** with HF `tokenizers` (SUBMIT_TEXT), until #68's step 3 moves the tokenizer into `front`.
+- **Detokenizing.** The engine still turns the ids it generates into text with HF `tokenizers` (`glm_vx/detok.py`). That is the model's output, not a client's bytes.
 - **An exported `extern fn`.** Vx main 973d80f9b's `--no-trusted-code` lets an `extern fn` with pointer `requires` through, though `--audit` lists them (Vx #4144). The audit test catches one in `front`.

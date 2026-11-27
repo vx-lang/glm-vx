@@ -24,7 +24,9 @@ From the front end to the engine:
 
 - Flags: bit 0 is `ignore_eos`. The other bits must be 0.
 - The front end picks the ids. An id stays in use from its SUBMIT until the engine's DONE or ERROR for it.
-- SUBMIT_TEXT exists until step 3 moves the tokenizer into the front end. After that, the engine gets token ids only.
+- A front end started with a tokenizer.json (`server.py --front ... --tokenizer`) tokenizes text prompts itself and sends
+  only SUBMIT, so the engine gets token ids only. Without one it sends SUBMIT_TEXT, and the engine tokenizes, or refuses
+  the request when it has no tokenizer either.
 
 From the engine to the front end:
 

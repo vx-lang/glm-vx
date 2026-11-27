@@ -8,6 +8,7 @@ import front::json;
 import front::jsonw;
 import front::link;
 import front::request;
+import front::tokenizer;
 import std::net;
 import std::string;
 import std::sync::channel;
@@ -180,7 +181,7 @@ fn next_reply(s : &mut TcpStream, rx : &Receiver<Incoming>, pending : &mut Vec<u
 
 // A completion. Gives false when the connection must close.
 fn complete(s : &mut TcpStream, body : &Vec<u8>, asks : &Sender<Ask>, model : &Vec<u8>, pending : &mut Vec<u8>,
-            beat_ms : u64) -> bool {
+            beat_ms : u64, tok : &Tokenizer) -> bool {
   let parsed = match parse(body) {
     Result<Value, JsonError>::Ok(v) => { v }
     Result<Value, JsonError>::Err(e) => {
@@ -190,13 +191,19 @@ fn complete(s : &mut TcpStream, body : &Vec<u8>, asks : &Sender<Ask>, model : &V
       return false;
     }
   };
-  let sub = match submission(&parsed, body, model) {
+  let mut sub = match submission(&parsed, body, model) {
     Result<Submission, Vec<u8>>::Ok(x) => { x }
     Result<Submission, Vec<u8>>::Err(message) => {
       let _sent = send(s, &json_reply(400u32, &error_body(&message), true));
       return false;
     }
   };
+  // With the tokenizer the engine gets token ids: the prompt's text stops here.
+  if sub.is_text && is_loaded(tok) {
+    sub.ids = encode(tok, &sub.text);
+    sub.text = Vec<u8>::new();
+    sub.is_text = false;
+  }
   let stream = sub.stream;
   let openai = sub.openai;
   let include_usage = sub.include_usage;
@@ -374,7 +381,7 @@ fn models(s : &mut TcpStream, model : &Vec<u8>, close : bool) -> bool {
 }
 
 // Serve one connection until it closes. A stream with nothing to send for `beat_ms` sends a heartbeat.
-pub fn serve(stream : TcpStream, asks : Sender<Ask>, model : Vec<u8>, beat_ms : u64) -> void {
+pub fn serve(stream : TcpStream, asks : Sender<Ask>, model : Vec<u8>, beat_ms : u64, tok : &Tokenizer) -> void {
   let mut s = stream;
   let mut pending = Vec<u8>::new();
   let get = lit("GET" as *const u8, 3);
@@ -409,7 +416,7 @@ pub fn serve(stream : TcpStream, asks : Sender<Ask>, model : Vec<u8>, beat_ms : 
                                                                          29)), true));
           return;
         }
-        keep = complete(&mut s, &req.body, &asks, &model, &mut pending, beat_ms) && !req.close;
+        keep = complete(&mut s, &req.body, &asks, &model, &mut pending, beat_ms, tok) && !req.close;
       } else {
         let _sent = send(&mut s, &json_reply(404u32, &error_body(&lit("not found" as *const u8, 9)), true));
         return;
