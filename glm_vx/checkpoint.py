@@ -150,6 +150,28 @@ class SafetensorsFile:
             self.close()
             raise
 
+    @classmethod
+    def from_table(cls, path: str | Path, size: int, data_start: int, tensors: dict[str, TensorInfo], *,
+                   max_tensor_bytes: int = 8 * 1024**3) -> "SafetensorsFile":
+        """The shard at `path`, whose header glm-vx-reader has checked (glm_vx/model_table.py): its
+        tensors are mapped at the table's offsets, and the header is not read again. The file must
+        still have the size the reader saw."""
+        if type(max_tensor_bytes) is not int or max_tensor_bytes <= 0:
+            raise CheckpointError("max_tensor_bytes must be a positive integer")
+        self = cls.__new__(cls)
+        self.path, self.max_tensor_bytes = Path(path), max_tensor_bytes
+        self._map, self._file = None, None
+        self.tensors, self.metadata, self.data_start = dict(tensors), {}, data_start
+        try:
+            self._file = self.path.open("rb")
+            if os.fstat(self._file.fileno()).st_size != size:
+                raise CheckpointError(f"{self.path.name} changed after glm-vx-reader read it")
+            self._map = mmap.mmap(self._file.fileno(), 0, access=mmap.ACCESS_READ)
+        except Exception:
+            self.close()
+            raise
+        return self
+
     def info(self, name: str) -> TensorInfo:
         try:
             return self.tensors[name]
@@ -300,6 +322,38 @@ class SafetensorsCheckpoint:
             self.metadata = {}
             self._shards[single.name] = mapped
 
+    @classmethod
+    def from_table(cls, root: str | Path, table, *, block_size: tuple[int, int] = (128, 128),
+                   max_open_shards: int = 8, max_tensor_bytes: int = 8 * 1024**3) -> "SafetensorsCheckpoint":
+        """The checkpoint in `root` from glm-vx-reader's table (glm_vx/model_table.py): the index and
+        the shards' headers are the reader's, and no JSON from the folder is parsed here."""
+        self = cls.__new__(cls)
+        self.root = Path(root).resolve()
+        if type(max_open_shards) is not int or max_open_shards <= 0:
+            raise CheckpointError("max_open_shards must be positive")
+        if type(max_tensor_bytes) is not int or max_tensor_bytes <= 0:
+            raise CheckpointError("max_tensor_bytes must be positive")
+        if not isinstance(block_size, (list, tuple)) or len(block_size) != 2 or any(type(x) is not int or x <= 0 for x in block_size):
+            raise CheckpointError("invalid block_size")
+        self.block_size, self.max_open_shards, self.max_tensor_bytes = tuple(block_size), max_open_shards, max_tensor_bytes
+        self._shards, self._closed, self.metadata = OrderedDict(), False, {}
+        self._table = {shard.name: (shard, {}) for shard in table.shards}
+        self.weight_map = {}
+        for name, (index, info) in table.tensors.items():
+            shard = table.shards[index]
+            self._shard_path(shard.name)
+            self._table[shard.name][1][name] = info
+            self.weight_map[name] = shard.name
+        return self
+
+    def _open_shard(self, shard: str) -> SafetensorsFile:
+        table = getattr(self, "_table", None)
+        if table is None:
+            return SafetensorsFile(self._shard_path(shard), max_tensor_bytes=self.max_tensor_bytes)
+        entry, tensors = table[shard]
+        return SafetensorsFile.from_table(self._shard_path(shard), entry.size, entry.data_start, tensors,
+                                          max_tensor_bytes=self.max_tensor_bytes)
+
     def _shard_path(self, name: str) -> Path:
         # Check resolved containment too, so existing symlinks cannot escape root.
         if not name or Path(name).name != name or "\\" in name or not name.endswith(".safetensors"):
@@ -320,7 +374,7 @@ class SafetensorsCheckpoint:
             if len(self._shards) >= self.max_open_shards:
                 _, old = self._shards.popitem(last=False)
                 old.close()
-            mapped = SafetensorsFile(self._shard_path(shard), max_tensor_bytes=self.max_tensor_bytes)
+            mapped = self._open_shard(shard)
         self._shards[shard] = mapped
         mapped.info(name)  # Fail explicitly if the index points to the wrong shard.
         return mapped

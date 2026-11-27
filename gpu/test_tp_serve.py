@@ -135,7 +135,7 @@ def test_lockstep_sends_device_steps_and_rewinds():
 
 def test_follower_replays_the_commands(monkeypatch):
     log = []
-    monkeypatch.setattr(tp_serve, 'load_model', lambda checkpoint, layers=None: ('model', checkpoint, layers))
+    monkeypatch.setattr(tp_serve, 'load_model', lambda checkpoint, layers=None, reader=None: ('model', checkpoint, layers, reader))
     built = []
 
     def build_rank(model, rank, ranks, max_tokens, one_shot=True, options=None):
@@ -144,8 +144,9 @@ def test_follower_replays_the_commands(monkeypatch):
     monkeypatch.setattr(tp_serve, 'build_rank', build_rank)
     monkeypatch.setattr(sys, 'stdin', pipe_with(b'P\nR\nF 3 0\nF 4 1\nF 6 2\nD 8\nS\nW 9\nQ\nF 5 1\n'))
     tp_serve.follower_main(['--checkpoint', 'ck', '--rank', '2', '--ranks', '8', '--max-tokens', '64', '--sum', 'nccl',
-                            '--layers', '4', '--option', 'moe_down2=true', '--option', 'norm_block=512'])
-    assert built == [(('model', 'ck', 4), 2, 8, 64, False, dict(moe_down2=True, norm_block=512))]
+                            '--layers', '4', '--option', 'moe_down2=true', '--option', 'norm_block=512',
+                            '--model-reader', 'reader/build/glm-vx-reader'])
+    assert built == [(('model', 'ck', 4, 'reader/build/glm-vx-reader'), 2, 8, 64, False, dict(moe_down2=True, norm_block=512))]
     # Nothing after Q runs; the graphs close before NCCL's teardown.
     assert log == [('preload',), ('reset',), ('forward', 3, False), ('forward', 4, True), ('forward', 6, 'greedy'),
                    ('device_step', 8, False), ('device_step', None, False), ('rewind', 9), ('close',), ('finish',)]
@@ -153,7 +154,7 @@ def test_follower_replays_the_commands(monkeypatch):
 
 def test_follower_rejects_an_unknown_command(monkeypatch):
     log = []
-    monkeypatch.setattr(tp_serve, 'load_model', lambda checkpoint, layers=None: None)
+    monkeypatch.setattr(tp_serve, 'load_model', lambda checkpoint, layers=None, reader=None: None)
     monkeypatch.setattr(tp_serve, 'build_rank', lambda *a, **k: (FakeResident(log), FakeTP(log)))
     monkeypatch.setattr(sys, 'stdin', pipe_with(b'X\n'))
     with pytest.raises(ValueError, match='unknown command'):
@@ -168,6 +169,7 @@ def test_follower_rejects_an_unknown_command(monkeypatch):
     (['--backend', 'vx-gpu-resident', '--checkpoint', 'x', '--layers', '4'], '--layers is a --tp smoke test'),
     (['--backend', 'vx-gpu-resident', '--tiny', '--tp-option', 'moe_down2=true'], '--tp-option loads --checkpoint'),
     (['--backend', 'vx-gpu-resident', '--checkpoint', 'x', '--tp', '2', '--tp-option', 'moe_down2'], 'expected KEY=VALUE'),
+    (['--tiny', '--model-reader', 'reader/build/glm-vx-reader'], '--model-reader reads a safetensors --checkpoint'),
 ])
 def test_server_tp_arguments(argv, message, capsys):
     from glm_vx.server import parse_args

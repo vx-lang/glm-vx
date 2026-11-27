@@ -1,0 +1,50 @@
+// glm-vx-reader (#68): reads a model folder and writes its table on standard output
+// (docs/MODEL-TABLE.md), or a line on standard error and exit code 1.
+//
+// `main` narrows `root.files` to a `Folder` for the one directory it is given, and the reader gets
+// only that `Folder`: it can read the files in that directory and no others. No `Network`,
+// `Environment` or `Processes`. The packages `reader` and `front` (for its JSON parser) are built
+// with `--no-trusted-code`.
+import front::bytes;
+import reader::model;
+import std::fs;
+import std::io;
+import std::string;
+import std::vec;
+
+fn say(err : &mut Stderr, text : Vec<u8>) -> void {
+  let mut line = lit("glm-vx-reader: " as *const u8, 15);
+  for i in 0..text.len() {
+    line.push(text[i]);
+  }
+  line.push(10u8);
+  let _w = err.write_all(&line);
+}
+
+fn main(root : Root, args : Vec<String>) -> i32 {
+  let mut err = root.stderr;
+  if args.len() != 2 {
+    say(&mut err, lit("usage: glm-vx-reader MODEL_DIR" as *const u8, 30));
+    return 2;
+  }
+  let folder = match Folder::open(&root.files, &args[1]) {
+    Result<Folder, FileError>::Ok(f) => { f }
+    Result<Folder, FileError>::Err(_e) => {
+      say(&mut err, lit("cannot open the model folder" as *const u8, 28));
+      return 1;
+    }
+  };
+  match read_model(&folder) {
+    Result<Vec<u8>, Vec<u8>>::Ok(table) => {
+      let mut out = root.stdout;
+      match out.write_all(&table) {
+        Result<u64, StdioError>::Ok(_n) => { return 0; }
+        Result<u64, StdioError>::Err(_e) => { return 1; }
+      }
+    }
+    Result<Vec<u8>, Vec<u8>>::Err(message) => {
+      say(&mut err, message);
+      return 1;
+    }
+  }
+}

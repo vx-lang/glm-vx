@@ -5,7 +5,8 @@ is one of:
 - something the Vx compiler checks, or
 - a test that fails when the reason stops holding.
 
-It covers serving with `python -m glm_vx.server --front front/build/glm-vx-front --tokenizer ...` (#68).
+It covers serving with `python -m glm_vx.server --front front/build/glm-vx-front --tokenizer ... --model-reader
+reader/build/glm-vx-reader` (#68).
 
 ## The boundary
 
@@ -17,6 +18,9 @@ client --HTTP--> glm-vx-front (Vx)  --fixed frames on stdin/stdout-->  engine (P
   - The engine starts it and has no listener of its own.
   - With `--tokenizer`, the engine gets only token ids, never a client's text.
 - **The engine reads only fixed binary frames** ([ENGINE-LINK.md](ENGINE-LINK.md)). It parses them with `struct`, after a check of their length. It never uses pickle.
+- **With `--model-reader`, a second Vx program reads the model folder** ([MODEL-TABLE.md](MODEL-TABLE.md)). It gets a
+  right to that folder only, and checks config.json, the index and every shard's header. The engine gets a fixed-format
+  table and maps each tensor at the offsets the reader checked.
 - **The front end's code holds only the rights `main` gives it.** Vx's `main(root : Root, ...)` gets every right of the process, and nothing else can make one:
   - `main` reads tokenizer.json with `root.files`, before it listens;
   - the listener gets `root.network`, once, to bind;
@@ -63,21 +67,21 @@ Each link goes to the GHSA advisory; the number is its CVSS 3.1 score.
     - 32 connections;
     - a 30 s read timeout.
   - `tests/test_front_fuzz.py` sends random requests and expects no crash and no hang.
-- **The model folder is trusted.**
-  - The weights are read by `glm_vx/checkpoint.py`, which has no pickle or remote code.
-  - `tokenizer.json` is read by the front end as data.
-  - Moving the readers into Vx, with a right to that folder only, is #68's later step.
+- **The model folder's weights are trusted data.**
+  - With `--model-reader`, `reader/` reads config.json, the index and the shards' headers. Without it, `glm_vx/checkpoint.py` does, with no pickle or remote code.
+  - The weights' bytes themselves go to the GPUs as numbers, and `tokenizer.json` is read by the front end as data.
+  - The GGUF path (`--gguf`, experimental) still reads its files with gguf-py.
 - **No TLS and no authentication.** Keep the default loopback address, or put a proxy in front.
 - **Without `--front`**, `server.py` serves HTTP with Python's `http.server`. The checks of the engine still hold, but not the front end's.
 
 ## Checking it
 
 ```
-VXC=/path/to/vxc front/build.sh
+VXC=/path/to/vxc front/build.sh && VXC=/path/to/vxc reader/build.sh
 VXC=/path/to/vxc python -m pytest tests/test_front_confinement.py tests/test_serving_path.py tests/test_front_http.py \
-    tests/test_front_fuzz.py tests/test_front_restart.py
+    tests/test_front_fuzz.py tests/test_front_restart.py tests/test_model_reader.py
 GLM_TOKENIZER=/path/to/GLM-5.3/tokenizer.json python -m pytest tests/test_front_tokenizer.py
-FRONT_PRELOAD=$(clang -print-file-name=libclang_rt.asan-x86_64.so) python -m pytest tests/test_front_*.py
+FRONT_PRELOAD=$(clang -print-file-name=libclang_rt.asan-x86_64.so) python -m pytest tests/test_front_*.py tests/test_model_reader.py
 ```
 
 Served latency through the front end (TTFT and TPOT on the 8×H200, under `docs/benchmarking_policy.md`) is not measured yet.

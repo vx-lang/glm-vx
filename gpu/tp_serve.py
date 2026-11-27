@@ -30,7 +30,6 @@ import sys
 import tempfile
 import threading
 import time
-from pathlib import Path
 
 # The kernels of the production decode step (validation/tp_real.py measures with the same).
 OPTIONS = dict(device_experts=True, graph=True, fused_attention=True, mla_kernel='tc', fp8_kernels='cvt',
@@ -38,18 +37,19 @@ OPTIONS = dict(device_experts=True, graph=True, fused_attention=True, mla_kernel
                fold_shared=True)
 
 
-def load_model(checkpoint, layers=None):
+def load_model(checkpoint, layers=None, reader=None):
     """The host model over a checkpoint directory (weights read lazily); with `layers`, only the first
-    layers (a smoke test: GLM-5.3's own per-layer patterns, meaningless output)."""
+    layers (a smoke test: GLM-5.3's own per-layer patterns, meaningless output). With `reader`
+    (reader/build/glm-vx-reader), the Vx reader reads the folder's JSON and headers (glm_vx/model_table.py)."""
     from glm_vx.backend import NumpyBackend
-    from glm_vx.checkpoint import Checkpoint
     from glm_vx.config import GLMConfig
     from glm_vx.model import GlmMoeDsaModel
-    config = json.loads((Path(checkpoint) / 'config.json').read_text())
+    from glm_vx.model_table import open_checkpoint, read_folder
+    config, table = read_folder(checkpoint, reader)
     if layers is not None:
         from validation.write_proxy import proxy_config
         config = proxy_config(layers, base=config)
-    weights = Checkpoint(checkpoint, block_size=GLMConfig.from_dict(config).weight_block_size)
+    weights = open_checkpoint(checkpoint, table, block_size=GLMConfig.from_dict(config).weight_block_size)
     return GlmMoeDsaModel(config, weights, NumpyBackend())
 
 
@@ -152,7 +152,7 @@ class Lockstep:
                 follower.kill()
 
 
-def start(checkpoint, ranks, max_tokens, *, one_shot=True, layers=None, options=None):
+def start(checkpoint, ranks, max_tokens, *, one_shot=True, layers=None, options=None, reader=None):
     """Rank 0 in this process, ranks 1..ranks-1 as followers, every rank with OPTIONS updated by
     `options`. Returns (host model, Lockstep)."""
     tmp = tempfile.mkdtemp(prefix='glm-vx-tp-')
@@ -160,12 +160,13 @@ def start(checkpoint, ranks, max_tokens, *, one_shot=True, layers=None, options=
     command = [sys.executable, '-m', 'gpu.tp_serve', '--checkpoint', str(checkpoint), '--ranks', str(ranks),
                '--max-tokens', str(max_tokens), '--sum', 'one-shot' if one_shot else 'nccl']
     command += ['--layers', str(layers)] if layers is not None else []
+    command += ['--model-reader', str(reader)] if reader is not None else []
     for key, value in (options or {}).items():
         command += ['--option', f'{key}={json.dumps(value)}']
     followers = [subprocess.Popen(command + ['--rank', str(r)], stdin=subprocess.PIPE, env=dict(os.environ))
                  for r in range(1, ranks)]
     try:
-        model = load_model(checkpoint, layers)
+        model = load_model(checkpoint, layers, reader)
         resident, tp = build_rank(model, 0, ranks, max_tokens, one_shot, options)
     except BaseException:
         for follower in followers:
@@ -205,9 +206,10 @@ def follower_main(argv=None):
     p.add_argument('--max-tokens', type=int, required=True)
     p.add_argument('--sum', choices=['one-shot', 'nccl'], default='one-shot')
     p.add_argument('--layers', type=int)
+    p.add_argument('--model-reader', help='reader/build/glm-vx-reader: the Vx reader reads the folder (glm_vx/model_table.py)')
     p.add_argument('--option', action='append', help='KEY=VALUE: a ResidentGLM option over OPTIONS')
     args = p.parse_args(argv)
-    resident, tp = build_rank(load_model(args.checkpoint, args.layers), args.rank, args.ranks, args.max_tokens,
+    resident, tp = build_rank(load_model(args.checkpoint, args.layers, args.model_reader), args.rank, args.ranks, args.max_tokens,
                               one_shot=args.sum == 'one-shot', options=parse_options(args.option))
     try:
         # GLM_VX_TP_SPIN: the seconds of non-blocking reads after a command (0: block at once).

@@ -1,0 +1,829 @@
+// The model folder's reader (#68): config.json, model.safetensors.index.json and each shard's
+// header, read through a `Folder` and checked as glm_vx/checkpoint.py checks them. The result is
+// one table (docs/MODEL-TABLE.md): config.json as a typed tree, the shards, and each tensor's
+// dtype, shape and byte range. The engine maps each tensor's bytes at the checked offsets and
+// parses nothing from the folder.
+//
+// Stricter than glm_vx/checkpoint.py:
+// - every JSON file: no key twice in an object, UTF-8 only, at most 32 levels of nesting, and no
+//   integer past 64 bits;
+// - every shard that the index names must be there, a plain file (no symbolic link) with each
+//   tensor that the index names in it.
+import front::bytes;
+import front::json;
+import front::link;
+import std::fs;
+import std::string;
+import std::vec;
+
+// ---- Names: a set of byte strings, by FNV-1a and open addressing ----
+
+struct Names {
+  names : Vec<Vec<u8>>,
+  // The index in `names` of each slot's name, -1 for an empty slot.
+  slots : Vec<i32>,
+}
+
+// A set for up to `n` names.
+fn new_names(n : i32) -> Names {
+  let mut size = 16;
+  while size < 2 * n {
+    size = size * 2;
+  }
+  let mut slots = Vec<i32>::with_capacity(size);
+  for _i in 0..size {
+    slots.push(-1);
+  }
+  return Names { names: Vec<Vec<u8>>::with_capacity(n), slots: slots };
+}
+
+fn name_hash(b : &Vec<u8>) -> u64 {
+  let mut h : u64 = 14695981039346656037u64;
+  for i in 0..b.len() {
+    h = (h ^ (b[i] as u64)).wrapping_mul(1099511628211u64);
+  }
+  return h;
+}
+
+fn same(a : &Vec<u8>, b : &Vec<u8>) -> bool {
+  if a.len() != b.len() {
+    return false;
+  }
+  for i in 0..a.len() {
+    if a[i] != b[i] {
+      return false;
+    }
+  }
+  return true;
+}
+
+fn copy(b : &Vec<u8>) -> Vec<u8> {
+  let mut out = Vec<u8>::with_capacity(b.len());
+  for i in 0..b.len() {
+    out.push(b[i]);
+  }
+  return out;
+}
+
+// The slot of `name`, or of the empty slot where it would go.
+fn slot_of(t : &Names, name : &Vec<u8>) -> i32 {
+  let mask = t.slots.len() - 1;
+  let mut i = (name_hash(name) & (mask as u64)) as i32;
+  while t.slots[i] >= 0 && !same(&t.names[t.slots[i]], name) {
+    i = (i + 1) & mask;
+  }
+  return i;
+}
+
+// The index of `name`, or -1.
+fn find_name(t : &Names, name : &Vec<u8>) -> i32 {
+  return t.slots[slot_of(t, name)];
+}
+
+// Add `name`, which the set may hold no more than `n` names of `new_names`. Its index, or -1 when
+// the set had it already.
+fn add_name(t : &mut Names, name : &Vec<u8>) -> i32 {
+  let s = slot_of(t, name);
+  if t.slots[s] >= 0 {
+    return -1;
+  }
+  let at = t.names.len();
+  t.names.push(copy(name));
+  t.slots.set(s, at);
+  return at;
+}
+
+// ---- JSON ----
+
+fn fail<T>(what : Vec<u8>) -> Result<T, Vec<u8>> {
+  return Result<T, Vec<u8>>::Err(what);
+}
+
+// `what`, then the name in quotes.
+fn about(what : Vec<u8>, name : &Vec<u8>) -> Vec<u8> {
+  let mut out = what;
+  out.push(32u8);
+  out.push(34u8);
+  for i in 0..name.len() {
+    out.push(name[i]);
+  }
+  out.push(34u8);
+  return out;
+}
+
+// No object in `v` has a key twice, as checkpoint.py's `_object` hook.
+fn unique_keys(v : &Value) -> bool {
+  match v {
+    Value::Object(members) => {
+      let mut seen = new_names(members.len());
+      for i in 0..members.len() {
+        if add_name(&mut seen, &members[i].key) < 0 || !unique_keys(&members[i].value) {
+          return false;
+        }
+      }
+      return true;
+    }
+    Value::Array(items) => {
+      for i in 0..items.len() {
+        if !unique_keys(&items[i]) {
+          return false;
+        }
+      }
+      return true;
+    }
+    _ => { return true; }
+  }
+}
+
+// The member named `key`, or -1. Keys are unique by then.
+fn member(members : &Vec<Member>, key : &Vec<u8>) -> i32 {
+  for i in 0..members.len() {
+    if same(&members[i].key, key) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// A number written with no fraction and no exponent: Python's json gives it an `int`.
+fn integer_literal(input : &Vec<u8>, from : i32, to : i32) -> bool {
+  for k in from..to {
+    let c = input[k];
+    if c == 46u8 || c == 101u8 || c == 69u8 {
+      return false;
+    }
+  }
+  return true;
+}
+
+struct Int {
+  ok : bool,
+  value : i64,
+}
+
+fn no_int() -> Int {
+  return Int { ok: false, value: 0i64 };
+}
+
+// `v` as an integer, as Python's `type(v) is int`: a number with no fraction or exponent, and not
+// true or false. One past 64 bits is not one.
+fn int_of(v : &Value, input : &Vec<u8>) -> Int {
+  match v {
+    Value::Number(from, to) => {
+      if !integer_literal(input, *from, *to) {
+        return no_int();
+      }
+      match i64::parse(input, *from, *to) {
+        Result<i64, ParseNumberError>::Ok(n) => { return Int { ok: true, value: n }; }
+        Result<i64, ParseNumberError>::Err(_e) => { return no_int(); }
+      }
+    }
+    _ => { return no_int(); }
+  }
+}
+
+// ---- The table ----
+
+fn put_bytes(out : &mut Vec<u8>, b : &Vec<u8>) -> void {
+  put_u32(out, b.len() as u32);
+  for i in 0..b.len() {
+    out.push(b[i]);
+  }
+}
+
+// `v` as a tree: a tag byte (0 null, 1 false, 2 true, 3 an i64, 4 an f64, 5 text, 6 a list, 7 an
+// object), then its value. Python's json.loads gives the same values. False for an integer past
+// 64 bits.
+fn put_tree(out : &mut Vec<u8>, v : &Value, input : &Vec<u8>) -> bool {
+  match v {
+    Value::Null => {
+      out.push(0u8);
+      return true;
+    }
+    Value::Bool(b) => {
+      out.push(if *b { 2u8 } else { 1u8 });
+      return true;
+    }
+    Value::Number(from, to) => {
+      if integer_literal(input, *from, *to) {
+        match i64::parse(input, *from, *to) {
+          Result<i64, ParseNumberError>::Ok(n) => {
+            out.push(3u8);
+            put_u64(out, n as u64);
+            return true;
+          }
+          Result<i64, ParseNumberError>::Err(_e) => { return false; }
+        }
+      }
+      // f64::parse rounds to the nearest f64, as Python's float() does: 1e400 is inf.
+      match f64::parse(input, *from, *to) {
+        Result<f64, ParseNumberError>::Ok(x) => {
+          out.push(4u8);
+          put_u64(out, x.to_bits());
+          return true;
+        }
+        Result<f64, ParseNumberError>::Err(_e) => { return false; }
+      }
+    }
+    Value::Text(t) => {
+      out.push(5u8);
+      put_bytes(out, t);
+      return true;
+    }
+    Value::Array(items) => {
+      out.push(6u8);
+      put_u32(out, items.len() as u32);
+      for i in 0..items.len() {
+        if !put_tree(out, &items[i], input) {
+          return false;
+        }
+      }
+      return true;
+    }
+    Value::Object(members) => {
+      out.push(7u8);
+      put_u32(out, members.len() as u32);
+      for i in 0..members.len() {
+        put_bytes(out, &members[i].key);
+        if !put_tree(out, &members[i].value, input) {
+          return false;
+        }
+      }
+      return true;
+    }
+  }
+}
+
+// ---- Files ----
+
+// At most this many bytes of a JSON file: config.json and the index (checkpoint.py has no limit;
+// GLM-5.3's index is 11 MB), and a shard's header (checkpoint.py's MAX_HEADER_BYTES).
+fn max_json() -> i32 {
+  return 268435456;
+}
+
+fn max_header() -> i32 {
+  return 104857600;
+}
+
+// Up to `n` bytes of `f` from where it is; fewer only at its end.
+fn read_bytes(f : &mut File, n : i32) -> Result<Vec<u8>, FileError> {
+  let mut all = Vec<u8>::new();
+  while all.len() < n {
+    let want = if n - all.len() < 1048576 { n - all.len() } else { 1048576 };
+    let mut chunk = Vec<u8>::with_capacity(want);
+    for _i in 0..want {
+      chunk.push(0u8);
+    }
+    let got = f.read(&mut chunk)?;
+    if got == 0u64 {
+      return Result<Vec<u8>, FileError>::Ok(all);
+    }
+    for i in 0..(got as i32) {
+      all.push(chunk[i]);
+    }
+  }
+  return Result<Vec<u8>, FileError>::Ok(all);
+}
+
+// The size of `f` in bytes, or -1; then reads start at its first byte again.
+fn file_size(f : &mut File) -> i64 {
+  let size = f.seek(0i64, 2);
+  if f.seek(0i64, 0) != 0i64 {
+    return -1i64;
+  }
+  return size;
+}
+
+fn open_in(folder : &Folder, name : &Vec<u8>) -> Result<File, Vec<u8>> {
+  let path = match String::from_utf8(name) {
+    Result<String, Utf8Error>::Ok(s) => { s }
+    Result<String, Utf8Error>::Err(_e) => { return fail<File>(about(lit("a file name is not UTF-8:" as *const u8, 25), name)); }
+  };
+  match folder.open_file(&path) {
+    Result<File, FileError>::Ok(f) => { return Result<File, Vec<u8>>::Ok(f); }
+    Result<File, FileError>::Err(e) => {
+      match e {
+        FileError::NotFound => { return fail<File>(about(lit("no file" as *const u8, 7), name)); }
+        FileError::NotInFolder => {
+          return fail<File>(about(lit("not a plain file in the folder (a symbolic link?):" as *const u8, 50), name));
+        }
+        _ => { return fail<File>(about(lit("cannot open" as *const u8, 11), name)); }
+      }
+    }
+  }
+}
+
+// The JSON file `name`, read whole, with no key twice.
+fn read_json(f : &mut File, name : &Vec<u8>) -> Result<Json, Vec<u8>> {
+  let size = file_size(f);
+  if size < 0i64 || size > (max_json() as i64) {
+    return fail<Json>(about(lit("too big or unreadable:" as *const u8, 22), name));
+  }
+  let bytes = match read_bytes(f, size as i32) {
+    Result<Vec<u8>, FileError>::Ok(b) => { b }
+    Result<Vec<u8>, FileError>::Err(_e) => { return fail<Json>(about(lit("cannot read" as *const u8, 11), name)); }
+  };
+  return parse_unique(bytes, name);
+}
+
+// A parsed JSON text and its bytes, which hold its numbers.
+struct Json {
+  value : Value,
+  input : Vec<u8>,
+}
+
+fn parse_unique(bytes : Vec<u8>, name : &Vec<u8>) -> Result<Json, Vec<u8>> {
+  let value = match parse(&bytes) {
+    Result<Value, JsonError>::Ok(v) => { v }
+    Result<Value, JsonError>::Err(_e) => { return fail<Json>(about(lit("not JSON:" as *const u8, 9), name)); }
+  };
+  if !unique_keys(&value) {
+    return fail<Json>(about(lit("a key twice in an object:" as *const u8, 25), name));
+  }
+  return Result<Json, Vec<u8>>::Ok(Json { value: value, input: bytes });
+}
+
+// ---- A shard ----
+
+struct Shard {
+  name : Vec<u8>,
+  size : i64,
+  data_start : i64,
+  // Its tensors in the header's order, and the set of their names.
+  tensors : Names,
+  dtypes : Vec<u8>,
+  shapes : Vec<Vec<i64>>,
+  starts : Vec<i64>,
+  ends : Vec<i64>,
+}
+
+// checkpoint.py's DTYPE_BYTES, in the table's order (0 F32 .. 6 I64), as names and sizes.
+fn dtype_code(t : &Vec<u8>) -> i32 {
+  let names = lit("F32 F16 BF16 F8_E4M3 F8_E4M3FN I32 I64" as *const u8, 38);
+  let mut code = 0;
+  let mut start = 0;
+  for i in 0..(names.len() + 1) {
+    if i == names.len() || names[i] == 32u8 {
+      if i - start == t.len() {
+        let mut equal = true;
+        for k in 0..t.len() {
+          if names[start + k] != t[k] {
+            equal = false;
+          }
+        }
+        if equal {
+          return code;
+        }
+      }
+      code = code + 1;
+      start = i + 1;
+    }
+  }
+  return -1;
+}
+
+fn dtype_bytes(code : i32) -> i64 {
+  if code == 0 || code == 5 {
+    return 4i64;
+  }
+  if code == 1 || code == 2 {
+    return 2i64;
+  }
+  if code == 6 {
+    return 8i64;
+  }
+  return 1i64;
+}
+
+fn max_i64() -> i64 {
+  return 9223372036854775807i64;
+}
+
+// The shape in `v`: a list of at most 32 integers in 0..2^63-1. `ok` false otherwise.
+struct Shape {
+  ok : bool,
+  dims : Vec<i64>,
+}
+
+fn shape_of(v : &Value, input : &Vec<u8>) -> Shape {
+  let mut dims = Vec<i64>::new();
+  match v {
+    Value::Array(items) => {
+      if items.len() > 32 {
+        return Shape { ok: false, dims: dims };
+      }
+      for i in 0..items.len() {
+        let d = int_of(&items[i], input);
+        if !d.ok || d.value < 0i64 {
+          return Shape { ok: false, dims: dims };
+        }
+        dims.push(d.value);
+      }
+      return Shape { ok: true, dims: dims };
+    }
+    _ => { return Shape { ok: false, dims: dims }; }
+  }
+}
+
+// The elements of `dims`, or -1 past 2^63-1. A 0 makes it 0, as math.prod does.
+fn elements(dims : &Vec<i64>) -> i64 {
+  for i in 0..dims.len() {
+    if dims[i] == 0i64 {
+      return 0i64;
+    }
+  }
+  let mut n = 1i64;
+  for i in 0..dims.len() {
+    if n > max_i64() / dims[i] {
+      return -1i64;
+    }
+    n = n * dims[i];
+  }
+  return n;
+}
+
+// The two offsets in `v`, a list of two integers. `ok` false otherwise.
+fn offsets_of(v : &Value, input : &Vec<u8>) -> Shape {
+  let mut both = Vec<i64>::new();
+  match v {
+    Value::Array(items) => {
+      if items.len() != 2 {
+        return Shape { ok: false, dims: both };
+      }
+      for i in 0..2 {
+        let x = int_of(&items[i], input);
+        if !x.ok {
+          return Shape { ok: false, dims: both };
+        }
+        both.push(x.value);
+      }
+      return Shape { ok: true, dims: both };
+    }
+    _ => { return Shape { ok: false, dims: both }; }
+  }
+}
+
+fn all_text(members : &Vec<Member>) -> bool {
+  for i in 0..members.len() {
+    match &members[i].value {
+      Value::Text(_t) => {}
+      _ => { return false; }
+    }
+  }
+  return true;
+}
+
+// `__metadata__`: an object of strings.
+fn is_metadata(v : &Value) -> bool {
+  match v {
+    Value::Object(members) => { return all_text(members); }
+    _ => { return false; }
+  }
+}
+
+// Add the tensor `name` with entry `spec` to `s`, or say what is wrong with it.
+fn add_tensor(s : &mut Shard, name : &Vec<u8>, spec : &Value, input : &Vec<u8>, data_size : i64) -> Result<i32, Vec<u8>> {
+  let bad = about(lit("an invalid tensor entry" as *const u8, 23), name);
+  match spec {
+    Value::Object(fields) => {
+      let d = member(fields, &lit("dtype" as *const u8, 5));
+      let sh = member(fields, &lit("shape" as *const u8, 5));
+      let o = member(fields, &lit("data_offsets" as *const u8, 12));
+      if name.len() == 0 || fields.len() != 3 || d < 0 || sh < 0 || o < 0 {
+        return fail<i32>(bad);
+      }
+      let code = match &fields[d].value {
+        Value::Text(t) => { dtype_code(t) }
+        _ => { -1 }
+      };
+      if code < 0 {
+        return fail<i32>(about(lit("an unsupported dtype for" as *const u8, 24), name));
+      }
+      let shape = shape_of(&fields[sh].value, input);
+      if !shape.ok {
+        return fail<i32>(about(lit("an invalid shape for" as *const u8, 20), name));
+      }
+      let offsets = offsets_of(&fields[o].value, input);
+      if !offsets.ok {
+        return fail<i32>(about(lit("invalid offsets for" as *const u8, 19), name));
+      }
+      let start = offsets.dims[0];
+      let end = offsets.dims[1];
+      if start < 0i64 || end < start || end > data_size {
+        return fail<i32>(about(lit("out-of-bounds offsets for" as *const u8, 25), name));
+      }
+      let n = elements(&shape.dims);
+      let size = dtype_bytes(code);
+      if n < 0i64 || (end - start) % size != 0i64 || (end - start) / size != n {
+        return fail<i32>(about(lit("a byte count that does not match the shape and dtype for" as *const u8, 56), name));
+      }
+      if add_name(&mut s.tensors, name) < 0 {
+        return fail<i32>(bad);
+      }
+      s.dtypes.push(code as u8);
+      s.shapes.push(shape.dims);
+      s.starts.push(start);
+      s.ends.push(end);
+      return Result<i32, Vec<u8>>::Ok(0);
+    }
+    _ => { return fail<i32>(bad); }
+  }
+}
+
+// Whether tensor `a` sorts before tensor `b`: by start, then end.
+fn before(s : &Shard, a : i32, b : i32) -> bool {
+  return s.starts[a] < s.starts[b] || (s.starts[a] == s.starts[b] && s.ends[a] < s.ends[b]);
+}
+
+// The tensors' indices by start, then end: a bottom-up merge sort.
+fn by_offset(s : &Shard) -> Vec<i32> {
+  let n = s.starts.len();
+  let mut order = Vec<i32>::with_capacity(n);
+  let mut other = Vec<i32>::with_capacity(n);
+  for i in 0..n {
+    order.push(i);
+    other.push(i);
+  }
+  let mut width = 1;
+  while width < n {
+    let mut lo = 0;
+    while lo < n {
+      let mid = if lo + width < n { lo + width } else { n };
+      let hi = if lo + 2 * width < n { lo + 2 * width } else { n };
+      let mut i = lo;
+      let mut j = mid;
+      for k in lo..hi {
+        if i < mid && (j >= hi || !before(s, order[j], order[i])) {
+          other.set(k, order[i]);
+          i = i + 1;
+        } else {
+          other.set(k, order[j]);
+          j = j + 1;
+        }
+      }
+      lo = hi;
+    }
+    for k in 0..n {
+      order.set(k, other[k]);
+    }
+    width = width * 2;
+  }
+  return order;
+}
+
+fn header_members(s : &mut Shard, v : &Value, input : &Vec<u8>, data_size : i64) -> Result<i32, Vec<u8>> {
+  match v {
+    Value::Object(members) => {
+      s.tensors = new_names(members.len());
+      let meta = lit("__metadata__" as *const u8, 12);
+      for i in 0..members.len() {
+        if same(&members[i].key, &meta) {
+          if !is_metadata(&members[i].value) {
+            return fail<i32>(about(lit("metadata that is not strings in" as *const u8, 31), &s.name));
+          }
+        } else {
+          let _added = add_tensor(s, &members[i].key, &members[i].value, input, data_size)?;
+        }
+      }
+      return Result<i32, Vec<u8>>::Ok(0);
+    }
+    _ => { return fail<i32>(about(lit("a header that is not an object in" as *const u8, 33), &s.name)); }
+  }
+}
+
+// The shard `name`: its header, checked as checkpoint.py's SafetensorsFile checks it.
+fn read_shard(folder : &Folder, name : &Vec<u8>) -> Result<Shard, Vec<u8>> {
+  let mut f = open_in(folder, name)?;
+  let size = file_size(&mut f);
+  if size < 8i64 {
+    return fail<Shard>(about(lit("a truncated length prefix in" as *const u8, 28), name));
+  }
+  let prefix = match read_bytes(&mut f, 8) {
+    Result<Vec<u8>, FileError>::Ok(b) => { b }
+    Result<Vec<u8>, FileError>::Err(_e) => { return fail<Shard>(about(lit("cannot read" as *const u8, 11), name)); }
+  };
+  let length = get_u64(&prefix, 0);
+  if prefix.len() != 8 || length < 2u64 || length > (max_header() as u64) || length > ((size - 8i64) as u64) {
+    return fail<Shard>(about(lit("an invalid header length in" as *const u8, 27), name));
+  }
+  let header = match read_bytes(&mut f, length as i32) {
+    Result<Vec<u8>, FileError>::Ok(b) => { b }
+    Result<Vec<u8>, FileError>::Err(_e) => { return fail<Shard>(about(lit("cannot read" as *const u8, 11), name)); }
+  };
+  if header.len() != (length as i32) || header[0] != 123u8 {
+    return fail<Shard>(about(lit("a header that does not begin with '{' in" as *const u8, 40), name));
+  }
+  let json = parse_unique(header, name)?;
+  let data_start = 8i64 + (length as i64);
+  let mut s = Shard { name: copy(name), size: size, data_start: data_start, tensors: new_names(0),
+                      dtypes: Vec<u8>::new(), shapes: Vec<Vec<i64>>::new(), starts: Vec<i64>::new(), ends: Vec<i64>::new() };
+  let _m = header_members(&mut s, &json.value, &json.input, size - data_start)?;
+  // The tensors must cover the data from its first byte to its last, with no gap and no overlap.
+  let order = by_offset(&s);
+  let mut cursor = 0i64;
+  for k in 0..order.len() {
+    if s.starts[order[k]] != cursor {
+      return fail<Shard>(about(lit("an overlap or a gap before" as *const u8, 26), &s.tensors.names[order[k]]));
+    }
+    cursor = s.ends[order[k]];
+  }
+  if cursor != size - data_start {
+    return fail<Shard>(about(lit("unclaimed bytes at the end of" as *const u8, 29), name));
+  }
+  return Result<Shard, Vec<u8>>::Ok(s);
+}
+
+// ---- The index ----
+
+// A shard's name as checkpoint.py's _shard_path takes it: a plain file name ending in .safetensors.
+fn safe_shard_name(name : &Vec<u8>) -> bool {
+  let ending = lit(".safetensors" as *const u8, 12);
+  if name.len() < ending.len() {
+    return false;
+  }
+  for i in 0..name.len() {
+    if name[i] == 47u8 || name[i] == 92u8 {
+      return false;
+    }
+  }
+  for k in 0..ending.len() {
+    if name[name.len() - ending.len() + k] != ending[k] {
+      return false;
+    }
+  }
+  return true;
+}
+
+// The weight map: each tensor's name, and the index of its shard in `shards`.
+struct WeightMap {
+  names : Vec<Vec<u8>>,
+  shard_of : Vec<i32>,
+  shards : Names,
+}
+
+fn check_metadata(v : &Value, input : &Vec<u8>) -> bool {
+  match v {
+    Value::Object(meta) => {
+      let total = member(meta, &lit("total_size" as *const u8, 10));
+      if total < 0 {
+        return true;
+      }
+      match &meta[total].value {
+        Value::Null => { return true; }
+        _ => {}
+      }
+      let t = int_of(&meta[total].value, input);
+      return t.ok && t.value >= 0i64;
+    }
+    _ => { return false; }
+  }
+}
+
+fn weight_map(v : &Value) -> Result<WeightMap, Vec<u8>> {
+  match v {
+    Value::Object(entries) => {
+      if entries.len() == 0 {
+        return fail<WeightMap>(lit("the index's weight_map is empty" as *const u8, 31));
+      }
+      let mut map = WeightMap { names: Vec<Vec<u8>>::with_capacity(entries.len()), shard_of: Vec<i32>::with_capacity(entries.len()),
+                                shards: new_names(entries.len()) };
+      for i in 0..entries.len() {
+        let name = &entries[i].key;
+        let shard = match &entries[i].value {
+          Value::Text(t) => { copy(t) }
+          _ => { return fail<WeightMap>(about(lit("the index names no shard file for" as *const u8, 33), name)); }
+        };
+        if name.len() == 0 || !safe_shard_name(&shard) {
+          return fail<WeightMap>(about(lit("an unsafe shard file name:" as *const u8, 26), &shard));
+        }
+        let mut s = find_name(&map.shards, &shard);
+        if s < 0 {
+          s = add_name(&mut map.shards, &shard);
+        }
+        map.names.push(copy(name));
+        map.shard_of.push(s);
+      }
+      return Result<WeightMap, Vec<u8>>::Ok(map);
+    }
+    _ => { return fail<WeightMap>(lit("the index has no weight_map object" as *const u8, 34)); }
+  }
+}
+
+fn index_map(v : &Value, input : &Vec<u8>) -> Result<WeightMap, Vec<u8>> {
+  match v {
+    Value::Object(top) => {
+      let w = member(top, &lit("weight_map" as *const u8, 10));
+      let m = member(top, &lit("metadata" as *const u8, 8));
+      let mut known = 0;
+      if w >= 0 {
+        known = known + 1;
+      }
+      if m >= 0 {
+        known = known + 1;
+      }
+      if w < 0 || top.len() != known {
+        return fail<WeightMap>(lit("the index has fields other than weight_map and metadata, or no weight_map" as *const u8, 73));
+      }
+      if m >= 0 && !check_metadata(&top[m].value, input) {
+        return fail<WeightMap>(lit("the index's metadata is not an object with a nonnegative integer total_size" as *const u8, 75));
+      }
+      return weight_map(&top[w].value);
+    }
+    _ => { return fail<WeightMap>(lit("the index is not an object" as *const u8, 26)); }
+  }
+}
+
+// ---- The folder ----
+
+fn config_tree(out : &mut Vec<u8>, json : &Json) -> Result<i32, Vec<u8>> {
+  match &json.value {
+    Value::Object(_members) => {}
+    _ => { return fail<i32>(lit("config.json is not an object" as *const u8, 28)); }
+  }
+  if !put_tree(out, &json.value, &json.input) {
+    return fail<i32>(lit("config.json has an integer past 64 bits" as *const u8, 39));
+  }
+  return Result<i32, Vec<u8>>::Ok(0);
+}
+
+fn put_shard(out : &mut Vec<u8>, s : &Shard) -> void {
+  put_bytes(out, &s.name);
+  put_u64(out, s.size as u64);
+  put_u64(out, s.data_start as u64);
+}
+
+fn put_tensor(out : &mut Vec<u8>, name : &Vec<u8>, shard : i32, s : &Shard, t : i32) -> void {
+  put_bytes(out, name);
+  put_u32(out, shard as u32);
+  out.push(s.dtypes[t]);
+  out.push(s.shapes[t].len() as u8);
+  for k in 0..s.shapes[t].len() {
+    put_u64(out, s.shapes[t][k] as u64);
+  }
+  put_u64(out, s.starts[t] as u64);
+  put_u64(out, s.ends[t] as u64);
+}
+
+// The folder's table (docs/MODEL-TABLE.md), or what is wrong with the folder.
+pub fn read_model(folder : &Folder) -> Result<Vec<u8>, Vec<u8>> {
+  let mut out = lit("glm-vx-table 1\n" as *const u8, 15);
+  let config_name = lit("config.json" as *const u8, 11);
+  let mut config_file = open_in(folder, &config_name)?;
+  let config = read_json(&mut config_file, &config_name)?;
+  let _c = config_tree(&mut out, &config)?;
+  let index_name = lit("model.safetensors.index.json" as *const u8, 28);
+  let single = lit("model.safetensors" as *const u8, 17);
+  let mut shards = Vec<Shard>::new();
+  let mut names = Vec<Vec<u8>>::new();
+  let mut shard_of = Vec<i32>::new();
+  let index_path = match String::from_utf8(&index_name) {
+    Result<String, Utf8Error>::Ok(s) => { s }
+    Result<String, Utf8Error>::Err(_e) => { return fail<Vec<u8>>(Vec<u8>::new()); }
+  };
+  let mut has_index = true;
+  match folder.open_file(&index_path) {
+    Result<File, FileError>::Ok(_f) => {}
+    Result<File, FileError>::Err(e) => {
+      match e {
+        FileError::NotFound => { has_index = false; }
+        _ => {}
+      }
+    }
+  }
+  if has_index {
+    let mut index_file = open_in(folder, &index_name)?;
+    let index = read_json(&mut index_file, &index_name)?;
+    let map = index_map(&index.value, &index.input)?;
+    for k in 0..map.shards.names.len() {
+      let s = read_shard(folder, &map.shards.names[k])?;
+      shards.push(s);
+    }
+    for i in 0..map.names.len() {
+      names.push(copy(&map.names[i]));
+      shard_of.push(map.shard_of[i]);
+    }
+  } else {
+    let s = read_shard(folder, &single)?;
+    for t in 0..s.tensors.names.len() {
+      names.push(copy(&s.tensors.names[t]));
+      shard_of.push(0);
+    }
+    shards.push(s);
+  }
+  put_u32(&mut out, shards.len() as u32);
+  for k in 0..shards.len() {
+    put_shard(&mut out, &shards[k]);
+  }
+  put_u32(&mut out, names.len() as u32);
+  for i in 0..names.len() {
+    let k = shard_of[i];
+    let t = find_name(&shards[k].tensors, &names[i]);
+    if t < 0 {
+      return fail<Vec<u8>>(about(about(lit("the index puts a tensor in a shard that lacks it:" as *const u8, 49), &names[i]),
+                                 &shards[k].name));
+    }
+    put_tensor(&mut out, &names[i], k, &shards[k], t);
+  }
+  return Result<Vec<u8>, Vec<u8>>::Ok(out);
+}

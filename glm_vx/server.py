@@ -171,6 +171,8 @@ def parse_args(argv=None):
     p.add_argument('--decoded-cache-mib',type=int,default=512,help='bounded GGUF decoded-weight cache')
     p.add_argument('--packed-weights',action='store_true',help='opt in to Vx packed GGUF dot products with F32 activations')
     p.add_argument('--tokenizer',help='local tokenizer.json')
+    p.add_argument('--model-reader',metavar='BINARY',help="read --checkpoint's config.json, index and shard headers with the Vx reader "
+                   '(reader/build/glm-vx-reader), so this process parses nothing from the model folder (docs/MODEL-TABLE.md)')
     p.add_argument('--host',default='127.0.0.1'); p.add_argument('--port',type=int,default=8000)
     p.add_argument('--front',metavar='BINARY',help='serve HTTP through the Vx front end (front/build/glm-vx-front), '
                    'which this process starts and feeds over its standard input and output (docs/ENGINE-LINK.md)')
@@ -195,6 +197,7 @@ def parse_args(argv=None):
     args=p.parse_args(argv)
     if args.packed_weights and (not args.gguf or args.backend != 'vx'):p.error('packed weights requires --gguf and --backend vx')
     if args.prefix_cache_mib<0:p.error('prefix cache must be nonnegative')
+    if args.model_reader and not args.checkpoint:p.error('--model-reader reads a safetensors --checkpoint')
     if args.front and args.port==0:p.error('--front needs a fixed --port: the front end binds it, so this process cannot report a port 0 picks')
     if args.max_pending_events<2:p.error('max pending events must be at least two')
     if args.gpu_weight_cache_mib is not None and args.gpu_weight_cache_mib<0:p.error('GPU weight cache must be nonnegative')
@@ -260,14 +263,14 @@ def build_model(args):
         # --tp-option: one GPU with gpu/tp_serve.py's options and no followers (ResidentGLM drops a 1-rank TP).
         from gpu import resident,tp_serve
         model,backend=tp_serve.start(args.checkpoint,args.tp,args.max_context,one_shot=args.tp_sum=='one-shot',layers=args.layers,
-                                     options=getattr(args,'tp_options',None))
+                                     options=getattr(args,'tp_options',None),reader=args.model_reader)
         return preloaded(args,resident.ResidentSequenceModel(model,backend),backend),backend,model.weights,'glm-5.3-vx-experimental'
     else:
-        from .checkpoint import Checkpoint
         from .config import GLMConfig
-        with open(args.checkpoint+'/config.json') as f:config=json.load(f)
+        from .model_table import open_checkpoint,read_folder
+        config,table=read_folder(args.checkpoint,args.model_reader)
         validated=GLMConfig.from_dict(config)
-        weights=Checkpoint(args.checkpoint,block_size=validated.weight_block_size)
+        weights=open_checkpoint(args.checkpoint,table,block_size=validated.weight_block_size)
         weights.validate_manifest(validated.tensor_shapes(),inspect_shards=True)
         name='glm-5.3-vx-experimental'
     model=Model(config,weights,backend,packed_weights=args.packed_weights)
