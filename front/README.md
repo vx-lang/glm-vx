@@ -1,6 +1,6 @@
 # glm-vx-front: the HTTP front end in Vx (#68)
 
-`glm-vx-front` reads every byte that comes from the network. The engine (`glm_vx/server.py`, Python, the GPUs) starts it and talks to it only over its standard input and output, in the fixed frames of [docs/ENGINE-LINK.md](../docs/ENGINE-LINK.md). The engine has no listener.
+`glm-vx-front` reads every byte that comes from the network. The engine (`glm_vx/server.py`, Python, the GPUs) starts it and talks to it only over its standard input and output, in the fixed frames of [docs/ENGINE-LINK.md](../docs/ENGINE-LINK.md). The engine has no listener. [docs/SECURITY.md](../docs/SECURITY.md) goes through SGLang's advisories and why each cannot happen here.
 
 ```
 client --HTTP--> glm-vx-front (Vx)                 --frames on stdin/stdout--> engine (Python)

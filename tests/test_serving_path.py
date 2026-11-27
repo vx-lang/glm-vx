@@ -3,13 +3,14 @@
 The serving path is every module of this repository that `python -m glm_vx.server` can import. The
 test finds it by following the import statements from glm_vx.server, also those inside functions,
 so the GPU modules are on it. None of them may:
-- import pickle, dill, cloudpickle, marshal, shelve, joblib, jinja2, yaml or torch;
+- import pickle, dill, cloudpickle, marshal, shelve, joblib, jinja2, yaml, torch or transformers;
 - call eval, exec, compile or __import__, or importlib.import_module with a name it computes;
 - call numpy.load with allow_pickle=True.
 
 SGLang's CVE-2026-3059 and CVE-2026-3060 (CERT VU#665416: pickle.loads on a ZMQ socket) and
 CVE-2026-5760 (CERT VU#915947: a model's chat template rendered by an unsandboxed Jinja2) are this
-class. glm_vx/generate.py renders chat templates with Jinja2's sandbox; it is not on the path.
+class, and docs/SECURITY.md lists the rest. glm_vx/generate.py renders chat templates with Jinja2's
+sandbox, and glm_vx/disaggregated.py is a CPU demo on pipes; neither is on the path.
 
 numpy itself imports pickle (np.load of object arrays), so `sys.modules` after an import shows
 nothing; this test reads the source instead.
@@ -20,7 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ENTRY = 'glm_vx.server'
 FORBIDDEN = {'pickle', '_pickle', 'cPickle', 'cloudpickle', 'dill', 'marshal', 'shelve', 'joblib', 'jinja2',
-             'yaml', 'torch'}
+             'yaml', 'torch', 'transformers'}
 BUILTINS = {'eval', 'exec', 'compile', '__import__'}
 
 
@@ -73,7 +74,7 @@ def test_the_walk_reaches_the_engine_the_link_and_the_gpu_modules():
     for module in ('glm_vx.server', 'glm_vx.link', 'glm_vx.scheduler', 'glm_vx.prefix', 'glm_vx.checkpoint',
                    'glm_vx.gguf_reader', 'gpu.tp_serve', 'gpu.resident', 'kernels.backend'):
         assert module in found, sorted(found)
-    assert 'glm_vx.generate' not in found
+    assert 'glm_vx.generate' not in found and 'glm_vx.disaggregated' not in found
 
 
 def test_no_serving_module_imports_a_deserializer_or_a_template_engine():
