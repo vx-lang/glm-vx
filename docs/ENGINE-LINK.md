@@ -59,6 +59,7 @@ From the engine to the front end:
   - a flag bit that is not 0;
   - a SUBMIT whose id is in use.
 
-  The engine cancels the link's requests and stops reading. It does not try to find the next frame.
+  The engine cancels the link's requests and stops reading. It does not try to find the next frame. It kills the
+  front end and starts a new one, as it does when a front end stops on its own (see `FrontEnd` in `glm_vx/link.py`).
 - **A well-formed SUBMIT with a bad value is the request's error, not the link's.** Examples: a token id past the vocabulary, a negative or non-finite temperature, a prompt past the context. The engine answers with ERROR code 2.
 - **A CANCEL for an id not in use is ignored**, since the request may have just finished.

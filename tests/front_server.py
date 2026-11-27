@@ -52,11 +52,10 @@ class FrontServer:
         self._stop.set()
 
     def server_close(self):
-        alive = self.front.process.poll() is None
-        code = self.front.process.poll()
+        restarts = list(self.front.restarts)
         self.front.close()
         assert self.front.error is None, self.front.error
-        assert alive, f'the front end died during the test with {code}'
+        assert not restarts, f'the front end stopped during the test: {restarts}'
 
 
 def use(request, monkeypatch, module_name):

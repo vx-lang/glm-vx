@@ -51,6 +51,10 @@ The replies are `server.py`'s: the same JSON fields, SSE framing and heartbeats,
 ## What this does not cover
 
 - **Memory bugs in trusted code.** That includes `std`'s `unsafe` blocks, the Vx compiler, the Python engine and the CUDA driver. Vx main 973d80f9b frees a value twice when it is moved into a call whose `Err` is returned by `?` from inside a block (Vx #4142). `src/request.vx` avoids that pattern. `FRONT_PRELOAD=$(clang -print-file-name=libclang_rt.asan-x86_64.so)` runs the test programs and the front end under AddressSanitizer.
-- **A panic.** For example, an index out of range stops the front end. That is a denial of service, not code execution. Restarting it is the engine's job, and that is not written yet.
+- **A panic.** For example, an index out of range stops the front end. That is a denial of service, not code execution:
+  - every open connection is lost, and the engine cancels the requests they carried;
+  - the engine then starts a new front end on the same address and shows the count as `front_end_restarts` in `/health`;
+  - after 5 restarts within 60 s it stops, and so does `server.py`, with the error.
+  `tests/test_front_restart.py` checks these.
 - **Text prompts are still tokenized by the engine** with HF `tokenizers` (SUBMIT_TEXT), until #68's step 3 moves the tokenizer into `front`.
 - **An exported `extern fn`.** Vx main 973d80f9b's `--no-trusted-code` lets an `extern fn` with pointer `requires` through, though `--audit` lists them (Vx #4144). The audit test catches one in `front`.

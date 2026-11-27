@@ -6,6 +6,7 @@ on its standard input. Each frame is parsed with `struct`, after a check of its 
 import json
 import queue
 import struct
+import sys
 import threading
 import time
 
@@ -297,48 +298,94 @@ class FrontEnd:
     """Run the Vx front end (front/build/glm-vx-front) on `address` and serve its link.
 
     The front end listens; the engine has no listener. Its standard input and output are the
-    link, so it needs no right to reach the engine. wait() returns when it exits, and close()
-    stops it.
+    link, so it needs no right to reach the engine.
+
+    A front end that stops when close() did not ask it to (a panic, a signal, a malformed frame)
+    loses its connections, and the engine cancels the requests it carried. A new one then binds the
+    same address. After `max_restarts` restarts within `window` seconds the engine gives up: wait()
+    returns the last exit code and `error` says why. `restarts` lists (time, exit code, error).
     """
 
     def __init__(self, binary, host, port, scheduler, tokenizer=None, model_name='glm-vx-tiny-random',
-                 heartbeat_seconds=None, env=None):
-        import subprocess
+                 heartbeat_seconds=None, env=None, max_restarts=5, window=60.0):
         self.health = lambda: {'status': 'ok', 'model': model_name,
                                'backend': getattr(getattr(scheduler.model, 'backend', None), 'name', None),
-                               **scheduler.status()}
-        argv = [str(binary), f'{host}:{port}', model_name]
+                               'front_end_restarts': len(self.restarts), **scheduler.status()}
+        self.argv = [str(binary), f'{host}:{port}', model_name]
         if heartbeat_seconds is not None:
-            argv.append(str(max(1, round(heartbeat_seconds * 1000))))
-        self.process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env)
-        self.link = EngineLink(scheduler, self.process.stdout, self.process.stdin, tokenizer, status=self.health)
-        self.error = None
+            self.argv.append(str(max(1, round(heartbeat_seconds * 1000))))
+        self.scheduler, self.tokenizer, self.env = scheduler, tokenizer, env
+        self.max_restarts, self.window = max_restarts, window
+        self.restarts, self.error, self.code = [], None, None
+        self.lock, self.closing, self.done = threading.Lock(), threading.Event(), threading.Event()
+        self._start()
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
 
-    def _run(self):
+    def _start(self):
+        import subprocess
+        self.process = subprocess.Popen(self.argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=self.env)
+        self.link = EngineLink(self.scheduler, self.process.stdout, self.process.stdin, self.tokenizer,
+                               status=self.health)
+
+    def _serve(self):
+        """Serve the current front end until it stops; its exit code and the link's error."""
+        process, error = self.process, None
         try:
             self.link.run()
         except ProtocolError as exc:
-            self.error = exc
-            self.process.kill()
+            error = exc
+            process.kill()
         finally:
             try:
-                self.process.stdin.close()
+                process.stdin.close()
             except OSError:
                 pass
+        try:
+            return process.wait(10), error
+        except Exception:  # its standard output closed, but it did not exit
+            process.kill()
+            return process.wait(), error
+
+    def _run(self):
+        try:
+            while True:
+                self.code, error = self._serve()
+                if self.closing.is_set():
+                    return
+                now = time.monotonic()
+                recent = [t for t, _, _ in self.restarts if now - t < self.window]
+                if len(recent) >= self.max_restarts:
+                    self.error = error or RuntimeError(f'the front end stopped {len(recent) + 1} times '
+                                                       f'in {self.window:g} s, the last with {self.code}')
+                    return
+                self.restarts.append((now, self.code, error))
+                print(json.dumps({'front_end_stopped': self.code, 'error': str(error) if error else None,
+                                  'restart': len(self.restarts)}), file=sys.stderr, flush=True)
+                if self.closing.wait(min(0.05 * 2 ** len(recent), 2.0)):
+                    return
+                with self.lock:
+                    if self.closing.is_set():
+                        return
+                    self._start()
+        finally:
+            self.done.set()
 
     def wait(self):
-        code = self.process.wait()
+        """The exit code of the last front end, once the engine stops restarting it."""
+        self.done.wait()
         self.thread.join(10)
-        return code
+        return self.code
 
     def close(self):
-        if self.process.poll() is None:
-            self.process.terminate()
+        with self.lock:
+            self.closing.set()
+            process = self.process
+        if process.poll() is None:
+            process.terminate()
             try:
-                self.process.wait(10)
+                process.wait(10)
             except Exception:
-                self.process.kill()
-                self.process.wait()
+                process.kill()
+                process.wait()
         self.thread.join(10)
