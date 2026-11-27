@@ -29,17 +29,17 @@ macro_rules! wait_flag {
     };
 }
 
-pub fn glm_vx_spawn_tp_all_reduce(x: &mut Tensor<f32, [?], Memory::HBM>, mine: &mut Tensor<f32, [?], Memory::HBM>,
-                                  my_flags: &mut Tensor<u32, [?], Memory::HBM>, epochs: &mut Tensor<u32, [?], Memory::HBM>,
-                                  d0: &Tensor<f32, [?], Memory::HBM>, d1: &Tensor<f32, [?], Memory::HBM>,
-                                  d2: &Tensor<f32, [?], Memory::HBM>, d3: &Tensor<f32, [?], Memory::HBM>,
-                                  d4: &Tensor<f32, [?], Memory::HBM>, d5: &Tensor<f32, [?], Memory::HBM>,
-                                  d6: &Tensor<f32, [?], Memory::HBM>, d7: &Tensor<f32, [?], Memory::HBM>,
-                                  f0: &Tensor<u32, [?], Memory::HBM>, f1: &Tensor<u32, [?], Memory::HBM>,
-                                  f2: &Tensor<u32, [?], Memory::HBM>, f3: &Tensor<u32, [?], Memory::HBM>,
-                                  f4: &Tensor<u32, [?], Memory::HBM>, f5: &Tensor<u32, [?], Memory::HBM>,
-                                  f6: &Tensor<u32, [?], Memory::HBM>, f7: &Tensor<u32, [?], Memory::HBM>,
-                                  ranks: i32, n: i32) -> void {
+pub extern fn glm_vx_spawn_tp_all_reduce(x: &mut Tensor<f32, [?], Memory::HBM>, mine: &mut Tensor<f32, [?], Memory::HBM>,
+                                         my_flags: &mut Tensor<u32, [?], Memory::HBM>, epochs: &mut Tensor<u32, [?], Memory::HBM>,
+                                         d0: &Tensor<f32, [?], Memory::HBM>, d1: &Tensor<f32, [?], Memory::HBM>,
+                                         d2: &Tensor<f32, [?], Memory::HBM>, d3: &Tensor<f32, [?], Memory::HBM>,
+                                         d4: &Tensor<f32, [?], Memory::HBM>, d5: &Tensor<f32, [?], Memory::HBM>,
+                                         d6: &Tensor<f32, [?], Memory::HBM>, d7: &Tensor<f32, [?], Memory::HBM>,
+                                         f0: &Tensor<u32, [?], Memory::HBM>, f1: &Tensor<u32, [?], Memory::HBM>,
+                                         f2: &Tensor<u32, [?], Memory::HBM>, f3: &Tensor<u32, [?], Memory::HBM>,
+                                         f4: &Tensor<u32, [?], Memory::HBM>, f5: &Tensor<u32, [?], Memory::HBM>,
+                                         f6: &Tensor<u32, [?], Memory::HBM>, f7: &Tensor<u32, [?], Memory::HBM>,
+                                         ranks: i32, n: i32) -> void {
   spawn on(Topology::Device) {
     for b in 0..(n + 255) / 256 across blocks {
       // 1. This block's part of x into this call's half of mine.

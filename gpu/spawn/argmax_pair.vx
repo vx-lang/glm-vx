@@ -7,8 +7,8 @@
 // so it is chosen only as x[0] with nothing larger after it. A bad dim or threads writes NaN and -1.
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_argmax_pair(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
-                                dim: i32, offset: i32, threads: i32) -> void {
+pub extern fn glm_vx_spawn_argmax_pair(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                                       dim: i32, offset: i32, threads: i32) -> void {
   spawn on(Topology::Device) {
     for block in 0..1 across blocks {
       if dim > 0 && threads >= 32 && threads <= 1024 && threads % 32 == 0 {

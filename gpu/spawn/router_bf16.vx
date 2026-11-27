@@ -31,10 +31,10 @@ macro_rules! beats {
     };
 }
 
-pub fn glm_vx_spawn_router_bf16(indices: &mut Tensor<i32, [?], Memory::HBM>, weights: &mut Tensor<f32, [?], Memory::HBM>,
-                                logits: &mut Tensor<f32, [?], Memory::HBM>, gate: &Tensor<u32, [?], Memory::HBM>,
-                                x: &Tensor<f32, [?], Memory::HBM>, bias: &Tensor<f32, [?], Memory::HBM>,
-                                experts: i32, cols: i32, k: i32, scale: f32) -> void {
+pub extern fn glm_vx_spawn_router_bf16(indices: &mut Tensor<i32, [?], Memory::HBM>, weights: &mut Tensor<f32, [?], Memory::HBM>,
+                                       logits: &mut Tensor<f32, [?], Memory::HBM>, gate: &Tensor<u32, [?], Memory::HBM>,
+                                       x: &Tensor<f32, [?], Memory::HBM>, bias: &Tensor<f32, [?], Memory::HBM>,
+                                       experts: i32, cols: i32, k: i32, scale: f32) -> void {
   spawn on(Topology::Device) {
     for row in 0..experts across blocks {
       let mut products = unsafe { Tensor<f32, [8192], Memory::SMEM>::uninit() };

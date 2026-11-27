@@ -5,9 +5,9 @@
 // keys): lane l scores key 256 * kb + l.
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_index_scores_rows(scores: &mut Tensor<f32, [?, ?], Memory::HBM>, q: &Tensor<f32, [?, ?, ?], Memory::HBM>,
-                                      keys: &Tensor<f32, [?, ?], Memory::HBM>, weights: &Tensor<f32, [?, ?], Memory::HBM>,
-                                      start: i32, queries: i32, heads: i32, dim: i32, scale: f32) -> void {
+pub extern fn glm_vx_spawn_index_scores_rows(scores: &mut Tensor<f32, [?, ?], Memory::HBM>, q: &Tensor<f32, [?, ?, ?], Memory::HBM>,
+                                             keys: &Tensor<f32, [?, ?], Memory::HBM>, weights: &Tensor<f32, [?, ?], Memory::HBM>,
+                                             start: i32, queries: i32, heads: i32, dim: i32, scale: f32) -> void {
   spawn on(Topology::Device) {
     for i in 0..queries across blocks {
       for kb in 0..(start + queries + 255) / 256 across blocks {

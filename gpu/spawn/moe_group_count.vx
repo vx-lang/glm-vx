@@ -2,7 +2,7 @@
 // = the pairs of expert e among pairs 256 b .. 256 b + 255 of ids. prefill_chunk's grouped experts, on the device.
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_moe_group_count(counts : &mut Tensor<i32, [?, ?], Memory::HBM>, ids : &Tensor<i32, [?], Memory::HBM>, n : i32, experts : i32) -> void {
+pub extern fn glm_vx_spawn_moe_group_count(counts : &mut Tensor<i32, [?, ?], Memory::HBM>, ids : &Tensor<i32, [?], Memory::HBM>, n : i32, experts : i32) -> void {
   spawn on(Topology::Device) {
     for b in 0..(n + 255) / 256 across blocks {
       let mut keys = unsafe { Tensor<i32, [256], Memory::SMEM>::uninit() };

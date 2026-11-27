@@ -1,4 +1,4 @@
-"""Launch a gpu/spawn kernel through Vx's own runtime: call the kernel's `pub fn` in the shared
+"""Launch a gpu/spawn kernel through Vx's own runtime: call the kernel's `pub extern fn` in the shared
 library build.py --library made, and Vx's CUDA backend launches it with the shape that the
 region's `across` loops give (Vx #252).
 

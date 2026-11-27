@@ -47,8 +47,8 @@ fn vxk_quant_max(a: f32, b: f32) -> f32 {
 // scale_rows >= rows. cuBLASLt takes a multiple of 4 tokens (gpu/cublaslt.py), so one token's
 // scales sit 4 apart: rows 1, scale_rows 4. One warp a (row, group): lane l quantizes l, l + 32,
 // l + 64, l + 96. Launch 128 threads, ceil(rows * cols / 128 / 4) blocks.
-pub fn glm_vx_gpu_fp8_quant_groups(codes: *mut u8, scales: *mut f32, x: *const f32, rows: i32, cols: i32,
-                                   scale_rows: i32) -> void {
+pub extern fn glm_vx_gpu_fp8_quant_groups(codes: *mut u8, scales: *mut f32, x: *const f32, rows: i32, cols: i32,
+                                          scale_rows: i32) -> void {
   if rows <= 0 { return; }
   if scale_rows < rows { return; }
   if cols <= 0 { return; }

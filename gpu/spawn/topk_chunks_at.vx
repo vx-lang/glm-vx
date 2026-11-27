@@ -54,8 +54,8 @@ macro_rules! bitonic_stage {
     };
 }
 
-pub fn glm_vx_spawn_topk_chunks_at(lists: &mut Tensor<i64, [?, ?], Memory::HBM>, scores: &Tensor<i32, [?], Memory::HBM>,
-                                   step: &Tensor<i32, [?], Memory::HBM>, max_tokens: i32) -> void {
+pub extern fn glm_vx_spawn_topk_chunks_at(lists: &mut Tensor<i64, [?, ?], Memory::HBM>, scores: &Tensor<i32, [?], Memory::HBM>,
+                                          step: &Tensor<i32, [?], Memory::HBM>, max_tokens: i32) -> void {
   spawn on(Topology::Device) {
     for c in 0..(max_tokens + 2047) / 2048 across blocks {
       let tokens: i32 = step[1];

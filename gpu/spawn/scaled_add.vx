@@ -3,8 +3,8 @@
 // the hand kernel and the host path.
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_scaled_add(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
-                               weights: &Tensor<f32, [?], Memory::HBM>, slot: i32, n: i32) -> void {
+pub extern fn glm_vx_spawn_scaled_add(out: &mut Tensor<f32, [?], Memory::HBM>, x: &Tensor<f32, [?], Memory::HBM>,
+                                      weights: &Tensor<f32, [?], Memory::HBM>, slot: i32, n: i32) -> void {
   spawn on(Topology::Device) {
     let w: f32 = weights[slot];
     for blk in 0..(n - 1) / 256 + 1 across blocks {

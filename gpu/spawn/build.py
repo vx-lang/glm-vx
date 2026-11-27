@@ -2,7 +2,7 @@
 """Build a glm-vx kernel through Vx's own GPU path (spawn on), with no extern adapter.
 
 `vxc --emit-ptx` writes the PTX of the one `spawn on(Topology::Device)` region in SOURCE, with
-the entry named after the `pub fn` that holds it, and a manifest of its parameters: the
+the entry named after the function that holds it, and a manifest of its parameters: the
 function's parameters, in declared order (Vx docs/lang/abi.md section 3.5). A scalar is passed
 by value; a tensor of rank r is a memref descriptor of 3 + 2r u64 (base pointer, aligned
 pointer, offset, sizes, strides).
@@ -13,7 +13,8 @@ loaded at its element width. It writes the PTX and our manifest (.json) beside i
 
 With --library, it also compiles the same source to a host object (vxc --action emit-obj;
 needs llvm-config on PATH) and links it with Vx's dispatch library into a shared library
-whose `pub fn` Vx's own runtime launches (gpu/spawn/vx_launch.py).
+whose `pub extern fn` Vx's own runtime launches (gpu/spawn/vx_launch.py). Since Vx #3896 only an `extern fn`
+gets a C symbol, so the library needs the entry declared `pub extern fn`.
 """
 import argparse, hashlib, json, os, re, subprocess, sys, tempfile
 from pathlib import Path
@@ -47,12 +48,13 @@ def variant_of(source: str, suffix: str):
 
 
 def rename_entry(source: str, suffix: str) -> str:
-    """The source with its `pub fn glm_vx_spawn_...(` entry renamed <entry><suffix> (`-`: unchanged)."""
+    """The source with its `pub extern fn glm_vx_spawn_...(` entry renamed <entry><suffix> (`-`: unchanged)."""
     if suffix == '-':
         return source
-    renamed, count = re.subn(r'\bpub fn (glm_vx_spawn_\w+)\(', lambda m: f'pub fn {m[1]}{suffix}(', source, count=1)
+    renamed, count = re.subn(r'\b(pub (?:extern )?fn) (glm_vx_spawn_\w+)\(', lambda m: f'{m[1]} {m[2]}{suffix}(', source,
+                             count=1)
     if not count:
-        raise ValueError('no `pub fn glm_vx_spawn_...(` entry to rename')
+        raise ValueError('no `pub extern fn glm_vx_spawn_...(` entry to rename')
     return renamed
 
 
@@ -137,14 +139,16 @@ def same_kernel(a: str, b: str) -> bool:
 
 
 def build_library(args, combined_text, name, params, env, ptx):
-    """The shared library Vx launches from. Its `pub fn` takes every parameter of the function,
+    """The shared library Vx launches from. Its `pub extern fn` takes every parameter of the function,
     so they must be exactly the kernel's, in the manifest's order, for the call to line up."""
-    declared = re.search(rf'^pub fn {name}\((.*?)\)\s*->', combined_text, re.M | re.S)
+    if re.search(rf'^pub fn {name}\(', combined_text, re.M):
+        raise ValueError(f'--library needs `pub extern fn {name}`: since Vx #3896 a `pub fn` gets no C symbol')
+    declared = re.search(rf'^pub extern fn {name}\((.*?)\)\s*->', combined_text, re.M | re.S)
     names = [item.split(':', 1)[0].strip() for item in split_top(declared[1])] if declared else None
     # The arrival count is the kernel's, not the function's: Vx's host side makes it (Vx #2188).
     kernel_names = [p['name'] for p in params if p['kind'] != 'arrivals']
     if names != kernel_names:
-        raise ValueError(f'pub fn {name} takes {names}, but the kernel uses {kernel_names}')
+        raise ValueError(f'pub extern fn {name} takes {names}, but the kernel uses {kernel_names}')
     if not args.dispatch_lib or not Path(args.dispatch_lib).is_file():
         raise ValueError('--library needs --dispatch-lib (or VX_DISPATCH_LIB): the libvx_cuda_dispatch.so vxc was built with')
     dispatch = Path(args.dispatch_lib).resolve()

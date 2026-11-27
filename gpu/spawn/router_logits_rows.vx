@@ -5,8 +5,8 @@
 // spawn-include: device.vx
 // spawn-maxnreg: 32
 
-pub fn glm_vx_spawn_router_logits_rows(logits: &mut Tensor<f32, [?, ?], Memory::HBM>, gate: &Tensor<u32, [?], Memory::HBM>,
-                                       x: &Tensor<f32, [?, ?], Memory::HBM>, tokens: i32, experts: i32, cols: i32) -> void {
+pub extern fn glm_vx_spawn_router_logits_rows(logits: &mut Tensor<f32, [?, ?], Memory::HBM>, gate: &Tensor<u32, [?], Memory::HBM>,
+                                              x: &Tensor<f32, [?, ?], Memory::HBM>, tokens: i32, experts: i32, cols: i32) -> void {
   spawn on(Topology::Device) {
     for t in 0..tokens across blocks {
       for row in 0..experts across blocks {

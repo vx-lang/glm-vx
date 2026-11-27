@@ -5,7 +5,7 @@
 // cos and sin (steps[t]: cos at 0.., sin at rot / 2..). compressed is [rows, rank + rot].
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_kv_rows_prefill_bf16(latents: &mut Tensor<bf16, [?, ?], Memory::HBM>, rope_keys: &mut Tensor<bf16, [?, ?], Memory::HBM>,
+pub extern fn glm_vx_spawn_kv_rows_prefill_bf16(latents: &mut Tensor<bf16, [?, ?], Memory::HBM>, rope_keys: &mut Tensor<bf16, [?, ?], Memory::HBM>,
                                 compressed: &Tensor<f32, [?, ?], Memory::HBM>, weight: &Tensor<f32, [?], Memory::HBM>,
                                 steps: &Tensor<f32, [?, ?], Memory::HBM>, start: i32, rows: i32, rank: i32, rot: i32,
                                 eps: f32, threads: i32) -> void {

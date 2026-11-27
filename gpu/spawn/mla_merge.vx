@@ -3,8 +3,8 @@
 // f32::fast_exp (see sigmoid in device.vx). out is [heads, rank].
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_mla_merge(out: &mut Tensor<f32, [?, ?], Memory::HBM>, numerator: &Tensor<f32, [?], Memory::HBM>,
-                              stats: &Tensor<f32, [?], Memory::HBM>, heads: i32, rank: i32, splits: i32) -> void {
+pub extern fn glm_vx_spawn_mla_merge(out: &mut Tensor<f32, [?, ?], Memory::HBM>, numerator: &Tensor<f32, [?], Memory::HBM>,
+                                     stats: &Tensor<f32, [?], Memory::HBM>, heads: i32, rank: i32, splits: i32) -> void {
   spawn on(Topology::Device) {
     for h in 0..heads across blocks {
       for d in 0..rank across lanes(256) {

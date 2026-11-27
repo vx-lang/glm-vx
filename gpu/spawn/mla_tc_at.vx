@@ -20,11 +20,11 @@
 // spawn-maxnreg: 128 (build.py: two blocks of 256 threads an SM)
 // spawn-include: device.vx
 
-pub fn glm_vx_spawn_mla_tc_at(numerator: &mut Tensor<f32, [?, ?], Memory::HBM>, stats: &mut Tensor<f32, [?, ?], Memory::HBM>,
-                              q_t: &Tensor<bf16, [?, ?], Memory::HBM>, qr_t: &Tensor<bf16, [?, ?], Memory::HBM>,
-                              cache_latent: &Tensor<bf16, [?, ?], Memory::HBM>, cache_rope: &Tensor<bf16, [?, ?], Memory::HBM>,
-                              selected: &Tensor<i32, [?], Memory::HBM>, step: &Tensor<i32, [?], Memory::HBM>,
-                              heads: i32, rank: i32, rope_dim: i32, selection_stride: i32, splits_max: i32, scale: f32) -> void {
+pub extern fn glm_vx_spawn_mla_tc_at(numerator: &mut Tensor<f32, [?, ?], Memory::HBM>, stats: &mut Tensor<f32, [?, ?], Memory::HBM>,
+                                     q_t: &Tensor<bf16, [?, ?], Memory::HBM>, qr_t: &Tensor<bf16, [?, ?], Memory::HBM>,
+                                     cache_latent: &Tensor<bf16, [?, ?], Memory::HBM>, cache_rope: &Tensor<bf16, [?, ?], Memory::HBM>,
+                                     selected: &Tensor<i32, [?], Memory::HBM>, step: &Tensor<i32, [?], Memory::HBM>,
+                                     heads: i32, rank: i32, rope_dim: i32, selection_stride: i32, splits_max: i32, scale: f32) -> void {
   spawn on(Topology::Device) {
     for b in 0..(heads / 16) * splits_max across blocks {
       let hg: i32 = b / splits_max;
