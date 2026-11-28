@@ -262,7 +262,8 @@ def test_mha_prefill_tc_writes_its_tiles_rows_only_and_nothing_off_its_shape(run
 @pytest.mark.parametrize('tokens,kk,experts', [(5, 3, 7), (40, 9, 257), (300, 9, 257)])
 def test_moe_group_kernels_are_a_stable_sort_by_expert(run, tokens, kk, experts):
     # moe_group_count / _offsets / _place (Vx's std::nn counting sort) and moe_group_finish: the pairs grouped by
-    # expert in pair order, the starts, and each token's grouped rows ranked by expert id (with its router slot).
+    # expert in pair order, the starts, each pair's grouped row, and each token's grouped rows ranked by expert id (with
+    # its router slot).
     rng = np.random.default_rng(tokens)
     ids = np.stack([rng.choice(experts - 1, kk - 1, replace=False) for _ in range(tokens)]).astype(np.int32)
     ids = np.concatenate([ids, np.full((tokens, 1), experts - 1, np.int32)], 1)  # the shared expert last
@@ -273,14 +274,16 @@ def test_moe_group_kernels_are_a_stable_sort_by_expert(run, tokens, kk, experts)
     got = run('moe_group_offsets', base=np.zeros((blocks, experts), np.int32), starts=np.zeros(experts + 1, np.int32),
               tile_expert=np.zeros(rows, np.int32), order=np.zeros(rows, np.int32), counts=counts, n=rows, experts=experts,
               align=1)
-    order = run('moe_group_place', order=got['order'], ids=flat, base=got['base'], n=rows)['order']
+    placed = run('moe_group_place', order=got['order'], row_of=np.full(rows, -1, np.int32), ids=flat, base=got['base'],
+                 n=rows)
     want = np.argsort(flat, kind='stable')
-    np.testing.assert_array_equal(order, want)
+    np.testing.assert_array_equal(placed['order'], want)
     np.testing.assert_array_equal(got['starts'], np.searchsorted(flat[want], np.arange(experts + 1)))
-    fin = run('moe_group_finish', slots=np.full(rows, -1, np.int32), picks=np.full(rows, -1, np.int32), order=order, ids=flat,
-              rows=rows, kk=kk)
     slot_of = np.empty(rows, np.int64)
     slot_of[want] = np.arange(rows)
+    np.testing.assert_array_equal(placed['row_of'], slot_of)
+    fin = run('moe_group_finish', slots=np.full((tokens, kk), -1, np.int32), picks=np.full((tokens, kk), -1, np.int32),
+              row_of=placed['row_of'], ids=flat, tokens=tokens, kk=kk)
     by_id = np.argsort(ids, axis=1, kind='stable')
     np.testing.assert_array_equal(fin['picks'].reshape(tokens, kk), by_id)
     np.testing.assert_array_equal(fin['slots'].reshape(tokens, kk), slot_of.reshape(tokens, kk)[np.arange(tokens)[:, None], by_id])

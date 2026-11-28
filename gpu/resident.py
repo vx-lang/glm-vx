@@ -2943,10 +2943,11 @@ class ResidentGLM:
     def _prefill_moe_grouped(self, prefix, x, count):
         """The routed experts of the first count rows of x, grouped by expert (prefill_moe='grouped'), all on the device:
         each row's k experts (and the shared expert last, with fold_shared; _prefill_route); the (token, expert) pairs
-        grouped by expert in pair order (moe_group_count / _offsets / _place: Vx's std::nn counting sort) and each
-        token's grouped rows ranked by expert id (moe_group_finish); the rows gathered and quantized to e4m3 per 128
-        columns (fp8_quant_rows); gate and up as grouped block-FP8 GEMMs, SwiGLU, the activations quantized, down (bf16
-        C); each token's rows weighted and added in ascending expert id (moe_combine_rows_bf16: moe_down's order).
+        grouped by expert in pair order (moe_group_count / _offsets / _place: Vx's std::nn counting sort, place also
+        writing each pair's grouped row) and each token's grouped rows ranked by expert id (moe_group_finish, one lane a
+        token: plain stores the race check proves, #72); the rows gathered and quantized to e4m3 per 128 columns
+        (fp8_quant_rows); gate and up as grouped block-FP8 GEMMs, SwiGLU, the activations quantized, down (bf16 C); each
+        token's rows weighted and added in ascending expert id (moe_combine_rows_bf16: moe_down's order).
         Returns this rank's part, one row a token."""
         c = self.config
         experts, k = int(c['n_routed_experts']), int(c['num_experts_per_tok'])
@@ -2963,15 +2964,17 @@ class ResidentGLM:
             meta[total] = (self._tensor((blocks, total), 'int32'), self._tensor((blocks, total), 'int32'),
                            self._tensor((total + 1,), 'int32'), self._tensor((capacity,), 'int32'),
                            self._tensor((capacity,), 'int32'), self._tensor((capacity,), 'int32'),
-                           self._tensor((capacity,), 'int32'))
-        counts, base, starts, order_all, tiles_all, slots_all, picks_all = meta[total]
+                           self._tensor((capacity,), 'int32'), self._tensor((capacity,), 'int32'))
+        counts, base, starts, order_all, tiles_all, slots_all, picks_all, row_of_all = meta[total]
         flat_ids = ids.view((ids.shape[0] * kk,), 'int32').view((rows,), 'int32')
         order, tile_expert = order_all.view((rows,), 'int32'), tiles_all.view((rows,), 'int32')
+        row_of = row_of_all.view((rows,), 'int32')
+        slots, picks = (t.view((capacity // kk, kk), 'int32') for t in (slots_all, picks_all))
         self._spawn('moe_group_count', counts=counts, ids=flat_ids, n=rows, experts=total)
         self._spawn('moe_group_offsets', base=base, starts=starts, tile_expert=tile_expert, order=order, counts=counts,
                     n=rows, experts=total, align=1)
-        self._spawn('moe_group_place', order=order, ids=flat_ids, base=base, n=rows)
-        self._spawn('moe_group_finish', slots=slots_all, picks=picks_all, order=order, ids=flat_ids, rows=rows, kk=kk)
+        self._spawn('moe_group_place', order=order, row_of=row_of, ids=flat_ids, base=base, n=rows)
+        self._spawn('moe_group_finish', slots=slots, picks=picks, row_of=row_of, ids=flat_ids, tokens=count, kk=kk)
         a_codes, a_scales = self._grouped_rows('a_codes', hidden, 'uint8'), self._grouped_rows('a_scales', hidden // 128)
         self._spawn('fp8_quant_rows', codes=a_codes, scales=a_scales, x=x, src=order_all, rows=rows, cols=hidden, gather=kk)
         g, u, act = (self._grouped_rows(n, inter) for n in ('gate', 'up', 'act'))
@@ -2984,8 +2987,8 @@ class ResidentGLM:
         y = self._grouped_rows('y', hidden, 'uint16')  # down's C in bf16: half the bytes of its largest write
         self._grouped_gemm(q_codes, q_scales, down[1], y, starts, rows, hidden, inter, total)
         moe = self._prefill_rows('moe_sum', self.hidden)
-        self._spawn('moe_combine_rows_bf16', out=moe, y=y, slots=slots_all.view((capacity // kk, kk), 'int32'),
-                    picks=picks_all.view((capacity // kk, kk), 'int32'), weights=weights, tokens=count, cols=hidden, kk=kk)
+        self._spawn('moe_combine_rows_bf16', out=moe, y=y, slots=slots, picks=picks, weights=weights, tokens=count,
+                    cols=hidden, kk=kk)
         self.launches['grouped_moe'] = self.launches.get('grouped_moe', 0) + 1
         return moe
 

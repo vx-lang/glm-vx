@@ -1,10 +1,12 @@
 // glm_vx_spawn_moe_group_place (#63, item 5b): Vx's std::nn nn_moe_group_place: order[g] = the pair p at grouped row g,
-// each expert's pairs in the order of p (pair p is slot p % kk of token p / kk).
+// each expert's pairs in the order of p (pair p is slot p % kk of token p / kk). It also writes the inverse, row_of[p] =
+// g, for moe_group_finish. The store to order is atomic, as the library's is: the checker cannot see that no two pairs
+// get the same row. The store to row_of is at the lane's own pair, so the race check proves it (#72, item 1).
 // spawn-include: device.vx
 // spawn-vxc: -fweak-relaxed-atomics
 import core::sync::atomic;
 
-pub extern fn glm_vx_spawn_moe_group_place(order : &mut Tensor<i32, [?], Memory::HBM>, ids : &Tensor<i32, [?], Memory::HBM>, base : &Tensor<i32, [?, ?], Memory::HBM>, n : i32) -> void {
+pub extern fn glm_vx_spawn_moe_group_place(order : &mut Tensor<i32, [?], Memory::HBM>, row_of : &mut Tensor<i32, [?], Memory::HBM>, ids : &Tensor<i32, [?], Memory::HBM>, base : &Tensor<i32, [?, ?], Memory::HBM>, n : i32) -> void {
   spawn on(Topology::Device) {
     for b in 0..(n + 255) / 256 across blocks {
       let mut keys = unsafe { Tensor<i32, [256], Memory::SMEM>::uninit() };
@@ -26,7 +28,9 @@ pub extern fn glm_vx_spawn_moe_group_place(order : &mut Tensor<i32, [?], Memory:
               rank = rank + 1;
             }
           }
-          atomic_store_i32(order, base[b][id] + rank, p, AtomicOrdering::Relaxed);
+          let g = base[b][id] + rank;
+          atomic_store_i32(order, g, p, AtomicOrdering::Relaxed);
+          row_of[p] = g;
         }
       }
     }
