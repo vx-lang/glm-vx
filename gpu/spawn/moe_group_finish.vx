@@ -1,31 +1,26 @@
 // glm_vx_spawn_moe_group_finish (#63, item 5b): after moe_group_place, each token's grouped rows in ascending expert id
-// for moe_combine_rows: grouped row g holds pair p = order[g] (slot j = p % kk of token t = p / kk); its rank among the
-// token's kk experts (ids distinct within a token) gives slots[t][rank] = g and picks[t][rank] = j, so the combine adds
-// the token's experts in moe_down's order (the shared expert, id n_routed_experts, last). Atomic stores: the checker
-// cannot see that no two pairs get the same rank.
+// for moe_combine_rows: slot j of token t is pair p = t * kk + j, at grouped row row_of[p] (moe_group_place); its rank
+// among the token's kk experts (ids distinct within a token) gives slots[t][rank] = row_of[p] and picks[t][rank] = j,
+// so the combine adds the token's experts in moe_down's order (the shared expert, id n_routed_experts, last). One lane
+// a token: a lane writes only row t of slots and picks, so the race check proves the plain stores (#72, item 1).
 // spawn-include: device.vx
-// spawn-vxc: -fweak-relaxed-atomics
-import core::sync::atomic;
 
-pub extern fn glm_vx_spawn_moe_group_finish(slots: &mut Tensor<i32, [?], Memory::HBM>, picks: &mut Tensor<i32, [?], Memory::HBM>,
-                                            order: &Tensor<i32, [?], Memory::HBM>, ids: &Tensor<i32, [?], Memory::HBM>,
-                                            rows: i32, kk: i32) -> void {
+pub extern fn glm_vx_spawn_moe_group_finish(slots: &mut Tensor<i32, [?, ?], Memory::HBM>, picks: &mut Tensor<i32, [?, ?], Memory::HBM>,
+                                            row_of: &Tensor<i32, [?], Memory::HBM>, ids: &Tensor<i32, [?], Memory::HBM>,
+                                            tokens: i32, kk: i32) -> void {
   spawn on(Topology::Device) {
-    for b in 0..(rows + 255) / 256 across blocks {
+    for b in 0..(tokens + 255) / 256 across blocks {
       for l in 0..256 across lanes {
-        let g: i32 = b * 256 + l;
-        if g < rows && kk > 0 {
-          let p: i32 = order[g];
-          if p < rows {
-            let t: i32 = p / kk;
-            let j: i32 = p - t * kk;
-            let id: i32 = ids[p];
+        let t: i32 = b * 256 + l;
+        if t < tokens {
+          for j in 0..kk {
+            let id: i32 = ids[t * kk + j];
             let mut rank: i32 = 0;
             for q in 0..kk {
               if ids[t * kk + q] < id { rank = rank + 1; }
             }
-            atomic_store_i32(slots, t * kk + rank, g, AtomicOrdering::Relaxed);
-            atomic_store_i32(picks, t * kk + rank, j, AtomicOrdering::Relaxed);
+            slots[t][rank] = row_of[t * kk + j];
+            picks[t][rank] = j;
           }
         }
       }
